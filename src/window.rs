@@ -773,13 +773,23 @@ fn select_taskbar_for_popup(requested_index: usize) -> bool {
         native_interop::set_tray_event_hook(thread_id, on_tray_location_changed)
     });
 
-    let mut state = lock_state();
-    if let Some(s) = state.as_mut() {
-        s.taskbar_hwnd = Some(taskbar.hwnd);
-        s.tray_notify_hwnd = tray_notify;
-        s.win_event_hook = hook;
-        s.taskbar_index = index;
-        s.embedded = false;
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.taskbar_hwnd = Some(taskbar.hwnd);
+            s.tray_notify_hwnd = tray_notify;
+            s.win_event_hook = hook;
+            s.taskbar_index = index;
+            s.embedded = false;
+        }
+    }
+
+    let foreground_hwnd = {
+        let state = lock_state();
+        state.as_ref().map(|s| s.hwnd.to_hwnd())
+    };
+    if let Some(foreground_hwnd) = foreground_hwnd {
+        bind_popup_windows_to_taskbar_owner(foreground_hwnd);
     }
     true
 }
@@ -1542,6 +1552,19 @@ fn register_acrylic_backdrop_class() {
     }
 }
 
+fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
+    let taskbar_hwnd = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| s.taskbar_hwnd)
+    };
+    if let Some(taskbar_hwnd) = taskbar_hwnd {
+        native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
+        if let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() {
+            native_interop::set_popup_owner(backdrop_hwnd, Some(taskbar_hwnd));
+        }
+    }
+}
+
 fn acrylic_backdrop_hwnd() -> Option<HWND> {
     let state = ACRYLIC_BACKDROP_HWND
         .lock()
@@ -1604,6 +1627,11 @@ fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
                 .unwrap_or_else(|e| e.into_inner());
             *state = Some(SendHwnd::from_hwnd(hwnd));
         }
+        let owner = {
+            let state = lock_state();
+            state.as_ref().and_then(|s| s.taskbar_hwnd)
+        };
+        native_interop::set_popup_owner(hwnd, owner);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         diagnose::log("acrylic backdrop created");
         Some(hwnd)
@@ -1611,6 +1639,7 @@ fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
 }
 
 fn sync_acrylic_backdrop_zorder(foreground_hwnd: HWND) {
+    bind_popup_windows_to_taskbar_owner(foreground_hwnd);
     let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
         return;
     };
@@ -1667,6 +1696,7 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
                 s.frosted_popup_session = true;
             }
         }
+        bind_popup_windows_to_taskbar_owner(hwnd);
         position_at_taskbar();
     }
 
@@ -1683,6 +1713,7 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
         }
     }
 
+    bind_popup_windows_to_taskbar_owner(hwnd);
     sync_acrylic_backdrop_zorder(hwnd);
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -1715,6 +1746,7 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
         // process lifetime. Reparenting is what invalidates the layered surface
         // on affected Windows 11 builds. Keep the same top-level layered HWND
         // and simply render the normal opaque/transparent panel again.
+        bind_popup_windows_to_taskbar_owner(hwnd);
         position_at_taskbar();
         unsafe {
             let _ = SetWindowPos(
@@ -2590,6 +2622,8 @@ fn position_at_taskbar() {
     }
     if acrylic_active {
         sync_acrylic_backdrop_zorder(hwnd);
+    } else if !embedded {
+        bind_popup_windows_to_taskbar_owner(hwnd);
     }
 }
 
