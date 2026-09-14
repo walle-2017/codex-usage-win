@@ -2718,7 +2718,7 @@ fn tray_reposition_is_suppressed() -> bool {
 
 fn position_at_taskbar() {
     refresh_dpi();
-    let (hwnd, embedded, tray_offset, taskbar_hwnd, acrylic_active) = {
+    let (hwnd, embedded, tray_offset, taskbar_hwnd, blur_active) = {
         let state = lock_state();
         let s = match state.as_ref() {
             Some(s) => s,
@@ -2810,7 +2810,7 @@ fn position_at_taskbar() {
         ));
     } else {
         let x = tray_left - widget_width - tray_offset;
-        if acrylic_active {
+        if blur_active {
             move_frosted_pair(hwnd, x, y, widget_width, widget_height);
         } else {
             native_interop::move_window(hwnd, x, y, widget_width, widget_height);
@@ -2819,7 +2819,7 @@ fn position_at_taskbar() {
             "positioned fallback widget at x={x} y={y} w={widget_width} h={widget_height}"
         ));
     }
-    if !embedded && !acrylic_active {
+    if !embedded && !blur_active {
         bind_popup_windows_to_taskbar_owner(hwnd);
     }
 }
@@ -3052,7 +3052,7 @@ unsafe extern "system" fn wnd_proc(
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
 
-                let (current_taskbar_index, embedded, acrylic_active) = {
+                let (current_taskbar_index, embedded, blur_active) = {
                     let state = lock_state();
                     state
                         .as_ref()
@@ -3153,9 +3153,9 @@ unsafe extern "system" fn wnd_proc(
                             (taskbar_rect.left + drag_left, anchor_y)
                         };
 
-                        // Embedded mode uses taskbar-client coordinates; Acrylic popup
+                        // Embedded mode uses taskbar-client coordinates; Composition blur popup
                         // mode uses absolute screen coordinates.
-                        if acrylic_active {
+                        if blur_active {
                             move_frosted_pair(
                                 hwnd,
                                 window_x,
@@ -4853,7 +4853,7 @@ fn paint(hdc: HDC, hwnd: HWND, composition_blur_active: bool) {
         }
 
         if composition_blur_active {
-            // The DWM owns the acrylic backdrop. Draw only foreground content.
+            // The Composition backdrop owns the blurred background. Draw only foreground content.
             paint_content(
                 hdc,
                 width,
