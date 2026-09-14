@@ -1617,12 +1617,23 @@ fn blur_backdrop_hwnd() -> Option<HWND> {
 }
 
 fn destroy_blur_backdrop() {
-    {
-        let mut color = BLUR_BACKDROP_TINT
+    let context = {
+        let mut state = BLUR_BACKDROP_CONTEXT
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *color = None;
+        state.take()
+    };
+    if let Some(context) = context {
+        native_interop::destroy_composition_blur(context);
     }
+
+    {
+        let mut params = BLUR_BACKDROP_PARAMS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *params = None;
+    }
+
     let hwnd = {
         let mut state = BLUR_BACKDROP_HWND
             .lock()
@@ -1630,46 +1641,56 @@ fn destroy_blur_backdrop() {
         state.take().map(|h| h.to_hwnd())
     };
     if let Some(hwnd) = hwnd {
-        let _ = native_interop::set_native_acrylic(hwnd, None);
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
-        diagnose::log("acrylic backdrop destroyed");
+        diagnose::log("composition gaussian backdrop destroyed");
     }
 }
 
-fn acrylic_tint_for_strength(base: Color, strength: u8) -> Color {
-    let strength = strength.min(FROSTED_STRENGTH_MAX);
-    if strength == 0 {
-        return Color::rgba(base.r, base.g, base.b, 0);
-    }
-
-    // SetWindowCompositionAttribute does not expose a blur-radius parameter.
-    // Linearly scale the Acrylic tint alpha instead: this gives a smooth
-    // user-visible frosted intensity while keeping the stable dual-window path.
-    let alpha = (u16::from(strength) * u16::from(FROSTED_TINT_ALPHA_MAX))
-        .div_ceil(u16::from(FROSTED_STRENGTH_MAX)) as u8;
-    Color::rgba(base.r, base.g, base.b, alpha.max(1))
+fn blur_amount_for_strength(strength: u8) -> f32 {
+    FROSTED_MAX_BLUR_PX * f32::from(strength.min(FROSTED_STRENGTH_MAX))
+        / f32::from(FROSTED_STRENGTH_MAX)
 }
 
-fn ensure_blur_backdrop(color: Color) -> Option<HWND> {
-    if let Some(hwnd) = blur_backdrop_hwnd() {
+fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
+    let params = BlurBackdropParams {
+        blur_bits: blur_amount.to_bits(),
+        tint,
+    };
+
+    let existing_hwnd = blur_backdrop_hwnd();
+    let existing_context = {
+        let state = BLUR_BACKDROP_CONTEXT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *state
+    };
+
+    if let (Some(hwnd), Some(context)) = (existing_hwnd, existing_context) {
         let unchanged = {
-            let cached = BLUR_BACKDROP_TINT
+            let cached = BLUR_BACKDROP_PARAMS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            *cached == Some(color)
+            *cached == Some(params)
         };
         if unchanged {
             return Some(hwnd);
         }
-        if native_interop::set_native_acrylic(hwnd, Some(color)) {
-            let mut cached = BLUR_BACKDROP_TINT
+
+        let amount_ok = native_interop::set_composition_blur_amount(context, blur_amount);
+        let tint_ok = native_interop::set_composition_blur_tint(context, tint);
+        if amount_ok && tint_ok {
+            let mut cached = BLUR_BACKDROP_PARAMS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            *cached = Some(color);
+            *cached = Some(params);
             return Some(hwnd);
         }
+
+        destroy_blur_backdrop();
+    } else if existing_hwnd.is_some() || existing_context.is_some() {
+        // A partial backend state is not reusable. Recreate it atomically.
         destroy_blur_backdrop();
     }
 
@@ -1678,7 +1699,11 @@ fn ensure_blur_backdrop(color: Color) -> Option<HWND> {
         let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
         let title = native_interop::wide_str("");
         let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            WS_EX_TOOLWINDOW
+                | WS_EX_TOPMOST
+                | WS_EX_NOACTIVATE
+                | WS_EX_TRANSPARENT
+                | WS_EX_NOREDIRECTIONBITMAP,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_POPUP,
@@ -1693,30 +1718,39 @@ fn ensure_blur_backdrop(color: Color) -> Option<HWND> {
         )
         .ok()?;
 
-        if !native_interop::set_native_acrylic(hwnd, Some(color)) {
+        let Some(context) =
+            native_interop::create_composition_blur(hwnd, blur_amount, tint)
+        else {
             let _ = DestroyWindow(hwnd);
             return None;
-        }
+        };
+
         {
-            let mut cached = BLUR_BACKDROP_TINT
+            let mut state = BLUR_BACKDROP_CONTEXT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            *cached = Some(color);
+            *state = Some(context);
         }
-
+        {
+            let mut cached = BLUR_BACKDROP_PARAMS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached = Some(params);
+        }
         {
             let mut state = BLUR_BACKDROP_HWND
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *state = Some(SendHwnd::from_hwnd(hwnd));
         }
+
         let owner = {
             let state = lock_state();
             state.as_ref().and_then(|s| s.taskbar_hwnd)
         };
         native_interop::set_popup_owner(hwnd, owner);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        diagnose::log("acrylic backdrop created");
+        diagnose::log("composition gaussian backdrop created");
         Some(hwnd)
     }
 }
@@ -1826,14 +1860,18 @@ fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: 
     }
 }
 
-fn activate_blur_popup(hwnd: HWND, acrylic_color: Color) -> bool {
+fn activate_blur_popup(
+    hwnd: HWND,
+    blur_amount: f32,
+    tint: Color,
+) -> bool {
     let was_embedded = {
         let state = lock_state();
         state.as_ref().map(|s| s.embedded).unwrap_or(false)
     };
 
     // Keep the foreground widget layered at all times. Only detach it from
-    // Explorer so a separate native Acrylic backdrop can sit behind it.
+    // Explorer so the independent Composition backdrop can sit behind it.
     if was_embedded {
         native_interop::detach_from_taskbar_as_popup(hwnd);
         native_interop::set_layered_style(hwnd, true);
@@ -1841,10 +1879,9 @@ fn activate_blur_popup(hwnd: HWND, acrylic_color: Color) -> bool {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 s.embedded = false;
-                // Reparenting a layered HWND back into Explorer after Acrylic
-                // has proven unreliable. Once frosted mode is entered, keep the
-                // foreground as a top-level layered popup for the rest of this
-                // process lifetime and only toggle the separate backdrop window.
+                // Reparenting a layered HWND back into Explorer after entering
+                // backdrop mode is unreliable on affected Windows 11 builds.
+                // Keep this foreground as a top-level popup for the process.
                 s.frosted_popup_session = true;
             }
         }
@@ -1852,8 +1889,10 @@ fn activate_blur_popup(hwnd: HWND, acrylic_color: Color) -> bool {
         position_at_taskbar();
     }
 
-    let Some(_) = ensure_blur_backdrop(acrylic_color) else {
-        diagnose::log("acrylic backdrop activation failed; restoring embedded layered mode");
+    let Some(_) = ensure_blur_backdrop(blur_amount, tint) else {
+        diagnose::log(
+            "composition blur backdrop activation failed; restoring layered mode",
+        );
         restore_layered_taskbar_mode(hwnd);
         return false;
     };
@@ -1870,7 +1909,7 @@ fn activate_blur_popup(hwnd: HWND, acrylic_color: Color) -> bool {
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
-    diagnose::log("dual-window frosted glass activated");
+    diagnose::log("dual-window composition gaussian blur activated");
     true
 }
 
@@ -1941,8 +1980,8 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
     }
 }
 
-/// Render the foreground widget through UpdateLayeredWindow. Frosted-glass mode
-/// keeps this foreground layered and uses a separate native Acrylic backdrop.
+/// Render the foreground widget through UpdateLayeredWindow. Frosted mode keeps
+/// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
     refresh_dpi();
     let (
@@ -1981,7 +2020,9 @@ fn render_layered() {
 
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
-    let acrylic_requested = frosted_strength > 0;
+    let blur_requested = frosted_strength > 0;
+    let blur_amount = blur_amount_for_strength(frosted_strength);
+    let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
         let state = lock_state();
         state
@@ -1990,12 +2031,10 @@ fn render_layered() {
             .unwrap_or(false)
     };
 
-    if acrylic_requested {
-        let acrylic_color = acrylic_tint_for_strength(
-            style.color(StyleColorTarget::PanelBackground),
-            frosted_strength,
-        );
-        if composition_blur_active && ensure_blur_backdrop(acrylic_color).is_none() {
+    if blur_requested {
+        if composition_blur_active
+            && ensure_blur_backdrop(blur_amount, blur_tint).is_none()
+        {
             composition_blur_active = false;
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
@@ -2003,7 +2042,8 @@ fn render_layered() {
             }
         }
         if !composition_blur_active {
-            composition_blur_active = activate_blur_popup(hwnd, acrylic_color);
+            composition_blur_active =
+                activate_blur_popup(hwnd, blur_amount, blur_tint);
         }
     } else if composition_blur_active {
         restore_layered_taskbar_mode(hwnd);
@@ -2041,7 +2081,7 @@ fn render_layered() {
     let mut surface_style = style.clone();
     let background = style.color(StyleColorTarget::PanelBackground);
     if composition_blur_active {
-        // Acrylic owns the visible background, so the layered foreground only
+        // Composition owns the visible background, so the layered foreground only
         // needs a virtually invisible alpha to keep blank areas hit-testable.
         surface_style.panel_background = Color::rgba(
             background.r,
