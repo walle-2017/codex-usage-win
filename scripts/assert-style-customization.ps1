@@ -67,9 +67,10 @@ if ($native -notmatch 'detach_from_taskbar_as_popup' -or
     $windowProduction -notmatch 'restore_layered_taskbar_mode') {
     throw 'Frosted foreground must detach as a layered popup and safely restore taskbar embedding.'
 }
-if ($windowProduction -notmatch 'surface_style\.panel_background = "#00000000"' -or
+if ($windowProduction -notmatch 'FROSTED_HIT_TEST_ALPHA:\s*u8\s*=\s*1' -or
+    $windowProduction -notmatch 'surface_style\.panel_background\s*=\s*Color::rgba' -or
     $windowProduction -notmatch 'UpdateLayeredWindow') {
-    throw 'Frosted foreground must stay visible through the layered renderer with a transparent panel surface.'
+    throw 'Frosted foreground must keep a minimally nonzero layered alpha so blank panel areas remain interactive.'
 }
 if ($windowProduction -notmatch 'select_taskbar_for_popup' -or
     $windowProduction -notmatch 'taskbar_rect\.left \+ drag_left' -or
