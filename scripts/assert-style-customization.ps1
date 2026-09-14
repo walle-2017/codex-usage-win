@@ -106,6 +106,10 @@ if ($windowProduction -notmatch 'DRAG_FRAME_MS:\s*u64\s*=\s*8' -or
     $windowProduction -notmatch 'move_frosted_pair') {
     throw 'High-frequency drag updates must be throttled and move the frosted pair without z-order churn.'
 }
+if ($windowProduction -notmatch 'move_window_without_repaint' -or
+    $windowProduction -notmatch 'SWP_NOZORDER\s*\|\s*SWP_NOACTIVATE') {
+    throw 'Drag motion must preserve existing layered pixels instead of requesting redundant repaint work.'
+}
 if ($windowProduction -notmatch 'ACRYLIC_BACKDROP_COLOR' -or
     $windowProduction -notmatch '\*cached == Some\(color\)') {
     throw 'Acrylic composition color must be cached to avoid redundant DWM reconfiguration.'
