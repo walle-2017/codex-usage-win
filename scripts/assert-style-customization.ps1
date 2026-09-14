@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
+$composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 
@@ -51,31 +52,46 @@ if ($windowProduction -notmatch 'apply_style_color\(' -or
 if ($windowProduction -notmatch 'render_layered\(\);[\s\S]{0,200}TB_ENDTRACK_CODE') {
     Write-Warning 'Live-preview implementation shape changed; inspect manually if this warning appears.'
 }
-if ($native -notmatch 'set_native_acrylic' -or
-    $native -notmatch 'ACCENT_ENABLE_ACRYLICBLURBEHIND' -or
-    $native -notmatch 'SetWindowCompositionAttribute') {
-    throw 'Frosted glass must use native DWM acrylic composition.'
+if ($native -notmatch 'create_composition_blur' -or
+    $native -notmatch 'set_composition_blur_amount' -or
+    $native -notmatch 'destroy_composition_blur') {
+    throw 'Rust must use the native Windows Composition Gaussian-blur helper.'
 }
-if ($windowProduction -notmatch 'acrylic_tint_for_strength' -or
-    $windowProduction -notmatch 'FROSTED_TINT_ALPHA_MAX:\s*u8\s*=\s*220' -or
+if ($composition -notmatch 'CreateDesktopWindowTarget' -or
+    $composition -notmatch 'CreateBackdropBrush' -or
+    $composition -notmatch 'CLSID_D2D1GaussianBlur' -or
+    $composition -notmatch 'Blur\.BlurAmount' -or
+    $composition -notmatch 'IGraphicsEffectD2D1Interop') {
+    throw 'Native helper must use DesktopWindowTarget + BackdropBrush + real GaussianBlurEffect.'
+}
+if ($windowProduction -notmatch 'FROSTED_MAX_BLUR_PX:\s*f32\s*=\s*20\.0' -or
+    $windowProduction -notmatch 'blur_amount_for_strength' -or
+    $windowProduction -notmatch 'FROSTED_MAX_BLUR_PX\s*\*\s*f32::from\(strength' -or
     $windowProduction -notmatch 'frosted_strength\s*>\s*0') {
-    throw 'Frosted intensity must map 0-100 continuously to Acrylic tint strength.'
+    throw 'Frosted intensity must map 0-100 linearly to a real Gaussian blur amount.'
+}
+if ($native -match 'SetWindowCompositionAttribute' -or
+    $native -match 'ACCENT_ENABLE_ACRYLICBLURBEHIND' -or
+    $native -match 'set_native_acrylic') {
+    throw 'Legacy WCA Acrylic backend must not remain in the production blur path.'
 }
 if ($styleProduction -notmatch 'skip_serializing' -or
     $styleProduction -notmatch 'LEGACY_FROSTED_STRENGTH_SENTINEL' -or
     $styleProduction -notmatch 'panel_blur_radius') {
     throw 'Legacy boolean frosted settings must migrate without being written back.'
 }
-if ($windowProduction -notmatch 'ACRYLIC_BACKDROP_HWND' -or
-    $windowProduction -notmatch 'ensure_acrylic_backdrop' -or
-    $windowProduction -notmatch 'sync_acrylic_backdrop_zorder') {
-    throw 'Frosted glass must use a separate Acrylic backdrop window.'
+if ($windowProduction -notmatch 'BLUR_BACKDROP_HWND' -or
+    $windowProduction -notmatch 'BLUR_BACKDROP_CONTEXT' -or
+    $windowProduction -notmatch 'ensure_blur_backdrop' -or
+    $windowProduction -notmatch 'sync_blur_backdrop_zorder' -or
+    $windowProduction -notmatch 'WS_EX_NOREDIRECTIONBITMAP') {
+    throw 'Frosted glass must use a separate no-redirection Composition backdrop window.'
 }
 if ($windowProduction -match 'set_layered_style\(hwnd, false\)') {
     throw 'The foreground widget must remain layered while frosted glass is active.'
 }
 if ($native -notmatch 'detach_from_taskbar_as_popup' -or
-    $windowProduction -notmatch 'activate_acrylic_popup' -or
+    $windowProduction -notmatch 'activate_blur_popup' -or
     $windowProduction -notmatch 'restore_layered_taskbar_mode') {
     throw 'Frosted foreground must detach as a layered popup and safely restore taskbar embedding.'
 }
@@ -83,12 +99,12 @@ if ($windowProduction -notmatch 'MIN_INTERACTIVE_ALPHA:\s*u8\s*=\s*1' -or
     $windowProduction -notmatch 'else if background\.a == 0' -or
     $windowProduction -notmatch 'surface_style\.panel_background\s*=\s*Color::rgba' -or
     $windowProduction -notmatch 'UpdateLayeredWindow') {
-    throw 'Transparent layered panels must keep a minimally nonzero alpha so blank areas remain interactive with or without Acrylic.'
+    throw 'Transparent layered panels must keep a minimally nonzero alpha so blank areas remain interactive with or without Composition blur.'
 }
 if ($windowProduction -notmatch 'select_taskbar_for_popup' -or
     $windowProduction -notmatch 'taskbar_rect\.left \+ drag_left' -or
-    $windowProduction -notmatch 'sync_acrylic_backdrop_zorder\(hwnd\)') {
-    throw 'Frosted popup dragging must keep the Acrylic backdrop aligned and preserve taskbar selection.'
+    $windowProduction -notmatch 'sync_blur_backdrop_zorder\(hwnd\)') {
+    throw 'Frosted popup dragging must keep the Composition backdrop aligned and preserve taskbar selection.'
 }
 if ($windowProduction -notmatch 'frosted_popup_session' -or
     $windowProduction -notmatch 'keeping foreground in stable layered popup mode') {
@@ -123,16 +139,16 @@ if ($windowProduction -notmatch 'move_window_without_repaint' -or
     $windowProduction -notmatch 'SWP_NOZORDER\s*\|\s*SWP_NOACTIVATE') {
     throw 'Drag motion must preserve existing layered pixels instead of requesting redundant repaint work.'
 }
-if ($windowProduction -notmatch 'ACRYLIC_BACKDROP_COLOR' -or
-    $windowProduction -notmatch '\*cached == Some\(color\)') {
-    throw 'Acrylic composition color must be cached to avoid redundant DWM reconfiguration.'
+if ($windowProduction -notmatch 'BLUR_BACKDROP_PARAMS' -or
+    $windowProduction -notmatch '\*cached == Some\(params\)') {
+    throw 'Composition blur/tint parameters must be cached to avoid redundant effect updates.'
 }
 $mouseMoveBlock = [regex]::Match(
     $windowProduction,
     '(?s)WM_MOUSEMOVE\s*=>\s*\{.*?WM_CANCELMODE\s*=>'
 ).Value
-if ($mouseMoveBlock -match 'sync_acrylic_backdrop_zorder') {
-    throw 'Drag frames must not reorder Acrylic/foreground windows.'
+if ($mouseMoveBlock -match 'sync_blur_backdrop_zorder') {
+    throw 'Drag frames must not reorder Composition backdrop/foreground windows.'
 }
 if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'box_blur_bitmap' -or
