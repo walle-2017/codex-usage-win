@@ -219,6 +219,25 @@ pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
     }
 }
 
+/// Assign an owner to a top-level popup without turning it into a child window.
+/// Owned popups remain above their owner in z-order, which keeps taskbar overlays
+/// visible when Explorer re-activates the taskbar.
+pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
+    unsafe {
+        let owner_value = owner.map(|h| h.0 as isize).unwrap_or(0);
+        let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        );
+    }
+}
+
 /// Toggle WS_EX_LAYERED without changing the other extended window styles.
 pub fn set_layered_style(hwnd: HWND, enabled: bool) {
     unsafe {
