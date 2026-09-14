@@ -54,18 +54,27 @@ if ($native -notmatch 'set_native_acrylic' -or
     $native -notmatch 'SetWindowCompositionAttribute') {
     throw 'Frosted glass must use native DWM acrylic composition.'
 }
-if ($windowProduction -notmatch 'set_layered_style\(hwnd, false\)' -or
-    $windowProduction -notmatch 'native_acrylic_active') {
-    throw 'Acrylic rendering must leave UpdateLayeredWindow mode and use WM_PAINT foreground rendering.'
+if ($windowProduction -notmatch 'ACRYLIC_BACKDROP_HWND' -or
+    $windowProduction -notmatch 'ensure_acrylic_backdrop' -or
+    $windowProduction -notmatch 'sync_acrylic_backdrop_zorder') {
+    throw 'Frosted glass must use a separate Acrylic backdrop window.'
+}
+if ($windowProduction -match 'set_layered_style\(hwnd, false\)') {
+    throw 'The foreground widget must remain layered while frosted glass is active.'
 }
 if ($native -notmatch 'detach_from_taskbar_as_popup' -or
     $windowProduction -notmatch 'activate_acrylic_popup' -or
     $windowProduction -notmatch 'restore_layered_taskbar_mode') {
-    throw 'Acrylic must run as a top-level popup and restore the embedded layered taskbar mode.'
+    throw 'Frosted foreground must detach as a layered popup and safely restore taskbar embedding.'
+}
+if ($windowProduction -notmatch 'surface_style\.panel_background = "#00000000"' -or
+    $windowProduction -notmatch 'UpdateLayeredWindow') {
+    throw 'Frosted foreground must stay visible through the layered renderer with a transparent panel surface.'
 }
 if ($windowProduction -notmatch 'select_taskbar_for_popup' -or
-    $windowProduction -notmatch 'taskbar_rect\.left \+ drag_left') {
-    throw 'Acrylic popup dragging must use top-level screen coordinates and preserve taskbar selection.'
+    $windowProduction -notmatch 'taskbar_rect\.left \+ drag_left' -or
+    $windowProduction -notmatch 'sync_acrylic_backdrop_zorder\(hwnd\)') {
+    throw 'Frosted popup dragging must keep the Acrylic backdrop aligned and preserve taskbar selection.'
 }
 if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'box_blur_bitmap' -or
