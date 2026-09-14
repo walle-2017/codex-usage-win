@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <roapi.h>
 #include <DispatcherQueue.h>
+#include <initguid.h>
 #include <d2d1effects.h>
 #include <windows.graphics.effects.interop.h>
 #include <windows.ui.composition.interop.h>
