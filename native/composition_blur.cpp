@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <roapi.h>
 #include <DispatcherQueue.h>
 #include <d2d1effects.h>
 #include <windows.graphics.effects.interop.h>
@@ -10,6 +11,7 @@
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.Effects.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
@@ -26,14 +28,18 @@ namespace awucd = ABI::Windows::UI::Composition::Desktop;
 namespace {
 
 thread_local winrt::Windows::System::DispatcherQueueController g_dispatcher_controller{nullptr};
+thread_local bool g_ro_initialized = false;
 
 bool ensure_winrt_and_dispatcher() noexcept
 {
-    // RoInitialize is reference-counted. Keep the apartment alive for the process
-    // and tolerate a pre-existing apartment initialized by another component.
-    const HRESULT ro = RoInitialize(RO_INIT_SINGLETHREADED);
-    if (FAILED(ro) && ro != RPC_E_CHANGED_MODE) {
-        return false;
+    // Initialize the apartment at most once for this UI thread and tolerate an
+    // apartment that another component already initialized with a different model.
+    if (!g_ro_initialized) {
+        const HRESULT ro = RoInitialize(RO_INIT_SINGLETHREADED);
+        if (FAILED(ro) && ro != RPC_E_CHANGED_MODE) {
+            return false;
+        }
+        g_ro_initialized = true;
     }
 
     try {
@@ -228,9 +234,12 @@ struct CompositionBlurContext
         effect->blur_amount = std::clamp(blur_amount, 0.0f, 250.0f);
         effect->Source = source_parameter;
 
+        auto animatable_properties =
+            winrt::single_threaded_vector<winrt::hstring>();
+        animatable_properties.Append(L"Blur.BlurAmount");
         auto factory = compositor.CreateEffectFactory(
             effect.as<wge::IGraphicsEffect>(),
-            {L"Blur.BlurAmount"});
+            animatable_properties);
         blur_brush = factory.CreateBrush();
 
         // For a WS_EX_NOREDIRECTIONBITMAP Win32 target, CreateBackdropBrush
