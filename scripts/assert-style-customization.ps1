@@ -166,6 +166,16 @@ $mouseMoveBlock = [regex]::Match(
     $windowProduction,
     '(?s)WM_MOUSEMOVE\s*=>\s*\{.*?WM_CANCELMODE\s*=>'
 ).Value
+if ($mouseMoveBlock -notmatch 'let\s+Some\(\(hovered_taskbar_index, hovered_taskbar\)\)\s*=\s*taskbar_at_point\(pt\)\s+else\s*\{\s*return\s+LRESULT\(0\);') {
+    throw 'Cross-monitor dragging must freeze while the pointer is outside every taskbar.'
+}
+$mouseUpBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)WM_LBUTTONUP\s*=>\s*\{.*?updater::WM_APP_STARTUP_UPDATE_RESULT'
+).Value
+if ($mouseUpBlock -notmatch 'drag released outside taskbars; restored last valid taskbar position') {
+    throw 'Releasing a drag over desktop must restore a valid taskbar position.'
+}
 if ($mouseMoveBlock -match 'sync_blur_backdrop_zorder') {
     throw 'Drag frames must not reorder Composition backdrop/foreground windows.'
 }
