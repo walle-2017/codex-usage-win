@@ -152,8 +152,9 @@ const TB_ENDTRACK_CODE: u16 = 8;
 /// Keep the visible panel border at one physical pixel even at high DPI.
 const PANEL_BORDER_WIDTH_PX: i32 = 1;
 /// Layered windows treat fully transparent pixels as mouse-pass-through.
-/// Frosted mode keeps an imperceptible alpha so the whole panel remains interactive.
-const FROSTED_HIT_TEST_ALPHA: u8 = 1;
+/// Keep an imperceptible alpha on visually transparent panel pixels so the
+/// component remains draggable/right-clickable even when its background is 0 alpha.
+const MIN_INTERACTIVE_ALPHA: u8 = 1;
 const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
 
@@ -2010,26 +2011,34 @@ fn render_layered() {
         Color::from_hex("#F3F3F3FF")
     };
     let mut surface_style = style.clone();
+    let background = style.color(StyleColorTarget::PanelBackground);
     if native_acrylic_active {
-        // The Acrylic window owns the visible background. Do not use alpha=0 on
-        // the foreground panel: fully transparent layered-window pixels become
-        // mouse-pass-through, making blank panel areas impossible to drag/right-click.
-        // Alpha=1 is visually imperceptible but keeps the whole panel hit-testable.
-        let background = style.color(StyleColorTarget::PanelBackground);
+        // Acrylic owns the visible background, so the layered foreground only
+        // needs a virtually invisible alpha to keep blank areas hit-testable.
         surface_style.panel_background = Color::rgba(
             background.r,
             background.g,
             background.b,
-            FROSTED_HIT_TEST_ALPHA,
+            MIN_INTERACTIVE_ALPHA,
         )
         .to_hex_rgba();
+    } else if background.a == 0 {
+        // A fully transparent normal panel must remain interactive as well.
+        // Alpha=1 is visually indistinguishable from transparent but prevents
+        // Windows from treating the panel interior as mouse-pass-through.
+        surface_style.panel_background = Color::rgba(
+            background.r,
+            background.g,
+            background.b,
+            MIN_INTERACTIVE_ALPHA,
+        )
+        .to_hex_rgba();
+    }
 
-        let border = style.color(StyleColorTarget::PanelBorder);
-        if border.a == 0 {
-            surface_style.panel_border =
-                Color::rgba(border.r, border.g, border.b, FROSTED_HIT_TEST_ALPHA)
-                    .to_hex_rgba();
-        }
+    let border = style.color(StyleColorTarget::PanelBorder);
+    if border.a == 0 {
+        surface_style.panel_border =
+            Color::rgba(border.r, border.g, border.b, MIN_INTERACTIVE_ALPHA).to_hex_rgba();
     }
 
     unsafe {
