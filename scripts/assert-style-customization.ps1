@@ -125,6 +125,25 @@ if ($native -notmatch 'set_popup_owner' -or
     $windowProduction -notmatch 'bind_popup_windows_to_taskbar_owner') {
     throw 'Stable frosted popups must be owned by the selected taskbar so Explorer cannot cover them.'
 }
+$bindOwnerBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn\s+bind_popup_windows_to_taskbar_owner\s*\(.*?\n\}'
+).Value
+$backdropOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner(backdrop_hwnd')
+$foregroundOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner(foreground_hwnd')
+if ($backdropOwnerIndex -lt 0 -or
+    $foregroundOwnerIndex -lt 0 -or
+    $backdropOwnerIndex -ge $foregroundOwnerIndex) {
+    throw 'Taskbar owner rebinding must promote the blur backdrop before the foreground.'
+}
+$popupTaskbarSwitchBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn\s+select_taskbar_for_popup\s*\(.*?\n\}'
+).Value
+if ($popupTaskbarSwitchBlock -notmatch 'composition_blur_active' -or
+    $popupTaskbarSwitchBlock -notmatch 'if\s+blur_active\s*\{[\s\S]*?sync_blur_backdrop_zorder\(foreground_hwnd\)') {
+    throw 'Cross-taskbar popup switches must reassert blur/foreground z-order once after owner rebinding.'
+}
 if ($windowProduction -notmatch 'STYLE_PREVIEW_FRAME_MS:\s*u64\s*=\s*16' -or
     $windowProduction -notmatch 'render_style_preview\(' -or
     $windowProduction -notmatch 'LAST_STYLE_PREVIEW_RENDER') {
