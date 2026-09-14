@@ -3075,48 +3075,56 @@ unsafe extern "system" fn wnd_proc(
                         .map(|s| (Some(s.taskbar_index), s.embedded, s.composition_blur_active))
                         .unwrap_or((None, false, false))
                 };
+
+                // A popup uses absolute screen coordinates. If the pointer has
+                // left every taskbar, combining its X coordinate with the old
+                // taskbar's Y coordinate can place the widget in the middle of
+                // another desktop (especially with vertically offset monitors).
+                // Freeze at the last valid taskbar position until the pointer
+                // enters a taskbar again.
+                let Some((hovered_taskbar_index, hovered_taskbar)) = taskbar_at_point(pt) else {
+                    return LRESULT(0);
+                };
+
                 let mut switched_taskbar = false;
-
                 if let Some(current_index) = current_taskbar_index {
-                    if let Some((target_index, target_taskbar)) = taskbar_at_point(pt) {
-                        if target_index != current_index {
-                            let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed);
-                            let target_dpi = GetDpiForWindow(target_taskbar.hwnd);
-                            if target_dpi > 0 {
-                                CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
-                            }
+                    if hovered_taskbar_index != current_index {
+                        let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed);
+                        let target_dpi = GetDpiForWindow(hovered_taskbar.hwnd);
+                        if target_dpi > 0 {
+                            CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
+                        }
 
+                        {
+                            let mut state = lock_state();
+                            if let Some(s) = state.as_mut() {
+                                s.drag_reparenting = true;
+                            }
+                        }
+                        let _ = ReleaseCapture();
+
+                        let switched = if embedded {
+                            attach_to_taskbar(hwnd, hovered_taskbar_index)
+                        } else {
+                            select_taskbar_for_popup(hovered_taskbar_index)
+                        };
+                        if switched {
                             {
                                 let mut state = lock_state();
                                 if let Some(s) = state.as_mut() {
-                                    s.drag_reparenting = true;
-                                }
-                            }
-                            let _ = ReleaseCapture();
-
-                            let switched = if embedded {
-                                attach_to_taskbar(hwnd, target_index)
-                            } else {
-                                select_taskbar_for_popup(target_index)
-                            };
-                            if switched {
-                                {
-                                    let mut state = lock_state();
-                                    if let Some(s) = state.as_mut() {
-                                        s.dragging = true;
-                                        s.drag_reparenting = false;
-                                    }
-                                }
-                                SetCapture(hwnd);
-                                switched_taskbar = true;
-                            } else {
-                                CURRENT_DPI.store(previous_dpi, Ordering::Relaxed);
-                                let mut state = lock_state();
-                                if let Some(s) = state.as_mut() {
+                                    s.dragging = true;
                                     s.drag_reparenting = false;
                                 }
-                                SetCapture(hwnd);
                             }
+                            SetCapture(hwnd);
+                            switched_taskbar = true;
+                        } else {
+                            CURRENT_DPI.store(previous_dpi, Ordering::Relaxed);
+                            let mut state = lock_state();
+                            if let Some(s) = state.as_mut() {
+                                s.drag_reparenting = false;
+                            }
+                            SetCapture(hwnd);
                         }
                     }
                 }
@@ -3262,7 +3270,8 @@ unsafe extern "system" fn wnd_proc(
             }
 
             if let Some((current_taskbar_index, anchor_logical_x, embedded)) = drag_result {
-                if let Some((target_index, _)) = taskbar_at_point(pt) {
+                let release_taskbar = taskbar_at_point(pt);
+                if let Some((target_index, _)) = release_taskbar {
                     if target_index != current_taskbar_index {
                         if embedded {
                             let _ = attach_to_taskbar(hwnd, target_index);
@@ -3270,35 +3279,45 @@ unsafe extern "system" fn wnd_proc(
                             let _ = select_taskbar_for_popup(target_index);
                         }
                     }
-                }
 
-                refresh_dpi();
-                let final_taskbar = {
-                    let state = lock_state();
-                    state.as_ref().and_then(|s| s.taskbar_hwnd)
-                };
-                if let Some(taskbar_hwnd) = final_taskbar {
-                    if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
-                        let dpi = GetDpiForWindow(taskbar_hwnd);
-                        if dpi > 0 {
-                            CURRENT_DPI.store(dpi, Ordering::Relaxed);
-                        }
-                        let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
-                        let anchor_px = drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
-                        let final_drag_left = drag_left_from_cursor(taskbar_rect, pt, anchor_px);
-                        let new_offset =
-                            offset_for_drag_left(taskbar_hwnd, taskbar_rect, final_drag_left);
-                        {
-                            let mut state = lock_state();
-                            if let Some(s) = state.as_mut() {
-                                s.tray_offset = new_offset;
+                    refresh_dpi();
+                    let final_taskbar = {
+                        let state = lock_state();
+                        state.as_ref().and_then(|s| s.taskbar_hwnd)
+                    };
+                    if let Some(taskbar_hwnd) = final_taskbar {
+                        if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
+                            let dpi = GetDpiForWindow(taskbar_hwnd);
+                            if dpi > 0 {
+                                CURRENT_DPI.store(dpi, Ordering::Relaxed);
                             }
+                            let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
+                            let anchor_px =
+                                drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
+                            let final_drag_left =
+                                drag_left_from_cursor(taskbar_rect, pt, anchor_px);
+                            let new_offset =
+                                offset_for_drag_left(taskbar_hwnd, taskbar_rect, final_drag_left);
+                            {
+                                let mut state = lock_state();
+                                if let Some(s) = state.as_mut() {
+                                    s.tray_offset = new_offset;
+                                }
+                            }
+                            position_at_taskbar();
+                            render_layered();
                         }
-                        position_at_taskbar();
-                        render_layered();
                     }
+                    save_state_settings();
+                } else {
+                    // Releasing over desktop is not a valid drop target. Keep the
+                    // current taskbar selection and restore its persisted offset.
+                    position_at_taskbar();
+                    render_layered();
+                    diagnose::log(
+                        "drag released outside taskbars; restored last valid taskbar position",
+                    );
                 }
-                save_state_settings();
             }
             LRESULT(0)
         }
