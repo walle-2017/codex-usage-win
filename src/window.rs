@@ -1752,20 +1752,34 @@ fn sync_acrylic_backdrop_geometry(foreground_hwnd: HWND) {
             rect.top,
             width,
             height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn move_window_without_repaint(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
 }
 
 fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
     let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
-        native_interop::move_window(foreground_hwnd, x, y, width, height);
+        move_window_without_repaint(foreground_hwnd, x, y, width, height);
         return;
     };
     unsafe {
         // Preserve existing owner/z-order. Re-ordering two top-level windows on
         // every mouse move causes visible DWM flicker.
-        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE;
         let _ = SetWindowPos(
             backdrop_hwnd,
             HWND::default(),
@@ -3073,7 +3087,7 @@ unsafe extern "system" fn wnd_proc(
                                 widget_height,
                             );
                         } else {
-                            native_interop::move_window(
+                            move_window_without_repaint(
                                 hwnd,
                                 window_x,
                                 window_y,
