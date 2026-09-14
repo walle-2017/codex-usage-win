@@ -60,6 +60,7 @@ struct AppState {
     theme_mode: ThemeMode,
     styles: StyleSettings,
     native_acrylic_active: bool,
+    frosted_popup_session: bool,
     small_taskbar_mode: bool,
     small_show_weekly: bool,
 
@@ -1398,6 +1399,7 @@ pub fn run() {
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 native_acrylic_active: false,
+                frosted_popup_session: false,
                 small_taskbar_mode: false,
                 small_show_weekly: false,
                 codex_session_percent: 0.0,
@@ -1658,9 +1660,15 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 s.embedded = false;
+                // Reparenting a layered HWND back into Explorer after Acrylic
+                // has proven unreliable. Once frosted mode is entered, keep the
+                // foreground as a top-level layered popup for the rest of this
+                // process lifetime and only toggle the separate backdrop window.
+                s.frosted_popup_session = true;
             }
         }
         position_at_taskbar();
+        render_layered();
     }
 
     let Some(_) = ensure_acrylic_backdrop(acrylic_color) else {
@@ -1685,12 +1693,12 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
 }
 
 fn restore_layered_taskbar_mode(hwnd: HWND) {
-    let (taskbar_index, was_acrylic) = {
+    let frosted_popup_session = {
         let state = lock_state();
         state
             .as_ref()
-            .map(|s| (s.taskbar_index, s.native_acrylic_active))
-            .unwrap_or((0, false))
+            .map(|s| s.frosted_popup_session)
+            .unwrap_or(false)
     };
 
     destroy_acrylic_backdrop();
@@ -1703,22 +1711,47 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
         }
     }
 
+    if frosted_popup_session {
+        // Do NOT SetParent() this HWND back into Explorer during the same
+        // process lifetime. Reparenting is what invalidates the layered surface
+        // on affected Windows 11 builds. Keep the same top-level layered HWND
+        // and simply render the normal opaque/transparent panel again.
+        position_at_taskbar();
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        diagnose::log("frosted glass disabled; keeping foreground in stable layered popup mode");
+        return;
+    }
+
+    // This path is only for an activation failure that happened before the
+    // foreground ever entered the frosted popup session.
+    let taskbar_index = {
+        let state = lock_state();
+        state.as_ref().map(|s| s.taskbar_index).unwrap_or(0)
+    };
     if attach_to_taskbar(hwnd, taskbar_index) {
         position_at_taskbar();
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
-        if was_acrylic {
-            diagnose::log("restored embedded layered mode after frosted glass");
-        }
     } else {
-        diagnose::log("unable to re-embed after frosted glass; using layered popup fallback");
         native_interop::detach_from_taskbar_as_popup(hwnd);
         native_interop::set_layered_style(hwnd, true);
         {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 s.embedded = false;
+                s.frosted_popup_session = true;
             }
         }
         position_at_taskbar();
@@ -1803,11 +1836,14 @@ fn render_layered() {
         native_acrylic_active = false;
     }
 
-    let embedded = {
+    let (embedded, frosted_popup_session) = {
         let state = lock_state();
-        state.as_ref().map(|s| s.embedded).unwrap_or(false)
+        state
+            .as_ref()
+            .map(|s| (s.embedded, s.frosted_popup_session))
+            .unwrap_or((false, false))
     };
-    if !embedded && !native_acrylic_active {
+    if !embedded && !frosted_popup_session && !native_acrylic_active {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -1923,6 +1959,18 @@ fn render_layered() {
 
     if native_acrylic_active {
         sync_acrylic_backdrop_zorder(hwnd);
+    } else if frosted_popup_session && !embedded {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
     }
 }
 
@@ -2767,12 +2815,12 @@ unsafe extern "system" fn wnd_proc(
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
 
-                let (current_taskbar_index, acrylic_active) = {
+                let (current_taskbar_index, embedded, acrylic_active) = {
                     let state = lock_state();
                     state
                         .as_ref()
-                        .map(|s| (Some(s.taskbar_index), s.native_acrylic_active))
-                        .unwrap_or((None, false))
+                        .map(|s| (Some(s.taskbar_index), s.embedded, s.native_acrylic_active))
+                        .unwrap_or((None, false, false))
                 };
                 let mut switched_taskbar = false;
 
@@ -2793,10 +2841,10 @@ unsafe extern "system" fn wnd_proc(
                             }
                             let _ = ReleaseCapture();
 
-                            let switched = if acrylic_active {
-                                select_taskbar_for_popup(target_index)
-                            } else {
+                            let switched = if embedded {
                                 attach_to_taskbar(hwnd, target_index)
+                            } else {
+                                select_taskbar_for_popup(target_index)
                             };
                             if switched {
                                 {
@@ -2922,6 +2970,7 @@ unsafe extern "system" fn wnd_proc(
                         Some((
                             s.taskbar_index,
                             s.drag_anchor_logical_x,
+                            s.embedded,
                             s.native_acrylic_active,
                         ))
                     } else {
@@ -2956,13 +3005,13 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_index, anchor_logical_x, acrylic_active)) = drag_result {
+            if let Some((current_taskbar_index, anchor_logical_x, embedded, acrylic_active)) = drag_result {
                 if let Some((target_index, _)) = taskbar_at_point(pt) {
                     if target_index != current_taskbar_index {
-                        if acrylic_active {
-                            let _ = select_taskbar_for_popup(target_index);
-                        } else {
+                        if embedded {
                             let _ = attach_to_taskbar(hwnd, target_index);
+                        } else {
+                            let _ = select_taskbar_for_popup(target_index);
                         }
                     }
                 }
@@ -3449,6 +3498,38 @@ fn close_style_editors() {
     }
 }
 
+fn refresh_widget_after_style_editor_close() {
+    let hwnd = {
+        let state = lock_state();
+        state.as_ref().map(|s| s.hwnd.to_hwnd())
+    };
+    render_layered();
+    if let Some(hwnd) = hwnd {
+        let (embedded, frosted_active) = {
+            let state = lock_state();
+            state
+                .as_ref()
+                .map(|s| (s.embedded, s.native_acrylic_active))
+                .unwrap_or((true, false))
+        };
+        if frosted_active {
+            sync_acrylic_backdrop_zorder(hwnd);
+        } else if !embedded {
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
+    }
+}
+
 fn apply_style_color(theme_is_dark: bool, target: StyleColorTarget, color: Color) {
     {
         let mut state = lock_state();
@@ -3581,10 +3662,13 @@ unsafe extern "system" fn color_editor_wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            let mut state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
-                *state = None;
+            {
+                let mut state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
+                    *state = None;
+                }
             }
+            refresh_widget_after_style_editor_close();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -3755,10 +3839,13 @@ unsafe extern "system" fn blur_editor_wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
-                *state = None;
+            {
+                let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
+                    *state = None;
+                }
             }
+            refresh_widget_after_style_editor_close();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
