@@ -61,7 +61,7 @@ struct AppState {
     appearance_preset: AppearancePreset,
     theme_mode: ThemeMode,
     styles: StyleSettings,
-    native_acrylic_active: bool,
+    composition_blur_active: bool,
     frosted_popup_session: bool,
     small_taskbar_mode: bool,
     small_show_weekly: bool,
@@ -171,8 +171,8 @@ const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
-static ACRYLIC_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
-static ACRYLIC_BACKDROP_COLOR: Mutex<Option<Color>> = Mutex::new(None);
+static BLUR_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
+static BLUR_BACKDROP_TINT: Mutex<Option<Color>> = Mutex::new(None);
 static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -1420,7 +1420,7 @@ pub fn run() {
                 appearance_preset: settings.appearance_preset,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
-                native_acrylic_active: false,
+                composition_blur_active: false,
                 frosted_popup_session: false,
                 small_taskbar_mode: false,
                 small_show_weekly: false,
@@ -1534,7 +1534,7 @@ pub fn run() {
     }
 }
 
-unsafe extern "system" fn acrylic_backdrop_wnd_proc(
+unsafe extern "system" fn blur_backdrop_wnd_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
@@ -1547,13 +1547,13 @@ unsafe extern "system" fn acrylic_backdrop_wnd_proc(
     }
 }
 
-fn register_acrylic_backdrop_class() {
+fn register_blur_backdrop_class() {
     unsafe {
-        let class_name = native_interop::wide_str("CodexUsageAcrylicBackdrop");
+        let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(acrylic_backdrop_wnd_proc),
+            lpfnWndProc: Some(blur_backdrop_wnd_proc),
             hInstance: HINSTANCE(hinstance.0),
             hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
             hbrBackground: HBRUSH(std::ptr::null_mut()),
@@ -1571,7 +1571,7 @@ fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
     };
     if let Some(taskbar_hwnd) = taskbar_hwnd {
         native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
-        if let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() {
+        if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
             native_interop::set_popup_owner(backdrop_hwnd, Some(taskbar_hwnd));
         }
     }
@@ -1602,22 +1602,22 @@ fn drag_frame_due(force: bool) -> bool {
     preview_frame_due(&LAST_DRAG_FRAME, DRAG_FRAME_MS, force)
 }
 
-fn acrylic_backdrop_hwnd() -> Option<HWND> {
-    let state = ACRYLIC_BACKDROP_HWND
+fn blur_backdrop_hwnd() -> Option<HWND> {
+    let state = BLUR_BACKDROP_HWND
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     state.as_ref().map(|h| h.to_hwnd())
 }
 
-fn destroy_acrylic_backdrop() {
+fn destroy_blur_backdrop() {
     {
-        let mut color = ACRYLIC_BACKDROP_COLOR
+        let mut color = BLUR_BACKDROP_TINT
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *color = None;
     }
     let hwnd = {
-        let mut state = ACRYLIC_BACKDROP_HWND
+        let mut state = BLUR_BACKDROP_HWND
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         state.take().map(|h| h.to_hwnd())
@@ -1645,10 +1645,10 @@ fn acrylic_tint_for_strength(base: Color, strength: u8) -> Color {
     Color::rgba(base.r, base.g, base.b, alpha.max(1))
 }
 
-fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
-    if let Some(hwnd) = acrylic_backdrop_hwnd() {
+fn ensure_blur_backdrop(color: Color) -> Option<HWND> {
+    if let Some(hwnd) = blur_backdrop_hwnd() {
         let unchanged = {
-            let cached = ACRYLIC_BACKDROP_COLOR
+            let cached = BLUR_BACKDROP_TINT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *cached == Some(color)
@@ -1657,18 +1657,18 @@ fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
             return Some(hwnd);
         }
         if native_interop::set_native_acrylic(hwnd, Some(color)) {
-            let mut cached = ACRYLIC_BACKDROP_COLOR
+            let mut cached = BLUR_BACKDROP_TINT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *cached = Some(color);
             return Some(hwnd);
         }
-        destroy_acrylic_backdrop();
+        destroy_blur_backdrop();
     }
 
-    register_acrylic_backdrop_class();
+    register_blur_backdrop_class();
     unsafe {
-        let class_name = native_interop::wide_str("CodexUsageAcrylicBackdrop");
+        let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
         let title = native_interop::wide_str("");
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
@@ -1691,14 +1691,14 @@ fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
             return None;
         }
         {
-            let mut cached = ACRYLIC_BACKDROP_COLOR
+            let mut cached = BLUR_BACKDROP_TINT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *cached = Some(color);
         }
 
         {
-            let mut state = ACRYLIC_BACKDROP_HWND
+            let mut state = BLUR_BACKDROP_HWND
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *state = Some(SendHwnd::from_hwnd(hwnd));
@@ -1714,9 +1714,9 @@ fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
     }
 }
 
-fn sync_acrylic_backdrop_zorder(foreground_hwnd: HWND) {
+fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     bind_popup_windows_to_taskbar_owner(foreground_hwnd);
-    let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
+    let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
         return;
     };
     let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
@@ -1750,8 +1750,8 @@ fn sync_acrylic_backdrop_zorder(foreground_hwnd: HWND) {
     }
 }
 
-fn sync_acrylic_backdrop_geometry(foreground_hwnd: HWND) {
-    let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
+fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
+    let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
         return;
     };
     let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
@@ -1790,7 +1790,7 @@ fn move_window_without_repaint(hwnd: HWND, x: i32, y: i32, width: i32, height: i
 }
 
 fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
-    let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
+    let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
         move_window_without_repaint(foreground_hwnd, x, y, width, height);
         return;
     };
@@ -1819,7 +1819,7 @@ fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: 
     }
 }
 
-fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
+fn activate_blur_popup(hwnd: HWND, acrylic_color: Color) -> bool {
     let was_embedded = {
         let state = lock_state();
         state.as_ref().map(|s| s.embedded).unwrap_or(false)
@@ -1845,7 +1845,7 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
         position_at_taskbar();
     }
 
-    let Some(_) = ensure_acrylic_backdrop(acrylic_color) else {
+    let Some(_) = ensure_blur_backdrop(acrylic_color) else {
         diagnose::log("acrylic backdrop activation failed; restoring embedded layered mode");
         restore_layered_taskbar_mode(hwnd);
         return false;
@@ -1854,12 +1854,12 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
     {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
-            s.native_acrylic_active = true;
+            s.composition_blur_active = true;
         }
     }
 
     bind_popup_windows_to_taskbar_owner(hwnd);
-    sync_acrylic_backdrop_zorder(hwnd);
+    sync_blur_backdrop_zorder(hwnd);
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
@@ -1876,13 +1876,13 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
             .unwrap_or(false)
     };
 
-    destroy_acrylic_backdrop();
+    destroy_blur_backdrop();
     native_interop::set_layered_style(hwnd, true);
 
     {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
-            s.native_acrylic_active = false;
+            s.composition_blur_active = false;
         }
     }
 
@@ -1975,11 +1975,11 @@ fn render_layered() {
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
     let acrylic_requested = frosted_strength > 0;
-    let mut native_acrylic_active = {
+    let mut composition_blur_active = {
         let state = lock_state();
         state
             .as_ref()
-            .map(|s| s.native_acrylic_active)
+            .map(|s| s.composition_blur_active)
             .unwrap_or(false)
     };
 
@@ -1988,19 +1988,19 @@ fn render_layered() {
             style.color(StyleColorTarget::PanelBackground),
             frosted_strength,
         );
-        if native_acrylic_active && ensure_acrylic_backdrop(acrylic_color).is_none() {
-            native_acrylic_active = false;
+        if composition_blur_active && ensure_blur_backdrop(acrylic_color).is_none() {
+            composition_blur_active = false;
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
-                s.native_acrylic_active = false;
+                s.composition_blur_active = false;
             }
         }
-        if !native_acrylic_active {
-            native_acrylic_active = activate_acrylic_popup(hwnd, acrylic_color);
+        if !composition_blur_active {
+            composition_blur_active = activate_blur_popup(hwnd, acrylic_color);
         }
-    } else if native_acrylic_active {
+    } else if composition_blur_active {
         restore_layered_taskbar_mode(hwnd);
-        native_acrylic_active = false;
+        composition_blur_active = false;
     }
 
     let (embedded, frosted_popup_session) = {
@@ -2010,7 +2010,7 @@ fn render_layered() {
             .map(|s| (s.embedded, s.frosted_popup_session))
             .unwrap_or((false, false))
     };
-    if !embedded && !frosted_popup_session && !native_acrylic_active {
+    if !embedded && !frosted_popup_session && !composition_blur_active {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -2033,7 +2033,7 @@ fn render_layered() {
     };
     let mut surface_style = style.clone();
     let background = style.color(StyleColorTarget::PanelBackground);
-    if native_acrylic_active {
+    if composition_blur_active {
         // Acrylic owns the visible background, so the layered foreground only
         // needs a virtually invisible alpha to keep blank areas hit-testable.
         surface_style.panel_background = Color::rgba(
@@ -2148,8 +2148,8 @@ fn render_layered() {
         ReleaseDC(hwnd, screen_dc);
     }
 
-    if native_acrylic_active {
-        sync_acrylic_backdrop_geometry(hwnd);
+    if composition_blur_active {
+        sync_blur_backdrop_geometry(hwnd);
     }
 }
 
@@ -2692,7 +2692,7 @@ fn position_at_taskbar() {
             s.embedded,
             s.tray_offset,
             taskbar_hwnd,
-            s.native_acrylic_active,
+            s.composition_blur_active,
         )
     };
 
@@ -2840,7 +2840,7 @@ unsafe extern "system" fn wnd_proc(
                 let state = lock_state();
                 state
                     .as_ref()
-                    .map(|s| (s.embedded, s.native_acrylic_active))
+                    .map(|s| (s.embedded, s.composition_blur_active))
                     .unwrap_or((false, false))
             };
             if embedded || frosted_active {
@@ -3009,7 +3009,7 @@ unsafe extern "system" fn wnd_proc(
                     let state = lock_state();
                     state
                         .as_ref()
-                        .map(|s| (Some(s.taskbar_index), s.embedded, s.native_acrylic_active))
+                        .map(|s| (Some(s.taskbar_index), s.embedded, s.composition_blur_active))
                         .unwrap_or((None, false, false))
                 };
                 let mut switched_taskbar = false;
@@ -3407,7 +3407,7 @@ unsafe extern "system" fn wnd_proc(
                     });
                 }
                 2 => {
-                    destroy_acrylic_backdrop();
+                    destroy_blur_backdrop();
                     let hook = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| s.win_event_hook)
@@ -3635,7 +3635,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            destroy_acrylic_backdrop();
+            destroy_blur_backdrop();
             let hook = {
                 let state = lock_state();
                 state.as_ref().and_then(|s| s.win_event_hook)
@@ -3702,11 +3702,11 @@ fn refresh_widget_after_style_editor_close() {
             let state = lock_state();
             state
                 .as_ref()
-                .map(|s| (s.embedded, s.native_acrylic_active))
+                .map(|s| (s.embedded, s.composition_blur_active))
                 .unwrap_or((true, false))
         };
         if frosted_active {
-            sync_acrylic_backdrop_zorder(hwnd);
+            sync_blur_backdrop_zorder(hwnd);
         } else if !embedded {
             unsafe {
                 let _ = SetWindowPos(
@@ -4759,7 +4759,7 @@ fn show_context_menu(hwnd: HWND) {
 }
 
 /// Paint for non-embedded fallback (normal WM_PAINT path)
-fn paint(hdc: HDC, hwnd: HWND, native_acrylic_active: bool) {
+fn paint(hdc: HDC, hwnd: HWND, composition_blur_active: bool) {
     let (
         is_dark,
         language,
@@ -4805,7 +4805,7 @@ fn paint(hdc: HDC, hwnd: HWND, native_acrylic_active: bool) {
             return;
         }
 
-        if native_acrylic_active {
+        if composition_blur_active {
             // The DWM owns the acrylic backdrop. Draw only foreground content.
             paint_content(
                 hdc,
