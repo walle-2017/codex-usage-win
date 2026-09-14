@@ -5,7 +5,7 @@
 - Added top-level theme selection: follow system, dark, or light.
 - Renamed the taskbar appearance menu to Layout while keeping Compact and Minimal presets.
 - Added per-theme style customization for panel, text, progress-bar, and drag-handle RGBA colors.
-- Added panel background blur with live slider preview.
+- Added 0–100% frosted-glass intensity with live slider preview; 0% disables Acrylic.
 - Style sliders preview changes continuously and save automatically when the interaction ends.
 - Dark and light theme style values are stored independently; legacy settings keep the v1.0.4 defaults.
 
