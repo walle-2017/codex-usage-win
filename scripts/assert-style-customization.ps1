@@ -76,6 +76,20 @@ if ($windowProduction -notmatch 'select_taskbar_for_popup' -or
     $windowProduction -notmatch 'sync_acrylic_backdrop_zorder\(hwnd\)') {
     throw 'Frosted popup dragging must keep the Acrylic backdrop aligned and preserve taskbar selection.'
 }
+if ($windowProduction -notmatch 'frosted_popup_session' -or
+    $windowProduction -notmatch 'keeping foreground in stable layered popup mode') {
+    throw 'After frosted mode is entered, foreground must remain a stable layered popup for the process lifetime.'
+}
+$restoreBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn\s+restore_layered_taskbar_mode\s*\(.*?\n\}'
+).Value
+if ($restoreBlock -match 'if\s+frosted_popup_session[\s\S]*?attach_to_taskbar') {
+    throw 'Disabling frosted glass must not reparent the foreground back into Explorer.'
+}
+if ($windowProduction -notmatch 'refresh_widget_after_style_editor_close') {
+    throw 'Closing style editors must re-render and restore foreground z-order.'
+}
 if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'box_blur_bitmap' -or
     $windowProduction -match 'tint_frosted_panel_bitmap') {
