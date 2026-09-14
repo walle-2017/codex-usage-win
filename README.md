@@ -17,7 +17,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 - Reset time/date display
 - Compact and minimal taskbar layouts
 - Follow-system, forced dark, and forced light themes
-- Per-theme live style editing for RGBA colors and panel blur
+- Per-theme live style editing for RGBA colors and 0–100% frosted-glass intensity
 - Optional low-quota alerts
 - Configurable refresh interval
 - Windows light/dark theme support
