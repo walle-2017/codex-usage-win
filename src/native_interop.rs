@@ -189,8 +189,8 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
 }
 
 /// Detach the widget from Explorer and turn it back into a top-level popup.
-/// Native DWM backdrop effects require a top-level window; applying Acrylic to
-/// the taskbar child window makes the child stop presenting visible pixels.
+/// The independent Windows Composition backdrop requires a top-level target;
+/// the foreground remains layered and interactive above that target.
 pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
     unsafe {
         let _ = SetParent(hwnd, HWND::default());
