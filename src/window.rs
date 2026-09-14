@@ -154,6 +154,8 @@ const PANEL_BORDER_WIDTH_PX: i32 = 1;
 /// Layered windows treat fully transparent pixels as mouse-pass-through.
 /// Frosted mode keeps an imperceptible alpha so the whole panel remains interactive.
 const FROSTED_HIT_TEST_ALPHA: u8 = 1;
+const STYLE_PREVIEW_FRAME_MS: u64 = 16;
+const DRAG_FRAME_MS: u64 = 8;
 
 const GITHUB_RELEASES_URL: &str =
     "https://github.com/walle-2017/codex-usage-win/releases";
@@ -166,6 +168,9 @@ const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static ACRYLIC_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
+static ACRYLIC_BACKDROP_COLOR: Mutex<Option<Color>> = Mutex::new(None);
+static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
+static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -1568,6 +1573,31 @@ fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
     }
 }
 
+fn preview_frame_due(last: &Mutex<Option<Instant>>, interval_ms: u64, force: bool) -> bool {
+    let now = Instant::now();
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+    if force
+        || last
+            .map(|previous| now.duration_since(previous) >= Duration::from_millis(interval_ms))
+            .unwrap_or(true)
+    {
+        *last = Some(now);
+        true
+    } else {
+        false
+    }
+}
+
+fn render_style_preview(force: bool) {
+    if preview_frame_due(&LAST_STYLE_PREVIEW_RENDER, STYLE_PREVIEW_FRAME_MS, force) {
+        render_layered();
+    }
+}
+
+fn drag_frame_due(force: bool) -> bool {
+    preview_frame_due(&LAST_DRAG_FRAME, DRAG_FRAME_MS, force)
+}
+
 fn acrylic_backdrop_hwnd() -> Option<HWND> {
     let state = ACRYLIC_BACKDROP_HWND
         .lock()
@@ -1576,6 +1606,12 @@ fn acrylic_backdrop_hwnd() -> Option<HWND> {
 }
 
 fn destroy_acrylic_backdrop() {
+    {
+        let mut color = ACRYLIC_BACKDROP_COLOR
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *color = None;
+    }
     let hwnd = {
         let mut state = ACRYLIC_BACKDROP_HWND
             .lock()
@@ -1593,7 +1629,20 @@ fn destroy_acrylic_backdrop() {
 
 fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
     if let Some(hwnd) = acrylic_backdrop_hwnd() {
+        let unchanged = {
+            let cached = ACRYLIC_BACKDROP_COLOR
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached == Some(color)
+        };
+        if unchanged {
+            return Some(hwnd);
+        }
         if native_interop::set_native_acrylic(hwnd, Some(color)) {
+            let mut cached = ACRYLIC_BACKDROP_COLOR
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached = Some(color);
             return Some(hwnd);
         }
         destroy_acrylic_backdrop();
@@ -1622,6 +1671,12 @@ fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
         if !native_interop::set_native_acrylic(hwnd, Some(color)) {
             let _ = DestroyWindow(hwnd);
             return None;
+        }
+        {
+            let mut cached = ACRYLIC_BACKDROP_COLOR
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached = Some(color);
         }
 
         {
@@ -1673,6 +1728,61 @@ fn sync_acrylic_backdrop_zorder(foreground_hwnd: HWND) {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+fn sync_acrylic_backdrop_geometry(foreground_hwnd: HWND) {
+    let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
+        return;
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
+        return;
+    };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            backdrop_hwnd,
+            HWND::default(),
+            rect.left,
+            rect.top,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
+        native_interop::move_window(foreground_hwnd, x, y, width, height);
+        return;
+    };
+    unsafe {
+        // Preserve existing owner/z-order. Re-ordering two top-level windows on
+        // every mouse move causes visible DWM flicker.
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+        let _ = SetWindowPos(
+            backdrop_hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            flags,
+        );
+        let _ = SetWindowPos(
+            foreground_hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            flags,
         );
     }
 }
@@ -1842,24 +1952,11 @@ fn render_layered() {
 
     if acrylic_requested {
         let acrylic_color = style.color(StyleColorTarget::PanelBackground);
-        if native_acrylic_active {
-            if let Some(backdrop) = acrylic_backdrop_hwnd() {
-                if !native_interop::set_native_acrylic(backdrop, Some(acrylic_color)) {
-                    destroy_acrylic_backdrop();
-                    native_acrylic_active = false;
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.native_acrylic_active = false;
-                        }
-                    }
-                }
-            } else {
-                native_acrylic_active = false;
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    s.native_acrylic_active = false;
-                }
+        if native_acrylic_active && ensure_acrylic_backdrop(acrylic_color).is_none() {
+            native_acrylic_active = false;
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.native_acrylic_active = false;
             }
         }
         if !native_acrylic_active {
@@ -2008,19 +2105,10 @@ fn render_layered() {
     }
 
     if native_acrylic_active {
-        sync_acrylic_backdrop_zorder(hwnd);
+        sync_acrylic_backdrop_geometry(hwnd);
     } else if frosted_popup_session && !embedded {
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-        }
+        // Owner relationship established during the lifecycle keeps this popup
+        // above the taskbar; ordinary repaints must not churn z-order.
     }
 }
 
@@ -2627,21 +2715,28 @@ fn position_at_taskbar() {
     let y = compute_anchor_y(anchor_top, anchor_height, widget_height);
     if embedded {
         let x = tray_left - taskbar_rect.left - widget_width - tray_offset;
-        native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
+        if acrylic_active {
+            // Embedded + Acrylic should not normally occur, but preserve safe behavior.
+            native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
+        } else {
+            native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
+        }
         diagnose::log(format!(
             "positioned embedded widget at x={x} y={} w={widget_width} h={widget_height}",
             y - taskbar_rect.top
         ));
     } else {
         let x = tray_left - widget_width - tray_offset;
-        native_interop::move_window(hwnd, x, y, widget_width, widget_height);
+        if acrylic_active {
+            move_frosted_pair(hwnd, x, y, widget_width, widget_height);
+        } else {
+            native_interop::move_window(hwnd, x, y, widget_width, widget_height);
+        }
         diagnose::log(format!(
             "positioned fallback widget at x={x} y={y} w={widget_width} h={widget_height}"
         ));
     }
-    if acrylic_active {
-        sync_acrylic_backdrop_zorder(hwnd);
-    } else if !embedded {
+    if !embedded && !acrylic_active {
         bind_popup_windows_to_taskbar_owner(hwnd);
     }
 }
@@ -2855,6 +2950,10 @@ unsafe extern "system" fn wnd_proc(
                 s.dragging = true;
                 s.drag_anchor_logical_x = anchor_logical_x;
             }
+            {
+                let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
+                *last = None;
+            }
             SetCapture(hwnd);
             LRESULT(0)
         }
@@ -2864,6 +2963,9 @@ unsafe extern "system" fn wnd_proc(
                 state.as_ref().map(|s| s.dragging).unwrap_or(false)
             };
             if is_dragging {
+                if !drag_frame_due(false) {
+                    return LRESULT(0);
+                }
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
 
@@ -2970,15 +3072,22 @@ unsafe extern "system" fn wnd_proc(
 
                         // Embedded mode uses taskbar-client coordinates; Acrylic popup
                         // mode uses absolute screen coordinates.
-                        native_interop::move_window(
-                            hwnd,
-                            window_x,
-                            window_y,
-                            widget_width,
-                            widget_height,
-                        );
                         if acrylic_active {
-                            sync_acrylic_backdrop_zorder(hwnd);
+                            move_frosted_pair(
+                                hwnd,
+                                window_x,
+                                window_y,
+                                widget_width,
+                                widget_height,
+                            );
+                        } else {
+                            native_interop::move_window(
+                                hwnd,
+                                window_x,
+                                window_y,
+                                widget_width,
+                                widget_height,
+                            );
                         }
 
                         if switched_taskbar || small_mode_changed {
@@ -3028,6 +3137,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             };
             let _ = ReleaseCapture();
+            let _ = drag_frame_due(true);
 
             if drag_result.is_none() {
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -3578,23 +3688,17 @@ fn refresh_widget_after_style_editor_close() {
 }
 
 fn apply_style_color(theme_is_dark: bool, target: StyleColorTarget, color: Color) {
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.styles.active_mut(theme_is_dark).set_color(target, color);
-        }
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        s.styles.active_mut(theme_is_dark).set_color(target, color);
     }
-    render_layered();
 }
 
 fn apply_style_blur(theme_is_dark: bool, radius: u8) {
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.styles.active_mut(theme_is_dark).panel_blur_radius = u8::from(radius > 0);
-        }
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        s.styles.active_mut(theme_is_dark).panel_blur_radius = u8::from(radius > 0);
     }
-    render_layered();
 }
 
 unsafe fn create_editor_static(
@@ -3697,7 +3801,9 @@ unsafe extern "system" fn color_editor_wnd_proc(
                 update_color_editor_labels(editor, color);
                 apply_style_color(editor.theme_is_dark, editor.target, color);
                 let code = (wparam.0 & 0xFFFF) as u16;
-                if code == TB_ENDTRACK_CODE {
+                let final_frame = code == TB_ENDTRACK_CODE;
+                render_style_preview(final_frame);
+                if final_frame {
                     save_state_settings();
                 }
             }
@@ -3874,7 +3980,9 @@ unsafe extern "system" fn blur_editor_wnd_proc(
                 update_blur_editor_label(editor, radius, language);
                 apply_style_blur(editor.theme_is_dark, radius);
                 let code = (wparam.0 & 0xFFFF) as u16;
-                if code == TB_ENDTRACK_CODE {
+                let final_frame = code == TB_ENDTRACK_CODE;
+                render_style_preview(final_frame);
+                if final_frame {
                     save_state_settings();
                 }
             }
