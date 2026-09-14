@@ -157,7 +157,7 @@ const PANEL_BORDER_WIDTH_PX: i32 = 1;
 /// Keep an imperceptible alpha on visually transparent panel pixels so the
 /// component remains draggable/right-clickable even when its background is 0 alpha.
 const MIN_INTERACTIVE_ALPHA: u8 = 1;
-const FROSTED_TINT_ALPHA_MAX: u8 = 220;
+const FROSTED_MAX_BLUR_PX: f32 = 20.0;
 const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
 
@@ -171,8 +171,15 @@ const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlurBackdropParams {
+    blur_bits: u32,
+    tint: Color,
+}
+
 static BLUR_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
-static BLUR_BACKDROP_TINT: Mutex<Option<Color>> = Mutex::new(None);
+static BLUR_BACKDROP_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
+static BLUR_BACKDROP_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
 static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 
