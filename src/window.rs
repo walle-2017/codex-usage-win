@@ -5181,6 +5181,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frosted_strength_maps_linearly_to_gaussian_radius() {
+        assert_eq!(blur_amount_for_strength(0), 0.0);
+        assert!((blur_amount_for_strength(1) - 0.2).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(10) - 2.0).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(50) - 10.0).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(100) - 20.0).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(255) - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn centers_widget_vertically() {
         assert_eq!(compute_anchor_y(100, 48, 42), 103);
         assert_eq!(compute_anchor_y(100, 32, 28), 102);
