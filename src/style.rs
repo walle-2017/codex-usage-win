@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::native_interop::Color;
 
+pub const FROSTED_STRENGTH_MAX: u8 = 100;
+const LEGACY_FROSTED_STRENGTH_SENTINEL: u8 = u8::MAX;
+
+fn missing_frosted_strength() -> u8 {
+    LEGACY_FROSTED_STRENGTH_SENTINEL
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
@@ -31,7 +38,12 @@ pub enum StyleColorTarget {
 pub struct ThemeStyle {
     pub panel_background: String,
     pub panel_border: String,
+    /// Legacy v1.0.5 test-build field. Read for migration only and omit on save.
+    #[serde(default, skip_serializing)]
     pub panel_blur_radius: u8,
+    /// Visual Acrylic intensity: 0 = off, 1..=100 = increasingly frosted.
+    #[serde(default = "missing_frosted_strength")]
+    pub panel_frosted_strength: u8,
     pub quota_type: String,
     pub remaining: String,
     pub reset_time: String,
@@ -55,6 +67,7 @@ impl ThemeStyle {
             panel_background: "#242A31FF".into(),
             panel_border: "#343B43FF".into(),
             panel_blur_radius: 0,
+            panel_frosted_strength: 0,
             quota_type: "#A0A0A0FF".into(),
             remaining: "#FFFFFFFF".into(),
             reset_time: "#92979DFF".into(),
@@ -72,6 +85,7 @@ impl ThemeStyle {
             panel_background: "#EEF1F4FF".into(),
             panel_border: "#D4D9DFFF".into(),
             panel_blur_radius: 0,
+            panel_frosted_strength: 0,
             quota_type: "#404040FF".into(),
             remaining: "#202020FF".into(),
             reset_time: "#666666FF".into(),
@@ -97,7 +111,21 @@ impl ThemeStyle {
         self.progress_consumed =
             normalize_color(&self.progress_consumed, &fallback.progress_consumed);
         self.drag_handle = normalize_color(&self.drag_handle, &fallback.drag_handle);
-        self.panel_blur_radius = u8::from(self.panel_blur_radius > 0);
+
+        // Earlier v1.0.5 test builds stored frosted glass as a boolean-like
+        // panel_blur_radius (0/1). Preserve an enabled setting by migrating it
+        // to 100% the first time the new linear-strength schema is loaded.
+        if self.panel_frosted_strength == LEGACY_FROSTED_STRENGTH_SENTINEL {
+            self.panel_frosted_strength = if self.panel_blur_radius > 0 {
+                FROSTED_STRENGTH_MAX
+            } else {
+                0
+            };
+        } else {
+            self.panel_frosted_strength =
+                self.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
+        }
+        self.panel_blur_radius = 0;
     }
 
     pub fn color(&self, target: StyleColorTarget) -> Color {
@@ -199,13 +227,33 @@ mod tests {
     }
 
     #[test]
-    fn invalid_colors_are_normalized() {
+    fn invalid_colors_and_strength_are_normalized() {
         let mut styles = StyleSettings::default();
         styles.dark.panel_background = "bad".into();
-        styles.dark.panel_blur_radius = 255;
+        styles.dark.panel_frosted_strength = 180;
         styles.normalize();
         assert_eq!(styles.dark.panel_background, "#242A31FF");
-        assert_eq!(styles.dark.panel_blur_radius, 1);
+        assert_eq!(styles.dark.panel_frosted_strength, FROSTED_STRENGTH_MAX);
+    }
+
+    #[test]
+    fn legacy_boolean_frosted_setting_migrates_to_full_strength() {
+        let json = r##"{
+            "dark": {
+                "panel_blur_radius": 1
+            },
+            "light": {
+                "panel_blur_radius": 0
+            }
+        }"##;
+        let mut styles: StyleSettings = serde_json::from_str(json).unwrap();
+        styles.normalize();
+        assert_eq!(styles.dark.panel_frosted_strength, 100);
+        assert_eq!(styles.light.panel_frosted_strength, 0);
+
+        let saved = serde_json::to_string(&styles).unwrap();
+        assert!(saved.contains("panel_frosted_strength"));
+        assert!(!saved.contains("panel_blur_radius"));
     }
 
     #[test]
