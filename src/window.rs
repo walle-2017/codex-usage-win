@@ -217,11 +217,16 @@ fn sc(px: i32) -> i32 {
 /// Uses GetDpiForWindow which returns the live DPI (unlike GetDpiForSystem
 /// which is cached at process startup and never changes).
 fn refresh_dpi() {
-    let hwnd = {
+    let dpi_source = {
         let state = lock_state();
-        state.as_ref().map(|s| s.hwnd.to_hwnd())
+        state.as_ref().map(|s| {
+            // During a cross-monitor popup move, the foreground HWND can report
+            // the old monitor DPI for a short period. The selected taskbar is
+            // already authoritative for layout, so prefer its DPI.
+            s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd())
+        })
     };
-    if let Some(hwnd) = hwnd {
+    if let Some(hwnd) = dpi_source {
         let dpi = unsafe { GetDpiForWindow(hwnd) };
         if dpi > 0 {
             CURRENT_DPI.store(dpi, Ordering::Relaxed);
@@ -1632,6 +1637,20 @@ fn blur_backdrop_hwnd() -> Option<HWND> {
     state.as_ref().map(|h| h.to_hwnd())
 }
 
+fn blur_backdrop_context() -> Option<usize> {
+    let state = BLUR_BACKDROP_CONTEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *state
+}
+
+fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
+    let Some(context) = blur_backdrop_context() else {
+        return false;
+    };
+    native_interop::set_composition_blur_bounds(context, width, height)
+}
+
 fn destroy_blur_backdrop() {
     let context = {
         let mut state = BLUR_BACKDROP_CONTEXT
@@ -1676,12 +1695,7 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
     };
 
     let existing_hwnd = blur_backdrop_hwnd();
-    let existing_context = {
-        let state = BLUR_BACKDROP_CONTEXT
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *state
-    };
+    let existing_context = blur_backdrop_context();
 
     if let (Some(hwnd), Some(context)) = (existing_hwnd, existing_context) {
         let unchanged = {
@@ -1785,6 +1799,10 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         return;
     }
 
+    if !sync_composition_blur_bounds(width, height) {
+        diagnose::log("composition blur bounds sync failed during z-order update");
+    }
+
     unsafe {
         let _ = SetWindowPos(
             backdrop_hwnd,
@@ -1819,6 +1837,9 @@ fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
     if width <= 0 || height <= 0 {
         return;
     }
+    if !sync_composition_blur_bounds(width, height) {
+        diagnose::log("composition blur bounds sync failed during geometry update");
+    }
     unsafe {
         let _ = SetWindowPos(
             backdrop_hwnd,
@@ -1851,6 +1872,11 @@ fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: 
         move_window_without_repaint(foreground_hwnd, x, y, width, height);
         return;
     };
+    // Shrink/expand the visual tree first. The current HWND bounds clip an
+    // expansion, while an early visual shrink prevents a stale-DPI blur tail.
+    if !sync_composition_blur_bounds(width, height) {
+        diagnose::log("composition blur bounds sync failed during drag");
+    }
     unsafe {
         // Preserve existing owner/z-order. Re-ordering two top-level windows on
         // every mouse move causes visible DWM flicker.
