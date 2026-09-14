@@ -64,6 +64,20 @@ if ($composition -notmatch 'CreateDesktopWindowTarget' -or
     $composition -notmatch 'IGraphicsEffectD2D1Interop') {
     throw 'Native helper must use DesktopWindowTarget + BackdropBrush + real GaussianBlurEffect.'
 }
+if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
+    $composition -notmatch 'CreateInsetClip' -or
+    $composition -notmatch 'root\.Size\(size\)' -or
+    $composition -notmatch 'blur_visual\.Size\(size\)' -or
+    $composition -notmatch 'tint_visual\.Size\(size\)') {
+    throw 'Composition backdrop must use explicit size and hard clipping to prevent stale-DPI blur tails.'
+}
+if ($native -notmatch 'set_composition_blur_bounds' -or
+    $windowProduction -notmatch 'sync_composition_blur_bounds') {
+    throw 'Rust must synchronize Composition visual bounds with the backdrop HWND.'
+}
+if ($windowProduction -notmatch 's\.taskbar_hwnd\.unwrap_or_else\(\|\| s\.hwnd\.to_hwnd\(\)\)') {
+    throw 'DPI refresh must prefer the selected taskbar during cross-monitor popup moves.'
+}
 if ($windowProduction -notmatch 'FROSTED_MAX_BLUR_PX:\s*f32\s*=\s*20\.0' -or
     $windowProduction -notmatch 'blur_amount_for_strength' -or
     $windowProduction -notmatch 'FROSTED_MAX_BLUR_PX\s*\*\s*f32::from\(strength' -or
