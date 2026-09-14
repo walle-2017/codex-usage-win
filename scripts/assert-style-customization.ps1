@@ -90,6 +90,11 @@ if ($restoreBlock -notmatch 'if\s+frosted_popup_session\s*\{[\s\S]*?return;') {
 if ($windowProduction -notmatch 'refresh_widget_after_style_editor_close') {
     throw 'Closing style editors must re-render and restore foreground z-order.'
 }
+if ($native -notmatch 'set_popup_owner' -or
+    $native -notmatch 'GWLP_HWNDPARENT' -or
+    $windowProduction -notmatch 'bind_popup_windows_to_taskbar_owner') {
+    throw 'Stable frosted popups must be owned by the selected taskbar so Explorer cannot cover them.'
+}
 if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'box_blur_bitmap' -or
     $windowProduction -match 'tint_frosted_panel_bitmap') {
