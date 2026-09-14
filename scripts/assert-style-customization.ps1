@@ -25,8 +25,9 @@ if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -
 if ($styleProduction -match '(?i)rounded') {
     throw 'v1.0.5 style settings must not expose rounded panel/progress options.'
 }
-if ($styleProduction -notmatch 'panel_blur_radius:\s*u8') {
-    throw 'Per-theme panel blur setting is missing.'
+if ($styleProduction -notmatch 'panel_frosted_strength:\s*u8' -or
+    $styleProduction -notmatch 'FROSTED_STRENGTH_MAX:\s*u8\s*=\s*100') {
+    throw 'Per-theme 0-100 frosted intensity setting is missing.'
 }
 if ($native -notmatch 'pub\s+a:\s+u8' -or $native -notmatch 'to_hex_rgba') {
     throw 'Native Color must support an alpha channel and RGBA serialization.'
@@ -43,8 +44,9 @@ foreach ($hex in @(
 if ($windowProduction -notmatch 'TB_ENDTRACK_CODE') {
     throw 'Continuous editors must save when trackbar interaction ends.'
 }
-if ($windowProduction -notmatch 'apply_style_color\(' -or $windowProduction -notmatch 'apply_style_blur\(') {
-    throw 'Color and blur editors must apply live previews.'
+if ($windowProduction -notmatch 'apply_style_color\(' -or
+    $windowProduction -notmatch 'apply_frosted_strength\(') {
+    throw 'Color and frosted-intensity editors must apply live previews.'
 }
 if ($windowProduction -notmatch 'render_layered\(\);[\s\S]{0,200}TB_ENDTRACK_CODE') {
     Write-Warning 'Live-preview implementation shape changed; inspect manually if this warning appears.'
@@ -53,6 +55,16 @@ if ($native -notmatch 'set_native_acrylic' -or
     $native -notmatch 'ACCENT_ENABLE_ACRYLICBLURBEHIND' -or
     $native -notmatch 'SetWindowCompositionAttribute') {
     throw 'Frosted glass must use native DWM acrylic composition.'
+}
+if ($windowProduction -notmatch 'acrylic_tint_for_strength' -or
+    $windowProduction -notmatch 'FROSTED_TINT_ALPHA_MAX:\s*u8\s*=\s*220' -or
+    $windowProduction -notmatch 'frosted_strength\s*>\s*0') {
+    throw 'Frosted intensity must map 0-100 continuously to Acrylic tint strength.'
+}
+if ($styleProduction -notmatch 'skip_serializing' -or
+    $styleProduction -notmatch 'LEGACY_FROSTED_STRENGTH_SENTINEL' -or
+    $styleProduction -notmatch 'panel_blur_radius') {
+    throw 'Legacy boolean frosted settings must migrate without being written back.'
 }
 if ($windowProduction -notmatch 'ACRYLIC_BACKDROP_HWND' -or
     $windowProduction -notmatch 'ensure_acrylic_backdrop' -or
@@ -127,8 +139,11 @@ if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'tint_frosted_panel_bitmap') {
     throw 'Taskbar screenshot/software blur must not be used for frosted glass.'
 }
-if ($windowProduction -notmatch '"磨砂玻璃"' -or $windowProduction -notmatch '"Frosted glass"') {
-    throw 'Frosted-glass UI labels are missing.'
+if ($windowProduction -notmatch '"样式 - 磨砂强度"' -or
+    $windowProduction -notmatch '"Style - Frosted intensity"' -or
+    $windowProduction -notmatch '磨砂强度\.\.\. \(\{\}%\)' -or
+    $windowProduction -notmatch 'Frosted intensity\.\.\. \(\{\}%\)') {
+    throw 'Linear frosted-intensity UI labels are missing.'
 }
 if ($windowProduction -notmatch 'reset_active\(s\.is_dark\)') {
     throw 'Reset Style must only reset the active theme.'
