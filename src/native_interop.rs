@@ -21,6 +21,11 @@ unsafe extern "C" {
         b: u8,
         a: u8,
     ) -> *mut std::ffi::c_void;
+    fn codex_composition_blur_set_bounds(
+        context: *mut std::ffi::c_void,
+        width: f32,
+        height: f32,
+    ) -> i32;
     fn codex_composition_blur_set_amount(
         context: *mut std::ffi::c_void,
         blur_amount: f32,
@@ -280,6 +285,19 @@ pub fn create_composition_blur(
         )
     };
     (!raw.is_null()).then_some(raw as usize)
+}
+
+pub fn set_composition_blur_bounds(context: usize, width: i32, height: i32) -> bool {
+    if context == 0 || width <= 0 || height <= 0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_bounds(
+            context as *mut std::ffi::c_void,
+            width as f32,
+            height as f32,
+        ) != 0
+    }
 }
 
 pub fn set_composition_blur_amount(context: usize, blur_amount: f32) -> bool {
