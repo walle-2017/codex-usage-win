@@ -96,6 +96,27 @@ if ($native -notmatch 'set_popup_owner' -or
     $windowProduction -notmatch 'bind_popup_windows_to_taskbar_owner') {
     throw 'Stable frosted popups must be owned by the selected taskbar so Explorer cannot cover them.'
 }
+if ($windowProduction -notmatch 'STYLE_PREVIEW_FRAME_MS:\s*u64\s*=\s*16' -or
+    $windowProduction -notmatch 'render_style_preview\(' -or
+    $windowProduction -notmatch 'LAST_STYLE_PREVIEW_RENDER') {
+    throw 'Live style preview must be frame-limited instead of repainting for every raw trackbar event.'
+}
+if ($windowProduction -notmatch 'DRAG_FRAME_MS:\s*u64\s*=\s*8' -or
+    $windowProduction -notmatch 'drag_frame_due\(' -or
+    $windowProduction -notmatch 'move_frosted_pair') {
+    throw 'High-frequency drag updates must be throttled and move the frosted pair without z-order churn.'
+}
+if ($windowProduction -notmatch 'ACRYLIC_BACKDROP_COLOR' -or
+    $windowProduction -notmatch '\*cached == Some\(color\)') {
+    throw 'Acrylic composition color must be cached to avoid redundant DWM reconfiguration.'
+}
+$mouseMoveBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)WM_MOUSEMOVE\s*=>\s*\{.*?WM_CANCELMODE\s*=>'
+).Value
+if ($mouseMoveBlock -match 'sync_acrylic_backdrop_zorder') {
+    throw 'Drag frames must not reorder Acrylic/foreground windows.'
+}
 if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'box_blur_bitmap' -or
     $windowProduction -match 'tint_frosted_panel_bitmap') {
