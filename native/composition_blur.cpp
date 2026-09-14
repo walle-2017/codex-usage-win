@@ -73,7 +73,7 @@ bool ensure_winrt_and_dispatcher() noexcept
     return true;
 }
 
-struct GaussianBlurEffect final :
+struct GaussianBlurEffect :
     winrt::implements<
         GaussianBlurEffect,
         wge::IGraphicsEffect,
@@ -146,27 +146,26 @@ struct GaussianBlurEffect final :
         *value = nullptr;
 
         try {
-            wf::IPropertyValue property{nullptr};
             switch (index) {
             case D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION:
-                property = wf::PropertyValue::CreateSingle(blur_amount)
-                               .as<wf::IPropertyValue>();
+                *value = wf::PropertyValue::CreateSingle(blur_amount)
+                             .as<ABI::Windows::Foundation::IPropertyValue>()
+                             .detach();
                 break;
             case D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION:
-                property = wf::PropertyValue::CreateUInt32(
-                               D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED)
-                               .as<wf::IPropertyValue>();
+                *value = wf::PropertyValue::CreateUInt32(
+                             D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED)
+                             .as<ABI::Windows::Foundation::IPropertyValue>()
+                             .detach();
                 break;
             case D2D1_GAUSSIANBLUR_PROP_BORDER_MODE:
-                property = wf::PropertyValue::CreateUInt32(D2D1_BORDER_MODE_HARD)
-                               .as<wf::IPropertyValue>();
+                *value = wf::PropertyValue::CreateUInt32(D2D1_BORDER_MODE_HARD)
+                             .as<ABI::Windows::Foundation::IPropertyValue>()
+                             .detach();
                 break;
             default:
                 return E_BOUNDS;
             }
-
-            *value = reinterpret_cast<ABI::Windows::Foundation::IPropertyValue*>(
-                winrt::detach_abi(property));
             return S_OK;
         } catch (...) {
             return winrt::to_hresult();
