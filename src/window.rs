@@ -151,6 +151,9 @@ const TBM_SETRANGE_MSG: u32 = WM_USER + 6;
 const TB_ENDTRACK_CODE: u16 = 8;
 /// Keep the visible panel border at one physical pixel even at high DPI.
 const PANEL_BORDER_WIDTH_PX: i32 = 1;
+/// Layered windows treat fully transparent pixels as mouse-pass-through.
+/// Frosted mode keeps an imperceptible alpha so the whole panel remains interactive.
+const FROSTED_HIT_TEST_ALPHA: u8 = 1;
 
 const GITHUB_RELEASES_URL: &str =
     "https://github.com/walle-2017/codex-usage-win/releases";
@@ -1897,9 +1900,25 @@ fn render_layered() {
     };
     let mut surface_style = style.clone();
     if native_acrylic_active {
-        // The Acrylic window owns the background. The foreground layered window
-        // only draws border/content so it can never disappear when Acrylic toggles.
-        surface_style.panel_background = "#00000000".to_string();
+        // The Acrylic window owns the visible background. Do not use alpha=0 on
+        // the foreground panel: fully transparent layered-window pixels become
+        // mouse-pass-through, making blank panel areas impossible to drag/right-click.
+        // Alpha=1 is visually imperceptible but keeps the whole panel hit-testable.
+        let background = style.color(StyleColorTarget::PanelBackground);
+        surface_style.panel_background = Color::rgba(
+            background.r,
+            background.g,
+            background.b,
+            FROSTED_HIT_TEST_ALPHA,
+        )
+        .to_hex_rgba();
+
+        let border = style.color(StyleColorTarget::PanelBorder);
+        if border.a == 0 {
+            surface_style.panel_border =
+                Color::rgba(border.r, border.g, border.b, FROSTED_HIT_TEST_ALPHA)
+                    .to_hex_rgba();
+        }
     }
 
     unsafe {
