@@ -84,8 +84,8 @@ $restoreBlock = [regex]::Match(
     $windowProduction,
     '(?s)fn\s+restore_layered_taskbar_mode\s*\(.*?\n\}'
 ).Value
-if ($restoreBlock -match 'if\s+frosted_popup_session[\s\S]*?attach_to_taskbar') {
-    throw 'Disabling frosted glass must not reparent the foreground back into Explorer.'
+if ($restoreBlock -notmatch 'if\s+frosted_popup_session\s*\{[\s\S]*?return;') {
+    throw 'Stable frosted-popup shutdown path must return before any Explorer reparent fallback.'
 }
 if ($windowProduction -notmatch 'refresh_widget_after_style_editor_close') {
     throw 'Closing style editors must re-render and restore foreground z-order.'
