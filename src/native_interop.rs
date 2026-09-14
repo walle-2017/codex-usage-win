@@ -1,8 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::core::{PCSTR, PCWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, FILETIME, HWND, LPARAM, RECT, SYSTEMTIME};
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
@@ -13,27 +12,28 @@ pub const WS_POPUP_STYLE: u32 = 0x80000000;
 pub const WS_CHILD_STYLE: u32 = 0x40000000;
 pub const WS_CLIPSIBLINGS_STYLE: u32 = 0x04000000;
 
-const WCA_ACCENT_POLICY: i32 = 19;
-const ACCENT_DISABLED: i32 = 0;
-const ACCENT_ENABLE_ACRYLICBLURBEHIND: i32 = 4;
-
-#[repr(C)]
-struct AccentPolicy {
-    accent_state: i32,
-    accent_flags: u32,
-    gradient_color: u32,
-    animation_id: i32,
+unsafe extern "C" {
+    fn codex_composition_blur_create(
+        hwnd_raw: isize,
+        blur_amount: f32,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> *mut std::ffi::c_void;
+    fn codex_composition_blur_set_amount(
+        context: *mut std::ffi::c_void,
+        blur_amount: f32,
+    ) -> i32;
+    fn codex_composition_blur_set_tint(
+        context: *mut std::ffi::c_void,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> i32;
+    fn codex_composition_blur_destroy(context: *mut std::ffi::c_void);
 }
-
-#[repr(C)]
-struct WindowCompositionAttribData {
-    attrib: i32,
-    pv_data: *mut std::ffi::c_void,
-    cb_data: u32,
-}
-
-type SetWindowCompositionAttributeFn =
-    unsafe extern "system" fn(HWND, *const WindowCompositionAttribData) -> BOOL;
 
 // Win event constants
 pub const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
@@ -262,49 +262,55 @@ pub fn set_layered_style(hwnd: HWND, enabled: bool) {
     }
 }
 
-/// Apply native DWM acrylic to a window. SetWindowCompositionAttribute is
-/// dynamically resolved because Microsoft doesn't provide a normal import
-/// library for it.
-pub fn set_native_acrylic(hwnd: HWND, color: Option<Color>) -> bool {
-    unsafe {
-        let user32_name = wide_str("user32.dll");
-        let Ok(user32) = GetModuleHandleW(PCWSTR::from_raw(user32_name.as_ptr())) else {
-            return false;
-        };
-        let proc_name = b"SetWindowCompositionAttribute\0";
-        let Some(proc) = GetProcAddress(user32, PCSTR::from_raw(proc_name.as_ptr())) else {
-            return false;
-        };
-        let set_attribute: SetWindowCompositionAttributeFn = std::mem::transmute(proc);
+/// Create a Windows Composition backdrop using a real Direct2D Gaussian blur.
+/// The returned opaque handle must be destroyed on the same UI thread.
+pub fn create_composition_blur(
+    hwnd: HWND,
+    blur_amount: f32,
+    tint: Color,
+) -> Option<usize> {
+    let raw = unsafe {
+        codex_composition_blur_create(
+            hwnd.0 as isize,
+            blur_amount,
+            tint.r,
+            tint.g,
+            tint.b,
+            tint.a,
+        )
+    };
+    (!raw.is_null()).then_some(raw as usize)
+}
 
-        let mut policy = if let Some(color) = color {
-            // Acrylic treats a zero tint alpha as disabled. Keep a minimum of 1
-            // so an almost-clear tint can still request backdrop blur.
-            let alpha = color.a.max(1) as u32;
-            let gradient_color = (alpha << 24)
-                | ((color.b as u32) << 16)
-                | ((color.g as u32) << 8)
-                | color.r as u32;
-            AccentPolicy {
-                accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
-                accent_flags: 0,
-                gradient_color,
-                animation_id: 0,
-            }
-        } else {
-            AccentPolicy {
-                accent_state: ACCENT_DISABLED,
-                accent_flags: 0,
-                gradient_color: 0,
-                animation_id: 0,
-            }
-        };
-        let data = WindowCompositionAttribData {
-            attrib: WCA_ACCENT_POLICY,
-            pv_data: (&mut policy as *mut AccentPolicy).cast(),
-            cb_data: std::mem::size_of::<AccentPolicy>() as u32,
-        };
-        set_attribute(hwnd, &data).as_bool()
+pub fn set_composition_blur_amount(context: usize, blur_amount: f32) -> bool {
+    if context == 0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_amount(context as *mut std::ffi::c_void, blur_amount) != 0
+    }
+}
+
+pub fn set_composition_blur_tint(context: usize, tint: Color) -> bool {
+    if context == 0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_tint(
+            context as *mut std::ffi::c_void,
+            tint.r,
+            tint.g,
+            tint.b,
+            tint.a,
+        ) != 0
+    }
+}
+
+pub fn destroy_composition_blur(context: usize) {
+    if context != 0 {
+        unsafe {
+            codex_composition_blur_destroy(context as *mut std::ffi::c_void);
+        }
     }
 }
 
