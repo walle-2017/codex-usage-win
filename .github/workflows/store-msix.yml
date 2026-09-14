@@ -127,7 +127,7 @@ jobs:
           $required = @(
               'Name="WalleStudio.CodexUsageWin"',
               'Publisher="CN=2AE5CECF-93C9-4AF7-82E0-23BE2024603E"',
-              'Version="1.0.4.0"',
+              'Version="1.0.5.0"',
               'ProcessorArchitecture="x64"',
               'Executable="codex-usage-win.exe"',
               'EntryPoint="windows.fullTrustApplication"',
@@ -176,7 +176,7 @@ jobs:
       - name: Upload MSIX test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: codex-usage-win-msix-1.0.4.0
+          name: codex-usage-win-msix-1.0.5.0
           path: |
             dist/*
           if-no-files-found: error
