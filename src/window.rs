@@ -803,12 +803,25 @@ fn select_taskbar_for_popup(requested_index: usize) -> bool {
         }
     }
 
-    let foreground_hwnd = {
+    let (foreground_hwnd, blur_active) = {
         let state = lock_state();
-        state.as_ref().map(|s| s.hwnd.to_hwnd())
+        state
+            .as_ref()
+            .map(|s| (Some(s.hwnd.to_hwnd()), s.composition_blur_active))
+            .unwrap_or((None, false))
     };
     if let Some(foreground_hwnd) = foreground_hwnd {
-        bind_popup_windows_to_taskbar_owner(foreground_hwnd);
+        if blur_active {
+            // Rebinding both top-level popups to another taskbar can change
+            // their relative z-order. Reassert it once per taskbar switch, not
+            // on every drag frame.
+            sync_blur_backdrop_zorder(foreground_hwnd);
+            diagnose::log(
+                "popup taskbar switched; reasserted blur backdrop behind foreground",
+            );
+        } else {
+            bind_popup_windows_to_taskbar_owner(foreground_hwnd);
+        }
     }
     true
 }
@@ -1577,10 +1590,13 @@ fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
         state.as_ref().and_then(|s| s.taskbar_hwnd)
     };
     if let Some(taskbar_hwnd) = taskbar_hwnd {
-        native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
+        // set_popup_owner() also promotes the popup to HWND_TOPMOST. Bind the
+        // backdrop first and the layered foreground last so owner changes can
+        // never leave the blur surface above text/progress content.
         if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
             native_interop::set_popup_owner(backdrop_hwnd, Some(taskbar_hwnd));
         }
+        native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
     }
 }
 
