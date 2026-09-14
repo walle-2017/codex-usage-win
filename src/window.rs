@@ -1640,9 +1640,8 @@ fn acrylic_tint_for_strength(base: Color, strength: u8) -> Color {
     // SetWindowCompositionAttribute does not expose a blur-radius parameter.
     // Linearly scale the Acrylic tint alpha instead: this gives a smooth
     // user-visible frosted intensity while keeping the stable dual-window path.
-    let alpha = ((u16::from(strength) * u16::from(FROSTED_TINT_ALPHA_MAX)
-        + u16::from(FROSTED_STRENGTH_MAX) - 1)
-        / u16::from(FROSTED_STRENGTH_MAX)) as u8;
+    let alpha = (u16::from(strength) * u16::from(FROSTED_TINT_ALPHA_MAX))
+        .div_ceil(u16::from(FROSTED_STRENGTH_MAX)) as u8;
     Color::rgba(base.r, base.g, base.b, alpha.max(1))
 }
 
