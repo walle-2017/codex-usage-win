@@ -1668,7 +1668,6 @@ fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
             }
         }
         position_at_taskbar();
-        render_layered();
     }
 
     let Some(_) = ensure_acrylic_backdrop(acrylic_color) else {
@@ -2967,12 +2966,7 @@ unsafe extern "system" fn wnd_proc(
                     let was_dragging = s.dragging;
                     s.dragging = false;
                     if was_dragging {
-                        Some((
-                            s.taskbar_index,
-                            s.drag_anchor_logical_x,
-                            s.embedded,
-                            s.native_acrylic_active,
-                        ))
+                        Some((s.taskbar_index, s.drag_anchor_logical_x, s.embedded))
                     } else {
                         None
                     }
@@ -3005,7 +2999,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_index, anchor_logical_x, embedded, acrylic_active)) = drag_result {
+            if let Some((current_taskbar_index, anchor_logical_x, embedded)) = drag_result {
                 if let Some((target_index, _)) = taskbar_at_point(pt) {
                     if target_index != current_taskbar_index {
                         if embedded {
