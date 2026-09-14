@@ -161,6 +161,7 @@ const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static ACRYLIC_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -1509,54 +1510,178 @@ pub fn run() {
     }
 }
 
+unsafe extern "system" fn acrylic_backdrop_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn register_acrylic_backdrop_class() {
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageAcrylicBackdrop");
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(acrylic_backdrop_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+    }
+}
+
+fn acrylic_backdrop_hwnd() -> Option<HWND> {
+    let state = ACRYLIC_BACKDROP_HWND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    state.as_ref().map(|h| h.to_hwnd())
+}
+
+fn destroy_acrylic_backdrop() {
+    let hwnd = {
+        let mut state = ACRYLIC_BACKDROP_HWND
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.take().map(|h| h.to_hwnd())
+    };
+    if let Some(hwnd) = hwnd {
+        let _ = native_interop::set_native_acrylic(hwnd, None);
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        diagnose::log("acrylic backdrop destroyed");
+    }
+}
+
+fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
+    if let Some(hwnd) = acrylic_backdrop_hwnd() {
+        if native_interop::set_native_acrylic(hwnd, Some(color)) {
+            return Some(hwnd);
+        }
+        destroy_acrylic_backdrop();
+    }
+
+    register_acrylic_backdrop_class();
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageAcrylicBackdrop");
+        let title = native_interop::wide_str("");
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            HWND::default(),
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        )
+        .ok()?;
+
+        if !native_interop::set_native_acrylic(hwnd, Some(color)) {
+            let _ = DestroyWindow(hwnd);
+            return None;
+        }
+
+        {
+            let mut state = ACRYLIC_BACKDROP_HWND
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *state = Some(SendHwnd::from_hwnd(hwnd));
+        }
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        diagnose::log("acrylic backdrop created");
+        Some(hwnd)
+    }
+}
+
+fn sync_acrylic_backdrop_zorder(foreground_hwnd: HWND) {
+    let Some(backdrop_hwnd) = acrylic_backdrop_hwnd() else {
+        return;
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
+        return;
+    };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    unsafe {
+        let _ = SetWindowPos(
+            backdrop_hwnd,
+            HWND_TOPMOST,
+            rect.left,
+            rect.top,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        let _ = SetWindowPos(
+            foreground_hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
 fn activate_acrylic_popup(hwnd: HWND, acrylic_color: Color) -> bool {
     let was_embedded = {
         let state = lock_state();
         state.as_ref().map(|s| s.embedded).unwrap_or(false)
     };
 
+    // Keep the foreground widget layered at all times. Only detach it from
+    // Explorer so a separate native Acrylic backdrop can sit behind it.
     if was_embedded {
         native_interop::detach_from_taskbar_as_popup(hwnd);
+        native_interop::set_layered_style(hwnd, true);
         {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 s.embedded = false;
-                s.native_acrylic_active = false;
             }
         }
         position_at_taskbar();
     }
 
-    native_interop::set_layered_style(hwnd, false);
-    let ok = native_interop::set_native_acrylic(hwnd, Some(acrylic_color));
-    if ok {
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.native_acrylic_active = true;
-            }
-        }
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            let _ = InvalidateRect(hwnd, None, true);
-            let _ = UpdateWindow(hwnd);
-        }
-        diagnose::log("native acrylic popup activated");
-        true
-    } else {
-        diagnose::log("native acrylic popup activation failed; restoring layered taskbar mode");
+    let Some(_) = ensure_acrylic_backdrop(acrylic_color) else {
+        diagnose::log("acrylic backdrop activation failed; restoring embedded layered mode");
         restore_layered_taskbar_mode(hwnd);
-        false
+        return false;
+    };
+
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.native_acrylic_active = true;
+        }
     }
+
+    sync_acrylic_backdrop_zorder(hwnd);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    diagnose::log("dual-window frosted glass activated");
+    true
 }
 
 fn restore_layered_taskbar_mode(hwnd: HWND) {
@@ -1568,7 +1693,7 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
             .unwrap_or((0, false))
     };
 
-    let _ = native_interop::set_native_acrylic(hwnd, None);
+    destroy_acrylic_backdrop();
     native_interop::set_layered_style(hwnd, true);
 
     {
@@ -1584,10 +1709,10 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         if was_acrylic {
-            diagnose::log("restored layered taskbar mode after acrylic");
+            diagnose::log("restored embedded layered mode after frosted glass");
         }
     } else {
-        diagnose::log("unable to re-embed after acrylic; using top-level layered fallback");
+        diagnose::log("unable to re-embed after frosted glass; using layered popup fallback");
         native_interop::detach_from_taskbar_as_popup(hwnd);
         native_interop::set_layered_style(hwnd, true);
         {
@@ -1600,9 +1725,8 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
     }
 }
 
-/// Render widget content and push to the layered window via UpdateLayeredWindow.
-/// The panel can use a captured/blurred taskbar backdrop; foreground text remains
-/// GDI-rendered for crisp native typography.
+/// Render the foreground widget through UpdateLayeredWindow. Frosted-glass mode
+/// keeps this foreground layered and uses a separate native Acrylic backdrop.
 fn render_layered() {
     refresh_dpi();
     let (
@@ -1641,7 +1765,7 @@ fn render_layered() {
 
     let hwnd = hwnd_val.to_hwnd();
     let acrylic_requested = style.panel_blur_radius > 0;
-    let native_acrylic_active = {
+    let mut native_acrylic_active = {
         let state = lock_state();
         state
             .as_ref()
@@ -1652,25 +1776,38 @@ fn render_layered() {
     if acrylic_requested {
         let acrylic_color = style.color(StyleColorTarget::PanelBackground);
         if native_acrylic_active {
-            let _ = native_interop::set_native_acrylic(hwnd, Some(acrylic_color));
-            unsafe {
-                let _ = InvalidateRect(hwnd, None, false);
-                let _ = UpdateWindow(hwnd);
+            if let Some(backdrop) = acrylic_backdrop_hwnd() {
+                if !native_interop::set_native_acrylic(backdrop, Some(acrylic_color)) {
+                    destroy_acrylic_backdrop();
+                    native_acrylic_active = false;
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.native_acrylic_active = false;
+                        }
+                    }
+                }
+            } else {
+                native_acrylic_active = false;
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.native_acrylic_active = false;
+                }
             }
-            return;
         }
-        if activate_acrylic_popup(hwnd, acrylic_color) {
-            return;
+        if !native_acrylic_active {
+            native_acrylic_active = activate_acrylic_popup(hwnd, acrylic_color);
         }
     } else if native_acrylic_active {
         restore_layered_taskbar_mode(hwnd);
+        native_acrylic_active = false;
     }
 
     let embedded = {
         let state = lock_state();
         state.as_ref().map(|s| s.embedded).unwrap_or(false)
     };
-    if !embedded {
+    if !embedded && !native_acrylic_active {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -1691,6 +1828,12 @@ fn render_layered() {
     } else {
         Color::from_hex("#F3F3F3FF")
     };
+    let mut surface_style = style.clone();
+    if native_acrylic_active {
+        // The Acrylic window owns the background. The foreground layered window
+        // only draws border/content so it can never disappear when Acrylic toggles.
+        surface_style.panel_background = "#00000000".to_string();
+    }
 
     unsafe {
         let screen_dc = GetDC(hwnd);
@@ -1721,8 +1864,7 @@ fn render_layered() {
         let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
         fill_bitmap(pixel_data, bg_color);
 
-        // Non-acrylic rendering stays fully app-controlled.
-        blend_panel_bitmap(pixel_data, width, height, &style);
+        blend_panel_bitmap(pixel_data, width, height, &surface_style);
         let panel_pixels = pixel_data.to_vec();
 
         paint_content(
@@ -1748,7 +1890,7 @@ fn render_layered() {
             &panel_pixels,
             width,
             height,
-            &style,
+            &surface_style,
         );
 
         let pt_src = POINT { x: 0, y: 0 };
@@ -1777,6 +1919,10 @@ fn render_layered() {
         let _ = DeleteObject(dib);
         let _ = DeleteDC(mem_dc);
         ReleaseDC(hwnd, screen_dc);
+    }
+
+    if native_acrylic_active {
+        sync_acrylic_backdrop_zorder(hwnd);
     }
 }
 
@@ -2298,7 +2444,7 @@ fn tray_reposition_is_suppressed() -> bool {
 
 fn position_at_taskbar() {
     refresh_dpi();
-    let (hwnd, embedded, tray_offset, taskbar_hwnd) = {
+    let (hwnd, embedded, tray_offset, taskbar_hwnd, acrylic_active) = {
         let state = lock_state();
         let s = match state.as_ref() {
             Some(s) => s,
@@ -2314,7 +2460,13 @@ fn position_at_taskbar() {
                 return;
             }
         };
-        (s.hwnd.to_hwnd(), s.embedded, s.tray_offset, taskbar_hwnd)
+        (
+            s.hwnd.to_hwnd(),
+            s.embedded,
+            s.tray_offset,
+            taskbar_hwnd,
+            s.native_acrylic_active,
+        )
     };
 
     let taskbar_rect = match native_interop::get_taskbar_rect(taskbar_hwnd) {
@@ -2389,6 +2541,9 @@ fn position_at_taskbar() {
             "positioned fallback widget at x={x} y={y} w={widget_width} h={widget_height}"
         ));
     }
+    if acrylic_active {
+        sync_acrylic_backdrop_zorder(hwnd);
+    }
 }
 
 fn compute_anchor_y(anchor_top: i32, anchor_height: i32, widget_height: i32) -> i32 {
@@ -2450,23 +2605,22 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            // For non-embedded fallback, paint normally
-            let (embedded, native_acrylic_active) = {
+            let (embedded, frosted_active) = {
                 let state = lock_state();
                 state
                     .as_ref()
                     .map(|s| (s.embedded, s.native_acrylic_active))
                     .unwrap_or((false, false))
             };
-            if embedded && !native_acrylic_active {
-                // Layered windows don't use WM_PAINT; just validate the region.
+            if embedded || frosted_active {
+                // Both taskbar mode and frosted foreground use UpdateLayeredWindow.
                 let mut ps = PAINTSTRUCT::default();
                 let _ = BeginPaint(hwnd, &mut ps);
                 let _ = EndPaint(hwnd, &ps);
             } else {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
-                paint(hdc, hwnd, native_acrylic_active);
+                paint(hdc, hwnd, false);
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
@@ -2723,6 +2877,9 @@ unsafe extern "system" fn wnd_proc(
                             widget_width,
                             widget_height,
                         );
+                        if acrylic_active {
+                            sync_acrylic_backdrop_zorder(hwnd);
+                        }
 
                         if switched_taskbar || small_mode_changed {
                             render_layered();
@@ -2762,7 +2919,11 @@ unsafe extern "system" fn wnd_proc(
                     let was_dragging = s.dragging;
                     s.dragging = false;
                     if was_dragging {
-                        Some((s.taskbar_index, s.drag_anchor_logical_x))
+                        Some((
+                            s.taskbar_index,
+                            s.drag_anchor_logical_x,
+                            s.native_acrylic_active,
+                        ))
                     } else {
                         None
                     }
@@ -2795,10 +2956,14 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_index, anchor_logical_x)) = drag_result {
+            if let Some((current_taskbar_index, anchor_logical_x, acrylic_active)) = drag_result {
                 if let Some((target_index, _)) = taskbar_at_point(pt) {
                     if target_index != current_taskbar_index {
-                        let _ = attach_to_taskbar(hwnd, target_index);
+                        if acrylic_active {
+                            let _ = select_taskbar_for_popup(target_index);
+                        } else {
+                            let _ = attach_to_taskbar(hwnd, target_index);
+                        }
                     }
                 }
 
@@ -3000,6 +3165,7 @@ unsafe extern "system" fn wnd_proc(
                     });
                 }
                 2 => {
+                    destroy_acrylic_backdrop();
                     let hook = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| s.win_event_hook)
@@ -3227,6 +3393,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            destroy_acrylic_backdrop();
             let hook = {
                 let state = lock_state();
                 state.as_ref().and_then(|s| s.win_event_hook)
