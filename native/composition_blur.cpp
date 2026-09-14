@@ -270,8 +270,8 @@ struct CompositionBlurContext
 
     void set_bounds(float width, float height)
     {
-        const float safe_width = std::max(width, 1.0f);
-        const float safe_height = std::max(height, 1.0f);
+        const float safe_width = width > 1.0f ? width : 1.0f;
+        const float safe_height = height > 1.0f ? height : 1.0f;
         const winrt::Windows::Foundation::Numerics::float2 size{
             safe_width,
             safe_height,
