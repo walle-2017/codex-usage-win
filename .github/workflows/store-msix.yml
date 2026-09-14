@@ -9,6 +9,10 @@ on:
       - '.github/workflows/store-msix.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'src/style.rs'
+      - 'src/native_interop.rs'
+      - 'native/**'
+      - 'build.rs'
       - 'src/icons/**'
       - 'src/window.rs'
   pull_request:
