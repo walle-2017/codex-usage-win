@@ -26,7 +26,9 @@ use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TRAY, WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
-use crate::style::{StyleColorTarget, StyleSettings, ThemeMode, ThemeStyle};
+use crate::style::{
+    StyleColorTarget, StyleSettings, ThemeMode, ThemeStyle, FROSTED_STRENGTH_MAX,
+};
 use crate::theme;
 use crate::tray_icon;
 use crate::updater;
@@ -155,6 +157,7 @@ const PANEL_BORDER_WIDTH_PX: i32 = 1;
 /// Keep an imperceptible alpha on visually transparent panel pixels so the
 /// component remains draggable/right-clickable even when its background is 0 alpha.
 const MIN_INTERACTIVE_ALPHA: u8 = 1;
+const FROSTED_TINT_ALPHA_MAX: u8 = 220;
 const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
 
@@ -1628,6 +1631,21 @@ fn destroy_acrylic_backdrop() {
     }
 }
 
+fn acrylic_tint_for_strength(base: Color, strength: u8) -> Color {
+    let strength = strength.min(FROSTED_STRENGTH_MAX);
+    if strength == 0 {
+        return Color::rgba(base.r, base.g, base.b, 0);
+    }
+
+    // SetWindowCompositionAttribute does not expose a blur-radius parameter.
+    // Linearly scale the Acrylic tint alpha instead: this gives a smooth
+    // user-visible frosted intensity while keeping the stable dual-window path.
+    let alpha = ((u16::from(strength) * u16::from(FROSTED_TINT_ALPHA_MAX)
+        + u16::from(FROSTED_STRENGTH_MAX) - 1)
+        / u16::from(FROSTED_STRENGTH_MAX)) as u8;
+    Color::rgba(base.r, base.g, base.b, alpha.max(1))
+}
+
 fn ensure_acrylic_backdrop(color: Color) -> Option<HWND> {
     if let Some(hwnd) = acrylic_backdrop_hwnd() {
         let unchanged = {
@@ -1956,7 +1974,8 @@ fn render_layered() {
     };
 
     let hwnd = hwnd_val.to_hwnd();
-    let acrylic_requested = style.panel_blur_radius > 0;
+    let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
+    let acrylic_requested = frosted_strength > 0;
     let mut native_acrylic_active = {
         let state = lock_state();
         state
@@ -1966,7 +1985,10 @@ fn render_layered() {
     };
 
     if acrylic_requested {
-        let acrylic_color = style.color(StyleColorTarget::PanelBackground);
+        let acrylic_color = acrylic_tint_for_strength(
+            style.color(StyleColorTarget::PanelBackground),
+            frosted_strength,
+        );
         if native_acrylic_active && ensure_acrylic_backdrop(acrylic_color).is_none() {
             native_acrylic_active = false;
             let mut state = lock_state();
@@ -3709,10 +3731,11 @@ fn apply_style_color(theme_is_dark: bool, target: StyleColorTarget, color: Color
     }
 }
 
-fn apply_style_blur(theme_is_dark: bool, radius: u8) {
+fn apply_frosted_strength(theme_is_dark: bool, strength: u8) {
     let mut state = lock_state();
     if let Some(s) = state.as_mut() {
-        s.styles.active_mut(theme_is_dark).panel_blur_radius = u8::from(radius > 0);
+        s.styles.active_mut(theme_is_dark).panel_frosted_strength =
+            strength.min(FROSTED_STRENGTH_MAX);
     }
 }
 
@@ -3954,17 +3977,15 @@ fn open_color_editor(owner: HWND, target: StyleColorTarget) {
     }
 }
 
-fn update_blur_editor_label(editor: BlurEditorState, radius: u8, language: LanguageId) {
-    let text = if radius == 0 {
+fn update_blur_editor_label(editor: BlurEditorState, strength: u8, language: LanguageId) {
+    let text = if strength == 0 {
         if language == LanguageId::SimplifiedChinese {
-            "关闭".to_string()
+            "0%（关闭）".to_string()
         } else {
-            "Off".to_string()
+            "0% (Off)".to_string()
         }
-    } else if language == LanguageId::SimplifiedChinese {
-        "磨砂玻璃".to_string()
     } else {
-        "Frosted glass".to_string()
+        format!("{}%", strength.min(FROSTED_STRENGTH_MAX))
     };
     unsafe {
         let text = native_interop::wide_str(&text);
@@ -3985,15 +4006,15 @@ unsafe extern "system" fn blur_editor_wnd_proc(
                 state.as_ref().copied().filter(|s| s.hwnd.to_hwnd() == hwnd)
             };
             if let Some(editor) = editor {
-                let radius =
+                let strength =
                     SendMessageW(editor.slider.to_hwnd(), TBM_GETPOS_MSG, WPARAM(0), LPARAM(0)).0
                         as u8;
                 let language = {
                     let state = lock_state();
                     state.as_ref().map(|s| s.language).unwrap_or(LanguageId::English)
                 };
-                update_blur_editor_label(editor, radius, language);
-                apply_style_blur(editor.theme_is_dark, radius);
+                update_blur_editor_label(editor, strength, language);
+                apply_frosted_strength(editor.theme_is_dark, strength);
                 let code = (wparam.0 & 0xFFFF) as u16;
                 let final_frame = code == TB_ENDTRACK_CODE;
                 render_style_preview(final_frame);
@@ -4042,7 +4063,7 @@ fn register_blur_editor_class() {
 fn open_blur_editor(owner: HWND) {
     close_style_editors();
     register_blur_editor_class();
-    let (theme_is_dark, language, radius) = {
+    let (theme_is_dark, language, strength) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else {
             return;
@@ -4050,16 +4071,16 @@ fn open_blur_editor(owner: HWND) {
         (
             s.is_dark,
             s.language,
-            s.styles.active(s.is_dark).panel_blur_radius,
+            s.styles.active(s.is_dark).panel_frosted_strength,
         )
     };
 
     unsafe {
         let class_name = native_interop::wide_str("CodexUsageBlurEditor");
         let title = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "样式 - 磨砂玻璃"
+            "样式 - 磨砂强度"
         } else {
-            "Style - Frosted glass"
+            "Style - Frosted intensity"
         });
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -4070,8 +4091,8 @@ fn open_blur_editor(owner: HWND) {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
             pt.x + 12,
             pt.y + 12,
-            330,
-            150,
+            360,
+            160,
             owner,
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
@@ -4080,21 +4101,29 @@ fn open_blur_editor(owner: HWND) {
             return;
         };
 
-        let Some(slider) = create_editor_trackbar(hwnd, 18, 20, 240, 32, 1, i32::from(radius > 0))
+        let Some(slider) = create_editor_trackbar(
+            hwnd,
+            18,
+            20,
+            260,
+            32,
+            i32::from(FROSTED_STRENGTH_MAX),
+            i32::from(strength.min(FROSTED_STRENGTH_MAX)),
+        )
         else {
             let _ = DestroyWindow(hwnd);
             return;
         };
-        let Some(value_label) = create_editor_static(hwnd, "", 268, 25, 48, 22) else {
+        let Some(value_label) = create_editor_static(hwnd, "", 286, 25, 64, 22) else {
             let _ = DestroyWindow(hwnd);
             return;
         };
         let hint = if language == LanguageId::SimplifiedChinese {
-            "关闭 / 磨砂玻璃；切换时实时预览并自动保存"
+            "0%=关闭；1–100%=磨砂强度；拖动实时预览并自动保存"
         } else {
-            "Off / Frosted glass; live preview and auto-save"
+            "0%=Off; 1–100%=frosted intensity; live preview and auto-save"
         };
-        let _ = create_editor_static(hwnd, hint, 18, 65, 290, 22);
+        let _ = create_editor_static(hwnd, hint, 18, 65, 330, 22);
 
         let editor = BlurEditorState {
             hwnd: SendHwnd::from_hwnd(hwnd),
@@ -4106,7 +4135,7 @@ fn open_blur_editor(owner: HWND) {
             let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
             *state = Some(editor);
         }
-        update_blur_editor_label(editor, radius, language);
+        update_blur_editor_label(editor, strength, language);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = SetForegroundWindow(hwnd);
     }
@@ -4124,7 +4153,7 @@ fn show_context_menu(hwnd: HWND) {
             alert_threshold_percent,
             appearance_preset,
             theme_mode,
-            active_blur_radius,
+            active_frosted_strength,
             available_update_version,
         ) = {
             let state = lock_state();
@@ -4139,7 +4168,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.alert_threshold_percent,
                     s.appearance_preset,
                     s.theme_mode,
-                    s.styles.active(s.is_dark).panel_blur_radius,
+                    s.styles.active(s.is_dark).panel_frosted_strength,
                     s.available_update_version.clone(),
                 ),
                 None => (
@@ -4432,15 +4461,9 @@ fn show_context_menu(hwnd: HWND) {
             );
         }
         let blur_text = if language == LanguageId::SimplifiedChinese {
-            format!(
-                "磨砂玻璃... ({})",
-                if active_blur_radius > 0 { "开启" } else { "关闭" }
-            )
+            format!("磨砂强度... ({}%)", active_frosted_strength)
         } else {
-            format!(
-                "Frosted glass... ({})",
-                if active_blur_radius > 0 { "On" } else { "Off" }
-            )
+            format!("Frosted intensity... ({}%)", active_frosted_strength)
         };
         let blur_label = native_interop::wide_str(&blur_text);
         let _ = AppendMenuW(
