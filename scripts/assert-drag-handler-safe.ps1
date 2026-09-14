@@ -19,7 +19,7 @@ if ($moveBody -match 'current_appearance_preset\s*\(') {
 if ($moveBody -notmatch 'taskbar_at_point\s*\(') {
     throw 'WM_MOUSEMOVE must detect the taskbar under the cursor while dragging.'
 }
-if ($moveBody -notmatch 'attach_to_taskbar\s*\(\s*hwnd\s*,\s*target_index\s*\)') {
+if ($moveBody -notmatch 'attach_to_taskbar\s*\(\s*hwnd\s*,\s*hovered_taskbar_index\s*\)') {
     throw 'WM_MOUSEMOVE must reattach the widget as soon as the cursor enters another taskbar.'
 }
 if ($moveBody -notmatch 'drag_left_from_cursor\s*\(') {
@@ -34,12 +34,12 @@ if ($moveBody -notmatch 'SetCapture\s*\(\s*hwnd\s*\)') {
 # restore capture only after the widget is attached to the new taskbar.
 $releaseBeforeAttach = [regex]::Match(
     $moveBody,
-    '(?s)drag_reparenting\s*=\s*true.*?ReleaseCapture\s*\(\s*\).*?attach_to_taskbar\s*\(\s*hwnd\s*,\s*target_index\s*\)'
+    '(?s)drag_reparenting\s*=\s*true.*?ReleaseCapture\s*\(\s*\).*?attach_to_taskbar\s*\(\s*hwnd\s*,\s*hovered_taskbar_index\s*\)'
 )
 if (-not $releaseBeforeAttach.Success) {
     throw 'Live taskbar switching must mark internal reparenting and release mouse capture before attach_to_taskbar().'
 }
-if ($moveBody -notmatch '(?s)attach_to_taskbar\s*\(\s*hwnd\s*,\s*target_index\s*\).*?drag_reparenting\s*=\s*false.*?SetCapture\s*\(\s*hwnd\s*\)') {
+if ($moveBody -notmatch '(?s)attach_to_taskbar\s*\(\s*hwnd\s*,\s*hovered_taskbar_index\s*\).*?drag_reparenting\s*=\s*false.*?SetCapture\s*\(\s*hwnd\s*\)') {
     throw 'Live taskbar switching must clear the reparent marker and restore capture only after attach_to_taskbar().'
 }
 

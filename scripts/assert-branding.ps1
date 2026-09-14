@@ -20,14 +20,14 @@ $ReleaseWorkflow = Get-Content -Raw -LiteralPath '.github/workflows/release.yml'
 $CiBuild = Get-Content -Raw -LiteralPath '.github/workflows/ci.yml'
 
 Assert-Contains $Cargo 'name = "codex-usage-win"' 'Cargo package must be named codex-usage-win.'
-Assert-Contains $Cargo 'version = "1.0.4"' 'Branding release must be version 1.0.4.'
+Assert-Contains $Cargo 'version = "1.0.5"' 'Branding release must be version 1.0.5.'
 Assert-Contains $Cargo 'description = "Codex Usage Win"' 'Cargo description must use Codex Usage Win.'
 Assert-Contains $Cargo 'ProductName = "Codex Usage Win"' 'Windows ProductName must use Codex Usage Win.'
 Assert-Contains $Cargo 'FileDescription = "Codex Usage Win"' 'Windows FileDescription must use Codex Usage Win.'
 Assert-Contains $Cargo 'OriginalFilename = "codex-usage-win.exe"' 'Windows OriginalFilename must use codex-usage-win.exe.'
 Assert-Contains $Cargo 'InternalName = "CodexUsageWin"' 'Windows InternalName must use CodexUsageWin.'
 Assert-Contains $Lock 'name = "codex-usage-win"' 'Cargo.lock root package must use codex-usage-win.'
-Assert-Contains $Lock 'version = "1.0.4"' 'Cargo.lock root package must be version 1.0.4.'
+Assert-Contains $Lock 'version = "1.0.5"' 'Cargo.lock root package must be version 1.0.5.'
 
 Assert-Contains $Updater 'const EXE_ASSET_NAME: &str = "codex-usage-win.exe";' 'Updater executable asset must use codex-usage-win.exe.'
 Assert-Contains $Updater 'const CHECKSUM_ASSET_NAME: &str = "codex-usage-win.exe.sha256";' 'Updater checksum asset must use codex-usage-win.exe.sha256.'
@@ -74,5 +74,5 @@ if ((Get-Item -LiteralPath 'src/icons/icon.ico').Length -lt 1024) {
     throw 'src/icons/icon.ico is unexpectedly small.'
 }
 
-Write-Output 'Branding contract verified: Codex Usage Win / codex-usage-win / v1.0.4.'
+Write-Output 'Branding contract verified: Codex Usage Win / codex-usage-win / v1.0.5.'
 exit 0

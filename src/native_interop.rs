@@ -12,6 +12,34 @@ pub const WS_POPUP_STYLE: u32 = 0x80000000;
 pub const WS_CHILD_STYLE: u32 = 0x40000000;
 pub const WS_CLIPSIBLINGS_STYLE: u32 = 0x04000000;
 
+unsafe extern "C" {
+    fn codex_composition_blur_create(
+        hwnd_raw: isize,
+        blur_amount: f32,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> *mut std::ffi::c_void;
+    fn codex_composition_blur_set_bounds(
+        context: *mut std::ffi::c_void,
+        width: f32,
+        height: f32,
+    ) -> i32;
+    fn codex_composition_blur_set_amount(
+        context: *mut std::ffi::c_void,
+        blur_amount: f32,
+    ) -> i32;
+    fn codex_composition_blur_set_tint(
+        context: *mut std::ffi::c_void,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> i32;
+    fn codex_composition_blur_destroy(context: *mut std::ffi::c_void);
+}
+
 // Win event constants
 pub const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
 pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
@@ -153,6 +181,154 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
         let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
 
         let _ = SetParent(hwnd, taskbar_hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// Detach the widget from Explorer and turn it back into a top-level popup.
+/// The independent Windows Composition backdrop requires a top-level target;
+/// the foreground remains layered and interactive above that target.
+pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
+    unsafe {
+        let _ = SetParent(hwnd, HWND::default());
+
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let new_style =
+            (style & !(WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE)) | WS_POPUP_STYLE;
+        let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let _ = SetWindowLongW(
+            hwnd,
+            GWL_EXSTYLE,
+            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32,
+        );
+
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// Assign an owner to a top-level popup without turning it into a child window.
+/// Owned popups remain above their owner in z-order, which keeps taskbar overlays
+/// visible when Explorer re-activates the taskbar.
+pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
+    unsafe {
+        let owner_value = owner.map(|h| h.0 as isize).unwrap_or(0);
+        let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+/// Toggle WS_EX_LAYERED without changing the other extended window styles.
+pub fn set_layered_style(hwnd: HWND, enabled: bool) {
+    unsafe {
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let next = if enabled {
+            ex_style | WS_EX_LAYERED.0 as i32
+        } else {
+            ex_style & !(WS_EX_LAYERED.0 as i32)
+        };
+        if next != ex_style {
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, next);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+/// Create a Windows Composition backdrop using a real Direct2D Gaussian blur.
+/// The returned opaque handle must be destroyed on the same UI thread.
+pub fn create_composition_blur(
+    hwnd: HWND,
+    blur_amount: f32,
+    tint: Color,
+) -> Option<usize> {
+    let raw = unsafe {
+        codex_composition_blur_create(
+            hwnd.0 as isize,
+            blur_amount,
+            tint.r,
+            tint.g,
+            tint.b,
+            tint.a,
+        )
+    };
+    (!raw.is_null()).then_some(raw as usize)
+}
+
+pub fn set_composition_blur_bounds(context: usize, width: i32, height: i32) -> bool {
+    if context == 0 || width <= 0 || height <= 0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_bounds(
+            context as *mut std::ffi::c_void,
+            width as f32,
+            height as f32,
+        ) != 0
+    }
+}
+
+pub fn set_composition_blur_amount(context: usize, blur_amount: f32) -> bool {
+    if context == 0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_amount(context as *mut std::ffi::c_void, blur_amount) != 0
+    }
+}
+
+pub fn set_composition_blur_tint(context: usize, tint: Color) -> bool {
+    if context == 0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_tint(
+            context as *mut std::ffi::c_void,
+            tint.r,
+            tint.g,
+            tint.b,
+            tint.a,
+        ) != 0
+    }
+}
+
+pub fn destroy_composition_blur(context: usize) {
+    if context != 0 {
+        unsafe {
+            codex_composition_blur_destroy(context as *mut std::ffi::c_void);
+        }
     }
 }
 
@@ -209,28 +385,66 @@ pub fn colorref(r: u8, g: u8, b: u8) -> u32 {
 }
 
 /// Color helper
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+    pub a: u8,
 }
 
 impl Color {
     #[allow(dead_code)]
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
+        Self { r, g, b, a: 255 }
+    }
+
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub fn try_from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.trim().trim_start_matches('#');
+        if hex.len() != 6 && hex.len() != 8 {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        let a = if hex.len() == 8 {
+            u8::from_str_radix(&hex[6..8], 16).ok()?
+        } else {
+            255
+        };
+        Some(Self { r, g, b, a })
     }
 
     pub fn from_hex(hex: &str) -> Self {
-        let hex = hex.trim_start_matches('#');
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-        Self { r, g, b }
+        Self::try_from_hex(hex).unwrap_or(Self::rgba(0, 0, 0, 255))
+    }
+
+    pub fn to_hex_rgba(self) -> String {
+        format!("#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
     }
 
     pub fn to_colorref(self) -> u32 {
         colorref(self.r, self.g, self.b)
+    }
+
+    pub fn blend_over(self, background: Self) -> Self {
+        if self.a == 255 {
+            return Self::rgba(self.r, self.g, self.b, 255);
+        }
+        let alpha = self.a as u16;
+        let inv = 255u16 - alpha;
+        let blend = |fg: u8, bg: u8| -> u8 {
+            ((fg as u16 * alpha + bg as u16 * inv + 127) / 255) as u8
+        };
+        Self::rgba(
+            blend(self.r, background.r),
+            blend(self.g, background.g),
+            blend(self.b, background.b),
+            255,
+        )
     }
 }

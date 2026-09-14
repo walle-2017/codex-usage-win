@@ -47,8 +47,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "codex-usage-win"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
+ "cc",
  "dirs",
  "native-tls",
  "serde",

@@ -9,13 +9,15 @@
 
 # Codex Usage Win
 
-A lightweight native Windows taskbar monitor for **Codex usage**. Current release: **v1.0.4**.
+A lightweight native Windows taskbar monitor for **Codex usage**. Current release: **v1.0.5**.
 
 ## Features
 
 - Codex 5-hour and 7-day remaining quota
 - Reset time/date display
-- Compact and minimal taskbar appearances
+- Compact and minimal taskbar layouts
+- Follow-system, forced dark, and forced light themes
+- Per-theme live style editing for RGBA colors and 0–100% Windows Composition Gaussian backdrop blur
 - Optional low-quota alerts
 - Configurable refresh interval
 - Windows light/dark theme support

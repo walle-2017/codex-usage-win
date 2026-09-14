@@ -1,6 +1,6 @@
 [package]
 name = "codex-usage-win"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 license = "MIT"
 description = "Codex Usage Win"
@@ -39,6 +39,7 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
     "Win32_System_Registry",
     "Win32_Security",
     "Win32_System_Threading",
@@ -48,6 +49,7 @@ features = [
 ]
 
 [build-dependencies]
+cc = "1"
 winres = "0.1"
 
 [profile.release]

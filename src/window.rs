@@ -12,6 +12,7 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
+use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
@@ -25,6 +26,9 @@ use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TRAY, WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
+use crate::style::{
+    StyleColorTarget, StyleSettings, ThemeMode, ThemeStyle, FROSTED_STRENGTH_MAX,
+};
 use crate::theme;
 use crate::tray_icon;
 use crate::updater;
@@ -55,6 +59,10 @@ struct AppState {
     language_override: Option<LanguageId>,
     language: LanguageId,
     appearance_preset: AppearancePreset,
+    theme_mode: ThemeMode,
+    styles: StyleSettings,
+    composition_blur_active: bool,
+    frosted_popup_session: bool,
     small_taskbar_mode: bool,
     small_show_weekly: bool,
 
@@ -119,8 +127,39 @@ const IDM_ALERT_10: u16 = 81;
 const IDM_ALERT_20: u16 = 82;
 const IDM_ALERT_30: u16 = 83;
 
-const IDM_APPEARANCE_COMPACT: u16 = 91;
-const IDM_APPEARANCE_MINIMAL: u16 = 92;
+const IDM_LAYOUT_COMPACT: u16 = 91;
+const IDM_LAYOUT_MINIMAL: u16 = 92;
+const IDM_THEME_SYSTEM: u16 = 93;
+const IDM_THEME_DARK: u16 = 94;
+const IDM_THEME_LIGHT: u16 = 95;
+
+const IDM_STYLE_PANEL_BACKGROUND: u16 = 100;
+const IDM_STYLE_PANEL_BORDER: u16 = 101;
+const IDM_STYLE_PANEL_BLUR: u16 = 102;
+const IDM_STYLE_QUOTA_TYPE: u16 = 103;
+const IDM_STYLE_REMAINING: u16 = 104;
+const IDM_STYLE_RESET_TIME: u16 = 105;
+const IDM_STYLE_ERROR: u16 = 106;
+const IDM_STYLE_PROGRESS_HIGH: u16 = 107;
+const IDM_STYLE_PROGRESS_MEDIUM: u16 = 108;
+const IDM_STYLE_PROGRESS_LOW: u16 = 109;
+const IDM_STYLE_PROGRESS_CONSUMED: u16 = 110;
+const IDM_STYLE_DRAG_HANDLE: u16 = 111;
+const IDM_STYLE_RESET_CURRENT: u16 = 112;
+
+const TBM_GETPOS_MSG: u32 = WM_USER;
+const TBM_SETPOS_MSG: u32 = WM_USER + 5;
+const TBM_SETRANGE_MSG: u32 = WM_USER + 6;
+const TB_ENDTRACK_CODE: u16 = 8;
+/// Keep the visible panel border at one physical pixel even at high DPI.
+const PANEL_BORDER_WIDTH_PX: i32 = 1;
+/// Layered windows treat fully transparent pixels as mouse-pass-through.
+/// Keep an imperceptible alpha on visually transparent panel pixels so the
+/// component remains draggable/right-clickable even when its background is 0 alpha.
+const MIN_INTERACTIVE_ALPHA: u8 = 1;
+const FROSTED_MAX_BLUR_PX: f32 = 20.0;
+const STYLE_PREVIEW_FRAME_MS: u64 = 16;
+const DRAG_FRAME_MS: u64 = 8;
 
 const GITHUB_RELEASES_URL: &str =
     "https://github.com/walle-2017/codex-usage-win/releases";
@@ -132,6 +171,38 @@ const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlurBackdropParams {
+    blur_bits: u32,
+    tint: Color,
+}
+
+static BLUR_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
+static BLUR_BACKDROP_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
+static BLUR_BACKDROP_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
+static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
+static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct ColorEditorState {
+    hwnd: SendHwnd,
+    theme_is_dark: bool,
+    target: StyleColorTarget,
+    sliders: [SendHwnd; 4],
+    value_labels: [SendHwnd; 4],
+    hex_label: SendHwnd,
+}
+
+#[derive(Clone, Copy)]
+struct BlurEditorState {
+    hwnd: SendHwnd,
+    theme_is_dark: bool,
+    slider: SendHwnd,
+    value_label: SendHwnd,
+}
+
+static COLOR_EDITOR_STATE: Mutex<Option<ColorEditorState>> = Mutex::new(None);
+static BLUR_EDITOR_STATE: Mutex<Option<BlurEditorState>> = Mutex::new(None);
 
 /// Current system DPI (96 = 100% scaling, 144 = 150%, 192 = 200%, etc.)
 static CURRENT_DPI: AtomicU32 = AtomicU32::new(96);
@@ -146,11 +217,16 @@ fn sc(px: i32) -> i32 {
 /// Uses GetDpiForWindow which returns the live DPI (unlike GetDpiForSystem
 /// which is cached at process startup and never changes).
 fn refresh_dpi() {
-    let hwnd = {
+    let dpi_source = {
         let state = lock_state();
-        state.as_ref().map(|s| s.hwnd.to_hwnd())
+        state.as_ref().map(|s| {
+            // During a cross-monitor popup move, the foreground HWND can report
+            // the old monitor DPI for a short period. The selected taskbar is
+            // already authoritative for layout, so prefer its DPI.
+            s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd())
+        })
     };
-    if let Some(hwnd) = hwnd {
+    if let Some(hwnd) = dpi_source {
         let dpi = unsafe { GetDpiForWindow(hwnd) };
         if dpi > 0 {
             CURRENT_DPI.store(dpi, Ordering::Relaxed);
@@ -311,6 +387,10 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     appearance_preset: AppearancePreset,
+    #[serde(default)]
+    theme_mode: ThemeMode,
+    #[serde(default)]
+    styles: StyleSettings,
     #[serde(default = "default_show_usage_window")]
     show_session_window: bool,
     #[serde(default = "default_show_usage_window")]
@@ -329,6 +409,8 @@ impl Default for SettingsFile {
             poll_interval_ms: default_poll_interval(),
             language: None,
             appearance_preset: AppearancePreset::Compact,
+            theme_mode: ThemeMode::System,
+            styles: StyleSettings::default(),
             show_session_window: true,
             show_weekly_window: true,
             alert_threshold_percent: 0,
@@ -387,6 +469,7 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     }
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
+    settings.styles.normalize();
     settings
 }
 
@@ -411,6 +494,8 @@ fn save_state_settings() {
                 .language_override
                 .map(|language| language.code().to_string()),
             appearance_preset: s.appearance_preset,
+            theme_mode: s.theme_mode,
+            styles: s.styles.clone(),
             show_session_window: s.show_session_window,
             show_weekly_window: s.show_weekly_window,
             alert_threshold_percent: s.alert_threshold_percent,
@@ -686,6 +771,62 @@ fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
         s.win_event_hook = hook;
         s.taskbar_index = index;
         s.embedded = true;
+    }
+    true
+}
+
+fn select_taskbar_for_popup(requested_index: usize) -> bool {
+    let taskbars = native_interop::find_taskbars();
+    if taskbars.is_empty() {
+        return false;
+    }
+    let index = requested_index.min(taskbars.len().saturating_sub(1));
+    let taskbar = taskbars[index];
+
+    let old_hook = {
+        let mut state = lock_state();
+        state.as_mut().and_then(|s| s.win_event_hook.take())
+    };
+    if let Some(hook) = old_hook {
+        native_interop::unhook_win_event(hook);
+    }
+
+    let tray_notify = native_interop::find_child_window(taskbar.hwnd, "TrayNotifyWnd");
+    let hook = tray_notify.and_then(|tray_hwnd| {
+        let thread_id = native_interop::get_window_thread_id(tray_hwnd);
+        native_interop::set_tray_event_hook(thread_id, on_tray_location_changed)
+    });
+
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.taskbar_hwnd = Some(taskbar.hwnd);
+            s.tray_notify_hwnd = tray_notify;
+            s.win_event_hook = hook;
+            s.taskbar_index = index;
+            s.embedded = false;
+        }
+    }
+
+    let (foreground_hwnd, blur_active) = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| (Some(s.hwnd.to_hwnd()), s.composition_blur_active))
+            .unwrap_or((None, false))
+    };
+    if let Some(foreground_hwnd) = foreground_hwnd {
+        if blur_active {
+            // Rebinding both top-level popups to another taskbar can change
+            // their relative z-order. Reassert it once per taskbar switch, not
+            // on every drag frame.
+            sync_blur_backdrop_zorder(foreground_hwnd);
+            diagnose::log(
+                "popup taskbar switched; reasserted blur backdrop behind foreground",
+            );
+        } else {
+            bind_popup_windows_to_taskbar_owner(foreground_hwnd);
+        }
     }
     true
 }
@@ -1091,6 +1232,18 @@ fn current_appearance_preset() -> AppearancePreset {
         .unwrap_or_default()
 }
 
+fn current_theme_style() -> ThemeStyle {
+    let state = lock_state();
+    state
+        .as_ref()
+        .map(|s| s.styles.active(s.is_dark).clone())
+        .unwrap_or_else(ThemeStyle::dark_default)
+}
+
+fn current_style_color(target: StyleColorTarget) -> Color {
+    current_theme_style().color(target)
+}
+
 fn row_bar_segment_count(preset: AppearancePreset) -> i32 {
     match preset {
         AppearancePreset::Compact => 8,
@@ -1148,27 +1301,20 @@ fn total_widget_width() -> i32 {
     total_widget_width_for_preset(language, preset)
 }
 
-fn quota_bar_color(_is_dark: bool, displayed_percent: f64, _language: LanguageId) -> Color {
+fn quota_bar_color(displayed_percent: f64) -> Color {
     let remaining = displayed_percent.clamp(0.0, 100.0);
     if remaining > 50.0 {
-        Color::from_hex("#55A8F2")
+        current_style_color(StyleColorTarget::ProgressHigh)
     } else if remaining > 20.0 {
-        Color::from_hex("#E6B84A")
+        current_style_color(StyleColorTarget::ProgressMedium)
     } else {
-        Color::from_hex("#D95C5C")
-    }
-}
-
-fn stable_percentage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#FFFFFF")
-    } else {
-        Color::from_hex("#202020")
+        current_style_color(StyleColorTarget::ProgressLow)
     }
 }
 pub fn run() {
     // Enable Per-Monitor DPI Awareness V2 for crisp rendering at any scale factor
     unsafe {
+        InitCommonControls();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CURRENT_DPI.store(GetDpiForSystem(), Ordering::Relaxed);
     }
@@ -1277,7 +1423,12 @@ pub fn run() {
 
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
 
-        let is_dark = theme::is_dark_mode();
+        let system_is_dark = theme::is_dark_mode();
+        let is_dark = match settings.theme_mode {
+            ThemeMode::System => system_is_dark,
+            ThemeMode::Dark => true,
+            ThemeMode::Light => false,
+        };
         let mut embedded = false;
 
         {
@@ -1292,6 +1443,10 @@ pub fn run() {
                 language_override,
                 language,
                 appearance_preset: settings.appearance_preset,
+                theme_mode: settings.theme_mode,
+                styles: settings.styles.clone(),
+                composition_blur_active: false,
+                frosted_popup_session: false,
                 small_taskbar_mode: false,
                 small_show_weekly: false,
                 codex_session_percent: 0.0,
@@ -1404,47 +1559,550 @@ pub fn run() {
     }
 }
 
-/// Render widget content and push to the layered window via UpdateLayeredWindow.
-/// Renders fully opaque with the actual taskbar background colour so that
-/// ClearType sub-pixel font rendering can be used for crisp, OS-native text.
+unsafe extern "system" fn blur_backdrop_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn register_blur_backdrop_class() {
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(blur_backdrop_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+    }
+}
+
+fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
+    let taskbar_hwnd = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| s.taskbar_hwnd)
+    };
+    if let Some(taskbar_hwnd) = taskbar_hwnd {
+        // set_popup_owner() also promotes the popup to HWND_TOPMOST. Bind the
+        // backdrop first and the layered foreground last so owner changes can
+        // never leave the blur surface above text/progress content.
+        if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
+            native_interop::set_popup_owner(backdrop_hwnd, Some(taskbar_hwnd));
+        }
+        native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
+    }
+}
+
+fn preview_frame_due(last: &Mutex<Option<Instant>>, interval_ms: u64, force: bool) -> bool {
+    let now = Instant::now();
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+    if force
+        || last
+            .map(|previous| now.duration_since(previous) >= Duration::from_millis(interval_ms))
+            .unwrap_or(true)
+    {
+        *last = Some(now);
+        true
+    } else {
+        false
+    }
+}
+
+fn render_style_preview(force: bool) {
+    if preview_frame_due(&LAST_STYLE_PREVIEW_RENDER, STYLE_PREVIEW_FRAME_MS, force) {
+        render_layered();
+    }
+}
+
+fn drag_frame_due(force: bool) -> bool {
+    preview_frame_due(&LAST_DRAG_FRAME, DRAG_FRAME_MS, force)
+}
+
+fn blur_backdrop_hwnd() -> Option<HWND> {
+    let state = BLUR_BACKDROP_HWND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    state.as_ref().map(|h| h.to_hwnd())
+}
+
+fn blur_backdrop_context() -> Option<usize> {
+    let state = BLUR_BACKDROP_CONTEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *state
+}
+
+fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
+    let Some(context) = blur_backdrop_context() else {
+        return false;
+    };
+    native_interop::set_composition_blur_bounds(context, width, height)
+}
+
+fn destroy_blur_backdrop() {
+    let context = {
+        let mut state = BLUR_BACKDROP_CONTEXT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.take()
+    };
+    if let Some(context) = context {
+        native_interop::destroy_composition_blur(context);
+    }
+
+    {
+        let mut params = BLUR_BACKDROP_PARAMS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *params = None;
+    }
+
+    let hwnd = {
+        let mut state = BLUR_BACKDROP_HWND
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.take().map(|h| h.to_hwnd())
+    };
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        diagnose::log("composition gaussian backdrop destroyed");
+    }
+}
+
+fn blur_amount_for_strength(strength: u8) -> f32 {
+    FROSTED_MAX_BLUR_PX * f32::from(strength.min(FROSTED_STRENGTH_MAX))
+        / f32::from(FROSTED_STRENGTH_MAX)
+}
+
+fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
+    let params = BlurBackdropParams {
+        blur_bits: blur_amount.to_bits(),
+        tint,
+    };
+
+    let existing_hwnd = blur_backdrop_hwnd();
+    let existing_context = blur_backdrop_context();
+
+    if let (Some(hwnd), Some(context)) = (existing_hwnd, existing_context) {
+        let unchanged = {
+            let cached = BLUR_BACKDROP_PARAMS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached == Some(params)
+        };
+        if unchanged {
+            return Some(hwnd);
+        }
+
+        let amount_ok = native_interop::set_composition_blur_amount(context, blur_amount);
+        let tint_ok = native_interop::set_composition_blur_tint(context, tint);
+        if amount_ok && tint_ok {
+            let mut cached = BLUR_BACKDROP_PARAMS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached = Some(params);
+            return Some(hwnd);
+        }
+
+        destroy_blur_backdrop();
+    } else if existing_hwnd.is_some() || existing_context.is_some() {
+        // A partial backend state is not reusable. Recreate it atomically.
+        destroy_blur_backdrop();
+    }
+
+    register_blur_backdrop_class();
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
+        let title = native_interop::wide_str("");
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW
+                | WS_EX_TOPMOST
+                | WS_EX_NOACTIVATE
+                | WS_EX_TRANSPARENT
+                | WS_EX_NOREDIRECTIONBITMAP,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            HWND::default(),
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        )
+        .ok()?;
+
+        let Some(context) =
+            native_interop::create_composition_blur(hwnd, blur_amount, tint)
+        else {
+            let _ = DestroyWindow(hwnd);
+            return None;
+        };
+
+        {
+            let mut state = BLUR_BACKDROP_CONTEXT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *state = Some(context);
+        }
+        {
+            let mut cached = BLUR_BACKDROP_PARAMS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cached = Some(params);
+        }
+        {
+            let mut state = BLUR_BACKDROP_HWND
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *state = Some(SendHwnd::from_hwnd(hwnd));
+        }
+
+        let owner = {
+            let state = lock_state();
+            state.as_ref().and_then(|s| s.taskbar_hwnd)
+        };
+        native_interop::set_popup_owner(hwnd, owner);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        diagnose::log("composition gaussian backdrop created");
+        Some(hwnd)
+    }
+}
+
+fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
+    bind_popup_windows_to_taskbar_owner(foreground_hwnd);
+    let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
+        return;
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
+        return;
+    };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    if !sync_composition_blur_bounds(width, height) {
+        diagnose::log("composition blur bounds sync failed during z-order update");
+    }
+
+    unsafe {
+        let _ = SetWindowPos(
+            backdrop_hwnd,
+            HWND_TOPMOST,
+            rect.left,
+            rect.top,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        let _ = SetWindowPos(
+            foreground_hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
+    let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
+        return;
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
+        return;
+    };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    if !sync_composition_blur_bounds(width, height) {
+        diagnose::log("composition blur bounds sync failed during geometry update");
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            backdrop_hwnd,
+            HWND::default(),
+            rect.left,
+            rect.top,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn move_window_without_repaint(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
+        move_window_without_repaint(foreground_hwnd, x, y, width, height);
+        return;
+    };
+    // Shrink/expand the visual tree first. The current HWND bounds clip an
+    // expansion, while an early visual shrink prevents a stale-DPI blur tail.
+    if !sync_composition_blur_bounds(width, height) {
+        diagnose::log("composition blur bounds sync failed during drag");
+    }
+    unsafe {
+        // Preserve existing owner/z-order. Re-ordering two top-level windows on
+        // every mouse move causes visible DWM flicker.
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE;
+        let _ = SetWindowPos(
+            backdrop_hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            flags,
+        );
+        let _ = SetWindowPos(
+            foreground_hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            flags,
+        );
+    }
+}
+
+fn activate_blur_popup(
+    hwnd: HWND,
+    blur_amount: f32,
+    tint: Color,
+) -> bool {
+    let was_embedded = {
+        let state = lock_state();
+        state.as_ref().map(|s| s.embedded).unwrap_or(false)
+    };
+
+    // Keep the foreground widget layered at all times. Only detach it from
+    // Explorer so the independent Composition backdrop can sit behind it.
+    if was_embedded {
+        native_interop::detach_from_taskbar_as_popup(hwnd);
+        native_interop::set_layered_style(hwnd, true);
+        {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.embedded = false;
+                // Reparenting a layered HWND back into Explorer after entering
+                // backdrop mode is unreliable on affected Windows 11 builds.
+                // Keep this foreground as a top-level popup for the process.
+                s.frosted_popup_session = true;
+            }
+        }
+        bind_popup_windows_to_taskbar_owner(hwnd);
+        position_at_taskbar();
+    }
+
+    let Some(_) = ensure_blur_backdrop(blur_amount, tint) else {
+        diagnose::log(
+            "composition blur backdrop activation failed; restoring layered mode",
+        );
+        restore_layered_taskbar_mode(hwnd);
+        return false;
+    };
+
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.composition_blur_active = true;
+        }
+    }
+
+    bind_popup_windows_to_taskbar_owner(hwnd);
+    sync_blur_backdrop_zorder(hwnd);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    diagnose::log("dual-window composition gaussian blur activated");
+    true
+}
+
+fn restore_layered_taskbar_mode(hwnd: HWND) {
+    let frosted_popup_session = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| s.frosted_popup_session)
+            .unwrap_or(false)
+    };
+
+    destroy_blur_backdrop();
+    native_interop::set_layered_style(hwnd, true);
+
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.composition_blur_active = false;
+        }
+    }
+
+    if frosted_popup_session {
+        // Do NOT SetParent() this HWND back into Explorer during the same
+        // process lifetime. Reparenting is what invalidates the layered surface
+        // on affected Windows 11 builds. Keep the same top-level layered HWND
+        // and simply render the normal opaque/transparent panel again.
+        bind_popup_windows_to_taskbar_owner(hwnd);
+        position_at_taskbar();
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        diagnose::log("frosted glass disabled; keeping foreground in stable layered popup mode");
+        return;
+    }
+
+    // This path is only for an activation failure that happened before the
+    // foreground ever entered the frosted popup session.
+    let taskbar_index = {
+        let state = lock_state();
+        state.as_ref().map(|s| s.taskbar_index).unwrap_or(0)
+    };
+    if attach_to_taskbar(hwnd, taskbar_index) {
+        position_at_taskbar();
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    } else {
+        native_interop::detach_from_taskbar_as_popup(hwnd);
+        native_interop::set_layered_style(hwnd, true);
+        {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.embedded = false;
+                s.frosted_popup_session = true;
+            }
+        }
+        position_at_taskbar();
+    }
+}
+
+/// Render the foreground widget through UpdateLayeredWindow. Frosted mode keeps
+/// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
     refresh_dpi();
     let (
         hwnd_val,
         is_dark,
-        embedded,
         language,
         strings,
+        style,
         codex_session_pct,
         codex_session_text,
         codex_weekly_pct,
         codex_weekly_text,
         show_session_window,
         show_weekly_window,
+        last_poll_ok,
     ) = {
         let state = lock_state();
         match state.as_ref() {
             Some(s) => (
                 s.hwnd,
                 s.is_dark,
-                s.embedded,
                 s.language,
                 s.language.strings(),
+                s.styles.active(s.is_dark).clone(),
                 s.codex_session_percent,
                 s.codex_session_text.clone(),
                 s.codex_weekly_percent,
                 s.codex_weekly_text.clone(),
                 s.show_session_window,
                 s.show_weekly_window,
+                s.last_poll_ok,
             ),
             None => return,
         }
     };
 
     let hwnd = hwnd_val.to_hwnd();
-    if !embedded {
+    let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
+    let blur_requested = frosted_strength > 0;
+    let blur_amount = blur_amount_for_strength(frosted_strength);
+    let blur_tint = style.color(StyleColorTarget::PanelBackground);
+    let mut composition_blur_active = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| s.composition_blur_active)
+            .unwrap_or(false)
+    };
+
+    if blur_requested {
+        if composition_blur_active
+            && ensure_blur_backdrop(blur_amount, blur_tint).is_none()
+        {
+            composition_blur_active = false;
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.composition_blur_active = false;
+            }
+        }
+        if !composition_blur_active {
+            composition_blur_active =
+                activate_blur_popup(hwnd, blur_amount, blur_tint);
+        }
+    } else if composition_blur_active {
+        restore_layered_taskbar_mode(hwnd);
+        composition_blur_active = false;
+    }
+
+    let (embedded, frosted_popup_session) = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| (s.embedded, s.frosted_popup_session))
+            .unwrap_or((false, false))
+    };
+    if !embedded && !frosted_popup_session && !composition_blur_active {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
+            let _ = UpdateWindow(hwnd);
         }
         return;
     }
@@ -1457,21 +2115,41 @@ fn render_layered() {
             .map(widget_height_for_state)
             .unwrap_or(sc(AppearancePreset::Compact.metrics().widget_height))
     };
-    let track = if is_dark {
-        Color::from_hex("#363A3F")
-    } else {
-        Color::from_hex("#AAAAAA")
-    };
-    let text_color = if is_dark {
-        Color::from_hex("#A0A0A0")
-    } else {
-        Color::from_hex("#404040")
-    };
     let bg_color = if is_dark {
-        Color::from_hex("#1C1C1C")
+        Color::from_hex("#1C1C1CFF")
     } else {
-        Color::from_hex("#F3F3F3")
+        Color::from_hex("#F3F3F3FF")
     };
+    let mut surface_style = style.clone();
+    let background = style.color(StyleColorTarget::PanelBackground);
+    if composition_blur_active {
+        // Composition owns the visible background, so the layered foreground only
+        // needs a virtually invisible alpha to keep blank areas hit-testable.
+        surface_style.panel_background = Color::rgba(
+            background.r,
+            background.g,
+            background.b,
+            MIN_INTERACTIVE_ALPHA,
+        )
+        .to_hex_rgba();
+    } else if background.a == 0 {
+        // A fully transparent normal panel must remain interactive as well.
+        // Alpha=1 is visually indistinguishable from transparent but prevents
+        // Windows from treating the panel interior as mouse-pass-through.
+        surface_style.panel_background = Color::rgba(
+            background.r,
+            background.g,
+            background.b,
+            MIN_INTERACTIVE_ALPHA,
+        )
+        .to_hex_rgba();
+    }
+
+    let border = style.color(StyleColorTarget::PanelBorder);
+    if border.a == 0 {
+        surface_style.panel_border =
+            Color::rgba(border.r, border.g, border.b, MIN_INTERACTIVE_ALPHA).to_hex_rgba();
+    }
 
     unsafe {
         let screen_dc = GetDC(hwnd);
@@ -1499,14 +2177,18 @@ fn render_layered() {
 
         let old_bmp = SelectObject(mem_dc, dib);
         let pixel_count = (width * height) as usize;
+        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
+        fill_bitmap(pixel_data, bg_color);
+
+        blend_panel_bitmap(pixel_data, width, height, &surface_style);
+        let panel_pixels = pixel_data.to_vec();
+
         paint_content(
             mem_dc,
             width,
             height,
             is_dark,
             &bg_color,
-            &text_color,
-            &track,
             language,
             strings,
             codex_session_pct,
@@ -1515,18 +2197,17 @@ fn render_layered() {
             &codex_weekly_text,
             show_session_window,
             show_weekly_window,
+            last_poll_ok,
+            false,
         );
 
-        let bg_bgr = bg_color.to_colorref();
-        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
-        for px in pixel_data.iter_mut() {
-            let rgb = *px & 0x00FFFFFF;
-            if rgb == bg_bgr {
-                *px = 0x01000000;
-            } else {
-                *px = rgb | 0xFF000000;
-            }
-        }
+        finalize_layered_bitmap(
+            pixel_data,
+            &panel_pixels,
+            width,
+            height,
+            &surface_style,
+        );
 
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
@@ -1555,18 +2236,125 @@ fn render_layered() {
         let _ = DeleteDC(mem_dc);
         ReleaseDC(hwnd, screen_dc);
     }
+
+    if composition_blur_active {
+        sync_blur_backdrop_geometry(hwnd);
+    }
 }
 
-/// Paint all widget content onto a DC with a given background color.
+fn fill_bitmap(pixels: &mut [u32], color: Color) {
+    let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+    pixels.fill(value);
+}
+
+fn blend_pixel(pixel: u32, color: Color) -> u32 {
+    if color.a == 0 {
+        return pixel & 0x00FFFFFF;
+    }
+    if color.a == 255 {
+        return ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+    }
+    let bg_b = pixel & 0xFF;
+    let bg_g = (pixel >> 8) & 0xFF;
+    let bg_r = (pixel >> 16) & 0xFF;
+    let a = color.a as u32;
+    let inv = 255 - a;
+    let r = (color.r as u32 * a + bg_r * inv + 127) / 255;
+    let g = (color.g as u32 * a + bg_g * inv + 127) / 255;
+    let b = (color.b as u32 * a + bg_b * inv + 127) / 255;
+    (r << 16) | (g << 8) | b
+}
+
+fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
+    let outer_inset = sc(1).max(1);
+    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
+    let border = style.color(StyleColorTarget::PanelBorder);
+    let fill = style.color(StyleColorTarget::PanelBackground);
+    for y in outer_inset..(height - outer_inset).max(outer_inset) {
+        for x in outer_inset..(width - outer_inset).max(outer_inset) {
+            let idx = (y * width + x) as usize;
+            let color = if x >= inner_inset
+                && x < width - inner_inset
+                && y >= inner_inset
+                && y < height - inner_inset
+            {
+                fill
+            } else {
+                border
+            };
+            pixels[idx] = blend_pixel(pixels[idx], color);
+        }
+    }
+}
+
+fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -> Option<Color> {
+    let outer_inset = sc(1).max(1);
+    if x < outer_inset
+        || x >= width - outer_inset
+        || y < outer_inset
+        || y >= height - outer_inset
+    {
+        return None;
+    }
+    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
+    if x >= inner_inset
+        && x < width - inner_inset
+        && y >= inner_inset
+        && y < height - inner_inset
+    {
+        Some(style.color(StyleColorTarget::PanelBackground))
+    } else {
+        Some(style.color(StyleColorTarget::PanelBorder))
+    }
+}
+
+fn premultiplied_pixel(color: Color) -> u32 {
+    let alpha = color.a as u32;
+    if alpha == 0 {
+        return 0;
+    }
+    let r = (color.r as u32 * alpha + 127) / 255;
+    let g = (color.g as u32 * alpha + 127) / 255;
+    let b = (color.b as u32 * alpha + 127) / 255;
+    (alpha << 24) | (r << 16) | (g << 8) | b
+}
+
+fn finalize_layered_bitmap(
+    pixels: &mut [u32],
+    panel_pixels: &[u32],
+    width: i32,
+    height: i32,
+    style: &ThemeStyle,
+) {
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let Some(panel_color) = panel_color_at(style, width, height, x, y) else {
+                pixels[idx] = 0;
+                continue;
+            };
+
+            // Foreground content is kept opaque. Panel pixels retain the
+            // configured RGBA alpha in the normal layered renderer.
+            if pixels[idx] != panel_pixels[idx] {
+                pixels[idx] = (pixels[idx] & 0x00FFFFFF) | 0xFF000000;
+            } else {
+                pixels[idx] = premultiplied_pixel(panel_color);
+            }
+        }
+    }
+}
+
+/// Paint widget foreground. For the normal-window fallback this also paints the
+/// panel using the same style, while the layered taskbar path prepares the
+/// backdrop and panel pixels before calling this function.
 #[allow(clippy::too_many_arguments)]
 fn paint_content(
     hdc: HDC,
     width: i32,
     height: i32,
-    is_dark: bool,
+    _is_dark: bool,
     bg: &Color,
-    text_color: &Color,
-    track: &Color,
     language: LanguageId,
     strings: Strings,
     codex_session_pct: f64,
@@ -1575,6 +2363,8 @@ fn paint_content(
     codex_weekly_text: &str,
     show_session_window: bool,
     show_weekly_window: bool,
+    last_poll_ok: bool,
+    paint_background: bool,
 ) {
     unsafe {
         let codex_session_pct = usage_percent_for_display(language, codex_session_pct);
@@ -1582,6 +2372,23 @@ fn paint_content(
         let preset = current_appearance_preset();
         let metrics = preset.metrics();
         let (label_width, text_width) = usage_layout_widths(language, preset);
+        let style = current_theme_style();
+        let panel_base = style
+            .color(StyleColorTarget::PanelBackground)
+            .blend_over(*bg);
+        let quota_type_color = style.color(StyleColorTarget::QuotaType).blend_over(panel_base);
+        let primary_color = if last_poll_ok {
+            style.color(StyleColorTarget::Remaining)
+        } else {
+            style.color(StyleColorTarget::Error)
+        }
+        .blend_over(panel_base);
+        let reset_color = style.color(StyleColorTarget::ResetTime).blend_over(panel_base);
+        let track = style
+            .color(StyleColorTarget::ProgressConsumed)
+            .blend_over(panel_base);
+        let drag_color = style.color(StyleColorTarget::DragHandle).blend_over(panel_base);
+
         let (small_taskbar_mode, small_show_weekly) = {
             let state = lock_state();
             state
@@ -1600,18 +2407,22 @@ fn paint_content(
             show_weekly_window
         };
 
-        let client_rect = RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        };
-        let bg_brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
-        FillRect(hdc, &client_rect, bg_brush);
-        let _ = DeleteObject(bg_brush);
+        if paint_background {
+            let client_rect = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            let bg_brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
+            FillRect(hdc, &client_rect, bg_brush);
+            let _ = DeleteObject(bg_brush);
 
-        draw_acrylic_panel(hdc, width, height, is_dark, metrics.panel_radius);
-        draw_drag_handle(hdc, height, is_dark);
+            let border = style.color(StyleColorTarget::PanelBorder).blend_over(*bg);
+            draw_panel(hdc, width, height, &border, &panel_base);
+        }
+
+        draw_drag_handle(hdc, height, &drag_color);
 
         let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
         let row2_y = height - sc(4) - sc(SEGMENT_H);
@@ -1619,7 +2430,6 @@ fn paint_content(
         let single_row_y = (height - sc(SEGMENT_H)) / 2;
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
         let font_name = native_interop::wide_str("Segoe UI");
         let font = CreateFontW(
             sc(metrics.font_height),
@@ -1648,15 +2458,16 @@ fn paint_content(
                 } else {
                     single_row_y
                 },
-                is_dark,
-                language,
-                text_color,
+                &quota_type_color,
+                &primary_color,
+                &reset_color,
                 strings.session_window,
                 codex_session_pct,
                 codex_session_text,
-                track,
+                &track,
                 label_width,
                 text_width,
+                panel_base,
             );
         }
         if effective_show_weekly {
@@ -1668,15 +2479,16 @@ fn paint_content(
                 } else {
                     single_row_y
                 },
-                is_dark,
-                language,
-                text_color,
+                &quota_type_color,
+                &primary_color,
+                &reset_color,
                 strings.weekly_window,
                 codex_weekly_pct,
                 codex_weekly_text,
-                track,
+                &track,
                 label_width,
                 text_width,
+                panel_base,
             );
         }
 
@@ -1880,12 +2692,14 @@ fn schedule_countdown_timer() {
 }
 
 fn check_theme_change() {
-    let new_dark = theme::is_dark_mode();
+    let system_dark = theme::is_dark_mode();
     let changed = {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
-            if s.is_dark != new_dark {
-                s.is_dark = new_dark;
+            if s.theme_mode != ThemeMode::System {
+                false
+            } else if s.is_dark != system_dark {
+                s.is_dark = system_dark;
                 true
             } else {
                 false
@@ -1895,6 +2709,7 @@ fn check_theme_change() {
         }
     };
     if changed {
+        close_style_editors();
         render_layered();
     }
 }
@@ -1945,7 +2760,7 @@ fn tray_reposition_is_suppressed() -> bool {
 
 fn position_at_taskbar() {
     refresh_dpi();
-    let (hwnd, embedded, tray_offset, taskbar_hwnd) = {
+    let (hwnd, embedded, tray_offset, taskbar_hwnd, blur_active) = {
         let state = lock_state();
         let s = match state.as_ref() {
             Some(s) => s,
@@ -1961,7 +2776,13 @@ fn position_at_taskbar() {
                 return;
             }
         };
-        (s.hwnd.to_hwnd(), s.embedded, s.tray_offset, taskbar_hwnd)
+        (
+            s.hwnd.to_hwnd(),
+            s.embedded,
+            s.tray_offset,
+            taskbar_hwnd,
+            s.composition_blur_active,
+        )
     };
 
     let taskbar_rect = match native_interop::get_taskbar_rect(taskbar_hwnd) {
@@ -2031,10 +2852,17 @@ fn position_at_taskbar() {
         ));
     } else {
         let x = tray_left - widget_width - tray_offset;
-        native_interop::move_window(hwnd, x, y, widget_width, widget_height);
+        if blur_active {
+            move_frosted_pair(hwnd, x, y, widget_width, widget_height);
+        } else {
+            native_interop::move_window(hwnd, x, y, widget_width, widget_height);
+        }
         diagnose::log(format!(
             "positioned fallback widget at x={x} y={y} w={widget_width} h={widget_height}"
         ));
+    }
+    if !embedded && !blur_active {
+        bind_popup_windows_to_taskbar_owner(hwnd);
     }
 }
 
@@ -2097,20 +2925,22 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            // For non-embedded fallback, paint normally
-            let embedded = {
+            let (embedded, frosted_active) = {
                 let state = lock_state();
-                state.as_ref().map(|s| s.embedded).unwrap_or(false)
+                state
+                    .as_ref()
+                    .map(|s| (s.embedded, s.composition_blur_active))
+                    .unwrap_or((false, false))
             };
-            if embedded {
-                // Layered windows don't use WM_PAINT; just validate the region
+            if embedded || frosted_active {
+                // Both taskbar mode and frosted foreground use UpdateLayeredWindow.
                 let mut ps = PAINTSTRUCT::default();
                 let _ = BeginPaint(hwnd, &mut ps);
                 let _ = EndPaint(hwnd, &ps);
             } else {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
-                paint(hdc, hwnd);
+                paint(hdc, hwnd, false);
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
@@ -2245,6 +3075,10 @@ unsafe extern "system" fn wnd_proc(
                 s.dragging = true;
                 s.drag_anchor_logical_x = anchor_logical_x;
             }
+            {
+                let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
+                *last = None;
+            }
             SetCapture(hwnd);
             LRESULT(0)
         }
@@ -2254,50 +3088,69 @@ unsafe extern "system" fn wnd_proc(
                 state.as_ref().map(|s| s.dragging).unwrap_or(false)
             };
             if is_dragging {
+                if !drag_frame_due(false) {
+                    return LRESULT(0);
+                }
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
 
-                let current_taskbar_index = {
+                let (current_taskbar_index, embedded, blur_active) = {
                     let state = lock_state();
-                    state.as_ref().map(|s| s.taskbar_index)
+                    state
+                        .as_ref()
+                        .map(|s| (Some(s.taskbar_index), s.embedded, s.composition_blur_active))
+                        .unwrap_or((None, false, false))
                 };
+
+                // A popup uses absolute screen coordinates. If the pointer has
+                // left every taskbar, combining its X coordinate with the old
+                // taskbar's Y coordinate can place the widget in the middle of
+                // another desktop (especially with vertically offset monitors).
+                // Freeze at the last valid taskbar position until the pointer
+                // enters a taskbar again.
+                let Some((hovered_taskbar_index, hovered_taskbar)) = taskbar_at_point(pt) else {
+                    return LRESULT(0);
+                };
+
                 let mut switched_taskbar = false;
-
                 if let Some(current_index) = current_taskbar_index {
-                    if let Some((target_index, target_taskbar)) = taskbar_at_point(pt) {
-                        if target_index != current_index {
-                            let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed);
-                            let target_dpi = GetDpiForWindow(target_taskbar.hwnd);
-                            if target_dpi > 0 {
-                                CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
-                            }
+                    if hovered_taskbar_index != current_index {
+                        let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed);
+                        let target_dpi = GetDpiForWindow(hovered_taskbar.hwnd);
+                        if target_dpi > 0 {
+                            CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
+                        }
 
+                        {
+                            let mut state = lock_state();
+                            if let Some(s) = state.as_mut() {
+                                s.drag_reparenting = true;
+                            }
+                        }
+                        let _ = ReleaseCapture();
+
+                        let switched = if embedded {
+                            attach_to_taskbar(hwnd, hovered_taskbar_index)
+                        } else {
+                            select_taskbar_for_popup(hovered_taskbar_index)
+                        };
+                        if switched {
                             {
                                 let mut state = lock_state();
                                 if let Some(s) = state.as_mut() {
-                                    s.drag_reparenting = true;
-                                }
-                            }
-                            let _ = ReleaseCapture();
-
-                            if attach_to_taskbar(hwnd, target_index) {
-                                {
-                                    let mut state = lock_state();
-                                    if let Some(s) = state.as_mut() {
-                                        s.dragging = true;
-                                        s.drag_reparenting = false;
-                                    }
-                                }
-                                SetCapture(hwnd);
-                                switched_taskbar = true;
-                            } else {
-                                CURRENT_DPI.store(previous_dpi, Ordering::Relaxed);
-                                let mut state = lock_state();
-                                if let Some(s) = state.as_mut() {
+                                    s.dragging = true;
                                     s.drag_reparenting = false;
                                 }
-                                SetCapture(hwnd);
                             }
+                            SetCapture(hwnd);
+                            switched_taskbar = true;
+                        } else {
+                            CURRENT_DPI.store(previous_dpi, Ordering::Relaxed);
+                            let mut state = lock_state();
+                            if let Some(s) = state.as_mut() {
+                                s.drag_reparenting = false;
+                            }
+                            SetCapture(hwnd);
                         }
                     }
                 }
@@ -2305,12 +3158,13 @@ unsafe extern "system" fn wnd_proc(
                 let drag_context = {
                     let state = lock_state();
                     state.as_ref().and_then(|s| {
-                        s.taskbar_hwnd
-                            .map(|taskbar_hwnd| (taskbar_hwnd, s.drag_anchor_logical_x))
+                        s.taskbar_hwnd.map(|taskbar_hwnd| {
+                            (taskbar_hwnd, s.drag_anchor_logical_x, s.embedded)
+                        })
                     })
                 };
 
-                if let Some((taskbar_hwnd, anchor_logical_x)) = drag_context {
+                if let Some((taskbar_hwnd, anchor_logical_x, embedded)) = drag_context {
                     if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
                         let dpi = GetDpiForWindow(taskbar_hwnd);
                         if dpi > 0 {
@@ -2341,18 +3195,33 @@ unsafe extern "system" fn wnd_proc(
                                 changed,
                             )
                         };
-                        let y = compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height)
-                            - taskbar_rect.top;
+                        let anchor_y =
+                            compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
+                        let (window_x, window_y) = if embedded {
+                            (drag_left, anchor_y - taskbar_rect.top)
+                        } else {
+                            (taskbar_rect.left + drag_left, anchor_y)
+                        };
 
-                        // Pointer alignment is authoritative while dragging. The taskbar
-                        // clips any temporary overhang; docked bounds are applied on button-up.
-                        native_interop::move_window(
-                            hwnd,
-                            drag_left,
-                            y,
-                            widget_width,
-                            widget_height,
-                        );
+                        // Embedded mode uses taskbar-client coordinates; Composition blur popup
+                        // mode uses absolute screen coordinates.
+                        if blur_active {
+                            move_frosted_pair(
+                                hwnd,
+                                window_x,
+                                window_y,
+                                widget_width,
+                                widget_height,
+                            );
+                        } else {
+                            move_window_without_repaint(
+                                hwnd,
+                                window_x,
+                                window_y,
+                                widget_width,
+                                widget_height,
+                            );
+                        }
 
                         if switched_taskbar || small_mode_changed {
                             render_layered();
@@ -2392,7 +3261,7 @@ unsafe extern "system" fn wnd_proc(
                     let was_dragging = s.dragging;
                     s.dragging = false;
                     if was_dragging {
-                        Some((s.taskbar_index, s.drag_anchor_logical_x))
+                        Some((s.taskbar_index, s.drag_anchor_logical_x, s.embedded))
                     } else {
                         None
                     }
@@ -2401,6 +3270,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             };
             let _ = ReleaseCapture();
+            let _ = drag_frame_due(true);
 
             if drag_result.is_none() {
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -2425,40 +3295,55 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_index, anchor_logical_x)) = drag_result {
-                if let Some((target_index, _)) = taskbar_at_point(pt) {
+            if let Some((current_taskbar_index, anchor_logical_x, embedded)) = drag_result {
+                let release_taskbar = taskbar_at_point(pt);
+                if let Some((target_index, _)) = release_taskbar {
                     if target_index != current_taskbar_index {
-                        let _ = attach_to_taskbar(hwnd, target_index);
+                        if embedded {
+                            let _ = attach_to_taskbar(hwnd, target_index);
+                        } else {
+                            let _ = select_taskbar_for_popup(target_index);
+                        }
                     }
-                }
 
-                refresh_dpi();
-                let final_taskbar = {
-                    let state = lock_state();
-                    state.as_ref().and_then(|s| s.taskbar_hwnd)
-                };
-                if let Some(taskbar_hwnd) = final_taskbar {
-                    if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
-                        let dpi = GetDpiForWindow(taskbar_hwnd);
-                        if dpi > 0 {
-                            CURRENT_DPI.store(dpi, Ordering::Relaxed);
-                        }
-                        let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
-                        let anchor_px = drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
-                        let final_drag_left = drag_left_from_cursor(taskbar_rect, pt, anchor_px);
-                        let new_offset =
-                            offset_for_drag_left(taskbar_hwnd, taskbar_rect, final_drag_left);
-                        {
-                            let mut state = lock_state();
-                            if let Some(s) = state.as_mut() {
-                                s.tray_offset = new_offset;
+                    refresh_dpi();
+                    let final_taskbar = {
+                        let state = lock_state();
+                        state.as_ref().and_then(|s| s.taskbar_hwnd)
+                    };
+                    if let Some(taskbar_hwnd) = final_taskbar {
+                        if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
+                            let dpi = GetDpiForWindow(taskbar_hwnd);
+                            if dpi > 0 {
+                                CURRENT_DPI.store(dpi, Ordering::Relaxed);
                             }
+                            let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
+                            let anchor_px =
+                                drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
+                            let final_drag_left =
+                                drag_left_from_cursor(taskbar_rect, pt, anchor_px);
+                            let new_offset =
+                                offset_for_drag_left(taskbar_hwnd, taskbar_rect, final_drag_left);
+                            {
+                                let mut state = lock_state();
+                                if let Some(s) = state.as_mut() {
+                                    s.tray_offset = new_offset;
+                                }
+                            }
+                            position_at_taskbar();
+                            render_layered();
                         }
-                        position_at_taskbar();
-                        render_layered();
                     }
+                    save_state_settings();
+                } else {
+                    // Releasing over desktop is not a valid drop target. Keep the
+                    // current taskbar selection and restore its persisted offset.
+                    position_at_taskbar();
+                    render_layered();
+                    diagnose::log(
+                        "drag released outside taskbars; restored last valid taskbar position",
+                    );
                 }
-                save_state_settings();
             }
             LRESULT(0)
         }
@@ -2630,6 +3515,7 @@ unsafe extern "system" fn wnd_proc(
                     });
                 }
                 2 => {
+                    destroy_blur_backdrop();
                     let hook = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| s.win_event_hook)
@@ -2729,8 +3615,28 @@ unsafe extern "system" fn wnd_proc(
                     notify_quota_alerts(hwnd, &alerts);
                     save_state_settings();
                 }
-                IDM_APPEARANCE_COMPACT | IDM_APPEARANCE_MINIMAL => {
-                    let preset = if id == IDM_APPEARANCE_MINIMAL {
+                IDM_THEME_SYSTEM | IDM_THEME_DARK | IDM_THEME_LIGHT => {
+                    close_style_editors();
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.theme_mode = match id {
+                                IDM_THEME_DARK => ThemeMode::Dark,
+                                IDM_THEME_LIGHT => ThemeMode::Light,
+                                _ => ThemeMode::System,
+                            };
+                            s.is_dark = match s.theme_mode {
+                                ThemeMode::System => theme::is_dark_mode(),
+                                ThemeMode::Dark => true,
+                                ThemeMode::Light => false,
+                            };
+                        }
+                    }
+                    save_state_settings();
+                    render_layered();
+                }
+                IDM_LAYOUT_COMPACT | IDM_LAYOUT_MINIMAL => {
+                    let preset = if id == IDM_LAYOUT_MINIMAL {
                         AppearancePreset::Minimal
                     } else {
                         AppearancePreset::Compact
@@ -2746,6 +3652,46 @@ unsafe extern "system" fn wnd_proc(
                     position_at_taskbar();
                     render_layered();
                     sync_tray_icons(hwnd);
+                }
+                IDM_STYLE_PANEL_BACKGROUND
+                | IDM_STYLE_PANEL_BORDER
+                | IDM_STYLE_QUOTA_TYPE
+                | IDM_STYLE_REMAINING
+                | IDM_STYLE_RESET_TIME
+                | IDM_STYLE_ERROR
+                | IDM_STYLE_PROGRESS_HIGH
+                | IDM_STYLE_PROGRESS_MEDIUM
+                | IDM_STYLE_PROGRESS_LOW
+                | IDM_STYLE_PROGRESS_CONSUMED
+                | IDM_STYLE_DRAG_HANDLE => {
+                    let target = match id {
+                        IDM_STYLE_PANEL_BACKGROUND => StyleColorTarget::PanelBackground,
+                        IDM_STYLE_PANEL_BORDER => StyleColorTarget::PanelBorder,
+                        IDM_STYLE_QUOTA_TYPE => StyleColorTarget::QuotaType,
+                        IDM_STYLE_REMAINING => StyleColorTarget::Remaining,
+                        IDM_STYLE_RESET_TIME => StyleColorTarget::ResetTime,
+                        IDM_STYLE_ERROR => StyleColorTarget::Error,
+                        IDM_STYLE_PROGRESS_HIGH => StyleColorTarget::ProgressHigh,
+                        IDM_STYLE_PROGRESS_MEDIUM => StyleColorTarget::ProgressMedium,
+                        IDM_STYLE_PROGRESS_LOW => StyleColorTarget::ProgressLow,
+                        IDM_STYLE_PROGRESS_CONSUMED => StyleColorTarget::ProgressConsumed,
+                        _ => StyleColorTarget::DragHandle,
+                    };
+                    open_color_editor(hwnd, target);
+                }
+                IDM_STYLE_PANEL_BLUR => {
+                    open_blur_editor(hwnd);
+                }
+                IDM_STYLE_RESET_CURRENT => {
+                    close_style_editors();
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.styles.reset_active(s.is_dark);
+                        }
+                    }
+                    save_state_settings();
+                    render_layered();
                 }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
@@ -2797,6 +3743,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            destroy_blur_backdrop();
             let hook = {
                 let state = lock_state();
                 state.as_ref().and_then(|s| s.win_event_hook)
@@ -2812,6 +3759,495 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+
+fn style_color_target_label(target: StyleColorTarget, language: LanguageId) -> &'static str {
+    let zh = language == LanguageId::SimplifiedChinese;
+    match target {
+        StyleColorTarget::PanelBackground => if zh { "背景颜色" } else { "Background color" },
+        StyleColorTarget::PanelBorder => if zh { "边框颜色" } else { "Border color" },
+        StyleColorTarget::QuotaType => if zh { "额度类型" } else { "Quota type" },
+        StyleColorTarget::Remaining => if zh { "剩余额度" } else { "Remaining quota" },
+        StyleColorTarget::ResetTime => if zh { "重置时间" } else { "Reset time" },
+        StyleColorTarget::Error => if zh { "异常状态" } else { "Error state" },
+        StyleColorTarget::ProgressHigh => if zh { "充足额度颜色" } else { "High quota color" },
+        StyleColorTarget::ProgressMedium => if zh { "中等额度颜色" } else { "Medium quota color" },
+        StyleColorTarget::ProgressLow => if zh { "低额度颜色" } else { "Low quota color" },
+        StyleColorTarget::ProgressConsumed => if zh { "已消耗部分颜色" } else { "Consumed color" },
+        StyleColorTarget::DragHandle => if zh { "拖拽点颜色" } else { "Drag handle color" },
+    }
+}
+
+fn close_style_editors() {
+    let color_hwnd = {
+        let state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.hwnd.to_hwnd())
+    };
+    let blur_hwnd = {
+        let state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.hwnd.to_hwnd())
+    };
+    if color_hwnd.is_some() || blur_hwnd.is_some() {
+        save_state_settings();
+    }
+    unsafe {
+        if let Some(hwnd) = color_hwnd {
+            let _ = DestroyWindow(hwnd);
+        }
+        if let Some(hwnd) = blur_hwnd {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}
+
+fn refresh_widget_after_style_editor_close() {
+    let hwnd = {
+        let state = lock_state();
+        state.as_ref().map(|s| s.hwnd.to_hwnd())
+    };
+    render_layered();
+    if let Some(hwnd) = hwnd {
+        let (embedded, frosted_active) = {
+            let state = lock_state();
+            state
+                .as_ref()
+                .map(|s| (s.embedded, s.composition_blur_active))
+                .unwrap_or((true, false))
+        };
+        if frosted_active {
+            sync_blur_backdrop_zorder(hwnd);
+        } else if !embedded {
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
+    }
+}
+
+fn apply_style_color(theme_is_dark: bool, target: StyleColorTarget, color: Color) {
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        s.styles.active_mut(theme_is_dark).set_color(target, color);
+    }
+}
+
+fn apply_frosted_strength(theme_is_dark: bool, strength: u8) {
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        s.styles.active_mut(theme_is_dark).panel_frosted_strength =
+            strength.min(FROSTED_STRENGTH_MAX);
+    }
+}
+
+unsafe fn create_editor_static(
+    parent: HWND,
+    text: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Option<HWND> {
+    let class = native_interop::wide_str("STATIC");
+    let text = native_interop::wide_str(text);
+    CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR::from_raw(class.as_ptr()),
+        PCWSTR::from_raw(text.as_ptr()),
+        WS_CHILD | WS_VISIBLE,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        HMENU::default(),
+        GetModuleHandleW(PCWSTR::null()).ok()?,
+        None,
+    )
+    .ok()
+}
+
+unsafe fn create_editor_trackbar(
+    parent: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    max_value: i32,
+    value: i32,
+) -> Option<HWND> {
+    let class = native_interop::wide_str("msctls_trackbar32");
+    let title = native_interop::wide_str("");
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR::from_raw(class.as_ptr()),
+        PCWSTR::from_raw(title.as_ptr()),
+        WS_CHILD | WS_VISIBLE,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        HMENU::default(),
+        GetModuleHandleW(PCWSTR::null()).ok()?,
+        None,
+    )
+    .ok()?;
+    let range = ((max_value as u32) << 16) as isize;
+    let _ = SendMessageW(hwnd, TBM_SETRANGE_MSG, WPARAM(1), LPARAM(range));
+    let _ = SendMessageW(
+        hwnd,
+        TBM_SETPOS_MSG,
+        WPARAM(1),
+        LPARAM(value.clamp(0, max_value) as isize),
+    );
+    Some(hwnd)
+}
+
+fn update_color_editor_labels(editor: ColorEditorState, color: Color) {
+    let values = [color.r, color.g, color.b, color.a];
+    unsafe {
+        for (label, value) in editor.value_labels.iter().zip(values) {
+            let text = native_interop::wide_str(&value.to_string());
+            let _ = SetWindowTextW(label.to_hwnd(), PCWSTR::from_raw(text.as_ptr()));
+        }
+        let hex = native_interop::wide_str(&color.to_hex_rgba());
+        let _ = SetWindowTextW(editor.hex_label.to_hwnd(), PCWSTR::from_raw(hex.as_ptr()));
+    }
+}
+
+unsafe fn color_editor_value(editor: &ColorEditorState) -> Color {
+    let values = editor.sliders.map(|slider| {
+        SendMessageW(slider.to_hwnd(), TBM_GETPOS_MSG, WPARAM(0), LPARAM(0)).0 as u8
+    });
+    Color::rgba(values[0], values[1], values[2], values[3])
+}
+
+unsafe extern "system" fn color_editor_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_HSCROLL => {
+            let editor = {
+                let state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().copied().filter(|s| s.hwnd.to_hwnd() == hwnd)
+            };
+            if let Some(editor) = editor {
+                let color = color_editor_value(&editor);
+                update_color_editor_labels(editor, color);
+                apply_style_color(editor.theme_is_dark, editor.target, color);
+                let code = (wparam.0 & 0xFFFF) as u16;
+                let final_frame = code == TB_ENDTRACK_CODE;
+                render_style_preview(final_frame);
+                if final_frame {
+                    save_state_settings();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            save_state_settings();
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            {
+                let mut state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
+                    *state = None;
+                }
+            }
+            refresh_widget_after_style_editor_close();
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn register_color_editor_class() {
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageColorEditor");
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(color_editor_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: CreateSolidBrush(COLORREF(native_interop::colorref(240, 240, 240))),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+    }
+}
+
+fn open_color_editor(owner: HWND, target: StyleColorTarget) {
+    close_style_editors();
+    register_color_editor_class();
+    let (theme_is_dark, language, color) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.is_dark, s.language, s.styles.active(s.is_dark).color(target))
+    };
+
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageColorEditor");
+        let title = format!(
+            "{} - {}",
+            if language == LanguageId::SimplifiedChinese { "样式" } else { "Style" },
+            style_color_target_label(target, language)
+        );
+        let title = native_interop::wide_str(&title);
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+            pt.x + 12,
+            pt.y + 12,
+            350,
+            245,
+            owner,
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) else {
+            return;
+        };
+
+        let channel_names = ["R", "G", "B", "A"];
+        let channel_values = [color.r, color.g, color.b, color.a];
+        let mut sliders = [SendHwnd(0); 4];
+        let mut labels = [SendHwnd(0); 4];
+        for index in 0..4 {
+            let y = 18 + index as i32 * 38;
+            let Some(_) = create_editor_static(hwnd, channel_names[index], 12, y + 5, 20, 22)
+            else {
+                let _ = DestroyWindow(hwnd);
+                return;
+            };
+            let Some(slider) = create_editor_trackbar(hwnd, 34, y, 230, 30, 255, channel_values[index] as i32)
+            else {
+                let _ = DestroyWindow(hwnd);
+                return;
+            };
+            let Some(value_label) =
+                create_editor_static(hwnd, &channel_values[index].to_string(), 274, y + 5, 50, 22)
+            else {
+                let _ = DestroyWindow(hwnd);
+                return;
+            };
+            sliders[index] = SendHwnd::from_hwnd(slider);
+            labels[index] = SendHwnd::from_hwnd(value_label);
+        }
+
+        let Some(hex_label) =
+            create_editor_static(hwnd, &color.to_hex_rgba(), 34, 172, 150, 24)
+        else {
+            let _ = DestroyWindow(hwnd);
+            return;
+        };
+        let hint = if language == LanguageId::SimplifiedChinese {
+            "拖动时实时预览，操作结束自动保存"
+        } else {
+            "Live preview while dragging; changes save automatically"
+        };
+        let _ = create_editor_static(hwnd, hint, 34, 196, 290, 22);
+
+        let editor = ColorEditorState {
+            hwnd: SendHwnd::from_hwnd(hwnd),
+            theme_is_dark,
+            target,
+            sliders,
+            value_labels: labels,
+            hex_label: SendHwnd::from_hwnd(hex_label),
+        };
+        {
+            let mut state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            *state = Some(editor);
+        }
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+fn update_blur_editor_label(editor: BlurEditorState, strength: u8, language: LanguageId) {
+    let text = if strength == 0 {
+        if language == LanguageId::SimplifiedChinese {
+            "0%（关闭）".to_string()
+        } else {
+            "0% (Off)".to_string()
+        }
+    } else {
+        format!("{}%", strength.min(FROSTED_STRENGTH_MAX))
+    };
+    unsafe {
+        let text = native_interop::wide_str(&text);
+        let _ = SetWindowTextW(editor.value_label.to_hwnd(), PCWSTR::from_raw(text.as_ptr()));
+    }
+}
+
+unsafe extern "system" fn blur_editor_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_HSCROLL => {
+            let editor = {
+                let state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().copied().filter(|s| s.hwnd.to_hwnd() == hwnd)
+            };
+            if let Some(editor) = editor {
+                let strength =
+                    SendMessageW(editor.slider.to_hwnd(), TBM_GETPOS_MSG, WPARAM(0), LPARAM(0)).0
+                        as u8;
+                let language = {
+                    let state = lock_state();
+                    state.as_ref().map(|s| s.language).unwrap_or(LanguageId::English)
+                };
+                update_blur_editor_label(editor, strength, language);
+                apply_frosted_strength(editor.theme_is_dark, strength);
+                let code = (wparam.0 & 0xFFFF) as u16;
+                let final_frame = code == TB_ENDTRACK_CODE;
+                render_style_preview(final_frame);
+                if final_frame {
+                    save_state_settings();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            save_state_settings();
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            {
+                let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
+                    *state = None;
+                }
+            }
+            refresh_widget_after_style_editor_close();
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn register_blur_editor_class() {
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageBlurEditor");
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(blur_editor_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: CreateSolidBrush(COLORREF(native_interop::colorref(240, 240, 240))),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+    }
+}
+
+fn open_blur_editor(owner: HWND) {
+    close_style_editors();
+    register_blur_editor_class();
+    let (theme_is_dark, language, strength) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (
+            s.is_dark,
+            s.language,
+            s.styles.active(s.is_dark).panel_frosted_strength,
+        )
+    };
+
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageBlurEditor");
+        let title = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "样式 - 磨砂强度"
+        } else {
+            "Style - Frosted intensity"
+        });
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+            pt.x + 12,
+            pt.y + 12,
+            360,
+            160,
+            owner,
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) else {
+            return;
+        };
+
+        let Some(slider) = create_editor_trackbar(
+            hwnd,
+            18,
+            20,
+            260,
+            32,
+            i32::from(FROSTED_STRENGTH_MAX),
+            i32::from(strength.min(FROSTED_STRENGTH_MAX)),
+        )
+        else {
+            let _ = DestroyWindow(hwnd);
+            return;
+        };
+        let Some(value_label) = create_editor_static(hwnd, "", 286, 25, 64, 22) else {
+            let _ = DestroyWindow(hwnd);
+            return;
+        };
+        let hint = if language == LanguageId::SimplifiedChinese {
+            "0%=关闭；1–100%=磨砂强度；拖动实时预览并自动保存"
+        } else {
+            "0%=Off; 1–100%=frosted intensity; live preview and auto-save"
+        };
+        let _ = create_editor_static(hwnd, hint, 18, 65, 330, 22);
+
+        let editor = BlurEditorState {
+            hwnd: SendHwnd::from_hwnd(hwnd),
+            theme_is_dark,
+            slider: SendHwnd::from_hwnd(slider),
+            value_label: SendHwnd::from_hwnd(value_label),
+        };
+        {
+            let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            *state = Some(editor);
+        }
+        update_blur_editor_label(editor, strength, language);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
 fn show_context_menu(hwnd: HWND) {
     unsafe {
         let (
@@ -2823,6 +4259,8 @@ fn show_context_menu(hwnd: HWND) {
             show_weekly_window,
             alert_threshold_percent,
             appearance_preset,
+            theme_mode,
+            active_frosted_strength,
             available_update_version,
         ) = {
             let state = lock_state();
@@ -2836,6 +4274,8 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_weekly_window,
                     s.alert_threshold_percent,
                     s.appearance_preset,
+                    s.theme_mode,
+                    s.styles.active(s.is_dark).panel_frosted_strength,
                     s.available_update_version.clone(),
                 ),
                 None => (
@@ -2847,6 +4287,8 @@ fn show_context_menu(hwnd: HWND) {
                     true,
                     0,
                     AppearancePreset::Compact,
+                    ThemeMode::System,
+                    0,
                     None,
                 ),
             }
@@ -3006,13 +4448,70 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(alert_label.as_ptr()),
         );
 
-        // Appearance submenu
-        let appearance_menu = CreatePopupMenu().unwrap();
-        let appearance_items = [
-            (IDM_APPEARANCE_COMPACT, AppearancePreset::Compact),
-            (IDM_APPEARANCE_MINIMAL, AppearancePreset::Minimal),
+        // Theme submenu. System mode selects the active dark/light style automatically.
+        let theme_menu = CreatePopupMenu().unwrap();
+        let theme_items = [
+            (
+                IDM_THEME_SYSTEM,
+                ThemeMode::System,
+                if language == LanguageId::SimplifiedChinese {
+                    "跟随系统"
+                } else {
+                    "Follow system"
+                },
+            ),
+            (
+                IDM_THEME_DARK,
+                ThemeMode::Dark,
+                if language == LanguageId::SimplifiedChinese {
+                    "深色"
+                } else {
+                    "Dark"
+                },
+            ),
+            (
+                IDM_THEME_LIGHT,
+                ThemeMode::Light,
+                if language == LanguageId::SimplifiedChinese {
+                    "浅色"
+                } else {
+                    "Light"
+                },
+            ),
         ];
-        for (id, preset) in appearance_items {
+        for (id, mode, label) in theme_items {
+            let label = native_interop::wide_str(label);
+            let flags = if mode == theme_mode {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            };
+            let _ = AppendMenuW(
+                theme_menu,
+                flags,
+                id as usize,
+                PCWSTR::from_raw(label.as_ptr()),
+            );
+        }
+        let theme_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "主题"
+        } else {
+            "Theme"
+        });
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP,
+            theme_menu.0 as usize,
+            PCWSTR::from_raw(theme_label.as_ptr()),
+        );
+
+        // Layout submenu (formerly Appearance).
+        let layout_menu = CreatePopupMenu().unwrap();
+        let layout_items = [
+            (IDM_LAYOUT_COMPACT, AppearancePreset::Compact),
+            (IDM_LAYOUT_MINIMAL, AppearancePreset::Minimal),
+        ];
+        for (id, preset) in layout_items {
             let label = native_interop::wide_str(preset.menu_label(language));
             let flags = if preset == appearance_preset {
                 MF_CHECKED
@@ -3020,23 +4519,223 @@ fn show_context_menu(hwnd: HWND) {
                 MENU_ITEM_FLAGS(0)
             };
             let _ = AppendMenuW(
-                appearance_menu,
+                layout_menu,
                 flags,
                 id as usize,
                 PCWSTR::from_raw(label.as_ptr()),
             );
         }
-        let appearance_label =
-            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "外观"
-            } else {
-                "Appearance"
-            });
+        let layout_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "排版"
+        } else {
+            "Layout"
+        });
         let _ = AppendMenuW(
             menu,
             MF_POPUP,
-            appearance_menu.0 as usize,
-            PCWSTR::from_raw(appearance_label.as_ptr()),
+            layout_menu.0 as usize,
+            PCWSTR::from_raw(layout_label.as_ptr()),
+        );
+
+        // Style submenu edits the currently active theme. Dark/light values are persisted separately.
+        let style_menu = CreatePopupMenu().unwrap();
+
+        let panel_menu = CreatePopupMenu().unwrap();
+        for (id, label) in [
+            (
+                IDM_STYLE_PANEL_BACKGROUND,
+                if language == LanguageId::SimplifiedChinese {
+                    "背景颜色..."
+                } else {
+                    "Background color..."
+                },
+            ),
+            (
+                IDM_STYLE_PANEL_BORDER,
+                if language == LanguageId::SimplifiedChinese {
+                    "边框颜色..."
+                } else {
+                    "Border color..."
+                },
+            ),
+        ] {
+            let label = native_interop::wide_str(label);
+            let _ = AppendMenuW(
+                panel_menu,
+                MENU_ITEM_FLAGS(0),
+                id as usize,
+                PCWSTR::from_raw(label.as_ptr()),
+            );
+        }
+        let blur_text = if language == LanguageId::SimplifiedChinese {
+            format!("磨砂强度... ({}%)", active_frosted_strength)
+        } else {
+            format!("Frosted intensity... ({}%)", active_frosted_strength)
+        };
+        let blur_label = native_interop::wide_str(&blur_text);
+        let _ = AppendMenuW(
+            panel_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_STYLE_PANEL_BLUR as usize,
+            PCWSTR::from_raw(blur_label.as_ptr()),
+        );
+        let panel_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "面板"
+        } else {
+            "Panel"
+        });
+        let _ = AppendMenuW(
+            style_menu,
+            MF_POPUP,
+            panel_menu.0 as usize,
+            PCWSTR::from_raw(panel_label.as_ptr()),
+        );
+
+        let text_menu = CreatePopupMenu().unwrap();
+        for (id, label) in [
+            (
+                IDM_STYLE_QUOTA_TYPE,
+                if language == LanguageId::SimplifiedChinese {
+                    "额度类型..."
+                } else {
+                    "Quota type..."
+                },
+            ),
+            (
+                IDM_STYLE_REMAINING,
+                if language == LanguageId::SimplifiedChinese {
+                    "剩余额度..."
+                } else {
+                    "Remaining quota..."
+                },
+            ),
+            (
+                IDM_STYLE_RESET_TIME,
+                if language == LanguageId::SimplifiedChinese {
+                    "重置时间..."
+                } else {
+                    "Reset time..."
+                },
+            ),
+            (
+                IDM_STYLE_ERROR,
+                if language == LanguageId::SimplifiedChinese {
+                    "异常状态..."
+                } else {
+                    "Error state..."
+                },
+            ),
+        ] {
+            let label = native_interop::wide_str(label);
+            let _ = AppendMenuW(
+                text_menu,
+                MENU_ITEM_FLAGS(0),
+                id as usize,
+                PCWSTR::from_raw(label.as_ptr()),
+            );
+        }
+        let text_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "文字颜色"
+        } else {
+            "Text colors"
+        });
+        let _ = AppendMenuW(
+            style_menu,
+            MF_POPUP,
+            text_menu.0 as usize,
+            PCWSTR::from_raw(text_label.as_ptr()),
+        );
+
+        let progress_menu = CreatePopupMenu().unwrap();
+        for (id, label) in [
+            (
+                IDM_STYLE_PROGRESS_HIGH,
+                if language == LanguageId::SimplifiedChinese {
+                    "充足额度颜色..."
+                } else {
+                    "High quota color..."
+                },
+            ),
+            (
+                IDM_STYLE_PROGRESS_MEDIUM,
+                if language == LanguageId::SimplifiedChinese {
+                    "中等额度颜色..."
+                } else {
+                    "Medium quota color..."
+                },
+            ),
+            (
+                IDM_STYLE_PROGRESS_LOW,
+                if language == LanguageId::SimplifiedChinese {
+                    "低额度颜色..."
+                } else {
+                    "Low quota color..."
+                },
+            ),
+            (
+                IDM_STYLE_PROGRESS_CONSUMED,
+                if language == LanguageId::SimplifiedChinese {
+                    "已消耗部分颜色..."
+                } else {
+                    "Consumed color..."
+                },
+            ),
+        ] {
+            let label = native_interop::wide_str(label);
+            let _ = AppendMenuW(
+                progress_menu,
+                MENU_ITEM_FLAGS(0),
+                id as usize,
+                PCWSTR::from_raw(label.as_ptr()),
+            );
+        }
+        let progress_label =
+            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+                "进度条"
+            } else {
+                "Progress bar"
+            });
+        let _ = AppendMenuW(
+            style_menu,
+            MF_POPUP,
+            progress_menu.0 as usize,
+            PCWSTR::from_raw(progress_label.as_ptr()),
+        );
+
+        let drag_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "拖拽点颜色..."
+        } else {
+            "Drag handle color..."
+        });
+        let _ = AppendMenuW(
+            style_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_STYLE_DRAG_HANDLE as usize,
+            PCWSTR::from_raw(drag_label.as_ptr()),
+        );
+        let _ = AppendMenuW(style_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let reset_style_label =
+            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+                "恢复当前主题默认样式"
+            } else {
+                "Reset current theme style"
+            });
+        let _ = AppendMenuW(
+            style_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_STYLE_RESET_CURRENT as usize,
+            PCWSTR::from_raw(reset_style_label.as_ptr()),
+        );
+        let style_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+            "样式"
+        } else {
+            "Style"
+        });
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP,
+            style_menu.0 as usize,
+            PCWSTR::from_raw(style_label.as_ptr()),
         );
 
         // Settings submenu
@@ -3168,7 +4867,7 @@ fn show_context_menu(hwnd: HWND) {
 }
 
 /// Paint for non-embedded fallback (normal WM_PAINT path)
-fn paint(hdc: HDC, hwnd: HWND) {
+fn paint(hdc: HDC, hwnd: HWND, composition_blur_active: bool) {
     let (
         is_dark,
         language,
@@ -3179,6 +4878,7 @@ fn paint(hdc: HDC, hwnd: HWND) {
         codex_weekly_text,
         show_session_window,
         show_weekly_window,
+        last_poll_ok,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -3192,25 +4892,16 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.codex_weekly_text.clone(),
                 s.show_session_window,
                 s.show_weekly_window,
+                s.last_poll_ok,
             ),
             None => return,
         }
     };
 
-    let track = if is_dark {
-        Color::from_hex("#363A3F")
-    } else {
-        Color::from_hex("#AAAAAA")
-    };
-    let text_color = if is_dark {
-        Color::from_hex("#A0A0A0")
-    } else {
-        Color::from_hex("#404040")
-    };
     let bg_color = if is_dark {
-        Color::from_hex("#1C1C1C")
+        Color::from_hex("#1C1C1CFF")
     } else {
-        Color::from_hex("#F3F3F3")
+        Color::from_hex("#F3F3F3FF")
     };
 
     unsafe {
@@ -3219,6 +4910,28 @@ fn paint(hdc: HDC, hwnd: HWND) {
         let width = client_rect.right - client_rect.left;
         let height = client_rect.bottom - client_rect.top;
         if width <= 0 || height <= 0 {
+            return;
+        }
+
+        if composition_blur_active {
+            // The Composition backdrop owns the blurred background. Draw only foreground content.
+            paint_content(
+                hdc,
+                width,
+                height,
+                is_dark,
+                &bg_color,
+                language,
+                strings,
+                codex_session_pct,
+                &codex_session_text,
+                codex_weekly_pct,
+                &codex_weekly_text,
+                show_session_window,
+                show_weekly_window,
+                last_poll_ok,
+                false,
+            );
             return;
         }
 
@@ -3231,8 +4944,6 @@ fn paint(hdc: HDC, hwnd: HWND) {
             height,
             is_dark,
             &bg_color,
-            &text_color,
-            &track,
             language,
             strings,
             codex_session_pct,
@@ -3241,6 +4952,8 @@ fn paint(hdc: HDC, hwnd: HWND) {
             &codex_weekly_text,
             show_session_window,
             show_weekly_window,
+            last_poll_ok,
+            true,
         );
         let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
         SelectObject(mem_dc, old_bmp);
@@ -3254,24 +4967,24 @@ fn draw_row(
     hdc: HDC,
     x: i32,
     y: i32,
-    is_dark: bool,
-    language: LanguageId,
-    text_color: &Color,
+    quota_type_color: &Color,
+    primary_color: &Color,
+    reset_color: &Color,
     label: &str,
     percent: f64,
     value_text: &str,
     track: &Color,
     label_width: i32,
     text_width: i32,
+    _panel_base: Color,
 ) {
     let seg_h = sc(SEGMENT_H);
     let preset = current_appearance_preset();
     let segment_count = row_bar_segment_count(preset);
     let metrics = preset.metrics();
-    let percentage_text_color = stable_percentage_text_color(is_dark);
 
     unsafe {
-        let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
+        let _ = SetTextColor(hdc, COLORREF(quota_type_color.to_colorref()));
         let mut label_wide: Vec<u16> = label.encode_utf16().collect();
         let mut label_rect = RECT {
             left: x,
@@ -3287,7 +5000,7 @@ fn draw_row(
         );
 
         let bar_x = x + sc(label_width) + sc(metrics.label_bar_gap);
-        let bar_color = quota_bar_color(is_dark, percent, language);
+        let bar_color = quota_bar_color(percent).blend_over(*track);
         draw_usage_bar(
             hdc,
             bar_x,
@@ -3297,7 +5010,8 @@ fn draw_row(
             value_text,
             &bar_color,
             track,
-            &percentage_text_color,
+            primary_color,
+            reset_color,
             text_width,
         );
     }
@@ -3313,7 +5027,8 @@ fn draw_usage_bar(
     text: &str,
     accent: &Color,
     track: &Color,
-    text_color: &Color,
+    primary_color: &Color,
+    reset_color: &Color,
     text_width: i32,
 ) {
     let seg_w = sc(SEGMENT_W);
@@ -3350,10 +5065,20 @@ fn draw_usage_bar(
         }
 
         let text_x = bar_x + progress_width + sc(metrics.bar_percent_gap);
-        draw_usage_value_text(hdc, text_x, y, seg_h, text, text_color, text_width);
+        draw_usage_value_text(
+            hdc,
+            text_x,
+            y,
+            seg_h,
+            text,
+            primary_color,
+            reset_color,
+            text_width,
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_usage_value_text(
     hdc: HDC,
     text_x: i32,
@@ -3361,6 +5086,7 @@ fn draw_usage_value_text(
     row_height: i32,
     text: &str,
     primary_color: &Color,
+    secondary_color: &Color,
     total_text_width: i32,
 ) {
     let preset = current_appearance_preset();
@@ -3422,11 +5148,6 @@ fn draw_usage_value_text(
                 PCWSTR::from_raw(font_name.as_ptr()),
             );
             SelectObject(hdc, secondary_font);
-            let secondary_color = if theme::is_dark_mode() {
-                Color::from_hex("#92979D")
-            } else {
-                Color::from_hex("#666666")
-            };
             let _ = SetTextColor(hdc, COLORREF(secondary_color.to_colorref()));
             let mut secondary_wide: Vec<u16> = secondary.encode_utf16().collect();
             let secondary_x = text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
@@ -3451,60 +5172,39 @@ fn draw_usage_value_text(
     }
 }
 
-fn draw_acrylic_panel(hdc: HDC, width: i32, height: i32, is_dark: bool, panel_radius: i32) {
-    // This intentionally simulates Acrylic with low-contrast solid colors rather than
-    // per-pixel translucency, preserving the existing ClearType rendering path.
-    let (border, fill) = if is_dark {
-        (Color::from_hex("#343B43"), Color::from_hex("#242A31"))
-    } else {
-        (Color::from_hex("#D4D9DF"), Color::from_hex("#EEF1F4"))
-    };
-
-    let outer_inset = sc(1);
+fn draw_panel(hdc: HDC, width: i32, height: i32, border: &Color, fill: &Color) {
+    let outer_inset = sc(1).max(1);
     let outer = RECT {
         left: outer_inset,
         top: outer_inset,
         right: width - outer_inset,
         bottom: height - outer_inset,
     };
-    let inner_inset = outer_inset + sc(1);
+    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
     let inner = RECT {
         left: inner_inset,
         top: inner_inset,
         right: width - inner_inset,
         bottom: height - inner_inset,
     };
+    unsafe {
+        let border_brush = CreateSolidBrush(COLORREF(border.to_colorref()));
+        FillRect(hdc, &outer, border_brush);
+        let _ = DeleteObject(border_brush);
 
-    if panel_radius <= 0 {
-        unsafe {
-            let border_brush = CreateSolidBrush(COLORREF(border.to_colorref()));
-            FillRect(hdc, &outer, border_brush);
-            let _ = DeleteObject(border_brush);
-
-            let fill_brush = CreateSolidBrush(COLORREF(fill.to_colorref()));
-            FillRect(hdc, &inner, fill_brush);
-            let _ = DeleteObject(fill_brush);
-        }
-        return;
+        let fill_brush = CreateSolidBrush(COLORREF(fill.to_colorref()));
+        FillRect(hdc, &inner, fill_brush);
+        let _ = DeleteObject(fill_brush);
     }
-
-    let radius = sc(panel_radius).max(sc(1));
-    draw_rounded_rect(hdc, &outer, &border, radius);
-    draw_rounded_rect(hdc, &inner, &fill, (radius - sc(1)).max(sc(1)));
 }
 
-fn draw_drag_handle(hdc: HDC, height: i32, is_dark: bool) {
+fn draw_drag_handle(hdc: HDC, height: i32, color: &Color) {
     let dot = sc(2).max(1);
     let gap_x = sc(1).max(1);
     let gap_y = sc(2).max(1);
     let matrix_h = dot * 3 + gap_y * 2;
     let origin_x = sc(DRAG_HANDLE_VISUAL_INSET_X);
     let origin_y = (height - matrix_h) / 2;
-    let color = if is_dark {
-        Color::from_hex("#69727C")
-    } else {
-        Color::from_hex("#8A929A")
-    };
 
     for row in 0..3 {
         for col in 0..2 {
@@ -3516,7 +5216,7 @@ fn draw_drag_handle(hdc: HDC, height: i32, is_dark: bool) {
                 right: left + dot,
                 bottom: top + dot,
             };
-            draw_rounded_rect(hdc, &rect, &color, sc(1).max(1));
+            draw_rounded_rect(hdc, &rect, color, sc(1).max(1));
         }
     }
 }
@@ -3540,6 +5240,16 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frosted_strength_maps_linearly_to_gaussian_radius() {
+        assert_eq!(blur_amount_for_strength(0), 0.0);
+        assert!((blur_amount_for_strength(1) - 0.2).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(10) - 2.0).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(50) - 10.0).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(100) - 20.0).abs() < f32::EPSILON);
+        assert!((blur_amount_for_strength(255) - 20.0).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn centers_widget_vertically() {
