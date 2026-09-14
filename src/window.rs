@@ -2106,9 +2106,6 @@ fn render_layered() {
 
     if native_acrylic_active {
         sync_acrylic_backdrop_geometry(hwnd);
-    } else if frosted_popup_session && !embedded {
-        // Owner relationship established during the lifecycle keeps this popup
-        // above the taskbar; ordinary repaints must not churn z-order.
     }
 }
 
@@ -2715,12 +2712,7 @@ fn position_at_taskbar() {
     let y = compute_anchor_y(anchor_top, anchor_height, widget_height);
     if embedded {
         let x = tray_left - taskbar_rect.left - widget_width - tray_offset;
-        if acrylic_active {
-            // Embedded + Acrylic should not normally occur, but preserve safe behavior.
-            native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
-        } else {
-            native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
-        }
+        native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
         diagnose::log(format!(
             "positioned embedded widget at x={x} y={} w={widget_width} h={widget_height}",
             y - taskbar_rect.top
