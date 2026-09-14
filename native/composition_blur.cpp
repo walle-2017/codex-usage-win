@@ -214,6 +214,7 @@ struct CompositionBlurContext
     wuc::Compositor compositor{nullptr};
     wucd::DesktopWindowTarget target{nullptr};
     wuc::ContainerVisual root{nullptr};
+    wuc::InsetClip root_clip{nullptr};
     wuc::SpriteVisual blur_visual{nullptr};
     wuc::SpriteVisual tint_visual{nullptr};
     wuc::CompositionEffectBrush blur_brush{nullptr};
@@ -248,20 +249,35 @@ struct CompositionBlurContext
         blur_brush.SetSourceParameter(L"backdrop", backdrop);
 
         root = compositor.CreateContainerVisual();
-        root.RelativeSizeAdjustment({1.0f, 1.0f});
+        root_clip = compositor.CreateInsetClip();
+        root.Clip(root_clip);
 
         blur_visual = compositor.CreateSpriteVisual();
-        blur_visual.RelativeSizeAdjustment({1.0f, 1.0f});
         blur_visual.Brush(blur_brush);
         root.Children().InsertAtBottom(blur_visual);
 
         tint_brush = compositor.CreateColorBrush(winrt::Windows::UI::Color{a, r, g, b});
         tint_visual = compositor.CreateSpriteVisual();
-        tint_visual.RelativeSizeAdjustment({1.0f, 1.0f});
         tint_visual.Brush(tint_brush);
         root.Children().InsertAtTop(tint_visual);
 
+        // Do not rely on DesktopWindowTarget's asynchronous resize propagation.
+        // Keep the entire visual tree explicitly bounded and clipped.
+        set_bounds(1.0f, 1.0f);
         target.Root(root);
+    }
+
+    void set_bounds(float width, float height)
+    {
+        const float safe_width = std::max(width, 1.0f);
+        const float safe_height = std::max(height, 1.0f);
+        const winrt::Windows::Foundation::Numerics::float2 size{
+            safe_width,
+            safe_height,
+        };
+        root.Size(size);
+        blur_visual.Size(size);
+        tint_visual.Size(size);
     }
 
     void set_blur(float amount)
@@ -301,6 +317,22 @@ extern "C" __declspec(dllexport) void* codex_composition_blur_create(
             a);
     } catch (...) {
         return nullptr;
+    }
+}
+
+extern "C" __declspec(dllexport) int codex_composition_blur_set_bounds(
+    void* context,
+    float width,
+    float height) noexcept
+{
+    if (!context || width <= 0.0f || height <= 0.0f) {
+        return 0;
+    }
+    try {
+        static_cast<CompositionBlurContext*>(context)->set_bounds(width, height);
+        return 1;
+    } catch (...) {
+        return 0;
     }
 }
 
