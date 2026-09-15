@@ -13,6 +13,7 @@
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.Graphics.Effects.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
@@ -264,6 +265,15 @@ struct CompositionBlurContext
         target.Root(root);
     }
 
+    void set_sample_scale_x(float scale_x)
+    {
+        const float safe_scale = std::clamp(scale_x, 0.25f, 4.0f);
+        // TEST-ONLY fault injection: stretch only the sampled/blurred backdrop
+        // inside the existing window bounds. The HWND, tint visual, foreground,
+        // and component width are intentionally left unchanged.
+        blur_visual.Scale({safe_scale, 1.0f, 1.0f});
+    }
+
     void set_blur(float amount)
     {
         blur_brush.Properties().InsertScalar(
@@ -301,6 +311,21 @@ extern "C" __declspec(dllexport) void* codex_composition_blur_create(
             a);
     } catch (...) {
         return nullptr;
+    }
+}
+
+extern "C" __declspec(dllexport) int codex_composition_blur_set_sample_scale_x(
+    void* context,
+    float scale_x) noexcept
+{
+    if (!context || scale_x <= 0.0f) {
+        return 0;
+    }
+    try {
+        static_cast<CompositionBlurContext*>(context)->set_sample_scale_x(scale_x);
+        return 1;
+    } catch (...) {
+        return 0;
     }
 }
 
