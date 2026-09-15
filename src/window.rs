@@ -183,6 +183,11 @@ static BLUR_BACKDROP_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None
 static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// TEST-ONLY fault injection for reproducing the historical cross-DPI blur tail.
+/// When moving from a higher-DPI taskbar to a lower-DPI taskbar, the backdrop
+/// deliberately keeps the source monitor's physical width.
+static REPRO_STALE_BACKDROP_SOURCE_DPI: AtomicU32 = AtomicU32::new(0);
+
 #[derive(Clone, Copy)]
 struct ColorEditorState {
     hwnd: SendHwnd,
@@ -777,6 +782,25 @@ fn select_taskbar_for_popup(requested_index: usize) -> bool {
     }
     let index = requested_index.min(taskbars.len().saturating_sub(1));
     let taskbar = taskbars[index];
+
+    let previous_taskbar = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| s.taskbar_hwnd)
+    };
+    let previous_dpi = previous_taskbar
+        .map(|hwnd| unsafe { GetDpiForWindow(hwnd) })
+        .unwrap_or(0);
+    let target_dpi = unsafe { GetDpiForWindow(taskbar.hwnd) };
+
+    if previous_dpi > 0 && target_dpi > 0 && previous_dpi > target_dpi {
+        REPRO_STALE_BACKDROP_SOURCE_DPI.store(previous_dpi, Ordering::Relaxed);
+        diagnose::log(&format!(
+            "REPRO fault enabled: backdrop keeps source DPI width ({} -> {})",
+            previous_dpi, target_dpi
+        ));
+    } else {
+        REPRO_STALE_BACKDROP_SOURCE_DPI.store(0, Ordering::Relaxed);
+    }
 
     let old_hook = {
         let mut state = lock_state();
@@ -1771,6 +1795,29 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
     }
 }
 
+fn repro_backdrop_width(width: i32) -> i32 {
+    let source_dpi = REPRO_STALE_BACKDROP_SOURCE_DPI.load(Ordering::Relaxed);
+    if source_dpi == 0 || width <= 0 {
+        return width;
+    }
+
+    let target_dpi = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .and_then(|s| s.taskbar_hwnd)
+            .map(|hwnd| unsafe { GetDpiForWindow(hwnd) })
+            .unwrap_or(0)
+    };
+    if target_dpi == 0 || source_dpi <= target_dpi {
+        return width;
+    }
+
+    // Deliberately reproduce a stale source-monitor physical width.
+    ((i64::from(width) * i64::from(source_dpi)) / i64::from(target_dpi))
+        .clamp(i64::from(width), i64::from(i32::MAX)) as i32
+}
+
 fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     bind_popup_windows_to_taskbar_owner(foreground_hwnd);
     let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
@@ -1784,6 +1831,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     if width <= 0 || height <= 0 {
         return;
     }
+    let backdrop_width = repro_backdrop_width(width);
 
     unsafe {
         let _ = SetWindowPos(
@@ -1791,7 +1839,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
             HWND_TOPMOST,
             rect.left,
             rect.top,
-            width,
+            backdrop_width,
             height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
@@ -1819,13 +1867,14 @@ fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
     if width <= 0 || height <= 0 {
         return;
     }
+    let backdrop_width = repro_backdrop_width(width);
     unsafe {
         let _ = SetWindowPos(
             backdrop_hwnd,
             HWND::default(),
             rect.left,
             rect.top,
-            width,
+            backdrop_width,
             height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
@@ -1851,6 +1900,7 @@ fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: 
         move_window_without_repaint(foreground_hwnd, x, y, width, height);
         return;
     };
+    let backdrop_width = repro_backdrop_width(width);
     unsafe {
         // Preserve existing owner/z-order. Re-ordering two top-level windows on
         // every mouse move causes visible DWM flicker.
@@ -1860,7 +1910,7 @@ fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: 
             HWND::default(),
             x,
             y,
-            width,
+            backdrop_width,
             height,
             flags,
         );
