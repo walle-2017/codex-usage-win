@@ -778,6 +778,15 @@ fn select_taskbar_for_popup(requested_index: usize) -> bool {
     let index = requested_index.min(taskbars.len().saturating_sub(1));
     let taskbar = taskbars[index];
 
+    let previous_taskbar_hwnd = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| s.taskbar_hwnd)
+    };
+    let previous_dpi = previous_taskbar_hwnd
+        .map(|hwnd| unsafe { GetDpiForWindow(hwnd) })
+        .unwrap_or(0);
+    let target_dpi = unsafe { GetDpiForWindow(taskbar.hwnd) };
+
     let old_hook = {
         let mut state = lock_state();
         state.as_mut().and_then(|s| s.win_event_hook.take())
@@ -812,6 +821,32 @@ fn select_taskbar_for_popup(requested_index: usize) -> bool {
     };
     if let Some(foreground_hwnd) = foreground_hwnd {
         if blur_active {
+            let context = {
+                let state = BLUR_BACKDROP_CONTEXT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *state
+            };
+            if let Some(context) = context {
+                // TEST-ONLY fault injection. Preserve all HWND/visual bounds and
+                // stretch only the sampled blur visual when moving high-DPI ->
+                // low-DPI. On the user's 225% -> 125% setup this is exactly 1.8x.
+                let sample_scale_x =
+                    if previous_dpi > 0 && target_dpi > 0 && previous_dpi > target_dpi {
+                        previous_dpi as f32 / target_dpi as f32
+                    } else {
+                        1.0
+                    };
+                let _ = native_interop::set_composition_blur_sample_scale_x(
+                    context,
+                    sample_scale_x,
+                );
+                diagnose::log(format!(
+                    "REPRO sample-scale fault: backdrop X scale {:.3} (DPI {} -> {})",
+                    sample_scale_x, previous_dpi, target_dpi
+                ));
+            }
+
             // Rebinding both top-level popups to another taskbar can change
             // their relative z-order. Reassert it once per taskbar switch, not
             // on every drag frame.
