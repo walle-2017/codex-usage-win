@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - repro/blur-tail-affine-sample
   pull_request:
     branches:
       - main
