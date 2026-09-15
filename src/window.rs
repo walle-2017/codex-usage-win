@@ -794,7 +794,7 @@ fn select_taskbar_for_popup(requested_index: usize) -> bool {
 
     if previous_dpi > 0 && target_dpi > 0 && previous_dpi > target_dpi {
         REPRO_STALE_BACKDROP_SOURCE_DPI.store(previous_dpi, Ordering::Relaxed);
-        diagnose::log(&format!(
+        diagnose::log(format!(
             "REPRO fault enabled: backdrop keeps source DPI width ({} -> {})",
             previous_dpi, target_dpi
         ));
