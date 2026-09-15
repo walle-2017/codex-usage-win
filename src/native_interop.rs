@@ -21,6 +21,10 @@ unsafe extern "C" {
         b: u8,
         a: u8,
     ) -> *mut std::ffi::c_void;
+    fn codex_composition_blur_set_sample_scale_x(
+        context: *mut std::ffi::c_void,
+        scale_x: f32,
+    ) -> i32;
     fn codex_composition_blur_set_amount(
         context: *mut std::ffi::c_void,
         blur_amount: f32,
@@ -280,6 +284,18 @@ pub fn create_composition_blur(
         )
     };
     (!raw.is_null()).then_some(raw as usize)
+}
+
+pub fn set_composition_blur_sample_scale_x(context: usize, scale_x: f32) -> bool {
+    if context == 0 || scale_x <= 0.0 {
+        return false;
+    }
+    unsafe {
+        codex_composition_blur_set_sample_scale_x(
+            context as *mut std::ffi::c_void,
+            scale_x,
+        ) != 0
+    }
 }
 
 pub fn set_composition_blur_amount(context: usize, blur_amount: f32) -> bool {
