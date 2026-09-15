@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - repro/blur-tail-backdrop-scale
   pull_request:
     branches:
       - main
