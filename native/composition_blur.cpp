@@ -8,11 +8,13 @@
 #include <windows.ui.composition.interop.h>
 
 #include <algorithm>
+#include <array>
 #include <string_view>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.Graphics.Effects.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
@@ -209,6 +211,151 @@ private:
     winrt::hstring m_name{L"Blur"};
 };
 
+struct AffineTransform2DEffect :
+    winrt::implements<
+        AffineTransform2DEffect,
+        wge::IGraphicsEffect,
+        wge::IGraphicsEffectSource,
+        awge::IGraphicsEffectD2D1Interop>
+{
+    winrt::hstring Name() const
+    {
+        return m_name;
+    }
+
+    void Name(winrt::hstring const& value)
+    {
+        m_name = value;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetEffectId(GUID* id) noexcept override
+    {
+        if (!id) {
+            return E_INVALIDARG;
+        }
+        *id = CLSID_D2D12DAffineTransform;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetNamedPropertyMapping(
+        LPCWSTR name,
+        UINT* index,
+        awge::GRAPHICS_EFFECT_PROPERTY_MAPPING* mapping) noexcept override
+    {
+        if (!name || !index || !mapping) {
+            return E_INVALIDARG;
+        }
+
+        const std::wstring_view property{name};
+        if (property == L"TransformMatrix") {
+            *index = D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX;
+            *mapping = awge::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT;
+            return S_OK;
+        }
+        if (property == L"InterpolationMode") {
+            *index = D2D1_2DAFFINETRANSFORM_PROP_INTERPOLATION_MODE;
+            *mapping = awge::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT;
+            return S_OK;
+        }
+        if (property == L"BorderMode") {
+            *index = D2D1_2DAFFINETRANSFORM_PROP_BORDER_MODE;
+            *mapping = awge::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT;
+            return S_OK;
+        }
+        if (property == L"Sharpness") {
+            *index = D2D1_2DAFFINETRANSFORM_PROP_SHARPNESS;
+            *mapping = awge::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT;
+            return S_OK;
+        }
+        return E_INVALIDARG;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetPropertyCount(UINT* count) noexcept override
+    {
+        if (!count) {
+            return E_INVALIDARG;
+        }
+        *count = 4;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetProperty(
+        UINT index,
+        ABI::Windows::Foundation::IPropertyValue** value) noexcept override
+    {
+        if (!value) {
+            return E_INVALIDARG;
+        }
+        *value = nullptr;
+
+        try {
+            wf::IPropertyValue property{nullptr};
+            switch (index) {
+            case D2D1_2DAFFINETRANSFORM_PROP_INTERPOLATION_MODE:
+                property = wf::PropertyValue::CreateUInt32(
+                               D2D1_2DAFFINETRANSFORM_INTERPOLATION_MODE_LINEAR)
+                               .as<wf::IPropertyValue>();
+                break;
+            case D2D1_2DAFFINETRANSFORM_PROP_BORDER_MODE:
+                property = wf::PropertyValue::CreateUInt32(D2D1_BORDER_MODE_HARD)
+                               .as<wf::IPropertyValue>();
+                break;
+            case D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX:
+                property = wf::PropertyValue::CreateSingleArray(transform_matrix)
+                               .as<wf::IPropertyValue>();
+                break;
+            case D2D1_2DAFFINETRANSFORM_PROP_SHARPNESS:
+                property = wf::PropertyValue::CreateSingle(1.0f)
+                               .as<wf::IPropertyValue>();
+                break;
+            default:
+                return E_BOUNDS;
+            }
+
+            *value = reinterpret_cast<ABI::Windows::Foundation::IPropertyValue*>(
+                winrt::detach_abi(property));
+            return S_OK;
+        } catch (...) {
+            return winrt::to_hresult();
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE GetSource(
+        UINT index,
+        awge::IGraphicsEffectSource** source) noexcept override
+    {
+        if (!source) {
+            return E_INVALIDARG;
+        }
+        *source = nullptr;
+        if (index != 0 || !Source) {
+            return E_BOUNDS;
+        }
+
+        try {
+            winrt::copy_to_abi(Source, *reinterpret_cast<void**>(source));
+            return S_OK;
+        } catch (...) {
+            return winrt::to_hresult();
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE GetSourceCount(UINT* count) noexcept override
+    {
+        if (!count) {
+            return E_INVALIDARG;
+        }
+        *count = 1;
+        return S_OK;
+    }
+
+    wge::IGraphicsEffectSource Source{nullptr};
+    std::array<float, 6> transform_matrix{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+
+private:
+    winrt::hstring m_name{L"Stretch"};
+};
+
 struct CompositionBlurContext
 {
     wuc::Compositor compositor{nullptr};
@@ -230,13 +377,18 @@ struct CompositionBlurContext
             reinterpret_cast<awucd::IDesktopWindowTarget**>(winrt::put_abi(target))));
 
         auto source_parameter = wuc::CompositionEffectSourceParameter(L"backdrop");
+
+        auto stretch = winrt::make_self<AffineTransform2DEffect>();
+        stretch->Source = source_parameter;
+
         auto effect = winrt::make_self<GaussianBlurEffect>();
         effect->blur_amount = std::clamp(blur_amount, 0.0f, 250.0f);
-        effect->Source = source_parameter;
+        effect->Source = stretch.as<wge::IGraphicsEffectSource>();
 
         auto animatable_properties =
             winrt::single_threaded_vector<winrt::hstring>();
         animatable_properties.Append(L"Blur.BlurAmount");
+        animatable_properties.Append(L"Stretch.TransformMatrix");
         auto factory = compositor.CreateEffectFactory(
             effect.as<wge::IGraphicsEffect>(),
             animatable_properties);
@@ -262,6 +414,18 @@ struct CompositionBlurContext
         root.Children().InsertAtTop(tint_visual);
 
         target.Root(root);
+    }
+
+    void set_sample_scale_x(float scale_x)
+    {
+        const float safe_scale = std::clamp(scale_x, 0.25f, 4.0f);
+        blur_brush.Properties().InsertMatrix3x2(
+            L"Stretch.TransformMatrix",
+            winrt::Windows::Foundation::Numerics::float3x2{
+                safe_scale, 0.0f,
+                0.0f, 1.0f,
+                0.0f, 0.0f
+            });
     }
 
     void set_blur(float amount)
@@ -301,6 +465,21 @@ extern "C" __declspec(dllexport) void* codex_composition_blur_create(
             a);
     } catch (...) {
         return nullptr;
+    }
+}
+
+extern "C" __declspec(dllexport) int codex_composition_blur_set_sample_scale_x(
+    void* context,
+    float scale_x) noexcept
+{
+    if (!context || scale_x <= 0.0f) {
+        return 0;
+    }
+    try {
+        static_cast<CompositionBlurContext*>(context)->set_sample_scale_x(scale_x);
+        return 1;
+    } catch (...) {
+        return 0;
     }
 }
 
