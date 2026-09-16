@@ -156,11 +156,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         };
         let _ = RegisterClassExW(&wc);
 
-        let title = native_interop::wide_str(if snapshot.language == LanguageId::SimplifiedChinese {
-            "样式设置"
-        } else {
-            "Style settings"
-        });
+        let title = native_interop::wide_str("Codex Usage Win");
         let hwnd = match CreateWindowExW(
             WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
