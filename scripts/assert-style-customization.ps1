@@ -18,10 +18,10 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
     $windowProduction -notmatch 'IDM_THEME_LIGHT') {
     throw 'Top-level theme menu commands are missing.'
 }
-if ($windowProduction -notmatch '"排版"' -or
-    $windowProduction -notmatch '"主题"' -or
+if ($styleWindow -notmatch '"排版"' -or
+    $styleWindow -notmatch '"主题"' -or
     $windowProduction -notmatch '"样式设置\.\.\."') {
-    throw 'Chinese top-level Theme/Layout/Style Settings labels must be present.'
+    throw 'Unified panel Theme/Layout labels and the Style Settings menu entry must be present.'
 }
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
@@ -32,6 +32,21 @@ if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'Section::Progress' -or
     $styleWindow -notmatch 'Section::Interaction') {
     throw 'Unified style settings panel contract is missing.'
+}
+if ($windowProduction -match 'AppendMenuW\([\s\S]{0,180}theme_menu' -or
+    $windowProduction -match 'AppendMenuW\([\s\S]{0,180}layout_menu') {
+    throw 'Theme and Layout must not be duplicated in the taskbar context menu.'
+}
+if ($styleWindow -match '实时预览' -or $styleWindow -match 'Live preview') {
+    throw 'The settings-panel preview card must be removed; the taskbar widget is the live preview.'
+}
+if ($styleWindow -match 'msctls_trackbar32' -or $styleWindow -match 'WM_HSCROLL') {
+    throw 'Unified style panel must use self-drawn sliders instead of white native trackbars.'
+}
+if ($styleWindow -notmatch 'WM_APP \+ 120' -or
+    $styleWindow -notmatch 'WM_APP \+ 123' -or
+    $styleWindow -notmatch 'draw_slider\(') {
+    throw 'Style panel messages must use a collision-free WM_APP range and self-drawn sliders.'
 }
 if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -notmatch 'pub\s+light:\s+ThemeStyle') {
     throw 'Dark and light theme styles must be stored separately.'
