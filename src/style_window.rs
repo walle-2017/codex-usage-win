@@ -306,7 +306,7 @@ fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     let index = match preset {
-        AppearancePreset::Compact => 0,
+        AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
     };
     rect(hwnd, 540 + index * 104, 50, 636 + index * 104, 84)
@@ -364,7 +364,7 @@ fn editor_box_rect(hwnd: HWND) -> RECT {
 }
 
 fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 358 + channel_index as i32 * 26;
+    let top = 348 + channel_index as i32 * 26;
     rect(hwnd, 310, top, 700, top + 4)
 }
 
@@ -379,7 +379,7 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 310, 390, 700, 394)
+    rect(hwnd, 310, 366, 700, 370)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -564,11 +564,11 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            for preset in [AppearancePreset::Compact, AppearancePreset::Minimal] {
+            for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
                 if pt_in_rect(layout_rect(hwnd, preset), x, y) {
                     send_parent(
                         WM_STYLE_LAYOUT_CHANGE,
-                        if preset == AppearancePreset::Compact { 0 } else { 1 },
+                        if preset == AppearancePreset::Default { 0 } else { 1 },
                         0,
                     );
                     return LRESULT(0);
@@ -792,7 +792,7 @@ unsafe fn paint(hwnd: HWND) {
         );
     }
 
-    for preset in [AppearancePreset::Compact, AppearancePreset::Minimal] {
+    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
         let selected = snapshot.appearance_preset == preset;
         draw_segment(
             hdc,
@@ -801,9 +801,9 @@ unsafe fn paint(hwnd: HWND) {
             if selected { accent } else { card },
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             match (snapshot.language == LanguageId::SimplifiedChinese, preset) {
-                (true, AppearancePreset::Compact) => "紧凑",
+                (true, AppearancePreset::Default) => "默认",
                 (true, AppearancePreset::Minimal) => "极简",
-                (false, AppearancePreset::Compact) => "Compact",
+                (false, AppearancePreset::Default) => "Default",
                 (false, AppearancePreset::Minimal) => "Minimal",
             },
         );
@@ -952,17 +952,9 @@ unsafe fn paint_editor(
     match editor {
         EditorSelection::Color(target) => {
             let color = snapshot.active_style.color(target);
-            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-            draw_text(
-                hdc,
-                "RGBA",
-                rect(hwnd, 194, 334, 260, 354),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-
             let values = [color.r, color.g, color.b, color.a];
             for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
-                let top = 348 + index as i32 * 26;
+                let top = 338 + index as i32 * 26;
                 let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
                 draw_text(
                     hdc,
@@ -987,20 +979,20 @@ unsafe fn paint_editor(
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
-        }
-        EditorSelection::Blur => {
-            let value = snapshot.active_style.panel_frosted_strength;
             let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
             draw_text(
                 hdc,
                 if snapshot.language == LanguageId::SimplifiedChinese {
-                    "强度调节"
+                    "R/G/B 调整颜色，A 调整透明度；拖动时任务栏组件实时生效，释放后自动保存"
                 } else {
-                    "Intensity"
+                    "R/G/B adjust color, A adjusts opacity; the taskbar widget updates live and saves on release"
                 },
-                rect(hwnd, 194, 344, 300, 368),
+                rect(hwnd, 196, 446, 770, 468),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
+        }
+        EditorSelection::Blur => {
+            let value = snapshot.active_style.panel_frosted_strength;
             draw_slider(
                 hdc,
                 hwnd,
@@ -1014,18 +1006,18 @@ unsafe fn paint_editor(
             draw_text(
                 hdc,
                 &format!("{}%", value),
-                rect(hwnd, 716, 378, 770, 406),
+                rect(hwnd, 716, 354, 770, 382),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
             let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
             draw_text(
                 hdc,
                 if snapshot.language == LanguageId::SimplifiedChinese {
-                    "0%=关闭；拖动时任务栏组件实时预览，释放后自动保存"
+                    "0% 关闭磨砂；1–100% 调整模糊强度。拖动时任务栏组件实时生效，释放后自动保存"
                 } else {
-                    "0%=Off; taskbar widget previews live while dragging; saves on release"
+                    "0% turns blur off; 1–100% adjusts blur strength. The taskbar widget updates live and saves on release"
                 },
-                rect(hwnd, 196, 420, 760, 450),
+                rect(hwnd, 196, 414, 770, 446),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
