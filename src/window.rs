@@ -128,7 +128,7 @@ const IDM_ALERT_10: u16 = 81;
 const IDM_ALERT_20: u16 = 82;
 const IDM_ALERT_30: u16 = 83;
 
-const IDM_LAYOUT_COMPACT: u16 = 91;
+const IDM_LAYOUT_DEFAULT: u16 = 91;
 const IDM_LAYOUT_MINIMAL: u16 = 92;
 const IDM_THEME_SYSTEM: u16 = 93;
 const IDM_THEME_DARK: u16 = 94;
@@ -410,7 +410,7 @@ impl Default for SettingsFile {
             taskbar_index: 0,
             poll_interval_ms: default_poll_interval(),
             language: None,
-            appearance_preset: AppearancePreset::Compact,
+            appearance_preset: AppearancePreset::Default,
             theme_mode: ThemeMode::System,
             styles: StyleSettings::default(),
             show_session_window: true,
@@ -1191,7 +1191,7 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
         state
             .as_ref()
             .map(widget_height_for_state)
-            .unwrap_or(sc(AppearancePreset::Compact.metrics().widget_height))
+            .unwrap_or(sc(AppearancePreset::Default.metrics().widget_height))
     };
     let hit_top = (widget_height - hit_h).max(0) / 2;
     client_x >= 0
@@ -1248,7 +1248,7 @@ fn current_style_color(target: StyleColorTarget) -> Color {
 
 fn row_bar_segment_count(preset: AppearancePreset) -> i32 {
     match preset {
-        AppearancePreset::Compact => 8,
+        AppearancePreset::Default => 8,
         AppearancePreset::Minimal => 6,
     }
 }
@@ -1285,7 +1285,7 @@ fn total_widget_width_for_preset(language: LanguageId, preset: AppearancePreset)
 }
 
 fn total_widget_width_for(language: LanguageId) -> i32 {
-    total_widget_width_for_preset(language, AppearancePreset::Compact)
+    total_widget_width_for_preset(language, AppearancePreset::Default)
 }
 
 fn total_widget_width_for_state(state: &AppState) -> i32 {
@@ -1298,7 +1298,7 @@ fn total_widget_width() -> i32 {
         state
             .as_ref()
             .map(|s| (s.language, s.appearance_preset))
-            .unwrap_or((LanguageId::English, AppearancePreset::Compact))
+            .unwrap_or((LanguageId::English, AppearancePreset::Default))
     };
     total_widget_width_for_preset(language, preset)
 }
@@ -1398,7 +1398,7 @@ pub fn run() {
             0,
             0,
             total_widget_width_for(language),
-            sc(AppearancePreset::Compact.metrics().widget_height),
+            sc(AppearancePreset::Default.metrics().widget_height),
             HWND::default(),
             HMENU::default(),
             hinstance,
@@ -2115,7 +2115,7 @@ fn render_layered() {
         state
             .as_ref()
             .map(widget_height_for_state)
-            .unwrap_or(sc(AppearancePreset::Compact.metrics().widget_height))
+            .unwrap_or(sc(AppearancePreset::Default.metrics().widget_height))
     };
     let bg_color = if is_dark {
         Color::from_hex("#1C1C1CFF")
@@ -2843,7 +2843,7 @@ fn position_at_taskbar() {
         state
             .as_ref()
             .map(widget_height_for_state)
-            .unwrap_or(sc(AppearancePreset::Compact.metrics().widget_height))
+            .unwrap_or(sc(AppearancePreset::Default.metrics().widget_height))
     };
     let y = compute_anchor_y(anchor_top, anchor_height, widget_height);
     if embedded {
@@ -3639,11 +3639,11 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     style_window::sync(style_settings_snapshot());
                 }
-                IDM_LAYOUT_COMPACT | IDM_LAYOUT_MINIMAL => {
+                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL => {
                     let preset = if id == IDM_LAYOUT_MINIMAL {
                         AppearancePreset::Minimal
                     } else {
-                        AppearancePreset::Compact
+                        AppearancePreset::Default
                     };
                     {
                         let mut state = lock_state();
@@ -3808,7 +3808,7 @@ unsafe extern "system" fn wnd_proc(
                     s.appearance_preset = if wparam.0 == 1 {
                         AppearancePreset::Minimal
                     } else {
-                        AppearancePreset::Compact
+                        AppearancePreset::Default
                     };
                     refresh_usage_texts(s);
                 }
@@ -4353,7 +4353,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             language: LanguageId::English,
             theme_mode: ThemeMode::System,
             is_dark: true,
-            appearance_preset: AppearancePreset::Compact,
+            appearance_preset: AppearancePreset::Default,
             active_style: ThemeStyle::dark_default(),
         }
     }
@@ -5119,9 +5119,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_settings_default_to_compact_appearance() {
+    fn legacy_settings_default_to_default_appearance() {
         let settings: SettingsFile = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.appearance_preset, AppearancePreset::Compact);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
     }
 
     #[test]
