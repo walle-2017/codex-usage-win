@@ -70,6 +70,25 @@ if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'update_color_from_numeric_edit\(') {
     throw 'RGBA values must use linked numeric input controls.'
 }
+if ($styleWindow -match 'WS_BORDER' -or
+    $styleWindow -notmatch 'numeric_edit_frame_rect\(' -or
+    $styleWindow -notmatch 'focused_numeric_edit' -or
+    $styleWindow -notmatch 'paint_numeric_edit_frames\(') {
+    throw 'RGBA numeric inputs must use the custom focus-aware borderless style.'
+}
+if ($styleWindow -notmatch 'WINDOW_HEIGHT_BLUR' -or
+    $styleWindow -notmatch 'resize_for_editor\(' -or
+    $styleWindow -notmatch '"当前强度"' -or
+    $styleWindow -notmatch '"关闭 0%"' -or
+    $styleWindow -notmatch '"最强 100%"') {
+    throw 'Blur editor must use the compact dynamic-height layout with status labels.'
+}
+if ($styleWindow -notmatch 'WS_CLIPCHILDREN' -or
+    $styleWindow -notmatch 'CreateCompatibleDC' -or
+    $styleWindow -notmatch 'CreateCompatibleBitmap' -or
+    $styleWindow -notmatch 'BitBlt') {
+    throw 'Style panel must use clipped child controls and double-buffered painting to reduce flicker.'
+}
 if ($styleWindow -notmatch 'WM_APP \+ 120' -or
     $styleWindow -notmatch 'WM_APP \+ 123' -or
     $styleWindow -notmatch 'draw_slider\(') {
