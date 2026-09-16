@@ -8,6 +8,7 @@ mod native_interop;
 mod poller;
 mod system_proxy;
 mod style;
+mod style_window;
 mod theme;
 mod tray_icon;
 mod updater;
