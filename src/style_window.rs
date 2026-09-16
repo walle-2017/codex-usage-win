@@ -25,11 +25,14 @@ pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
 
 const WINDOW_CLASS: &str = "CodexUsageStyleSettingsV1";
 const WINDOW_WIDTH: i32 = 820;
-const WINDOW_HEIGHT: i32 = 570;
+const WINDOW_HEIGHT_COLOR: i32 = 570;
+const WINDOW_HEIGHT_BLUR: i32 = 500;
 const ID_EDIT_R: u16 = 300;
 const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
 const ID_EDIT_A: u16 = 303;
+const EN_SETFOCUS_CODE: u16 = 0x0100;
+const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
 const EM_SETLIMITTEXT_MSG: u32 = 0x00C5;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
@@ -102,6 +105,7 @@ struct PanelState {
     pressed: Option<HitTarget>,
     tracking_mouse_leave: bool,
     numeric_edits: [SendHwnd; 4],
+    focused_numeric_edit: Option<usize>,
     syncing_numeric_edits: bool,
     edit_brush: isize,
     font: isize,
@@ -161,11 +165,11 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION,
+            WS_OVERLAPPED | WS_CAPTION | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
-            WINDOW_HEIGHT,
+            WINDOW_HEIGHT_COLOR,
             parent,
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
@@ -183,7 +187,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             0,
             0,
             s(WINDOW_WIDTH),
-            s(WINDOW_HEIGHT),
+            s(WINDOW_HEIGHT_COLOR),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
@@ -220,7 +224,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 WINDOW_STYLE(
                     WS_CHILD.0
                         | WS_VISIBLE.0
-                        | WS_BORDER.0
                         | ES_NUMBER as u32
                         | ES_CENTER as u32
                         | ES_AUTOHSCROLL as u32,
@@ -257,9 +260,9 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let numeric_edits = numeric_edits_raw.map(SendHwnd::from_hwnd);
         let edit_background = if snapshot.is_dark {
-            Color::from_hex("#292C31FF")
+            Color::from_hex("#20242AFF")
         } else {
-            Color::from_hex("#FFFFFFFF")
+            Color::from_hex("#F4F6F8FF")
         };
         let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
 
@@ -276,6 +279,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 pressed: None,
                 tracking_mouse_leave: false,
                 numeric_edits,
+                focused_numeric_edit: None,
                 syncing_numeric_edits: false,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
@@ -297,9 +301,9 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         };
         s.snapshot = snapshot;
         let background = if s.snapshot.is_dark {
-            Color::from_hex("#292C31FF")
+            Color::from_hex("#20242AFF")
         } else {
-            Color::from_hex("#FFFFFFFF")
+            Color::from_hex("#F4F6F8FF")
         };
         unsafe {
             if s.edit_brush != 0 {
