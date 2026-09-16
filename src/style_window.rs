@@ -286,6 +286,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             });
         }
 
+        resize_for_editor(hwnd);
         layout_numeric_edits(hwnd);
         sync_numeric_edits();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -811,6 +812,7 @@ fn set_section(section: Section) {
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
+    resize_for_editor(hwnd);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     unsafe {
@@ -828,6 +830,7 @@ fn select_editor(editor: EditorSelection) {
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
+    resize_for_editor(hwnd);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     unsafe {
@@ -1088,17 +1091,42 @@ unsafe extern "system" fn wnd_proc(
         WM_COMMAND => {
             let control_id = (wparam.0 & 0xFFFF) as u16;
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
-            if notification == EN_CHANGE_CODE {
-                let channel = match control_id {
-                    ID_EDIT_R => Some(0),
-                    ID_EDIT_G => Some(1),
-                    ID_EDIT_B => Some(2),
-                    ID_EDIT_A => Some(3),
-                    _ => None,
-                };
-                if let Some(channel) = channel {
-                    update_color_from_numeric_edit(channel);
-                    return LRESULT(0);
+            let channel = match control_id {
+                ID_EDIT_R => Some(0),
+                ID_EDIT_G => Some(1),
+                ID_EDIT_B => Some(2),
+                ID_EDIT_A => Some(3),
+                _ => None,
+            };
+            if let Some(channel) = channel {
+                match notification {
+                    EN_CHANGE_CODE => {
+                        update_color_from_numeric_edit(channel);
+                        return LRESULT(0);
+                    }
+                    EN_SETFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.focused_numeric_edit = Some(channel);
+                            }
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    EN_KILLFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                if s.focused_numeric_edit == Some(channel) {
+                                    s.focused_numeric_edit = None;
+                                }
+                            }
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    _ => {}
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1113,9 +1141,9 @@ unsafe extern "system" fn wnd_proc(
                 (s.snapshot.is_dark, s.edit_brush)
             };
             let background = if is_dark {
-                Color::from_hex("#292C31FF")
+                Color::from_hex("#20242AFF")
             } else {
-                Color::from_hex("#FFFFFFFF")
+                Color::from_hex("#F4F6F8FF")
             };
             let foreground = if is_dark {
                 Color::from_hex("#F2F3F5FF")
