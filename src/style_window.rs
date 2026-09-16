@@ -24,6 +24,12 @@ pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
 const WINDOW_CLASS: &str = "CodexUsageStyleSettingsV1";
 const WINDOW_WIDTH: i32 = 820;
 const WINDOW_HEIGHT: i32 = 570;
+const ID_EDIT_R: u16 = 300;
+const ID_EDIT_G: u16 = 301;
+const ID_EDIT_B: u16 = 302;
+const ID_EDIT_A: u16 = 303;
+const EN_CHANGE_CODE: u16 = 0x0300;
+const EM_SETLIMITTEXT_MSG: u32 = 0x00C5;
 
 #[derive(Clone)]
 pub struct StyleWindowSnapshot {
@@ -57,6 +63,16 @@ enum SliderKind {
     Blur,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HitTarget {
+    Theme(ThemeMode),
+    Layout(AppearancePreset),
+    Section(Section),
+    Row(EditorSelection),
+    Reset,
+    Close,
+}
+
 #[derive(Clone, Copy)]
 struct SendHwnd(isize);
 
@@ -79,6 +95,12 @@ struct PanelState {
     section: Section,
     editor: EditorSelection,
     dragging_slider: Option<SliderKind>,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    tracking_mouse_leave: bool,
+    numeric_edits: [SendHwnd; 4],
+    syncing_numeric_edits: bool,
+    edit_brush: isize,
     font: isize,
 }
 
@@ -130,7 +152,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            WS_OVERLAPPED | WS_CAPTION,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
@@ -174,6 +196,64 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             PCWSTR::from_raw(font_name.as_ptr()),
         );
 
+        let edit_class = native_interop::wide_str("EDIT");
+        let empty = native_interop::wide_str("");
+        let mut numeric_edits_raw = [HWND::default(); 4];
+        for (index, id) in [ID_EDIT_R, ID_EDIT_G, ID_EDIT_B, ID_EDIT_A]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let edit = match CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PCWSTR::from_raw(edit_class.as_ptr()),
+                PCWSTR::from_raw(empty.as_ptr()),
+                WINDOW_STYLE(
+                    WS_CHILD.0
+                        | WS_VISIBLE.0
+                        | WS_BORDER.0
+                        | ES_NUMBER.0 as u32
+                        | ES_CENTER.0 as u32
+                        | ES_AUTOHSCROLL.0 as u32,
+                ),
+                0,
+                0,
+                s(54),
+                s(22),
+                hwnd,
+                HMENU(id as usize as *mut _),
+                GetModuleHandleW(PCWSTR::null()).unwrap(),
+                None,
+            ) {
+                Ok(edit) => edit,
+                Err(_) => {
+                    let _ = DestroyWindow(hwnd);
+                    let _ = DeleteObject(font);
+                    return;
+                }
+            };
+            let _ = SendMessageW(
+                edit,
+                WM_SETFONT,
+                WPARAM(font.0 as usize),
+                LPARAM(1),
+            );
+            let _ = SendMessageW(
+                edit,
+                EM_SETLIMITTEXT_MSG,
+                WPARAM(3),
+                LPARAM(0),
+            );
+            numeric_edits_raw[index] = edit;
+        }
+        let numeric_edits = numeric_edits_raw.map(SendHwnd::from_hwnd);
+        let edit_background = if snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else {
+            Color::from_hex("#FFFFFFFF")
+        };
+        let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
+
         {
             let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
             *state = Some(PanelState {
@@ -183,10 +263,18 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 section: Section::Panel,
                 editor: EditorSelection::Color(StyleColorTarget::PanelBackground),
                 dragging_slider: None,
+                hovered: None,
+                pressed: None,
+                tracking_mouse_leave: false,
+                numeric_edits,
+                syncing_numeric_edits: false,
+                edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
             });
         }
 
+        layout_numeric_edits(hwnd);
+        sync_numeric_edits();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
     }
