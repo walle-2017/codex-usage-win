@@ -46,6 +46,30 @@ if ($styleWindow -match 'msctls_trackbar32' -or $styleWindow -match 'WM_HSCROLL'
 if ($styleWindow -match '"RGBA"' -or $styleWindow -match '"强度调节"' -or $styleWindow -match '"Intensity"') {
     throw 'Redundant RGBA/intensity editor headings must stay removed.'
 }
+if ($styleWindow -match 'R/G/B 调整颜色' -or
+    $styleWindow -match 'R/G/B adjust color' -or
+    $styleWindow -match '0% 关闭磨砂' -or
+    $styleWindow -match '0% turns blur off') {
+    throw 'Adjustment help text must not be shown in the style panel.'
+}
+if ($styleWindow -notmatch 'HitTarget' -or
+    $styleWindow -notmatch 'hovered:s*Option<HitTarget>' -or
+    $styleWindow -notmatch 'pressed:s*Option<HitTarget>' -or
+    $styleWindow -notmatch 'button_background\(' -or
+    $styleWindow -notmatch 'TrackMouseEvent') {
+    throw 'All style-panel buttons must expose hover and pressed feedback.'
+}
+if ($styleWindow -match 'WS_SYSMENU' -or
+    $styleWindow -notmatch 'WM_CLOSEs*=>s*LRESULT\(0\)') {
+    throw 'Style panel must not expose a title-bar close button; only the lower Close button may close it.'
+}
+if ($styleWindow -notmatch 'ID_EDIT_R' -or
+    $styleWindow -notmatch 'ES_NUMBER' -or
+    $styleWindow -notmatch 'EN_CHANGE_CODE' -or
+    $styleWindow -notmatch 'sync_numeric_edits\(' -or
+    $styleWindow -notmatch 'update_color_from_numeric_edit\(') {
+    throw 'RGBA values must use linked numeric input controls.'
+}
 if ($styleWindow -notmatch 'WM_APP \+ 120' -or
     $styleWindow -notmatch 'WM_APP \+ 123' -or
     $styleWindow -notmatch 'draw_slider\(') {
@@ -230,9 +254,7 @@ if ($windowProduction -match 'capture_taskbar_background' -or
     throw 'Taskbar screenshot/software blur must not be used for frosted glass.'
 }
 if ($styleWindow -notmatch '"磨砂强度"' -or
-    $styleWindow -notmatch '"Frosted intensity"' -or
-    $styleWindow -notmatch '0% 关闭磨砂' -or
-    $styleWindow -notmatch '0% turns blur off') {
+    $styleWindow -notmatch '"Frosted intensity"') {
     throw 'Unified frosted-intensity UI labels are missing.'
 }
 if ($windowProduction -notmatch 'reset_active\(s\.is_dark\)') {
