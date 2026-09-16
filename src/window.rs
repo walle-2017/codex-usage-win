@@ -4369,8 +4369,6 @@ fn show_context_menu(hwnd: HWND) {
             show_session_window,
             show_weekly_window,
             alert_threshold_percent,
-            appearance_preset,
-            theme_mode,
             available_update_version,
         ) = {
             let state = lock_state();
@@ -4383,8 +4381,6 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_session_window,
                     s.show_weekly_window,
                     s.alert_threshold_percent,
-                    s.appearance_preset,
-                    s.theme_mode,
                     s.available_update_version.clone(),
                 ),
                 None => (
@@ -4395,8 +4391,6 @@ fn show_context_menu(hwnd: HWND) {
                     true,
                     true,
                     0,
-                    AppearancePreset::Compact,
-                    ThemeMode::System,
                     None,
                 ),
             }
@@ -4554,95 +4548,6 @@ fn show_context_menu(hwnd: HWND) {
             MF_POPUP,
             alert_menu.0 as usize,
             PCWSTR::from_raw(alert_label.as_ptr()),
-        );
-
-        // Theme submenu. System mode selects the active dark/light style automatically.
-        let theme_menu = CreatePopupMenu().unwrap();
-        let theme_items = [
-            (
-                IDM_THEME_SYSTEM,
-                ThemeMode::System,
-                if language == LanguageId::SimplifiedChinese {
-                    "跟随系统"
-                } else {
-                    "Follow system"
-                },
-            ),
-            (
-                IDM_THEME_DARK,
-                ThemeMode::Dark,
-                if language == LanguageId::SimplifiedChinese {
-                    "深色"
-                } else {
-                    "Dark"
-                },
-            ),
-            (
-                IDM_THEME_LIGHT,
-                ThemeMode::Light,
-                if language == LanguageId::SimplifiedChinese {
-                    "浅色"
-                } else {
-                    "Light"
-                },
-            ),
-        ];
-        for (id, mode, label) in theme_items {
-            let label = native_interop::wide_str(label);
-            let flags = if mode == theme_mode {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            };
-            let _ = AppendMenuW(
-                theme_menu,
-                flags,
-                id as usize,
-                PCWSTR::from_raw(label.as_ptr()),
-            );
-        }
-        let theme_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "主题"
-        } else {
-            "Theme"
-        });
-        let _ = AppendMenuW(
-            menu,
-            MF_POPUP,
-            theme_menu.0 as usize,
-            PCWSTR::from_raw(theme_label.as_ptr()),
-        );
-
-        // Layout submenu (formerly Appearance).
-        let layout_menu = CreatePopupMenu().unwrap();
-        let layout_items = [
-            (IDM_LAYOUT_COMPACT, AppearancePreset::Compact),
-            (IDM_LAYOUT_MINIMAL, AppearancePreset::Minimal),
-        ];
-        for (id, preset) in layout_items {
-            let label = native_interop::wide_str(preset.menu_label(language));
-            let flags = if preset == appearance_preset {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            };
-            let _ = AppendMenuW(
-                layout_menu,
-                flags,
-                id as usize,
-                PCWSTR::from_raw(label.as_ptr()),
-            );
-        }
-        let layout_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "排版"
-        } else {
-            "Layout"
-        });
-        let _ = AppendMenuW(
-            menu,
-            MF_POPUP,
-            layout_menu.0 as usize,
-            PCWSTR::from_raw(layout_label.as_ptr()),
         );
 
         // Unified style settings panel. Detailed theme styling now lives in one non-modal window.
