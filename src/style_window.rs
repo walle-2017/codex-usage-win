@@ -100,7 +100,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wnd_proc),
-            hInstance: GetModuleHandleW(PCWSTR::null()).unwrap(),
+            hInstance: GetModuleHandleW(PCWSTR::null()).unwrap().into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hbrBackground: HBRUSH(std::ptr::null_mut()),
             lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
