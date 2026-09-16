@@ -53,14 +53,14 @@ if ($styleWindow -match 'R/G/B 调整颜色' -or
     throw 'Adjustment help text must not be shown in the style panel.'
 }
 if ($styleWindow -notmatch 'HitTarget' -or
-    $styleWindow -notmatch 'hovered:\\s*Option<HitTarget>' -or
-    $styleWindow -notmatch 'pressed:\\s*Option<HitTarget>' -or
+    $styleWindow -notmatch 'hovered:\s*Option<HitTarget>' -or
+    $styleWindow -notmatch 'pressed:\s*Option<HitTarget>' -or
     $styleWindow -notmatch 'button_background\(' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
 if ($styleWindow -match 'WS_SYSMENU' -or
-    $styleWindow -notmatch 'WM_CLOSEs*=>s*LRESULT\(0\)') {
+    $styleWindow -notmatch 'WM_CLOSE\s*=>\s*LRESULT\(0\)') {
     throw 'Style panel must not expose a title-bar close button; only the lower Close button may close it.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_R' -or
