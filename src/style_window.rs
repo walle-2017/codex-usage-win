@@ -4,8 +4,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::AppearancePreset;
@@ -13,18 +13,17 @@ use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
 use crate::style::{StyleColorTarget, ThemeMode, ThemeStyle, FROSTED_STRENGTH_MAX};
 
-pub const WM_STYLE_COLOR_PREVIEW: u32 = WM_APP + 20;
-pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 21;
-pub const WM_STYLE_SAVE: u32 = WM_APP + 22;
-pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 23;
-pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 24;
-pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 25;
+// Keep this block well away from updater.rs (WM_APP + 21..23).
+pub const WM_STYLE_COLOR_PREVIEW: u32 = WM_APP + 120;
+pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 121;
+pub const WM_STYLE_SAVE: u32 = WM_APP + 122;
+pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
+pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
+pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
 
 const WINDOW_CLASS: &str = "CodexUsageStyleSettingsV1";
-const TBM_GETPOS_MSG: u32 = WM_USER;
-const TBM_SETPOS_MSG: u32 = WM_USER + 5;
-const TBM_SETRANGE_MSG: u32 = WM_USER + 6;
-const TB_ENDTRACK_CODE: u16 = 8;
+const WINDOW_WIDTH: i32 = 820;
+const WINDOW_HEIGHT: i32 = 570;
 
 #[derive(Clone)]
 pub struct StyleWindowSnapshot {
@@ -49,6 +48,15 @@ enum EditorSelection {
     Blur,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SliderKind {
+    Red,
+    Green,
+    Blue,
+    Alpha,
+    Blur,
+}
+
 #[derive(Clone, Copy)]
 struct SendHwnd(isize);
 
@@ -70,8 +78,7 @@ struct PanelState {
     snapshot: StyleWindowSnapshot,
     section: Section,
     editor: EditorSelection,
-    rgba_sliders: [SendHwnd; 4],
-    blur_slider: SendHwnd,
+    dragging_slider: Option<SliderKind>,
     font: isize,
 }
 
@@ -94,8 +101,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     }
 
     unsafe {
-        InitCommonControls();
-
         let class_name = native_interop::wide_str(WINDOW_CLASS);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -120,8 +125,8 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            820,
-            650,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
             parent,
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
@@ -138,8 +143,8 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             HWND::default(),
             0,
             0,
-            s(820),
-            s(650),
+            s(WINDOW_WIDTH),
+            s(WINDOW_HEIGHT),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
@@ -161,28 +166,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             PCWSTR::from_raw(font_name.as_ptr()),
         );
 
-        let rgba_sliders = [
-            create_trackbar(hwnd, 0, 255, snapshot.active_style.color(StyleColorTarget::PanelBackground).r as i32),
-            create_trackbar(hwnd, 0, 255, snapshot.active_style.color(StyleColorTarget::PanelBackground).g as i32),
-            create_trackbar(hwnd, 0, 255, snapshot.active_style.color(StyleColorTarget::PanelBackground).b as i32),
-            create_trackbar(hwnd, 0, 255, snapshot.active_style.color(StyleColorTarget::PanelBackground).a as i32),
-        ];
-        let Some(rgba_sliders) = collect_four(rgba_sliders) else {
-            let _ = DestroyWindow(hwnd);
-            let _ = DeleteObject(font);
-            return;
-        };
-        let Some(blur_slider) = create_trackbar(
-            hwnd,
-            0,
-            FROSTED_STRENGTH_MAX as i32,
-            snapshot.active_style.panel_frosted_strength as i32,
-        ) else {
-            let _ = DestroyWindow(hwnd);
-            let _ = DeleteObject(font);
-            return;
-        };
-
         {
             let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
             *state = Some(PanelState {
@@ -191,14 +174,11 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 snapshot,
                 section: Section::Panel,
                 editor: EditorSelection::Color(StyleColorTarget::PanelBackground),
-                rgba_sliders: rgba_sliders.map(SendHwnd::from_hwnd),
-                blur_slider: SendHwnd::from_hwnd(blur_slider),
+                dragging_slider: None,
                 font: font.0 as isize,
             });
         }
 
-        layout_controls(hwnd);
-        sync_editor_controls();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
     }
@@ -213,7 +193,6 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         s.snapshot = snapshot;
         s.hwnd.to_hwnd()
     };
-    sync_editor_controls();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -269,50 +248,6 @@ fn pack_color(color: Color) -> isize {
         | (u32::from(color.a) << 24)) as isize
 }
 
-unsafe fn create_trackbar(
-    parent: HWND,
-    min_value: i32,
-    max_value: i32,
-    value: i32,
-) -> Option<HWND> {
-    let class = native_interop::wide_str("msctls_trackbar32");
-    let title = native_interop::wide_str("");
-    let hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE(0),
-        PCWSTR::from_raw(class.as_ptr()),
-        PCWSTR::from_raw(title.as_ptr()),
-        WS_CHILD | WS_VISIBLE,
-        0,
-        0,
-        100,
-        24,
-        parent,
-        HMENU::default(),
-        GetModuleHandleW(PCWSTR::null()).ok()?,
-        None,
-    )
-    .ok()?;
-
-    let range = ((max_value as u32) << 16) | (min_value as u32 & 0xFFFF);
-    let _ = SendMessageW(hwnd, TBM_SETRANGE_MSG, WPARAM(1), LPARAM(range as isize));
-    let _ = SendMessageW(
-        hwnd,
-        TBM_SETPOS_MSG,
-        WPARAM(1),
-        LPARAM(value.clamp(min_value, max_value) as isize),
-    );
-    Some(hwnd)
-}
-
-fn collect_four(values: [Option<HWND>; 4]) -> Option<[HWND; 4]> {
-    Some([
-        values[0]?,
-        values[1]?,
-        values[2]?,
-        values[3]?,
-    ])
-}
-
 fn window_dpi(hwnd: HWND) -> u32 {
     unsafe { GetDpiForWindow(hwnd).max(96) }
 }
@@ -331,6 +266,13 @@ fn rect(hwnd: HWND, left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     }
 }
 
+fn point_from_lparam(lparam: LPARAM) -> (i32, i32) {
+    (
+        (lparam.0 & 0xFFFF) as i16 as i32,
+        ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    )
+}
+
 fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 }
@@ -342,7 +284,7 @@ fn section_rect(hwnd: HWND, section: Section) -> RECT {
         Section::Progress => 2,
         Section::Interaction => 3,
     };
-    rect(hwnd, 20, 192 + index * 48, 142, 232 + index * 48)
+    rect(hwnd, 20, 126 + index * 48, 142, 166 + index * 48)
 }
 
 fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
@@ -363,11 +305,11 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
 }
 
 fn reset_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 20, 574, 166, 614)
+    rect(hwnd, 20, 488, 176, 528)
 }
 
 fn close_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 690, 574, 786, 614)
+    rect(hwnd, 690, 488, 786, 528)
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -403,106 +345,43 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
     rect(
         hwnd,
         174,
-        238 + index as i32 * 48,
+        126 + index as i32 * 48,
         786,
-        278 + index as i32 * 48,
+        166 + index as i32 * 48,
     )
 }
 
 fn editor_box_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 174, 438, 786, 558)
+    rect(hwnd, 174, 326, 786, 472)
 }
 
-fn layout_controls(hwnd: HWND) {
-    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(s) = state.as_ref() else {
-        return;
-    };
-    let editor = s.editor;
-    unsafe {
-        let x = scale(hwnd, 310);
-        let w = scale(hwnd, 390);
-        let h = scale(hwnd, 24);
-        let ys = [458, 482, 506, 530];
+fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
+    let top = 358 + channel_index as i32 * 26;
+    rect(hwnd, 310, top, 700, top + 4)
+}
 
-        for (index, slider) in s.rgba_sliders.iter().enumerate() {
-            let show = matches!(editor, EditorSelection::Color(_));
-            let _ = ShowWindow(slider.to_hwnd(), if show { SW_SHOW } else { SW_HIDE });
-            if show {
-                let _ = SetWindowPos(
-                    slider.to_hwnd(),
-                    HWND::default(),
-                    x,
-                    scale(hwnd, ys[index]),
-                    w,
-                    h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-        }
-
-        let show_blur = editor == EditorSelection::Blur;
-        let _ = ShowWindow(
-            s.blur_slider.to_hwnd(),
-            if show_blur { SW_SHOW } else { SW_HIDE },
-        );
-        if show_blur {
-            let _ = SetWindowPos(
-                s.blur_slider.to_hwnd(),
-                HWND::default(),
-                scale(hwnd, 310),
-                scale(hwnd, 486),
-                scale(hwnd, 390),
-                h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
+fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
+    let track = color_slider_track_rect(hwnd, channel_index);
+    RECT {
+        left: track.left - scale(hwnd, 8),
+        top: track.top - scale(hwnd, 10),
+        right: track.right + scale(hwnd, 8),
+        bottom: track.bottom + scale(hwnd, 10),
     }
 }
 
-fn sync_editor_controls() {
-    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(s) = state.as_ref() else {
-        return;
-    };
-    unsafe {
-        match s.editor {
-            EditorSelection::Color(target) => {
-                let c = s.snapshot.active_style.color(target);
-                for (hwnd, value) in s
-                    .rgba_sliders
-                    .iter()
-                    .map(|h| h.to_hwnd())
-                    .zip([c.r, c.g, c.b, c.a])
-                {
-                    let _ = SendMessageW(
-                        hwnd,
-                        TBM_SETPOS_MSG,
-                        WPARAM(1),
-                        LPARAM(value as isize),
-                    );
-                }
-            }
-            EditorSelection::Blur => {
-                let _ = SendMessageW(
-                    s.blur_slider.to_hwnd(),
-                    TBM_SETPOS_MSG,
-                    WPARAM(1),
-                    LPARAM(s.snapshot.active_style.panel_frosted_strength as isize),
-                );
-            }
-        }
-    }
-    drop(state);
-    layout_controls(current_hwnd());
+fn blur_slider_track_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 310, 390, 700, 394)
 }
 
-fn current_hwnd() -> HWND {
-    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state
-        .as_ref()
-        .map(|s| s.hwnd.to_hwnd())
-        .unwrap_or_default()
+fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
+    let track = blur_slider_track_rect(hwnd);
+    RECT {
+        left: track.left - scale(hwnd, 8),
+        top: track.top - scale(hwnd, 12),
+        right: track.right + scale(hwnd, 8),
+        bottom: track.bottom + scale(hwnd, 12),
+    }
 }
 
 fn set_section(section: Section) {
@@ -513,9 +392,9 @@ fn set_section(section: Section) {
         };
         s.section = section;
         s.editor = rows(section)[0];
+        s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
-    sync_editor_controls();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -528,9 +407,9 @@ fn select_editor(editor: EditorSelection) {
             return;
         };
         s.editor = editor;
+        s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
-    sync_editor_controls();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -548,63 +427,102 @@ fn send_parent(message: u32, wparam: usize, lparam: isize) {
     }
 }
 
-fn slider_value(hwnd: HWND) -> u8 {
-    unsafe { SendMessageW(hwnd, TBM_GETPOS_MSG, WPARAM(0), LPARAM(0)).0 as u8 }
-}
-
-fn update_color_from_sliders() {
-    let (target, sliders, panel_hwnd) = {
+fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
+    let editor = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        let EditorSelection::Color(target) = s.editor else {
-            return;
-        };
-        (target, s.rgba_sliders, s.hwnd.to_hwnd())
+        state.as_ref().map(|s| s.editor)?
     };
-
-    let color = Color::rgba(
-        slider_value(sliders[0].to_hwnd()),
-        slider_value(sliders[1].to_hwnd()),
-        slider_value(sliders[2].to_hwnd()),
-        slider_value(sliders[3].to_hwnd()),
-    );
-
-    {
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = state.as_mut() {
-            s.snapshot.active_style.set_color(target, color);
+    match editor {
+        EditorSelection::Color(_) => {
+            for index in 0..4 {
+                if pt_in_rect(color_slider_hit_rect(hwnd, index), x, y) {
+                    return Some(match index {
+                        0 => SliderKind::Red,
+                        1 => SliderKind::Green,
+                        2 => SliderKind::Blue,
+                        _ => SliderKind::Alpha,
+                    });
+                }
+            }
+            None
         }
-    }
-    send_parent(
-        WM_STYLE_COLOR_PREVIEW,
-        encode_color_target(target),
-        pack_color(color),
-    );
-    unsafe {
-        let _ = InvalidateRect(panel_hwnd, None, false);
+        EditorSelection::Blur => {
+            if pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
+                Some(SliderKind::Blur)
+            } else {
+                None
+            }
+        }
     }
 }
 
-fn update_blur_from_slider() {
-    let (slider, panel_hwnd) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        (s.blur_slider.to_hwnd(), s.hwnd.to_hwnd())
-    };
-    let value = slider_value(slider).min(FROSTED_STRENGTH_MAX);
+fn slider_value_from_x(track: RECT, x: i32, max: u8) -> u8 {
+    let width = (track.right - track.left).max(1);
+    let pos = (x.clamp(track.left, track.right) - track.left) as i64;
+    ((pos * i64::from(max) + i64::from(width / 2)) / i64::from(width))
+        .clamp(0, i64::from(max)) as u8
+}
+
+fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
+    let mut color_update: Option<(StyleColorTarget, Color)> = None;
+    let mut blur_update: Option<u8> = None;
+
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = state.as_mut() {
-            s.snapshot.active_style.panel_frosted_strength = value;
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+
+        match (s.editor, kind) {
+            (EditorSelection::Color(target), SliderKind::Red)
+            | (EditorSelection::Color(target), SliderKind::Green)
+            | (EditorSelection::Color(target), SliderKind::Blue)
+            | (EditorSelection::Color(target), SliderKind::Alpha) => {
+                let index = match kind {
+                    SliderKind::Red => 0,
+                    SliderKind::Green => 1,
+                    SliderKind::Blue => 2,
+                    SliderKind::Alpha => 3,
+                    SliderKind::Blur => return,
+                };
+                let value = slider_value_from_x(color_slider_track_rect(hwnd, index), x, u8::MAX);
+                let current = s.snapshot.active_style.color(target);
+                let color = match kind {
+                    SliderKind::Red => Color::rgba(value, current.g, current.b, current.a),
+                    SliderKind::Green => Color::rgba(current.r, value, current.b, current.a),
+                    SliderKind::Blue => Color::rgba(current.r, current.g, value, current.a),
+                    SliderKind::Alpha => Color::rgba(current.r, current.g, current.b, value),
+                    SliderKind::Blur => current,
+                };
+                s.snapshot.active_style.set_color(target, color);
+                color_update = Some((target, color));
+            }
+            (EditorSelection::Blur, SliderKind::Blur) => {
+                let value = slider_value_from_x(
+                    blur_slider_track_rect(hwnd),
+                    x,
+                    FROSTED_STRENGTH_MAX,
+                );
+                s.snapshot.active_style.panel_frosted_strength = value;
+                blur_update = Some(value);
+            }
+            _ => {}
         }
     }
-    send_parent(WM_STYLE_BLUR_PREVIEW, value as usize, 0);
+
+    if let Some((target, color)) = color_update {
+        send_parent(
+            WM_STYLE_COLOR_PREVIEW,
+            encode_color_target(target),
+            pack_color(color),
+        );
+    }
+    if let Some(value) = blur_update {
+        send_parent(WM_STYLE_BLUR_PREVIEW, value as usize, 0);
+    }
+
     unsafe {
-        let _ = InvalidateRect(panel_hwnd, None, false);
+        let _ = InvalidateRect(hwnd, None, false);
     }
 }
 
@@ -621,8 +539,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let (x, y) = point_from_lparam(lparam);
 
             for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
                 if pt_in_rect(theme_rect(hwnd, mode), x, y) {
@@ -675,6 +592,18 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
+            if let Some(kind) = slider_kind_at(hwnd, x, y) {
+                {
+                    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(s) = state.as_mut() {
+                        s.dragging_slider = Some(kind);
+                    }
+                }
+                let _ = SetCapture(hwnd);
+                update_slider(hwnd, kind, x);
+                return LRESULT(0);
+            }
+
             if pt_in_rect(reset_rect(hwnd), x, y) {
                 send_parent(WM_STYLE_RESET_CURRENT, 0, 0);
                 return LRESULT(0);
@@ -686,27 +615,40 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_HSCROLL => {
-            let source = HWND(lparam.0 as *mut _);
-            let (rgba, blur) = {
+        WM_MOUSEMOVE => {
+            let kind = {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(s) = state.as_ref() else {
+                state.as_ref().and_then(|s| s.dragging_slider)
+            };
+            if let Some(kind) = kind {
+                let (x, _) = point_from_lparam(lparam);
+                update_slider(hwnd, kind, x);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let was_dragging = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
                     return LRESULT(0);
                 };
-                (
-                    s.rgba_sliders.iter().any(|h| h.to_hwnd() == source),
-                    s.blur_slider.to_hwnd() == source,
-                )
+                s.dragging_slider.take().is_some()
             };
-
-            if rgba {
-                update_color_from_sliders();
-            } else if blur {
-                update_blur_from_slider();
+            if was_dragging {
+                let _ = ReleaseCapture();
+                send_parent(WM_STYLE_SAVE, 0, 0);
             }
-
-            let code = (wparam.0 & 0xFFFF) as u16;
-            if code == TB_ENDTRACK_CODE {
+            LRESULT(0)
+        }
+        WM_CANCELMODE | WM_CAPTURECHANGED => {
+            let was_dragging = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_mut()
+                    .and_then(|s| s.dragging_slider.take())
+                    .is_some()
+            };
+            if was_dragging {
                 send_parent(WM_STYLE_SAVE, 0, 0);
             }
             LRESULT(0)
@@ -722,7 +664,6 @@ unsafe extern "system" fn wnd_proc(
                 suggested.bottom - suggested.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
-            layout_controls(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
@@ -776,6 +717,11 @@ unsafe fn paint(hwnd: HWND) {
     } else {
         Color::from_hex("#E9EDF2FF")
     };
+    let track_background = if dark {
+        Color::from_hex("#454A52FF")
+    } else {
+        Color::from_hex("#D8DCE2FF")
+    };
     let accent = Color::from_hex("#4C8DFFFF");
     let primary = if dark {
         Color::from_hex("#F2F3F5FF")
@@ -796,7 +742,16 @@ unsafe fn paint(hwnd: HWND) {
     let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
 
-    draw_text(hdc, "样式设置", rect(hwnd, 20, 14, 150, 42), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        if snapshot.language == LanguageId::SimplifiedChinese {
+            "样式设置"
+        } else {
+            "Style settings"
+        },
+        rect(hwnd, 20, 14, 150, 42),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     draw_text(
         hdc,
         if snapshot.language == LanguageId::SimplifiedChinese { "主题" } else { "Theme" },
@@ -817,7 +772,7 @@ unsafe fn paint(hwnd: HWND) {
             theme_rect(hwnd, mode),
             selected,
             if selected { accent } else { card },
-            primary,
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             match (snapshot.language == LanguageId::SimplifiedChinese, mode) {
                 (true, ThemeMode::System) => "跟随系统",
                 (true, ThemeMode::Dark) => "深色",
@@ -836,7 +791,7 @@ unsafe fn paint(hwnd: HWND) {
             layout_rect(hwnd, preset),
             selected,
             if selected { accent } else { card },
-            primary,
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             match (snapshot.language == LanguageId::SimplifiedChinese, preset) {
                 (true, AppearancePreset::Compact) => "紧凑",
                 (true, AppearancePreset::Minimal) => "极简",
@@ -846,17 +801,6 @@ unsafe fn paint(hwnd: HWND) {
         );
     }
 
-    let preview = rect(hwnd, 174, 104, 786, 176);
-    fill(hdc, preview, card);
-    draw_text(
-        hdc,
-        if snapshot.language == LanguageId::SimplifiedChinese { "实时预览" } else { "Live preview" },
-        rect(hwnd, 190, 110, 280, 132),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    paint_preview(hdc, hwnd, &snapshot);
-
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     for item in [
         Section::Panel,
         Section::Text,
@@ -867,14 +811,23 @@ unsafe fn paint(hwnd: HWND) {
         let r = section_rect(hwnd, item);
         fill(hdc, r, if selected { card_hover } else { background });
         if selected {
-            let bar = RECT { right: r.left + scale(hwnd, 3), ..r };
+            let bar = RECT {
+                right: r.left + scale(hwnd, 3),
+                ..r
+            };
             fill(hdc, bar, accent);
         }
-        let _ = SetTextColor(hdc, COLORREF(if selected { primary } else { secondary }.to_colorref()));
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(if selected { primary } else { secondary }.to_colorref()),
+        );
         draw_text(
             hdc,
             section_label(item, snapshot.language),
-            RECT { left: r.left + scale(hwnd, 14), ..r },
+            RECT {
+                left: r.left + scale(hwnd, 14),
+                ..r
+            },
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
     }
@@ -886,7 +839,11 @@ unsafe fn paint(hwnd: HWND) {
         draw_text(
             hdc,
             row_label(row, snapshot.language),
-            RECT { left: r.left + scale(hwnd, 14), right: r.left + scale(hwnd, 210), ..r },
+            RECT {
+                left: r.left + scale(hwnd, 14),
+                right: r.left + scale(hwnd, 230),
+                ..r
+            },
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
 
@@ -904,7 +861,10 @@ unsafe fn paint(hwnd: HWND) {
                 draw_text(
                     hdc,
                     &color.to_hex_rgba(),
-                    RECT { left: r.right - scale(hwnd, 108), ..r },
+                    RECT {
+                        left: r.right - scale(hwnd, 108),
+                        ..r
+                    },
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
@@ -914,7 +874,10 @@ unsafe fn paint(hwnd: HWND) {
                 draw_text(
                     hdc,
                     &value,
-                    RECT { left: r.right - scale(hwnd, 82), ..r },
+                    RECT {
+                        left: r.right - scale(hwnd, 82),
+                        ..r
+                    },
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
@@ -923,7 +886,16 @@ unsafe fn paint(hwnd: HWND) {
 
     let editor_box = editor_box_rect(hwnd);
     fill(hdc, editor_box, card);
-    paint_editor_labels(hdc, hwnd, &snapshot, editor, primary, secondary);
+    paint_editor(
+        hdc,
+        hwnd,
+        &snapshot,
+        editor,
+        primary,
+        secondary,
+        track_background,
+        accent,
+    );
 
     draw_segment(
         hdc,
@@ -943,135 +915,221 @@ unsafe fn paint(hwnd: HWND) {
         true,
         accent,
         Color::from_hex("#FFFFFFFF"),
-        if snapshot.language == LanguageId::SimplifiedChinese { "关闭" } else { "Close" },
+        if snapshot.language == LanguageId::SimplifiedChinese {
+            "关闭"
+        } else {
+            "Close"
+        },
     );
 
     SelectObject(hdc, old_font);
     let _ = EndPaint(hwnd, &ps);
 }
 
-unsafe fn paint_preview(hdc: HDC, hwnd: HWND, snapshot: &StyleWindowSnapshot) {
-    let style = &snapshot.active_style;
-    let panel = rect(hwnd, 300, 118, 680, 164);
-    let background = style.color(StyleColorTarget::PanelBackground);
-    let border = style.color(StyleColorTarget::PanelBorder);
-    fill(hdc, panel, border);
-    let inner = RECT {
-        left: panel.left + scale(hwnd, 1),
-        top: panel.top + scale(hwnd, 1),
-        right: panel.right - scale(hwnd, 1),
-        bottom: panel.bottom - scale(hwnd, 1),
-    };
-    fill(hdc, inner, background.blend_over(if snapshot.is_dark {
-        Color::from_hex("#20242AFF")
-    } else {
-        Color::from_hex("#E8EBEFFF")
-    }));
-
-    let label = style.color(StyleColorTarget::QuotaType);
-    let remaining = style.color(StyleColorTarget::Remaining);
-    let reset = style.color(StyleColorTarget::ResetTime);
-    let high = style.color(StyleColorTarget::ProgressHigh);
-    let consumed = style.color(StyleColorTarget::ProgressConsumed);
-
-    let _ = SetTextColor(hdc, COLORREF(label.to_colorref()));
-    draw_text(hdc, "5H", rect(hwnd, 314, 123, 344, 140), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(hdc, "7D", rect(hwnd, 314, 143, 344, 160), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    for (top, pct) in [(126, 58), (146, 76)] {
-        let track = rect(hwnd, 350, top, 462, top + 8);
-        fill(hdc, track, consumed);
-        let filled = RECT {
-            right: track.left + (track.right - track.left) * pct / 100,
-            ..track
-        };
-        fill(hdc, filled, high);
-    }
-
-    let _ = SetTextColor(hdc, COLORREF(remaining.to_colorref()));
-    draw_text(hdc, "58%", rect(hwnd, 474, 120, 520, 141), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(hdc, "76%", rect(hwnd, 474, 140, 520, 161), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    let _ = SetTextColor(hdc, COLORREF(reset.to_colorref()));
-    draw_text(hdc, "19:04", rect(hwnd, 526, 120, 580, 141), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(hdc, "09/23", rect(hwnd, 526, 140, 580, 161), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-}
-
-unsafe fn paint_editor_labels(
+unsafe fn paint_editor(
     hdc: HDC,
     hwnd: HWND,
     snapshot: &StyleWindowSnapshot,
     editor: EditorSelection,
     primary: Color,
     secondary: Color,
+    track_background: Color,
+    accent: Color,
 ) {
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     match editor {
         EditorSelection::Color(target) => {
             let color = snapshot.active_style.color(target);
-            let title = format!(
-                "{}   {}",
-                row_label(EditorSelection::Color(target), snapshot.language),
-                color.to_hex_rgba()
+            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+            draw_text(
+                hdc,
+                "RGBA",
+                rect(hwnd, 194, 334, 260, 354),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
-            draw_text(hdc, &title, rect(hwnd, 190, 442, 520, 462), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
             let values = [color.r, color.g, color.b, color.a];
             for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
-                let top = 458 + index as i32 * 24;
+                let top = 348 + index as i32 * 26;
                 let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-                draw_text(hdc, label, rect(hwnd, 196, top, 220, top + 22), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                let value_text = value.to_string();
-                draw_text(hdc, &value_text, rect(hwnd, 710, top, 760, top + 22), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                draw_text(
+                    hdc,
+                    label,
+                    rect(hwnd, 196, top, 220, top + 22),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+                draw_slider(
+                    hdc,
+                    hwnd,
+                    color_slider_track_rect(hwnd, index),
+                    value,
+                    u8::MAX,
+                    track_background,
+                    accent,
+                );
+                let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+                draw_text(
+                    hdc,
+                    &value.to_string(),
+                    rect(hwnd, 716, top, 770, top + 22),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
             }
         }
         EditorSelection::Blur => {
-            draw_text(
-                hdc,
-                if snapshot.language == LanguageId::SimplifiedChinese { "磨砂强度" } else { "Frosted intensity" },
-                rect(hwnd, 190, 448, 320, 470),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-            let value = format!("{}%", snapshot.active_style.panel_frosted_strength);
+            let value = snapshot.active_style.panel_frosted_strength;
             let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-            draw_text(hdc, &value, rect(hwnd, 710, 484, 760, 510), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             draw_text(
                 hdc,
                 if snapshot.language == LanguageId::SimplifiedChinese {
-                    "0%=关闭；拖动实时预览，释放后自动保存"
+                    "强度调节"
                 } else {
-                    "0%=Off; live preview while dragging; saves on release"
+                    "Intensity"
                 },
-                rect(hwnd, 196, 520, 700, 546),
+                rect(hwnd, 194, 344, 300, 368),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_slider(
+                hdc,
+                hwnd,
+                blur_slider_track_rect(hwnd),
+                value,
+                FROSTED_STRENGTH_MAX,
+                track_background,
+                accent,
+            );
+            let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+            draw_text(
+                hdc,
+                &format!("{}%", value),
+                rect(hwnd, 716, 378, 770, 406),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+            draw_text(
+                hdc,
+                if snapshot.language == LanguageId::SimplifiedChinese {
+                    "0%=关闭；拖动时任务栏组件实时预览，释放后自动保存"
+                } else {
+                    "0%=Off; taskbar widget previews live while dragging; saves on release"
+                },
+                rect(hwnd, 196, 420, 760, 450),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
     }
 }
 
+unsafe fn draw_slider(
+    hdc: HDC,
+    hwnd: HWND,
+    track: RECT,
+    value: u8,
+    max: u8,
+    track_background: Color,
+    accent: Color,
+) {
+    fill(hdc, track, track_background);
+
+    let width = (track.right - track.left).max(1);
+    let thumb_x = track.left + width * i32::from(value) / i32::from(max.max(1));
+    let filled = RECT {
+        right: thumb_x.max(track.left),
+        ..track
+    };
+    if filled.right > filled.left {
+        fill(hdc, filled, accent);
+    }
+
+    let radius = scale(hwnd, 6);
+    let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
+    let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    let center_y = (track.top + track.bottom) / 2;
+    let _ = Ellipse(
+        hdc,
+        thumb_x - radius,
+        center_y - radius,
+        thumb_x + radius,
+        center_y + radius,
+    );
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(brush);
+}
+
 fn section_label(section: Section, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match section {
-        Section::Panel => if zh { "面板" } else { "Panel" },
-        Section::Text => if zh { "文字" } else { "Text" },
-        Section::Progress => if zh { "进度条" } else { "Progress" },
-        Section::Interaction => if zh { "交互" } else { "Interaction" },
+        Section::Panel => {
+            if zh {
+                "面板"
+            } else {
+                "Panel"
+            }
+        }
+        Section::Text => {
+            if zh {
+                "文字"
+            } else {
+                "Text"
+            }
+        }
+        Section::Progress => {
+            if zh {
+                "进度条"
+            } else {
+                "Progress"
+            }
+        }
+        Section::Interaction => {
+            if zh {
+                "交互"
+            } else {
+                "Interaction"
+            }
+        }
     }
 }
 
 fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match row {
-        EditorSelection::Color(StyleColorTarget::PanelBackground) => if zh { "背景颜色" } else { "Background" },
-        EditorSelection::Color(StyleColorTarget::PanelBorder) => if zh { "边框颜色" } else { "Border" },
-        EditorSelection::Blur => if zh { "磨砂强度" } else { "Frosted intensity" },
-        EditorSelection::Color(StyleColorTarget::QuotaType) => if zh { "额度类型" } else { "Quota type" },
-        EditorSelection::Color(StyleColorTarget::Remaining) => if zh { "剩余额度" } else { "Remaining quota" },
-        EditorSelection::Color(StyleColorTarget::ResetTime) => if zh { "重置时间" } else { "Reset time" },
-        EditorSelection::Color(StyleColorTarget::Error) => if zh { "异常状态" } else { "Error state" },
-        EditorSelection::Color(StyleColorTarget::ProgressHigh) => if zh { "充足额度" } else { "High quota" },
-        EditorSelection::Color(StyleColorTarget::ProgressMedium) => if zh { "中等额度" } else { "Medium quota" },
-        EditorSelection::Color(StyleColorTarget::ProgressLow) => if zh { "低额度" } else { "Low quota" },
-        EditorSelection::Color(StyleColorTarget::ProgressConsumed) => if zh { "已消耗部分" } else { "Consumed" },
-        EditorSelection::Color(StyleColorTarget::DragHandle) => if zh { "拖拽点" } else { "Drag handle" },
+        EditorSelection::Color(StyleColorTarget::PanelBackground) => {
+            if zh { "背景颜色" } else { "Background" }
+        }
+        EditorSelection::Color(StyleColorTarget::PanelBorder) => {
+            if zh { "边框颜色" } else { "Border" }
+        }
+        EditorSelection::Blur => {
+            if zh { "磨砂强度" } else { "Frosted intensity" }
+        }
+        EditorSelection::Color(StyleColorTarget::QuotaType) => {
+            if zh { "额度类型" } else { "Quota type" }
+        }
+        EditorSelection::Color(StyleColorTarget::Remaining) => {
+            if zh { "剩余额度" } else { "Remaining quota" }
+        }
+        EditorSelection::Color(StyleColorTarget::ResetTime) => {
+            if zh { "重置时间" } else { "Reset time" }
+        }
+        EditorSelection::Color(StyleColorTarget::Error) => {
+            if zh { "异常状态" } else { "Error state" }
+        }
+        EditorSelection::Color(StyleColorTarget::ProgressHigh) => {
+            if zh { "充足额度" } else { "High quota" }
+        }
+        EditorSelection::Color(StyleColorTarget::ProgressMedium) => {
+            if zh { "中等额度" } else { "Medium quota" }
+        }
+        EditorSelection::Color(StyleColorTarget::ProgressLow) => {
+            if zh { "低额度" } else { "Low quota" }
+        }
+        EditorSelection::Color(StyleColorTarget::ProgressConsumed) => {
+            if zh { "已消耗部分" } else { "Consumed" }
+        }
+        EditorSelection::Color(StyleColorTarget::DragHandle) => {
+            if zh { "拖拽点" } else { "Drag handle" }
+        }
     }
 }
 
@@ -1085,7 +1143,11 @@ unsafe fn draw_segment(
 ) {
     fill(hdc, rect, background);
     if selected {
-        let border = CreatePen(PS_SOLID, 1, COLORREF(Color::from_hex("#76A7FFFF").to_colorref()));
+        let border = CreatePen(
+            PS_SOLID,
+            1,
+            COLORREF(Color::from_hex("#76A7FFFF").to_colorref()),
+        );
         let old_pen = SelectObject(hdc, border);
         let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
         let _ = Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
