@@ -4,6 +4,7 @@ $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
+$styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 
@@ -17,8 +18,20 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
     $windowProduction -notmatch 'IDM_THEME_LIGHT') {
     throw 'Top-level theme menu commands are missing.'
 }
-if ($windowProduction -notmatch '"排版"' -or $windowProduction -notmatch '"样式"' -or $windowProduction -notmatch '"主题"') {
-    throw 'Chinese top-level Theme/Layout/Style labels must be present.'
+if ($windowProduction -notmatch '"排版"' -or
+    $windowProduction -notmatch '"主题"' -or
+    $windowProduction -notmatch '"样式设置\.\.\."') {
+    throw 'Chinese top-level Theme/Layout/Style Settings labels must be present.'
+}
+if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
+    $styleWindow -notmatch 'StyleWindowSnapshot' -or
+    $styleWindow -notmatch 'WM_STYLE_COLOR_PREVIEW' -or
+    $styleWindow -notmatch 'WM_STYLE_BLUR_PREVIEW' -or
+    $styleWindow -notmatch 'Section::Panel' -or
+    $styleWindow -notmatch 'Section::Text' -or
+    $styleWindow -notmatch 'Section::Progress' -or
+    $styleWindow -notmatch 'Section::Interaction') {
+    throw 'Unified style settings panel contract is missing.'
 }
 if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -notmatch 'pub\s+light:\s+ThemeStyle') {
     throw 'Dark and light theme styles must be stored separately.'
