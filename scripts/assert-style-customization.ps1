@@ -37,7 +37,7 @@ if ($windowProduction -match 'AppendMenuW\([\s\S]{0,180}theme_menu' -or
     $windowProduction -match 'AppendMenuW\([\s\S]{0,180}layout_menu') {
     throw 'Theme and Layout must not be duplicated in the taskbar context menu.'
 }
-if ($styleWindow -match '实时预览' -or $styleWindow -match 'Live preview') {
+if ($styleWindow -match 'paint_preview\(') {
     throw 'The settings-panel preview card must be removed; the taskbar widget is the live preview.'
 }
 if ($styleWindow -match 'msctls_trackbar32' -or $styleWindow -match 'WM_HSCROLL') {
