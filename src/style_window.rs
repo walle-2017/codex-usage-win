@@ -1198,21 +1198,17 @@ unsafe fn paint(hwnd: HWND) {
     let width = (paint_client.right - paint_client.left).max(1);
     let height = (paint_client.bottom - paint_client.top).max(1);
 
-    let mem_hdc = match CreateCompatibleDC(screen_hdc) {
-        Ok(dc) => dc,
-        Err(_) => {
-            let _ = EndPaint(hwnd, &ps);
-            return;
-        }
-    };
-    let bitmap = match CreateCompatibleBitmap(screen_hdc, width, height) {
-        Ok(bitmap) => bitmap,
-        Err(_) => {
-            let _ = DeleteDC(mem_hdc);
-            let _ = EndPaint(hwnd, &ps);
-            return;
-        }
-    };
+    let mem_hdc = CreateCompatibleDC(screen_hdc);
+    if mem_hdc.0.is_null() {
+        let _ = EndPaint(hwnd, &ps);
+        return;
+    }
+    let bitmap = CreateCompatibleBitmap(screen_hdc, width, height);
+    if bitmap.0.is_null() {
+        let _ = DeleteDC(mem_hdc);
+        let _ = EndPaint(hwnd, &ps);
+        return;
+    }
     let old_bitmap = SelectObject(mem_hdc, HGDIOBJ(bitmap.0));
     let hdc = mem_hdc;
 
