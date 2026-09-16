@@ -29,6 +29,7 @@ use crate::poller;
 use crate::style::{
     StyleColorTarget, StyleSettings, ThemeMode, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
+use crate::style_window;
 use crate::theme;
 use crate::tray_icon;
 use crate::updater;
@@ -132,6 +133,7 @@ const IDM_LAYOUT_MINIMAL: u16 = 92;
 const IDM_THEME_SYSTEM: u16 = 93;
 const IDM_THEME_DARK: u16 = 94;
 const IDM_THEME_LIGHT: u16 = 95;
+const IDM_STYLE_SETTINGS: u16 = 96;
 
 const IDM_STYLE_PANEL_BACKGROUND: u16 = 100;
 const IDM_STYLE_PANEL_BORDER: u16 = 101;
@@ -2711,6 +2713,7 @@ fn check_theme_change() {
     if changed {
         close_style_editors();
         render_layered();
+        style_window::sync(style_settings_snapshot());
     }
 }
 
@@ -3634,6 +3637,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                     render_layered();
+                    style_window::sync(style_settings_snapshot());
                 }
                 IDM_LAYOUT_COMPACT | IDM_LAYOUT_MINIMAL => {
                     let preset = if id == IDM_LAYOUT_MINIMAL {
@@ -3652,6 +3656,11 @@ unsafe extern "system" fn wnd_proc(
                     position_at_taskbar();
                     render_layered();
                     sync_tray_icons(hwnd);
+                    style_window::sync(style_settings_snapshot());
+                }
+                IDM_STYLE_SETTINGS => {
+                    close_style_editors();
+                    style_window::open_or_focus(hwnd, style_settings_snapshot());
                 }
                 IDM_STYLE_PANEL_BACKGROUND
                 | IDM_STYLE_PANEL_BORDER
@@ -3740,6 +3749,87 @@ unsafe extern "system" fn wnd_proc(
                 }
                 tray_icon::TrayAction::None => {}
             }
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_COLOR_PREVIEW => {
+            if let Some(target) = style_window::decode_color_target(wparam.0) {
+                let color = style_window::unpack_color(lparam.0);
+                {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        s.styles.active_mut(s.is_dark).set_color(target, color);
+                    }
+                }
+                render_layered();
+            }
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_BLUR_PREVIEW => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.styles.active_mut(s.is_dark).panel_frosted_strength =
+                        (wparam.0 as u8).min(FROSTED_STRENGTH_MAX);
+                }
+            }
+            render_layered();
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_SAVE => {
+            save_state_settings();
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_THEME_CHANGE => {
+            close_style_editors();
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.theme_mode = match wparam.0 {
+                        1 => ThemeMode::Dark,
+                        2 => ThemeMode::Light,
+                        _ => ThemeMode::System,
+                    };
+                    s.is_dark = match s.theme_mode {
+                        ThemeMode::System => theme::is_dark_mode(),
+                        ThemeMode::Dark => true,
+                        ThemeMode::Light => false,
+                    };
+                }
+            }
+            save_state_settings();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_LAYOUT_CHANGE => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.appearance_preset = if wparam.0 == 1 {
+                        AppearancePreset::Minimal
+                    } else {
+                        AppearancePreset::Compact
+                    };
+                    refresh_usage_texts(s);
+                }
+            }
+            save_state_settings();
+            position_at_taskbar();
+            render_layered();
+            sync_tray_icons(hwnd);
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_RESET_CURRENT => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.styles.reset_active(s.is_dark);
+                }
+            }
+            save_state_settings();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -4248,6 +4338,27 @@ fn open_blur_editor(owner: HWND) {
     }
 }
 
+fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
+    let state = lock_state();
+    if let Some(s) = state.as_ref() {
+        style_window::StyleWindowSnapshot {
+            language: s.language,
+            theme_mode: s.theme_mode,
+            is_dark: s.is_dark,
+            appearance_preset: s.appearance_preset,
+            active_style: s.styles.active(s.is_dark).clone(),
+        }
+    } else {
+        style_window::StyleWindowSnapshot {
+            language: LanguageId::English,
+            theme_mode: ThemeMode::System,
+            is_dark: true,
+            appearance_preset: AppearancePreset::Compact,
+            active_style: ThemeStyle::dark_default(),
+        }
+    }
+}
+
 fn show_context_menu(hwnd: HWND) {
     unsafe {
         let (
@@ -4260,7 +4371,6 @@ fn show_context_menu(hwnd: HWND) {
             alert_threshold_percent,
             appearance_preset,
             theme_mode,
-            active_frosted_strength,
             available_update_version,
         ) = {
             let state = lock_state();
@@ -4275,7 +4385,6 @@ fn show_context_menu(hwnd: HWND) {
                     s.alert_threshold_percent,
                     s.appearance_preset,
                     s.theme_mode,
-                    s.styles.active(s.is_dark).panel_frosted_strength,
                     s.available_update_version.clone(),
                 ),
                 None => (
@@ -4288,7 +4397,6 @@ fn show_context_menu(hwnd: HWND) {
                     0,
                     AppearancePreset::Compact,
                     ThemeMode::System,
-                    0,
                     None,
                 ),
             }
@@ -4537,205 +4645,18 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(layout_label.as_ptr()),
         );
 
-        // Style submenu edits the currently active theme. Dark/light values are persisted separately.
-        let style_menu = CreatePopupMenu().unwrap();
-
-        let panel_menu = CreatePopupMenu().unwrap();
-        for (id, label) in [
-            (
-                IDM_STYLE_PANEL_BACKGROUND,
-                if language == LanguageId::SimplifiedChinese {
-                    "背景颜色..."
-                } else {
-                    "Background color..."
-                },
-            ),
-            (
-                IDM_STYLE_PANEL_BORDER,
-                if language == LanguageId::SimplifiedChinese {
-                    "边框颜色..."
-                } else {
-                    "Border color..."
-                },
-            ),
-        ] {
-            let label = native_interop::wide_str(label);
-            let _ = AppendMenuW(
-                panel_menu,
-                MENU_ITEM_FLAGS(0),
-                id as usize,
-                PCWSTR::from_raw(label.as_ptr()),
-            );
-        }
-        let blur_text = if language == LanguageId::SimplifiedChinese {
-            format!("磨砂强度... ({}%)", active_frosted_strength)
-        } else {
-            format!("Frosted intensity... ({}%)", active_frosted_strength)
-        };
-        let blur_label = native_interop::wide_str(&blur_text);
-        let _ = AppendMenuW(
-            panel_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_STYLE_PANEL_BLUR as usize,
-            PCWSTR::from_raw(blur_label.as_ptr()),
-        );
-        let panel_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "面板"
-        } else {
-            "Panel"
-        });
-        let _ = AppendMenuW(
-            style_menu,
-            MF_POPUP,
-            panel_menu.0 as usize,
-            PCWSTR::from_raw(panel_label.as_ptr()),
-        );
-
-        let text_menu = CreatePopupMenu().unwrap();
-        for (id, label) in [
-            (
-                IDM_STYLE_QUOTA_TYPE,
-                if language == LanguageId::SimplifiedChinese {
-                    "额度类型..."
-                } else {
-                    "Quota type..."
-                },
-            ),
-            (
-                IDM_STYLE_REMAINING,
-                if language == LanguageId::SimplifiedChinese {
-                    "剩余额度..."
-                } else {
-                    "Remaining quota..."
-                },
-            ),
-            (
-                IDM_STYLE_RESET_TIME,
-                if language == LanguageId::SimplifiedChinese {
-                    "重置时间..."
-                } else {
-                    "Reset time..."
-                },
-            ),
-            (
-                IDM_STYLE_ERROR,
-                if language == LanguageId::SimplifiedChinese {
-                    "异常状态..."
-                } else {
-                    "Error state..."
-                },
-            ),
-        ] {
-            let label = native_interop::wide_str(label);
-            let _ = AppendMenuW(
-                text_menu,
-                MENU_ITEM_FLAGS(0),
-                id as usize,
-                PCWSTR::from_raw(label.as_ptr()),
-            );
-        }
-        let text_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "文字颜色"
-        } else {
-            "Text colors"
-        });
-        let _ = AppendMenuW(
-            style_menu,
-            MF_POPUP,
-            text_menu.0 as usize,
-            PCWSTR::from_raw(text_label.as_ptr()),
-        );
-
-        let progress_menu = CreatePopupMenu().unwrap();
-        for (id, label) in [
-            (
-                IDM_STYLE_PROGRESS_HIGH,
-                if language == LanguageId::SimplifiedChinese {
-                    "充足额度颜色..."
-                } else {
-                    "High quota color..."
-                },
-            ),
-            (
-                IDM_STYLE_PROGRESS_MEDIUM,
-                if language == LanguageId::SimplifiedChinese {
-                    "中等额度颜色..."
-                } else {
-                    "Medium quota color..."
-                },
-            ),
-            (
-                IDM_STYLE_PROGRESS_LOW,
-                if language == LanguageId::SimplifiedChinese {
-                    "低额度颜色..."
-                } else {
-                    "Low quota color..."
-                },
-            ),
-            (
-                IDM_STYLE_PROGRESS_CONSUMED,
-                if language == LanguageId::SimplifiedChinese {
-                    "已消耗部分颜色..."
-                } else {
-                    "Consumed color..."
-                },
-            ),
-        ] {
-            let label = native_interop::wide_str(label);
-            let _ = AppendMenuW(
-                progress_menu,
-                MENU_ITEM_FLAGS(0),
-                id as usize,
-                PCWSTR::from_raw(label.as_ptr()),
-            );
-        }
-        let progress_label =
+        // Unified style settings panel. Detailed theme styling now lives in one non-modal window.
+        let style_settings_label =
             native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "进度条"
+                "样式设置..."
             } else {
-                "Progress bar"
+                "Style settings..."
             });
-        let _ = AppendMenuW(
-            style_menu,
-            MF_POPUP,
-            progress_menu.0 as usize,
-            PCWSTR::from_raw(progress_label.as_ptr()),
-        );
-
-        let drag_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "拖拽点颜色..."
-        } else {
-            "Drag handle color..."
-        });
-        let _ = AppendMenuW(
-            style_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_STYLE_DRAG_HANDLE as usize,
-            PCWSTR::from_raw(drag_label.as_ptr()),
-        );
-        let _ = AppendMenuW(style_menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let reset_style_label =
-            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "恢复当前主题默认样式"
-            } else {
-                "Reset current theme style"
-            });
-        let _ = AppendMenuW(
-            style_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_STYLE_RESET_CURRENT as usize,
-            PCWSTR::from_raw(reset_style_label.as_ptr()),
-        );
-        let style_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "样式"
-        } else {
-            "Style"
-        });
         let _ = AppendMenuW(
             menu,
-            MF_POPUP,
-            style_menu.0 as usize,
-            PCWSTR::from_raw(style_label.as_ptr()),
+            MENU_ITEM_FLAGS(0),
+            IDM_STYLE_SETTINGS as usize,
+            PCWSTR::from_raw(style_settings_label.as_ptr()),
         );
 
         // Settings submenu
