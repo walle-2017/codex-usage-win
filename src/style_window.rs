@@ -32,6 +32,7 @@ const ID_EDIT_B: u16 = 302;
 const ID_EDIT_A: u16 = 303;
 const EN_CHANGE_CODE: u16 = 0x0300;
 const EM_SETLIMITTEXT_MSG: u32 = 0x00C5;
+const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 
 #[derive(Clone)]
 pub struct StyleWindowSnapshot {
@@ -116,6 +117,16 @@ struct EditorPalette {
     secondary: Color,
     track_background: Color,
     accent: Color,
+}
+
+#[derive(Clone, Copy)]
+struct ButtonPalette {
+    normal: Color,
+    hover: Color,
+    pressed: Color,
+    selected: Color,
+    selected_hover: Color,
+    selected_pressed: Color,
 }
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
@@ -714,21 +725,24 @@ fn button_background(
     selected: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
-    normal: Color,
-    hover: Color,
-    pressed_color: Color,
-    selected_color: Color,
-    selected_hover: Color,
-    selected_pressed: Color,
+    palette: ButtonPalette,
 ) -> Color {
     if pressed == Some(target) {
-        if selected { selected_pressed } else { pressed_color }
+        if selected {
+            palette.selected_pressed
+        } else {
+            palette.pressed
+        }
     } else if hovered == Some(target) {
-        if selected { selected_hover } else { hover }
+        if selected {
+            palette.selected_hover
+        } else {
+            palette.hover
+        }
     } else if selected {
-        selected_color
+        palette.selected
     } else {
-        normal
+        palette.normal
     }
 }
 
@@ -960,7 +974,7 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_MOUSELEAVE => {
+        WM_MOUSELEAVE_MSG => {
             let changed = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
@@ -1192,12 +1206,14 @@ unsafe fn paint(hwnd: HWND) {
             selected,
             hovered,
             pressed,
-            card,
-            card_hover,
-            card_pressed,
-            accent,
-            accent_hover,
-            accent_pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
         );
         draw_segment(
             hdc,
@@ -1224,12 +1240,14 @@ unsafe fn paint(hwnd: HWND) {
             selected,
             hovered,
             pressed,
-            card,
-            card_hover,
-            card_pressed,
-            accent,
-            accent_hover,
-            accent_pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
         );
         draw_segment(
             hdc,
@@ -1260,12 +1278,14 @@ unsafe fn paint(hwnd: HWND) {
             selected,
             hovered,
             pressed,
-            background,
-            card_hover,
-            card_pressed,
-            card_hover,
-            card_hover,
-            card_pressed,
+            ButtonPalette {
+                normal: background,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: card_hover,
+                selected_hover: card_hover,
+                selected_pressed: card_pressed,
+            },
         );
         fill(hdc, r, section_bg);
         if selected {
@@ -1299,12 +1319,14 @@ unsafe fn paint(hwnd: HWND) {
             selected,
             hovered,
             pressed,
-            card,
-            card_hover,
-            card_pressed,
-            card_hover,
-            card_hover,
-            card_pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: card_hover,
+                selected_hover: card_hover,
+                selected_pressed: card_pressed,
+            },
         );
         fill(hdc, r, row_bg);
         let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
@@ -1380,12 +1402,14 @@ unsafe fn paint(hwnd: HWND) {
             false,
             hovered,
             pressed,
-            card,
-            card_hover,
-            card_pressed,
-            card,
-            card_hover,
-            card_pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: card,
+                selected_hover: card_hover,
+                selected_pressed: card_pressed,
+            },
         ),
         primary,
         if snapshot.language == LanguageId::SimplifiedChinese {
@@ -1403,12 +1427,14 @@ unsafe fn paint(hwnd: HWND) {
             true,
             hovered,
             pressed,
-            accent,
-            accent_hover,
-            accent_pressed,
-            accent,
-            accent_hover,
-            accent_pressed,
+            ButtonPalette {
+                normal: accent,
+                hover: accent_hover,
+                pressed: accent_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
         ),
         Color::from_hex("#FFFFFFFF"),
         if snapshot.language == LanguageId::SimplifiedChinese {
