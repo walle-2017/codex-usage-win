@@ -86,6 +86,14 @@ unsafe impl Send for PanelState {}
 
 static STATE: Mutex<Option<PanelState>> = Mutex::new(None);
 
+#[derive(Clone, Copy)]
+struct EditorPalette {
+    primary: Color,
+    secondary: Color,
+    track_background: Color,
+    accent: Color,
+}
+
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -891,10 +899,12 @@ unsafe fn paint(hwnd: HWND) {
         hwnd,
         &snapshot,
         editor,
-        primary,
-        secondary,
-        track_background,
-        accent,
+        EditorPalette {
+            primary,
+            secondary,
+            track_background,
+            accent,
+        },
     );
 
     draw_segment(
@@ -931,11 +941,14 @@ unsafe fn paint_editor(
     hwnd: HWND,
     snapshot: &StyleWindowSnapshot,
     editor: EditorSelection,
-    primary: Color,
-    secondary: Color,
-    track_background: Color,
-    accent: Color,
+    palette: EditorPalette,
 ) {
+    let EditorPalette {
+        primary,
+        secondary,
+        track_background,
+        accent,
+    } = palette;
     match editor {
         EditorSelection::Color(target) => {
             let color = snapshot.active_style.color(target);
