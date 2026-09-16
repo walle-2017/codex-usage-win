@@ -5,7 +5,9 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::AppearancePreset;
@@ -212,9 +214,9 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                     WS_CHILD.0
                         | WS_VISIBLE.0
                         | WS_BORDER.0
-                        | ES_NUMBER.0 as u32
-                        | ES_CENTER.0 as u32
-                        | ES_AUTOHSCROLL.0 as u32,
+                        | ES_NUMBER as u32
+                        | ES_CENTER as u32
+                        | ES_AUTOHSCROLL as u32,
                 ),
                 0,
                 0,
@@ -1428,7 +1430,7 @@ unsafe fn paint_editor(
     palette: EditorPalette,
 ) {
     let EditorPalette {
-        primary: _,
+        primary,
         secondary,
         track_background,
         accent,
