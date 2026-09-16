@@ -1095,13 +1095,20 @@ unsafe fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
 
-    let (snapshot, section, editor, font) = {
+    let (snapshot, section, editor, hovered, pressed, font) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             let _ = EndPaint(hwnd, &ps);
             return;
         };
-        (s.snapshot.clone(), s.section, s.editor, s.font)
+        (
+            s.snapshot.clone(),
+            s.section,
+            s.editor,
+            s.hovered,
+            s.pressed,
+            s.font,
+        )
     };
 
     let dark = snapshot.is_dark;
@@ -1120,12 +1127,19 @@ unsafe fn paint(hwnd: HWND) {
     } else {
         Color::from_hex("#E9EDF2FF")
     };
+    let card_pressed = if dark {
+        Color::from_hex("#414751FF")
+    } else {
+        Color::from_hex("#D9E0E9FF")
+    };
     let track_background = if dark {
         Color::from_hex("#454A52FF")
     } else {
         Color::from_hex("#D8DCE2FF")
     };
     let accent = Color::from_hex("#4C8DFFFF");
+    let accent_hover = Color::from_hex("#629CFFFF");
+    let accent_pressed = Color::from_hex("#3678E6FF");
     let primary = if dark {
         Color::from_hex("#F2F3F5FF")
     } else {
@@ -1170,11 +1184,24 @@ unsafe fn paint(hwnd: HWND) {
 
     for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
         let selected = snapshot.theme_mode == mode;
+        let target = HitTarget::Theme(mode);
+        let button_bg = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            card,
+            card_hover,
+            card_pressed,
+            accent,
+            accent_hover,
+            accent_pressed,
+        );
         draw_segment(
             hdc,
             theme_rect(hwnd, mode),
             selected,
-            if selected { accent } else { card },
+            button_bg,
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             match (snapshot.language == LanguageId::SimplifiedChinese, mode) {
                 (true, ThemeMode::System) => "跟随系统",
@@ -1189,11 +1216,24 @@ unsafe fn paint(hwnd: HWND) {
 
     for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
         let selected = snapshot.appearance_preset == preset;
+        let target = HitTarget::Layout(preset);
+        let button_bg = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            card,
+            card_hover,
+            card_pressed,
+            accent,
+            accent_hover,
+            accent_pressed,
+        );
         draw_segment(
             hdc,
             layout_rect(hwnd, preset),
             selected,
-            if selected { accent } else { card },
+            button_bg,
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             match (snapshot.language == LanguageId::SimplifiedChinese, preset) {
                 (true, AppearancePreset::Default) => "默认",
@@ -1212,7 +1252,20 @@ unsafe fn paint(hwnd: HWND) {
     ] {
         let selected = item == section;
         let r = section_rect(hwnd, item);
-        fill(hdc, r, if selected { card_hover } else { background });
+        let target = HitTarget::Section(item);
+        let section_bg = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            background,
+            card_hover,
+            card_pressed,
+            card_hover,
+            card_hover,
+            card_pressed,
+        );
+        fill(hdc, r, section_bg);
         if selected {
             let bar = RECT {
                 right: r.left + scale(hwnd, 3),
@@ -1237,7 +1290,21 @@ unsafe fn paint(hwnd: HWND) {
 
     for (index, row) in rows(section).iter().copied().enumerate() {
         let r = row_rect(hwnd, index);
-        fill(hdc, r, if row == editor { card_hover } else { card });
+        let selected = row == editor;
+        let target = HitTarget::Row(row);
+        let row_bg = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            card,
+            card_hover,
+            card_pressed,
+            card_hover,
+            card_hover,
+            card_pressed,
+        );
+        fill(hdc, r, row_bg);
         let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
         draw_text(
             hdc,
@@ -1306,7 +1373,18 @@ unsafe fn paint(hwnd: HWND) {
         hdc,
         reset_rect(hwnd),
         false,
-        card,
+        button_background(
+            HitTarget::Reset,
+            false,
+            hovered,
+            pressed,
+            card,
+            card_hover,
+            card_pressed,
+            card,
+            card_hover,
+            card_pressed,
+        ),
         primary,
         if snapshot.language == LanguageId::SimplifiedChinese {
             "恢复当前主题默认"
@@ -1318,7 +1396,18 @@ unsafe fn paint(hwnd: HWND) {
         hdc,
         close_rect(hwnd),
         true,
-        accent,
+        button_background(
+            HitTarget::Close,
+            true,
+            hovered,
+            pressed,
+            accent,
+            accent_hover,
+            accent_pressed,
+            accent,
+            accent_hover,
+            accent_pressed,
+        ),
         Color::from_hex("#FFFFFFFF"),
         if snapshot.language == LanguageId::SimplifiedChinese {
             "关闭"
@@ -1339,7 +1428,7 @@ unsafe fn paint_editor(
     palette: EditorPalette,
 ) {
     let EditorPalette {
-        primary,
+        primary: _,
         secondary,
         track_background,
         accent,
@@ -1366,25 +1455,7 @@ unsafe fn paint_editor(
                     track_background,
                     accent,
                 );
-                let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-                draw_text(
-                    hdc,
-                    &value.to_string(),
-                    rect(hwnd, 716, top, 770, top + 22),
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                );
             }
-            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-            draw_text(
-                hdc,
-                if snapshot.language == LanguageId::SimplifiedChinese {
-                    "R/G/B 调整颜色，A 调整透明度；拖动时任务栏组件实时生效，释放后自动保存"
-                } else {
-                    "R/G/B adjust color, A adjusts opacity; the taskbar widget updates live and saves on release"
-                },
-                rect(hwnd, 196, 446, 770, 468),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
         }
         EditorSelection::Blur => {
             let value = snapshot.active_style.panel_frosted_strength;
@@ -1402,17 +1473,6 @@ unsafe fn paint_editor(
                 hdc,
                 &format!("{}%", value),
                 rect(hwnd, 716, 354, 770, 382),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-            draw_text(
-                hdc,
-                if snapshot.language == LanguageId::SimplifiedChinese {
-                    "0% 关闭磨砂；1–100% 调整模糊强度。拖动时任务栏组件实时生效，释放后自动保存"
-                } else {
-                    "0% turns blur off; 1–100% adjusts blur strength. The taskbar widget updates live and saves on release"
-                },
-                rect(hwnd, 196, 414, 770, 446),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
