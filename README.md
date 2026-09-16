@@ -15,7 +15,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 
 - Codex 5-hour and 7-day remaining quota
 - Reset time/date display
-- Compact and minimal taskbar layouts
+- Default and minimal taskbar layouts
 - Follow-system, forced dark, and forced light themes
 - Per-theme live style editing for RGBA colors and 0–100% Windows Composition Gaussian backdrop blur
 - Optional low-quota alerts
