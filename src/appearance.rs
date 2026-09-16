@@ -174,12 +174,12 @@ mod tests {
     }
 
     #[test]
-    fn compact_is_the_default_preset() {
+    fn default_is_the_default_preset() {
         assert_eq!(AppearancePreset::default(), AppearancePreset::Default);
     }
 
     #[test]
-    fn legacy_default_setting_migrates_to_compact() {
+    fn legacy_compact_setting_migrates_to_default() {
         let preset: AppearancePreset = serde_json::from_str("\"compact\"").unwrap();
         assert_eq!(preset, AppearancePreset::Default);
         assert_eq!(serde_json::to_string(&preset).unwrap(), "\"default\"");
