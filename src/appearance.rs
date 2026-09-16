@@ -9,7 +9,7 @@ use crate::poller::{self, UsageWindowKind};
 #[serde(rename_all = "lowercase")]
 pub enum AppearancePreset {
     #[default]
-    Compact,
+    Default,
     Minimal,
 }
 
@@ -20,11 +20,11 @@ impl<'de> Deserialize<'de> for AppearancePreset {
     {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
-            "compact" | "default" => Ok(Self::Compact),
+            "compact" | "default" => Ok(Self::Default),
             "minimal" => Ok(Self::Minimal),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["compact", "minimal"],
+                &["default", "minimal"],
             )),
         }
     }
@@ -61,7 +61,7 @@ pub struct StyleMetrics {
 impl AppearancePreset {
     pub fn metrics(self) -> StyleMetrics {
         match self {
-            Self::Compact => StyleMetrics {
+            Self::Default => StyleMetrics {
                 widget_height: 42,
                 panel_radius: 0,
                 outer_padding: 6,
@@ -175,58 +175,58 @@ mod tests {
 
     #[test]
     fn compact_is_the_default_preset() {
-        assert_eq!(AppearancePreset::default(), AppearancePreset::Compact);
+        assert_eq!(AppearancePreset::default(), AppearancePreset::Default);
     }
 
     #[test]
     fn legacy_default_setting_migrates_to_compact() {
-        let preset: AppearancePreset = serde_json::from_str("\"default\"").unwrap();
-        assert_eq!(preset, AppearancePreset::Compact);
-        assert_eq!(serde_json::to_string(&preset).unwrap(), "\"compact\"");
+        let preset: AppearancePreset = serde_json::from_str("\"compact\"").unwrap();
+        assert_eq!(preset, AppearancePreset::Default);
+        assert_eq!(serde_json::to_string(&preset).unwrap(), "\"default\"");
     }
 
     #[test]
     fn minimal_has_the_smallest_layout() {
-        let compact = AppearancePreset::Compact.metrics();
+        let default_layout = AppearancePreset::Default.metrics();
         let minimal = AppearancePreset::Minimal.metrics();
 
-        assert!(minimal.bar_width < compact.bar_width);
-        assert_eq!(minimal.bar_value_width, compact.bar_value_width);
-        assert_eq!(minimal.bar_value_gap, compact.bar_value_gap);
+        assert!(minimal.bar_width < default_layout.bar_width);
+        assert_eq!(minimal.bar_value_width, default_layout.bar_value_width);
+        assert_eq!(minimal.bar_value_gap, default_layout.bar_value_gap);
         assert_eq!(minimal.text_width, 0);
         assert!(minimal.hide_reset_time);
-        assert!(!compact.hide_reset_time);
+        assert!(!default_layout.hide_reset_time);
     }
 
     #[test]
     fn percentage_value_slot_has_room_for_three_digits() {
-        let compact = AppearancePreset::Compact.metrics();
+        let default_layout = AppearancePreset::Default.metrics();
         let minimal = AppearancePreset::Minimal.metrics();
 
-        assert!(compact.bar_value_width >= 34);
+        assert!(default_layout.bar_value_width >= 34);
         assert!(minimal.bar_value_width >= 34);
     }
 
     #[test]
     fn percentage_value_gap_is_subtle_but_visible() {
-        let compact = AppearancePreset::Compact.metrics();
+        let default_layout = AppearancePreset::Default.metrics();
         let minimal = AppearancePreset::Minimal.metrics();
 
-        assert_eq!(compact.bar_value_gap, 2);
+        assert_eq!(default_layout.bar_value_gap, 2);
         assert_eq!(minimal.bar_value_gap, 2);
     }
 
     #[test]
     fn taskbar_text_separates_percentage_from_reset_hint() {
         let section = section_with_local_reset(81.0, 1_789_000_000);
-        let compact = taskbar_value_text(
-            AppearancePreset::Compact,
+        let default_layout = taskbar_value_text(
+            AppearancePreset::Default,
             LanguageId::SimplifiedChinese,
             &section,
             UsageWindowKind::Session,
         );
-        assert_eq!(compact.primary, "19%");
-        assert!(compact.secondary.is_some());
+        assert_eq!(default_layout.primary, "19%");
+        assert!(default_layout.secondary.is_some());
 
         let minimal = taskbar_value_text(
             AppearancePreset::Minimal,
@@ -247,7 +247,7 @@ mod tests {
             LanguageId::Japanese,
         ] {
             let value = taskbar_value_text(
-                AppearancePreset::Compact,
+                AppearancePreset::Default,
                 language,
                 &section,
                 UsageWindowKind::Session,
@@ -259,8 +259,8 @@ mod tests {
     #[test]
     fn taskbar_line_never_uses_reset_icon() {
         let section = section_with_local_reset(81.0, 1_789_000_000);
-        let compact = taskbar_line(
-            AppearancePreset::Compact,
+        let default_layout = taskbar_line(
+            AppearancePreset::Default,
             LanguageId::SimplifiedChinese,
             &section,
             UsageWindowKind::Session,
@@ -272,8 +272,8 @@ mod tests {
             UsageWindowKind::Session,
         );
 
-        assert!(compact.starts_with("19%  "));
-        assert!(!compact.contains('↻'));
+        assert!(default_layout.starts_with("19%  "));
+        assert!(!default_layout.contains('↻'));
         assert_eq!(minimal, "19%");
     }
 }
