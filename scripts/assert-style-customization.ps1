@@ -76,12 +76,13 @@ if ($styleWindow -match 'WS_BORDER' -or
     $styleWindow -notmatch 'paint_numeric_edit_frames\(') {
     throw 'RGBA numeric inputs must use the custom focus-aware borderless style.'
 }
-if ($styleWindow -notmatch 'WINDOW_HEIGHT_BLUR' -or
-    $styleWindow -notmatch 'resize_for_editor\(' -or
+if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
+    $styleWindow -match 'resize_for_editor\(' -or
     $styleWindow -notmatch '"当前强度"' -or
-    $styleWindow -notmatch '"关闭 0%"' -or
-    $styleWindow -notmatch '"最强 100%"') {
-    throw 'Blur editor must use the compact dynamic-height layout with status labels.'
+    $styleWindow -match '"关闭 0%"' -or
+    $styleWindow -match '"最强 100%"' -or
+    $styleWindow -notmatch 'EditorSelection::Blur => rect\(hwnd, 174, 326, 786, 382\)') {
+    throw 'Style window height must stay fixed while only the blur editor block shrinks to one row.'
 }
 if ($styleWindow -notmatch 'WS_CLIPCHILDREN' -or
     $styleWindow -notmatch 'CreateCompatibleDC' -or
