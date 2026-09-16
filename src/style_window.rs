@@ -287,8 +287,22 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             return;
         };
         s.snapshot = snapshot;
+        let background = if s.snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else {
+            Color::from_hex("#FFFFFFFF")
+        };
+        unsafe {
+            if s.edit_brush != 0 {
+                let _ = DeleteObject(HGDIOBJ(s.edit_brush as *mut _));
+            }
+            let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
+            s.edit_brush = brush.0 as isize;
+        }
         s.hwnd.to_hwnd()
     };
+    layout_numeric_edits(hwnd);
+    sync_numeric_edits();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -480,6 +494,242 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
+    let top = 330 + channel_index as i32 * 26;
+    rect(hwnd, 716, top, 770, top + 22)
+}
+
+fn layout_numeric_edits(hwnd: HWND) {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = state.as_ref() else {
+        return;
+    };
+    let show = matches!(s.editor, EditorSelection::Color(_));
+    unsafe {
+        for (index, edit) in s.numeric_edits.iter().enumerate() {
+            let r = numeric_edit_rect(hwnd, index);
+            let _ = SetWindowPos(
+                edit.to_hwnd(),
+                HWND::default(),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = ShowWindow(edit.to_hwnd(), if show { SW_SHOW } else { SW_HIDE });
+        }
+    }
+}
+
+fn set_edit_text(edit: HWND, value: u8) {
+    let text = native_interop::wide_str(&value.to_string());
+    unsafe {
+        let _ = SendMessageW(
+            edit,
+            WM_SETTEXT,
+            WPARAM(0),
+            LPARAM(text.as_ptr() as isize),
+        );
+    }
+}
+
+fn sync_numeric_edits() {
+    let (edits, values) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        let EditorSelection::Color(target) = s.editor else {
+            return;
+        };
+        let color = s.snapshot.active_style.color(target);
+        s.syncing_numeric_edits = true;
+        (s.numeric_edits, [color.r, color.g, color.b, color.a])
+    };
+
+    for (edit, value) in edits.iter().zip(values) {
+        set_edit_text(edit.to_hwnd(), value);
+    }
+
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = state.as_mut() {
+        s.syncing_numeric_edits = false;
+    }
+}
+
+fn read_edit_value(edit: HWND) -> Option<u16> {
+    let mut buffer = [0u16; 4];
+    let len = unsafe {
+        SendMessageW(
+            edit,
+            WM_GETTEXT,
+            WPARAM(buffer.len()),
+            LPARAM(buffer.as_mut_ptr() as isize),
+        )
+        .0 as usize
+    };
+    if len == 0 {
+        return None;
+    }
+    String::from_utf16_lossy(&buffer[..len]).parse::<u16>().ok()
+}
+
+fn update_color_from_numeric_edit(channel_index: usize) {
+    let (edit, target, syncing) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        let EditorSelection::Color(target) = s.editor else {
+            return;
+        };
+        (s.numeric_edits[channel_index].to_hwnd(), target, s.syncing_numeric_edits)
+    };
+    if syncing {
+        return;
+    }
+    let Some(raw_value) = read_edit_value(edit) else {
+        return;
+    };
+    let value = raw_value.min(u16::from(u8::MAX)) as u8;
+
+    let color = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        let current = s.snapshot.active_style.color(target);
+        let color = match channel_index {
+            0 => Color::rgba(value, current.g, current.b, current.a),
+            1 => Color::rgba(current.r, value, current.b, current.a),
+            2 => Color::rgba(current.r, current.g, value, current.a),
+            _ => Color::rgba(current.r, current.g, current.b, value),
+        };
+        s.snapshot.active_style.set_color(target, color);
+        color
+    };
+
+    if raw_value > u16::from(u8::MAX) {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_numeric_edits = true;
+        }
+        drop(state);
+        set_edit_text(edit, value);
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_numeric_edits = false;
+        }
+    }
+
+    send_parent(
+        WM_STYLE_COLOR_PREVIEW,
+        encode_color_target(target),
+        pack_color(color),
+    );
+    send_parent(WM_STYLE_SAVE, 0, 0);
+    unsafe {
+        let hwnd = {
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default()
+        };
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
+    for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
+        if pt_in_rect(theme_rect(hwnd, mode), x, y) {
+            return Some(HitTarget::Theme(mode));
+        }
+    }
+    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+        if pt_in_rect(layout_rect(hwnd, preset), x, y) {
+            return Some(HitTarget::Layout(preset));
+        }
+    }
+    for section in [
+        Section::Panel,
+        Section::Text,
+        Section::Progress,
+        Section::Interaction,
+    ] {
+        if pt_in_rect(section_rect(hwnd, section), x, y) {
+            return Some(HitTarget::Section(section));
+        }
+    }
+    let section = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.section)?
+    };
+    for (index, editor) in rows(section).iter().copied().enumerate() {
+        if pt_in_rect(row_rect(hwnd, index), x, y) {
+            return Some(HitTarget::Row(editor));
+        }
+    }
+    if pt_in_rect(reset_rect(hwnd), x, y) {
+        return Some(HitTarget::Reset);
+    }
+    if pt_in_rect(close_rect(hwnd), x, y) {
+        return Some(HitTarget::Close);
+    }
+    None
+}
+
+fn activate_target(hwnd: HWND, target: HitTarget) {
+    match target {
+        HitTarget::Theme(mode) => {
+            send_parent(
+                WM_STYLE_THEME_CHANGE,
+                match mode {
+                    ThemeMode::System => 0,
+                    ThemeMode::Dark => 1,
+                    ThemeMode::Light => 2,
+                },
+                0,
+            );
+        }
+        HitTarget::Layout(preset) => {
+            send_parent(
+                WM_STYLE_LAYOUT_CHANGE,
+                if preset == AppearancePreset::Default { 0 } else { 1 },
+                0,
+            );
+        }
+        HitTarget::Section(section) => set_section(section),
+        HitTarget::Row(editor) => select_editor(editor),
+        HitTarget::Reset => send_parent(WM_STYLE_RESET_CURRENT, 0, 0),
+        HitTarget::Close => unsafe {
+            send_parent(WM_STYLE_SAVE, 0, 0);
+            let _ = DestroyWindow(hwnd);
+        },
+    }
+}
+
+fn button_background(
+    target: HitTarget,
+    selected: bool,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    normal: Color,
+    hover: Color,
+    pressed_color: Color,
+    selected_color: Color,
+    selected_hover: Color,
+    selected_pressed: Color,
+) -> Color {
+    if pressed == Some(target) {
+        if selected { selected_pressed } else { pressed_color }
+    } else if hovered == Some(target) {
+        if selected { selected_hover } else { hover }
+    } else if selected {
+        selected_color
+    } else {
+        normal
+    }
+}
+
 fn set_section(section: Section) {
     let hwnd = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -491,6 +741,8 @@ fn set_section(section: Section) {
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
+    layout_numeric_edits(hwnd);
+    sync_numeric_edits();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -506,6 +758,8 @@ fn select_editor(editor: EditorSelection) {
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
+    layout_numeric_edits(hwnd);
+    sync_numeric_edits();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
