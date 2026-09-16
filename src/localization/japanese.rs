@@ -9,7 +9,7 @@ pub(super) const STRINGS: Strings = Strings {
     fifteen_minutes: "15分",
     one_hour: "1時間",
     codex_model: "Codex",
-    settings: "設定",
+    settings: "その他の設定",
     start_with_windows: "Windows と同時に開始",
     reset_position: "位置をリセット",
     language: "言語",
