@@ -43,6 +43,9 @@ if ($styleWindow -match 'paint_preview\(') {
 if ($styleWindow -match 'msctls_trackbar32' -or $styleWindow -match 'WM_HSCROLL') {
     throw 'Unified style panel must use self-drawn sliders instead of white native trackbars.'
 }
+if ($styleWindow -match '"RGBA"' -or $styleWindow -match '"强度调节"' -or $styleWindow -match '"Intensity"') {
+    throw 'Redundant RGBA/intensity editor headings must stay removed.'
+}
 if ($styleWindow -notmatch 'WM_APP \+ 120' -or
     $styleWindow -notmatch 'WM_APP \+ 123' -or
     $styleWindow -notmatch 'draw_slider\(') {
@@ -228,8 +231,8 @@ if ($windowProduction -match 'capture_taskbar_background' -or
 }
 if ($styleWindow -notmatch '"磨砂强度"' -or
     $styleWindow -notmatch '"Frosted intensity"' -or
-    $styleWindow -notmatch '0%=关闭' -or
-    $styleWindow -notmatch '0%=Off') {
+    $styleWindow -notmatch '0% 关闭磨砂' -or
+    $styleWindow -notmatch '0% turns blur off') {
     throw 'Unified frosted-intensity UI labels are missing.'
 }
 if ($windowProduction -notmatch 'reset_active\(s\.is_dark\)') {
