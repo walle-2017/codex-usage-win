@@ -116,14 +116,6 @@ impl AppearancePreset {
         }
     }
 
-    pub fn menu_label(self, language: LanguageId) -> &'static str {
-        match (self, language == LanguageId::SimplifiedChinese) {
-            (Self::Compact, true) => "紧凑",
-            (Self::Minimal, true) => "极简",
-            (Self::Compact, false) => "Compact",
-            (Self::Minimal, false) => "Minimal",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
