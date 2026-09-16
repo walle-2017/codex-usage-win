@@ -1191,9 +1191,32 @@ unsafe extern "system" fn wnd_proc(
 
 unsafe fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(hwnd, &mut ps);
+    let screen_hdc = BeginPaint(hwnd, &mut ps);
 
-    let (snapshot, section, editor, hovered, pressed, font) = {
+    let mut paint_client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut paint_client);
+    let width = (paint_client.right - paint_client.left).max(1);
+    let height = (paint_client.bottom - paint_client.top).max(1);
+
+    let mem_hdc = match CreateCompatibleDC(screen_hdc) {
+        Ok(dc) => dc,
+        Err(_) => {
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        }
+    };
+    let bitmap = match CreateCompatibleBitmap(screen_hdc, width, height) {
+        Ok(bitmap) => bitmap,
+        Err(_) => {
+            let _ = DeleteDC(mem_hdc);
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        }
+    };
+    let old_bitmap = SelectObject(mem_hdc, HGDIOBJ(bitmap.0));
+    let hdc = mem_hdc;
+
+    let (snapshot, section, editor, hovered, pressed, focused_numeric_edit, font) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             let _ = EndPaint(hwnd, &ps);
@@ -1205,6 +1228,7 @@ unsafe fn paint(hwnd: HWND) {
             s.editor,
             s.hovered,
             s.pressed,
+            s.focused_numeric_edit,
             s.font,
         )
     };
@@ -1462,6 +1486,16 @@ unsafe fn paint(hwnd: HWND) {
 
     let editor_box = editor_box_rect(hwnd);
     fill(hdc, editor_box, card);
+    if matches!(editor, EditorSelection::Color(_)) {
+        paint_numeric_edit_frames(
+            hdc,
+            hwnd,
+            snapshot.is_dark,
+            focused_numeric_edit,
+            track_background,
+            accent,
+        );
+    }
     paint_editor(
         hdc,
         hwnd,
@@ -1527,7 +1561,47 @@ unsafe fn paint(hwnd: HWND) {
     );
 
     SelectObject(hdc, old_font);
+
+    let _ = BitBlt(
+        screen_hdc,
+        0,
+        0,
+        width,
+        height,
+        hdc,
+        0,
+        0,
+        SRCCOPY,
+    );
+    SelectObject(hdc, old_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(hdc);
     let _ = EndPaint(hwnd, &ps);
+}
+
+unsafe fn paint_numeric_edit_frames(
+    hdc: HDC,
+    hwnd: HWND,
+    is_dark: bool,
+    focused: Option<usize>,
+    border: Color,
+    accent: Color,
+) {
+    let background = if is_dark {
+        Color::from_hex("#20242AFF")
+    } else {
+        Color::from_hex("#F4F6F8FF")
+    };
+
+    for index in 0..4 {
+        let frame = numeric_edit_frame_rect(hwnd, index);
+        fill(hdc, frame, background);
+        draw_outline_rect(
+            hdc,
+            frame,
+            if focused == Some(index) { accent } else { border },
+        );
+    }
 }
 
 unsafe fn paint_editor(
@@ -1548,7 +1622,7 @@ unsafe fn paint_editor(
             let color = snapshot.active_style.color(target);
             let values = [color.r, color.g, color.b, color.a];
             for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
-                let top = 338 + index as i32 * 26;
+                let top = 336 + index as i32 * 32;
                 let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
                 draw_text(
                     hdc,
@@ -1569,6 +1643,26 @@ unsafe fn paint_editor(
         }
         EditorSelection::Blur => {
             let value = snapshot.active_style.panel_frosted_strength;
+
+            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+            draw_text(
+                hdc,
+                if snapshot.language == LanguageId::SimplifiedChinese {
+                    "当前强度"
+                } else {
+                    "Current"
+                },
+                rect(hwnd, 196, 336, 300, 356),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+            draw_text(
+                hdc,
+                &format!("{}%", value),
+                rect(hwnd, 700, 336, 764, 356),
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
+
             draw_slider(
                 hdc,
                 hwnd,
@@ -1578,12 +1672,27 @@ unsafe fn paint_editor(
                 track_background,
                 accent,
             );
-            let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+
+            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
             draw_text(
                 hdc,
-                &format!("{}%", value),
-                rect(hwnd, 716, 354, 770, 382),
+                if snapshot.language == LanguageId::SimplifiedChinese {
+                    "关闭 0%"
+                } else {
+                    "Off 0%"
+                },
+                rect(hwnd, 196, 374, 300, 394),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_text(
+                hdc,
+                if snapshot.language == LanguageId::SimplifiedChinese {
+                    "最强 100%"
+                } else {
+                    "Max 100%"
+                },
+                rect(hwnd, 660, 374, 764, 394),
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
             );
         }
     }
@@ -1727,6 +1836,16 @@ unsafe fn draw_segment(
     }
     let _ = SetTextColor(hdc, COLORREF(foreground.to_colorref()));
     draw_text(hdc, text, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+unsafe fn draw_outline_rect(hdc: HDC, rect: RECT, color: Color) {
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(color.to_colorref()));
+    let old_pen = SelectObject(hdc, pen);
+    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    let _ = Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    let _ = DeleteObject(pen);
 }
 
 unsafe fn fill(hdc: HDC, rect: RECT, color: Color) {
