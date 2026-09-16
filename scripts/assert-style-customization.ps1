@@ -211,11 +211,11 @@ if ($windowProduction -match 'capture_taskbar_background' -or
     $windowProduction -match 'tint_frosted_panel_bitmap') {
     throw 'Taskbar screenshot/software blur must not be used for frosted glass.'
 }
-if ($windowProduction -notmatch '"样式 - 磨砂强度"' -or
-    $windowProduction -notmatch '"Style - Frosted intensity"' -or
-    $windowProduction -notmatch '磨砂强度\.\.\. \(\{\}%\)' -or
-    $windowProduction -notmatch 'Frosted intensity\.\.\. \(\{\}%\)') {
-    throw 'Linear frosted-intensity UI labels are missing.'
+if ($styleWindow -notmatch '"磨砂强度"' -or
+    $styleWindow -notmatch '"Frosted intensity"' -or
+    $styleWindow -notmatch '0%=关闭' -or
+    $styleWindow -notmatch '0%=Off') {
+    throw 'Unified frosted-intensity UI labels are missing.'
 }
 if ($windowProduction -notmatch 'reset_active\(s\.is_dark\)') {
     throw 'Reset Style must only reset the active theme.'
