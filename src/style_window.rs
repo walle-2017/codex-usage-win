@@ -25,8 +25,7 @@ pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
 
 const WINDOW_CLASS: &str = "CodexUsageStyleSettingsV1";
 const WINDOW_WIDTH: i32 = 820;
-const WINDOW_HEIGHT_COLOR: i32 = 570;
-const WINDOW_HEIGHT_BLUR: i32 = 500;
+const WINDOW_HEIGHT: i32 = 570;
 const ID_EDIT_R: u16 = 300;
 const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
@@ -169,7 +168,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
-            WINDOW_HEIGHT_COLOR,
+            WINDOW_HEIGHT,
             parent,
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
@@ -187,7 +186,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             0,
             0,
             s(WINDOW_WIDTH),
-            s(WINDOW_HEIGHT_COLOR),
+            s(WINDOW_HEIGHT),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
@@ -285,8 +284,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 font: font.0 as isize,
             });
         }
-
-        resize_for_editor(hwnd);
         layout_numeric_edits(hwnd);
         sync_numeric_edits();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -315,8 +312,6 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         }
         s.hwnd.to_hwnd()
     };
-    resize_for_editor(hwnd);
-    resize_for_editor(hwnd);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     unsafe {
@@ -438,43 +433,12 @@ fn current_editor() -> EditorSelection {
         .unwrap_or(EditorSelection::Color(StyleColorTarget::PanelBackground))
 }
 
-fn window_height_for_editor(editor: EditorSelection) -> i32 {
-    match editor {
-        EditorSelection::Color(_) => WINDOW_HEIGHT_COLOR,
-        EditorSelection::Blur => WINDOW_HEIGHT_BLUR,
-    }
-}
-
-fn footer_top(editor: EditorSelection) -> i32 {
-    match editor {
-        EditorSelection::Color(_) => 488,
-        EditorSelection::Blur => 420,
-    }
-}
-
 fn reset_rect(hwnd: HWND) -> RECT {
-    let top = footer_top(current_editor());
-    rect(hwnd, 20, top, 176, top + 40)
+    rect(hwnd, 20, 488, 176, 528)
 }
 
 fn close_rect(hwnd: HWND) -> RECT {
-    let top = footer_top(current_editor());
-    rect(hwnd, 690, top, 786, top + 40)
-}
-
-fn resize_for_editor(hwnd: HWND) {
-    let editor = current_editor();
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            HWND::default(),
-            0,
-            0,
-            scale(hwnd, WINDOW_WIDTH),
-            scale(hwnd, window_height_for_editor(editor)),
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
+    rect(hwnd, 690, 488, 786, 528)
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -519,7 +483,7 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
 fn editor_box_rect(hwnd: HWND) -> RECT {
     match current_editor() {
         EditorSelection::Color(_) => rect(hwnd, 174, 326, 786, 472),
-        EditorSelection::Blur => rect(hwnd, 174, 326, 786, 404),
+        EditorSelection::Blur => rect(hwnd, 174, 326, 786, 382),
     }
 }
 
@@ -539,7 +503,7 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 244, 360, 676, 364)
+    rect(hwnd, 310, 352, 700, 356)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -812,7 +776,6 @@ fn set_section(section: Section) {
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
-    resize_for_editor(hwnd);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     unsafe {
@@ -830,7 +793,6 @@ fn select_editor(editor: EditorSelection) {
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
-    resize_for_editor(hwnd);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     unsafe {
@@ -1648,15 +1610,8 @@ unsafe fn paint_editor(
                 } else {
                     "Current"
                 },
-                rect(hwnd, 196, 336, 300, 356),
+                rect(hwnd, 196, 338, 286, 370),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-            let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-            draw_text(
-                hdc,
-                &format!("{}%", value),
-                rect(hwnd, 700, 336, 764, 356),
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
             );
 
             draw_slider(
@@ -1669,25 +1624,11 @@ unsafe fn paint_editor(
                 accent,
             );
 
-            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+            let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
             draw_text(
                 hdc,
-                if snapshot.language == LanguageId::SimplifiedChinese {
-                    "关闭 0%"
-                } else {
-                    "Off 0%"
-                },
-                rect(hwnd, 196, 374, 300, 394),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-            draw_text(
-                hdc,
-                if snapshot.language == LanguageId::SimplifiedChinese {
-                    "最强 100%"
-                } else {
-                    "Max 100%"
-                },
-                rect(hwnd, 660, 374, 764, 394),
+                &format!("{}%", value),
+                rect(hwnd, 716, 338, 764, 370),
                 DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
             );
         }
