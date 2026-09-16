@@ -314,6 +314,8 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         }
         s.hwnd.to_hwnd()
     };
+    resize_for_editor(hwnd);
+    resize_for_editor(hwnd);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     unsafe {
@@ -427,12 +429,51 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     rect(hwnd, 540 + index * 104, 50, 636 + index * 104, 84)
 }
 
+fn current_editor() -> EditorSelection {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state
+        .as_ref()
+        .map(|s| s.editor)
+        .unwrap_or(EditorSelection::Color(StyleColorTarget::PanelBackground))
+}
+
+fn window_height_for_editor(editor: EditorSelection) -> i32 {
+    match editor {
+        EditorSelection::Color(_) => WINDOW_HEIGHT_COLOR,
+        EditorSelection::Blur => WINDOW_HEIGHT_BLUR,
+    }
+}
+
+fn footer_top(editor: EditorSelection) -> i32 {
+    match editor {
+        EditorSelection::Color(_) => 488,
+        EditorSelection::Blur => 420,
+    }
+}
+
 fn reset_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 20, 488, 176, 528)
+    let top = footer_top(current_editor());
+    rect(hwnd, 20, top, 176, top + 40)
 }
 
 fn close_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 690, 488, 786, 528)
+    let top = footer_top(current_editor());
+    rect(hwnd, 690, top, 786, top + 40)
+}
+
+fn resize_for_editor(hwnd: HWND) {
+    let editor = current_editor();
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            scale(hwnd, WINDOW_WIDTH),
+            scale(hwnd, window_height_for_editor(editor)),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -475,12 +516,15 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
 }
 
 fn editor_box_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 174, 326, 786, 472)
+    match current_editor() {
+        EditorSelection::Color(_) => rect(hwnd, 174, 326, 786, 472),
+        EditorSelection::Blur => rect(hwnd, 174, 326, 786, 404),
+    }
 }
 
 fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 348 + channel_index as i32 * 26;
-    rect(hwnd, 310, top, 700, top + 4)
+    let top = 348 + channel_index as i32 * 32;
+    rect(hwnd, 244, top, 676, top + 4)
 }
 
 fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
@@ -494,7 +538,7 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 310, 366, 700, 370)
+    rect(hwnd, 244, 360, 676, 364)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -507,9 +551,19 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn numeric_edit_frame_rect(hwnd: HWND, channel_index: usize) -> RECT {
+    let top = 334 + channel_index as i32 * 32;
+    rect(hwnd, 690, top, 764, top + 26)
+}
+
 fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 330 + channel_index as i32 * 26;
-    rect(hwnd, 716, top, 770, top + 22)
+    let frame = numeric_edit_frame_rect(hwnd, channel_index);
+    RECT {
+        left: frame.left + scale(hwnd, 3),
+        top: frame.top + scale(hwnd, 3),
+        right: frame.right - scale(hwnd, 3),
+        bottom: frame.bottom - scale(hwnd, 3),
+    }
 }
 
 fn layout_numeric_edits(hwnd: HWND) {
