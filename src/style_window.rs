@@ -861,6 +861,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
     }
 
     if let Some((target, color)) = color_update {
+        sync_numeric_edits();
         send_parent(
             WM_STYLE_COLOR_PREVIEW,
             encode_color_target(target),
@@ -891,62 +892,12 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let (x, y) = point_from_lparam(lparam);
 
-            for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
-                if pt_in_rect(theme_rect(hwnd, mode), x, y) {
-                    send_parent(
-                        WM_STYLE_THEME_CHANGE,
-                        match mode {
-                            ThemeMode::System => 0,
-                            ThemeMode::Dark => 1,
-                            ThemeMode::Light => 2,
-                        },
-                        0,
-                    );
-                    return LRESULT(0);
-                }
-            }
-
-            for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
-                if pt_in_rect(layout_rect(hwnd, preset), x, y) {
-                    send_parent(
-                        WM_STYLE_LAYOUT_CHANGE,
-                        if preset == AppearancePreset::Default { 0 } else { 1 },
-                        0,
-                    );
-                    return LRESULT(0);
-                }
-            }
-
-            for section in [
-                Section::Panel,
-                Section::Text,
-                Section::Progress,
-                Section::Interaction,
-            ] {
-                if pt_in_rect(section_rect(hwnd, section), x, y) {
-                    set_section(section);
-                    return LRESULT(0);
-                }
-            }
-
-            let section = {
-                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.as_ref().map(|s| s.section)
-            };
-            if let Some(section) = section {
-                for (index, editor) in rows(section).iter().copied().enumerate() {
-                    if pt_in_rect(row_rect(hwnd, index), x, y) {
-                        select_editor(editor);
-                        return LRESULT(0);
-                    }
-                }
-            }
-
             if let Some(kind) = slider_kind_at(hwnd, x, y) {
                 {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
                         s.dragging_slider = Some(kind);
+                        s.pressed = None;
                     }
                 }
                 let _ = SetCapture(hwnd);
@@ -954,54 +905,156 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
 
-            if pt_in_rect(reset_rect(hwnd), x, y) {
-                send_parent(WM_STYLE_RESET_CURRENT, 0, 0);
-                return LRESULT(0);
-            }
-            if pt_in_rect(close_rect(hwnd), x, y) {
-                send_parent(WM_STYLE_SAVE, 0, 0);
-                let _ = DestroyWindow(hwnd);
-                return LRESULT(0);
+            if let Some(target) = hit_target_at(hwnd, x, y) {
+                {
+                    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(s) = state.as_mut() {
+                        s.pressed = Some(target);
+                        s.hovered = Some(target);
+                    }
+                }
+                let _ = SetCapture(hwnd);
+                let _ = InvalidateRect(hwnd, None, false);
             }
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let (x, _) = point_from_lparam(lparam);
             let kind = {
-                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.as_ref().and_then(|s| s.dragging_slider)
-            };
-            if let Some(kind) = kind {
-                let (x, _) = point_from_lparam(lparam);
-                update_slider(hwnd, kind, x);
-            }
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            let was_dragging = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
                     return LRESULT(0);
                 };
-                s.dragging_slider.take().is_some()
+                if !s.tracking_mouse_leave {
+                    let mut tracking = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tracking);
+                    s.tracking_mouse_leave = true;
+                }
+                s.dragging_slider
             };
-            if was_dragging {
-                let _ = ReleaseCapture();
-                send_parent(WM_STYLE_SAVE, 0, 0);
+
+            if let Some(kind) = kind {
+                update_slider(hwnd, kind, x);
+            } else {
+                let (_, y) = point_from_lparam(lparam);
+                let hovered = hit_target_at(hwnd, x, y);
+                let changed = {
+                    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(s) = state.as_mut() else {
+                        return LRESULT(0);
+                    };
+                    let changed = s.hovered != hovered;
+                    s.hovered = hovered;
+                    changed
+                };
+                if changed {
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
             }
             LRESULT(0)
         }
-        WM_CANCELMODE | WM_CAPTURECHANGED => {
-            let was_dragging = {
+        WM_MOUSELEAVE => {
+            let changed = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state
-                    .as_mut()
-                    .and_then(|s| s.dragging_slider.take())
-                    .is_some()
+                let Some(s) = state.as_mut() else {
+                    return LRESULT(0);
+                };
+                s.tracking_mouse_leave = false;
+                let changed = s.hovered.is_some();
+                s.hovered = None;
+                changed
+            };
+            if changed {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = point_from_lparam(lparam);
+            let (was_dragging, pressed) = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return LRESULT(0);
+                };
+                (s.dragging_slider.take().is_some(), s.pressed.take())
+            };
+
+            let _ = ReleaseCapture();
+
+            if was_dragging {
+                send_parent(WM_STYLE_SAVE, 0, 0);
+            } else if let Some(target) = pressed {
+                if hit_target_at(hwnd, x, y) == Some(target) {
+                    activate_target(hwnd, target);
+                }
+            }
+            let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
+        WM_CANCELMODE | WM_CAPTURECHANGED => {
+            let (was_dragging, had_pressed) = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return LRESULT(0);
+                };
+                (
+                    s.dragging_slider.take().is_some(),
+                    s.pressed.take().is_some(),
+                )
             };
             if was_dragging {
                 send_parent(WM_STYLE_SAVE, 0, 0);
             }
+            if had_pressed {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
             LRESULT(0)
+        }
+        WM_COMMAND => {
+            let control_id = (wparam.0 & 0xFFFF) as u16;
+            let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
+            if notification == EN_CHANGE_CODE {
+                let channel = match control_id {
+                    ID_EDIT_R => Some(0),
+                    ID_EDIT_G => Some(1),
+                    ID_EDIT_B => Some(2),
+                    ID_EDIT_A => Some(3),
+                    _ => None,
+                };
+                if let Some(channel) = channel {
+                    update_color_from_numeric_edit(channel);
+                    return LRESULT(0);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_CTLCOLOREDIT => {
+            let hdc = HDC(wparam.0 as *mut _);
+            let (is_dark, brush) = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_ref() else {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                };
+                (s.snapshot.is_dark, s.edit_brush)
+            };
+            let background = if is_dark {
+                Color::from_hex("#292C31FF")
+            } else {
+                Color::from_hex("#FFFFFFFF")
+            };
+            let foreground = if is_dark {
+                Color::from_hex("#F2F3F5FF")
+            } else {
+                Color::from_hex("#202124FF")
+            };
+            let _ = SetBkColor(hdc, COLORREF(background.to_colorref()));
+            let _ = SetTextColor(hdc, COLORREF(foreground.to_colorref()));
+            LRESULT(brush)
         }
         WM_DPICHANGED => {
             let suggested = &*(lparam.0 as *const RECT);
@@ -1014,22 +1067,22 @@ unsafe extern "system" fn wnd_proc(
                 suggested.bottom - suggested.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            layout_numeric_edits(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
-        WM_CLOSE => {
-            send_parent(WM_STYLE_SAVE, 0, 0);
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
+        WM_CLOSE => LRESULT(0),
         WM_DESTROY => {
-            let font = {
+            let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.take().map(|s| s.font)
+                state.take().map(|s| (s.font, s.edit_brush))
             };
-            if let Some(font) = font {
+            if let Some((font, edit_brush)) = resources {
                 if font != 0 {
                     let _ = DeleteObject(HGDIOBJ(font as *mut _));
+                }
+                if edit_brush != 0 {
+                    let _ = DeleteObject(HGDIOBJ(edit_brush as *mut _));
                 }
             }
             LRESULT(0)
