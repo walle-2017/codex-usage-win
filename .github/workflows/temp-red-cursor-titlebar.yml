@@ -1,0 +1,29 @@
+name: Temporary RED cursor and titlebar contract
+
+on:
+  push:
+    branches:
+      - feature/v1.0.5-style-settings-panel-v1
+
+permissions:
+  contents: read
+
+jobs:
+  red-contract:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/v1.0.5-style-settings-panel-v1
+      - name: Patch RED contract only
+        run: python scripts/temp-red-cursor-titlebar-contract.py
+      - name: Verify new contract fails before implementation
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File ./scripts/assert-style-customization.ps1
+          $code = $LASTEXITCODE
+          if ($code -eq 0) {
+            throw 'RED failed: new cursor/titlebar contract unexpectedly passed before implementation.'
+          }
+          Write-Host "RED confirmed: contract failed as expected (exit $code)."
