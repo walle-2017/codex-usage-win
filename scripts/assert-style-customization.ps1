@@ -70,6 +70,13 @@ if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'update_color_from_numeric_edit\(') {
     throw 'RGBA values must use linked numeric input controls.'
 }
+if ($styleWindow -notmatch 'ID_EDIT_BLUR' -or
+    $styleWindow -notmatch 'sync_blur_edit\(' -or
+    $styleWindow -notmatch 'update_blur_from_numeric_edit\(' -or
+    $styleWindow -notmatch 'focused_blur_edit' -or
+    $styleWindow -notmatch 'blur_edit_frame_rect\(') {
+    throw 'Blur intensity must use a linked 0-100 numeric input beside the slider.'
+}
 if ($styleWindow -match 'WS_BORDER' -or
     $styleWindow -notmatch 'numeric_edit_frame_rect\(' -or
     $styleWindow -notmatch 'focused_numeric_edit' -or
@@ -83,6 +90,16 @@ if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     $styleWindow -match '"最强 100%"' -or
     $styleWindow -notmatch 'EditorSelection::Blur => rect\(hwnd, 174, 326, 786, 382\)') {
     throw 'Style window height must stay fixed while only the blur editor block shrinks to one row.'
+}
+if ($styleWindow -notmatch 'DwmSetWindowAttribute' -or
+    $styleWindow -notmatch 'DWMWA_USE_IMMERSIVE_DARK_MODE' -or
+    $styleWindow -notmatch 'apply_titlebar_theme\(') {
+    throw 'Style window title bar must follow the active dark/light theme.'
+}
+foreach ($hex in @('#E9EEF4FF', '#DCE5EFFF', '#CBD7E4FF', '#C1CCD8FF', '#EEF3F8FF')) {
+    if ($styleWindow -notmatch [regex]::Escape($hex)) {
+        throw "Expected higher-contrast light style-panel color is missing: $hex"
+    }
 }
 if ($styleWindow -notmatch 'WS_CLIPCHILDREN' -or
     $styleWindow -notmatch 'CreateCompatibleDC' -or
