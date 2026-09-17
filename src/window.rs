@@ -215,6 +215,30 @@ fn sc(px: i32) -> i32 {
     (px as f64 * dpi as f64 / 96.0).round() as i32
 }
 
+fn text_quality_for_layered_surface(panel_alpha: u8, composition_blur_active: bool) -> u32 {
+    if composition_blur_active || panel_alpha < u8::MAX {
+        // ClearType/antialiased GDI glyph edges are pre-blended against the
+        // panel RGB. The layered-window finalizer later promotes changed pixels
+        // to opaque foreground, turning those edge blends into visible halos.
+        NONANTIALIASED_QUALITY.0 as u32
+    } else {
+        CLEARTYPE_QUALITY.0 as u32
+    }
+}
+
+fn widget_text_quality() -> u32 {
+    let state = lock_state();
+    let Some(s) = state.as_ref() else {
+        return CLEARTYPE_QUALITY.0 as u32;
+    };
+    let panel_alpha = s
+        .styles
+        .active(s.is_dark)
+        .color(StyleColorTarget::PanelBackground)
+        .a;
+    text_quality_for_layered_surface(panel_alpha, s.composition_blur_active)
+}
+
 /// Re-query the monitor DPI for our window and update the cached value.
 /// Uses GetDpiForWindow which returns the live DPI (unlike GetDpiForSystem
 /// which is cached at process startup and never changes).
@@ -2445,7 +2469,7 @@ fn paint_content(
             DEFAULT_CHARSET.0 as u32,
             OUT_TT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
-            CLEARTYPE_QUALITY.0 as u32,
+            widget_text_quality(),
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
@@ -4936,7 +4960,7 @@ fn draw_usage_value_text(
             DEFAULT_CHARSET.0 as u32,
             OUT_TT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
-            CLEARTYPE_QUALITY.0 as u32,
+            widget_text_quality(),
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
@@ -4969,7 +4993,7 @@ fn draw_usage_value_text(
                 DEFAULT_CHARSET.0 as u32,
                 OUT_TT_PRECIS.0 as u32,
                 CLIP_DEFAULT_PRECIS.0 as u32,
-                CLEARTYPE_QUALITY.0 as u32,
+                widget_text_quality(),
                 (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
                 PCWSTR::from_raw(font_name.as_ptr()),
             );
@@ -5066,6 +5090,22 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transparent_layered_text_avoids_cleartype_background_fringe() {
+        assert_eq!(
+            text_quality_for_layered_surface(255, false),
+            CLEARTYPE_QUALITY.0 as u32
+        );
+        assert_eq!(
+            text_quality_for_layered_surface(254, false),
+            NONANTIALIASED_QUALITY.0 as u32
+        );
+        assert_eq!(
+            text_quality_for_layered_surface(255, true),
+            NONANTIALIASED_QUALITY.0 as u32
+        );
+    }
 
     #[test]
     fn frosted_strength_maps_linearly_to_gaussian_radius() {

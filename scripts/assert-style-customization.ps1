@@ -302,3 +302,15 @@ if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)') {
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
+
+
+# Theme-sync and layered-text regression contract
+if ($styleWindow -notmatch 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
+    $styleWindow -notmatch 'UpdateWindow\(hwnd\)') {
+    throw 'Style-panel client and title-bar theme changes must commit without a delayed DWM transition.'
+}
+if ($windowProduction -notmatch 'text_quality_for_layered_surface' -or
+    $windowProduction -notmatch 'NONANTIALIASED_QUALITY' -or
+    $windowProduction -notmatch 'widget_text_quality\(\)') {
+    throw 'Transparent/frosted taskbar text must avoid ClearType background-fringe artifacts.'
+}

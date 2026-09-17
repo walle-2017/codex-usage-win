@@ -2,7 +2,9 @@ use std::sync::Mutex;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -369,12 +371,24 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     sync_blur_edit();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
+        // Commit the client-area theme in this UI turn so it lands together
+        // with the now non-animated DWM title-bar update.
+        let _ = UpdateWindow(hwnd);
     }
 }
 
 fn apply_titlebar_theme(hwnd: HWND, is_dark: bool) {
+    let transitions_disabled = BOOL::from(true);
     let enabled = BOOL::from(is_dark);
     unsafe {
+        // DWM otherwise animates the non-client title bar after the client area
+        // has already repainted, which makes theme changes visibly two-stage.
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &transitions_disabled as *const BOOL as *const std::ffi::c_void,
+            std::mem::size_of::<BOOL>() as u32,
+        );
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
