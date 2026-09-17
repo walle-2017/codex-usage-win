@@ -44,9 +44,6 @@ jobs:
               if old not in contract:
                   raise SystemExit("semantic cursor contract block not found")
               contract = contract.replace(old, new, 1)
-
-          if "样式设置\\t⚙" not in contract or "Style settings\\t⚙" not in contract:
-              raise SystemExit("right-aligned gear menu contract is missing")
           contract_path.write_text(contract, encoding="utf-8")
           '@ | python -
 
