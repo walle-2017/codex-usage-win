@@ -19,7 +19,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply approved interaction changes
-        run: python scripts/temp-apply-cursor-titlebar.py
+        run: |
+          python scripts/temp-apply-cursor-titlebar.py
+          python scripts/temp-fix-fixed-caption-contract.py
 
       - name: Verify style customization contract
         shell: pwsh
