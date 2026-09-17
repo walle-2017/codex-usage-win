@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -30,6 +31,7 @@ const ID_EDIT_R: u16 = 300;
 const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
 const ID_EDIT_A: u16 = 303;
+const ID_EDIT_BLUR: u16 = 304;
 const EN_SETFOCUS_CODE: u16 = 0x0100;
 const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
@@ -104,8 +106,11 @@ struct PanelState {
     pressed: Option<HitTarget>,
     tracking_mouse_leave: bool,
     numeric_edits: [SendHwnd; 4],
+    blur_edit: SendHwnd,
     focused_numeric_edit: Option<usize>,
+    focused_blur_edit: bool,
     syncing_numeric_edits: bool,
+    syncing_blur_edit: bool,
     edit_brush: isize,
     font: isize,
 }
@@ -258,10 +263,49 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             numeric_edits_raw[index] = edit;
         }
         let numeric_edits = numeric_edits_raw.map(SendHwnd::from_hwnd);
+
+        let blur_edit = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(edit_class.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WINDOW_STYLE(
+                WS_CHILD.0
+                    | ES_NUMBER as u32
+                    | ES_CENTER as u32
+                    | ES_AUTOHSCROLL as u32,
+            ),
+            0,
+            0,
+            s(54),
+            s(22),
+            hwnd,
+            HMENU(ID_EDIT_BLUR as usize as *mut _),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(edit) => edit,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                return;
+            }
+        };
+        let _ = SendMessageW(
+            blur_edit,
+            WM_SETFONT,
+            WPARAM(font.0 as usize),
+            LPARAM(1),
+        );
+        let _ = SendMessageW(
+            blur_edit,
+            EM_SETLIMITTEXT_MSG,
+            WPARAM(3),
+            LPARAM(0),
+        );
         let edit_background = if snapshot.is_dark {
             Color::from_hex("#20242AFF")
         } else {
-            Color::from_hex("#F4F6F8FF")
+            Color::from_hex("#EEF3F8FF")
         };
         let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
 
@@ -278,14 +322,19 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 pressed: None,
                 tracking_mouse_leave: false,
                 numeric_edits,
+                blur_edit: SendHwnd::from_hwnd(blur_edit),
                 focused_numeric_edit: None,
+                focused_blur_edit: false,
                 syncing_numeric_edits: false,
+                syncing_blur_edit: false,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
             });
         }
+        apply_titlebar_theme(hwnd, snapshot.is_dark);
         layout_numeric_edits(hwnd);
         sync_numeric_edits();
+        sync_blur_edit();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
     }
@@ -301,7 +350,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         let background = if s.snapshot.is_dark {
             Color::from_hex("#20242AFF")
         } else {
-            Color::from_hex("#F4F6F8FF")
+            Color::from_hex("#EEF3F8FF")
         };
         unsafe {
             if s.edit_brush != 0 {
@@ -312,10 +361,24 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         }
         s.hwnd.to_hwnd()
     };
+    apply_titlebar_theme(hwnd, snapshot.is_dark);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
+    sync_blur_edit();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn apply_titlebar_theme(hwnd: HWND, is_dark: bool) {
+    let enabled = BOOL::from(is_dark);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &enabled as *const BOOL as *const std::ffi::c_void,
+            std::mem::size_of::<BOOL>() as u32,
+        );
     }
 }
 
@@ -516,6 +579,20 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 716, 338, 766, 366)
+}
+
+fn blur_edit_rect(hwnd: HWND) -> RECT {
+    let frame = blur_edit_frame_rect(hwnd);
+    RECT {
+        left: frame.left + scale(hwnd, 3),
+        top: frame.top + scale(hwnd, 3),
+        right: frame.right - scale(hwnd, 3),
+        bottom: frame.bottom - scale(hwnd, 3),
+    }
+}
+
 fn numeric_edit_frame_rect(hwnd: HWND, channel_index: usize) -> RECT {
     let top = 334 + channel_index as i32 * 32;
     rect(hwnd, 690, top, 764, top + 26)
@@ -536,7 +613,8 @@ fn layout_numeric_edits(hwnd: HWND) {
     let Some(s) = state.as_ref() else {
         return;
     };
-    let show = matches!(s.editor, EditorSelection::Color(_));
+    let show_color = matches!(s.editor, EditorSelection::Color(_));
+    let show_blur = s.editor == EditorSelection::Blur;
     unsafe {
         for (index, edit) in s.numeric_edits.iter().enumerate() {
             let r = numeric_edit_rect(hwnd, index);
@@ -549,8 +627,26 @@ fn layout_numeric_edits(hwnd: HWND) {
                 r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
-            let _ = ShowWindow(edit.to_hwnd(), if show { SW_SHOW } else { SW_HIDE });
+            let _ = ShowWindow(
+                edit.to_hwnd(),
+                if show_color { SW_SHOW } else { SW_HIDE },
+            );
         }
+
+        let blur_rect = blur_edit_rect(hwnd);
+        let _ = SetWindowPos(
+            s.blur_edit.to_hwnd(),
+            HWND::default(),
+            blur_rect.left,
+            blur_rect.top,
+            blur_rect.right - blur_rect.left,
+            blur_rect.bottom - blur_rect.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(
+            s.blur_edit.to_hwnd(),
+            if show_blur { SW_SHOW } else { SW_HIDE },
+        );
     }
 }
 
@@ -587,6 +683,26 @@ fn sync_numeric_edits() {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(s) = state.as_mut() {
         s.syncing_numeric_edits = false;
+    }
+}
+
+fn sync_blur_edit() {
+    let (edit, value) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.syncing_blur_edit = true;
+        (
+            s.blur_edit.to_hwnd(),
+            s.snapshot.active_style.panel_frosted_strength,
+        )
+    };
+    set_edit_text(edit, value);
+
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = state.as_mut() {
+        s.syncing_blur_edit = false;
     }
 }
 
@@ -660,6 +776,55 @@ fn update_color_from_numeric_edit(channel_index: usize) {
         encode_color_target(target),
         pack_color(color),
     );
+    send_parent(WM_STYLE_SAVE, 0, 0);
+    unsafe {
+        let hwnd = {
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default()
+        };
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn update_blur_from_numeric_edit() {
+    let (edit, syncing) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.blur_edit.to_hwnd(), s.syncing_blur_edit)
+    };
+    if syncing {
+        return;
+    }
+
+    let Some(raw_value) = read_edit_value(edit) else {
+        return;
+    };
+    let value = raw_value.min(u16::from(FROSTED_STRENGTH_MAX)) as u8;
+
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.snapshot.active_style.panel_frosted_strength = value;
+    }
+
+    if raw_value > u16::from(FROSTED_STRENGTH_MAX) {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_blur_edit = true;
+        }
+        drop(state);
+        set_edit_text(edit, value);
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_blur_edit = false;
+        }
+    }
+
+    send_parent(WM_STYLE_BLUR_PREVIEW, value as usize, 0);
     send_parent(WM_STYLE_SAVE, 0, 0);
     unsafe {
         let hwnd = {
@@ -904,6 +1069,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
         );
     }
     if let Some(value) = blur_update {
+        sync_blur_edit();
         send_parent(WM_STYLE_BLUR_PREVIEW, value as usize, 0);
     }
 
@@ -1091,6 +1257,37 @@ unsafe extern "system" fn wnd_proc(
                     _ => {}
                 }
             }
+
+            if control_id == ID_EDIT_BLUR {
+                match notification {
+                    EN_CHANGE_CODE => {
+                        update_blur_from_numeric_edit();
+                        return LRESULT(0);
+                    }
+                    EN_SETFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.focused_blur_edit = true;
+                            }
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    EN_KILLFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.focused_blur_edit = false;
+                            }
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    _ => {}
+                }
+            }
+
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CTLCOLOREDIT => {
@@ -1105,7 +1302,7 @@ unsafe extern "system" fn wnd_proc(
             let background = if is_dark {
                 Color::from_hex("#20242AFF")
             } else {
-                Color::from_hex("#F4F6F8FF")
+                Color::from_hex("#EEF3F8FF")
             };
             let foreground = if is_dark {
                 Color::from_hex("#F2F3F5FF")
@@ -1174,7 +1371,16 @@ unsafe fn paint(hwnd: HWND) {
     let old_bitmap = SelectObject(mem_hdc, HGDIOBJ(bitmap.0));
     let hdc = mem_hdc;
 
-    let (snapshot, section, editor, hovered, pressed, focused_numeric_edit, font) = {
+    let (
+        snapshot,
+        section,
+        editor,
+        hovered,
+        pressed,
+        focused_numeric_edit,
+        focused_blur_edit,
+        font,
+    ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             let _ = EndPaint(hwnd, &ps);
@@ -1187,6 +1393,7 @@ unsafe fn paint(hwnd: HWND) {
             s.hovered,
             s.pressed,
             s.focused_numeric_edit,
+            s.focused_blur_edit,
             s.font,
         )
     };
@@ -1195,7 +1402,7 @@ unsafe fn paint(hwnd: HWND) {
     let background = if dark {
         Color::from_hex("#1F2125FF")
     } else {
-        Color::from_hex("#F5F6F8FF")
+        Color::from_hex("#E9EEF4FF")
     };
     let card = if dark {
         Color::from_hex("#292C31FF")
@@ -1205,17 +1412,17 @@ unsafe fn paint(hwnd: HWND) {
     let card_hover = if dark {
         Color::from_hex("#343840FF")
     } else {
-        Color::from_hex("#E9EDF2FF")
+        Color::from_hex("#DCE5EFFF")
     };
     let card_pressed = if dark {
         Color::from_hex("#414751FF")
     } else {
-        Color::from_hex("#D9E0E9FF")
+        Color::from_hex("#CBD7E4FF")
     };
     let track_background = if dark {
         Color::from_hex("#454A52FF")
     } else {
-        Color::from_hex("#D8DCE2FF")
+        Color::from_hex("#C1CCD8FF")
     };
     let accent = Color::from_hex("#4C8DFFFF");
     let accent_hover = Color::from_hex("#629CFFFF");
@@ -1453,6 +1660,15 @@ unsafe fn paint(hwnd: HWND) {
             track_background,
             accent,
         );
+    } else if editor == EditorSelection::Blur {
+        paint_blur_edit_frame(
+            hdc,
+            hwnd,
+            snapshot.is_dark,
+            focused_blur_edit,
+            track_background,
+            accent,
+        );
     }
     paint_editor(
         hdc,
@@ -1548,7 +1764,7 @@ unsafe fn paint_numeric_edit_frames(
     let background = if is_dark {
         Color::from_hex("#20242AFF")
     } else {
-        Color::from_hex("#F4F6F8FF")
+        Color::from_hex("#EEF3F8FF")
     };
 
     for index in 0..4 {
@@ -1560,6 +1776,24 @@ unsafe fn paint_numeric_edit_frames(
             if focused == Some(index) { accent } else { border },
         );
     }
+}
+
+unsafe fn paint_blur_edit_frame(
+    hdc: HDC,
+    hwnd: HWND,
+    is_dark: bool,
+    focused: bool,
+    border: Color,
+    accent: Color,
+) {
+    let background = if is_dark {
+        Color::from_hex("#20242AFF")
+    } else {
+        Color::from_hex("#EEF3F8FF")
+    };
+    let frame = blur_edit_frame_rect(hwnd);
+    fill(hdc, frame, background);
+    draw_outline_rect(hdc, frame, if focused { accent } else { border });
 }
 
 unsafe fn paint_editor(
@@ -1627,9 +1861,9 @@ unsafe fn paint_editor(
             let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
             draw_text(
                 hdc,
-                &format!("{}%", value),
-                rect(hwnd, 716, 338, 764, 370),
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                "%",
+                rect(hwnd, 770, 338, 786, 370),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
     }
