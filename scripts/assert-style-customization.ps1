@@ -105,9 +105,11 @@ if ($styleWindow -notmatch 'DwmSetWindowAttribute' -or
 if ($styleWindow -notmatch 'WM_SETCURSOR' -or
     $styleWindow -notmatch 'IDC_HAND' -or
     $styleWindow -notmatch 'IDC_SIZEWE' -or
+    $styleWindow -notmatch 'IDC_IBEAM' -or
+    $styleWindow -notmatch 'cursor_hwnd' -or
     $styleWindow -notmatch 'slider_kind_at\(' -or
     $styleWindow -notmatch 'hit_target_at\(') {
-    throw 'Style panel clickable controls and sliders must expose semantic mouse cursors.'
+    throw 'Style panel buttons, sliders, and numeric inputs must expose semantic mouse cursors.'
 }
 if ($windowProduction -notmatch 'WM_SETCURSOR' -or
     $windowProduction -notmatch 'small_taskbar_mode' -or

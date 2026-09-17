@@ -1105,6 +1105,25 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SETCURSOR => {
+            let cursor_hwnd = HWND(wparam.0 as *mut _);
+            let is_numeric_edit = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                match state.as_ref() {
+                    Some(s) => {
+                        s.numeric_edits
+                            .iter()
+                            .any(|edit| edit.to_hwnd() == cursor_hwnd)
+                            || s.blur_edit.to_hwnd() == cursor_hwnd
+                    }
+                    None => false,
+                }
+            };
+            if is_numeric_edit {
+                let cursor = LoadCursorW(HINSTANCE::default(), IDC_IBEAM).unwrap_or_default();
+                SetCursor(cursor);
+                return LRESULT(1);
+            }
+
             let mut point = POINT::default();
             let _ = GetCursorPos(&mut point);
             let _ = ScreenToClient(hwnd, &mut point);
