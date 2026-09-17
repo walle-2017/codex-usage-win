@@ -20,8 +20,9 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
 }
 if ($styleWindow -notmatch '"排版"' -or
     $styleWindow -notmatch '"主题"' -or
-    $windowProduction -notmatch '"样式设置\.\.\."') {
-    throw 'Unified panel Theme/Layout labels and the Style Settings menu entry must be present.'
+    $windowProduction -notmatch '样式设置\\t⚙' -or
+    $windowProduction -notmatch 'Style settings\\t⚙') {
+    throw 'Unified panel Theme/Layout labels and the right-aligned gear Style Settings menu entry must be present.'
 }
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
@@ -92,9 +93,26 @@ if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     throw 'Style window height must stay fixed while only the blur editor block shrinks to one row.'
 }
 if ($styleWindow -notmatch 'DwmSetWindowAttribute' -or
-    $styleWindow -notmatch 'DWMWA_USE_IMMERSIVE_DARK_MODE' -or
-    $styleWindow -notmatch 'apply_titlebar_theme\(') {
-    throw 'Style window title bar must follow the active dark/light theme.'
+    $styleWindow -notmatch 'DWMWA_CAPTION_COLOR' -or
+    $styleWindow -notmatch 'DWMWA_TEXT_COLOR' -or
+    $styleWindow -notmatch 'FIXED_CAPTION_COLORREF:\s*u32\s*=\s*0x00524843' -or
+    $styleWindow -notmatch 'FIXED_CAPTION_TEXT_COLORREF:\s*u32\s*=\s*0x00FFFFFF' -or
+    $styleWindow -notmatch 'apply_fixed_titlebar\(' -or
+    $styleWindow -match 'DWMWA_USE_IMMERSIVE_DARK_MODE' -or
+    $styleWindow -match 'DWMWA_TRANSITIONS_FORCEDISABLED') {
+    throw 'Style window title bar must use one fixed neutral caption color in every theme.'
+}
+if ($styleWindow -notmatch 'WM_SETCURSOR' -or
+    $styleWindow -notmatch 'IDC_HAND' -or
+    $styleWindow -notmatch 'IDC_SIZEWE' -or
+    $styleWindow -notmatch 'slider_kind_at\(' -or
+    $styleWindow -notmatch 'hit_target_at\(') {
+    throw 'Style panel clickable controls and sliders must expose semantic mouse cursors.'
+}
+if ($windowProduction -notmatch 'WM_SETCURSOR' -or
+    $windowProduction -notmatch 'small_taskbar_mode' -or
+    $windowProduction -notmatch 'IDC_HAND') {
+    throw 'Small-taskbar click-to-toggle mode must expose a hand cursor outside the drag handle.'
 }
 foreach ($hex in @('#E9EEF4FF', '#DCE5EFFF', '#CBD7E4FF', '#C1CCD8FF', '#EEF3F8FF')) {
     if ($styleWindow -notmatch [regex]::Escape($hex)) {
@@ -304,10 +322,10 @@ if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)') {
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 
 
-# Theme-sync and layered-text regression contract
-if ($styleWindow -notmatch 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
-    $styleWindow -notmatch 'UpdateWindow\(hwnd\)') {
-    throw 'Style-panel client and title-bar theme changes must commit without a delayed DWM transition.'
+# Fixed-caption and layered-text regression contract
+if ($styleWindow -match 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
+    $styleWindow -match 'DWMWA_USE_IMMERSIVE_DARK_MODE') {
+    throw 'The fixed neutral style-window caption must not switch or animate with the active theme.'
 }
 if ($windowProduction -notmatch 'text_quality_for_layered_surface' -or
     $windowProduction -notmatch 'NONANTIALIASED_QUALITY' -or

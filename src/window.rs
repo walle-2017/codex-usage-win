@@ -3079,6 +3079,19 @@ unsafe extern "system" fn wnd_proc(
                 SetCursor(cursor);
                 return LRESULT(1);
             }
+            let small_taskbar_mode = {
+                let state = lock_state();
+                state
+                    .as_ref()
+                    .map(|s| s.small_taskbar_mode)
+                    .unwrap_or(false)
+            };
+            if small_taskbar_mode {
+                let cursor = LoadCursorW(HINSTANCE::default(), IDC_HAND).unwrap_or_default();
+                SetCursor(cursor);
+                return LRESULT(1);
+            }
+
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
@@ -4577,9 +4590,9 @@ fn show_context_menu(hwnd: HWND) {
         // Unified style settings panel. Detailed theme styling now lives in one non-modal window.
         let style_settings_label =
             native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "样式设置..."
+                "样式设置\t⚙"
             } else {
-                "Style settings..."
+                "Style settings\t⚙"
             });
         let _ = AppendMenuW(
             menu,

@@ -2,9 +2,7 @@ use std::sync::Mutex;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE,
-};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -39,6 +37,8 @@ const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
 const EM_SETLIMITTEXT_MSG: u32 = 0x00C5;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
+const FIXED_CAPTION_COLORREF: u32 = 0x00524843; // #434852 in COLORREF byte order
+const FIXED_CAPTION_TEXT_COLORREF: u32 = 0x00FFFFFF;
 
 #[derive(Clone)]
 pub struct StyleWindowSnapshot {
@@ -311,7 +311,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         };
         let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
 
-        apply_titlebar_theme(hwnd, snapshot.is_dark);
+        apply_fixed_titlebar(hwnd);
 
         {
             let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -344,7 +344,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let is_dark = snapshot.is_dark;
     let hwnd = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
@@ -365,7 +364,6 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         }
         s.hwnd.to_hwnd()
     };
-    apply_titlebar_theme(hwnd, is_dark);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     sync_blur_edit();
@@ -377,23 +375,21 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     }
 }
 
-fn apply_titlebar_theme(hwnd: HWND, is_dark: bool) {
-    let transitions_disabled = BOOL::from(true);
-    let enabled = BOOL::from(is_dark);
+fn apply_fixed_titlebar(hwnd: HWND) {
+    let caption_color = COLORREF(FIXED_CAPTION_COLORREF);
+    let text_color = COLORREF(FIXED_CAPTION_TEXT_COLORREF);
     unsafe {
-        // DWM otherwise animates the non-client title bar after the client area
-        // has already repainted, which makes theme changes visibly two-stage.
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_TRANSITIONS_FORCEDISABLED,
-            &transitions_disabled as *const BOOL as *const std::ffi::c_void,
-            std::mem::size_of::<BOOL>() as u32,
+            DWMWA_CAPTION_COLOR,
+            &caption_color as *const COLORREF as *const std::ffi::c_void,
+            std::mem::size_of::<COLORREF>() as u32,
         );
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &enabled as *const BOOL as *const std::ffi::c_void,
-            std::mem::size_of::<BOOL>() as u32,
+            DWMWA_TEXT_COLOR,
+            &text_color as *const COLORREF as *const std::ffi::c_void,
+            std::mem::size_of::<COLORREF>() as u32,
         );
     }
 }
@@ -1107,6 +1103,22 @@ unsafe extern "system" fn wnd_proc(
         WM_PAINT => {
             paint(hwnd);
             LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            let mut point = POINT::default();
+            let _ = GetCursorPos(&mut point);
+            let _ = ScreenToClient(hwnd, &mut point);
+
+            let cursor_id = if slider_kind_at(hwnd, point.x, point.y).is_some() {
+                IDC_SIZEWE
+            } else if hit_target_at(hwnd, point.x, point.y).is_some() {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            };
+            let cursor = LoadCursorW(None, cursor_id).unwrap_or_default();
+            SetCursor(cursor);
+            LRESULT(1)
         }
         WM_LBUTTONDOWN => {
             let (x, y) = point_from_lparam(lparam);
