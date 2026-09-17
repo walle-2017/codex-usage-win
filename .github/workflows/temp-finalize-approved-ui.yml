@@ -1,0 +1,130 @@
+name: Finalize approved UI changes
+
+on:
+  push:
+    branches:
+      - feature/v1.0.5-style-settings-panel-v1
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy
+
+      - name: Apply final semantic cursor fix and clean temporary files
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          style_path = Path("src/style_window.rs")
+          text = style_path.read_text(encoding="utf-8")
+          marker = """        WM_SETCURSOR => {\n            let mut point = POINT::default();"""
+          replacement = """        WM_SETCURSOR => {\n            let cursor_hwnd = HWND(wparam.0 as *mut _);\n            let is_numeric_edit = {\n                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());\n                match state.as_ref() {\n                    Some(s) => {\n                        s.numeric_edits\n                            .iter()\n                            .any(|edit| edit.to_hwnd() == cursor_hwnd)\n                            || s.blur_edit.to_hwnd() == cursor_hwnd\n                    }\n                    None => false,\n                }\n            };\n            if is_numeric_edit {\n                let cursor = LoadCursorW(HINSTANCE::default(), IDC_IBEAM).unwrap_or_default();\n                SetCursor(cursor);\n                return LRESULT(1);\n            }\n\n            let mut point = POINT::default();"""
+          if "IDC_IBEAM" not in text:
+              if marker not in text:
+                  raise SystemExit("WM_SETCURSOR marker not found in style_window.rs")
+              text = text.replace(marker, replacement, 1)
+              style_path.write_text(text, encoding="utf-8")
+
+          contract_path = Path("scripts/assert-style-customization.ps1")
+          contract = contract_path.read_text(encoding="utf-8")
+          old = """if ($styleWindow -notmatch 'WM_SETCURSOR' -or\n    $styleWindow -notmatch 'IDC_HAND' -or\n    $styleWindow -notmatch 'IDC_SIZEWE' -or\n    $styleWindow -notmatch 'slider_kind_at\\(' -or\n    $styleWindow -notmatch 'hit_target_at\\(') {\n    throw 'Style panel clickable controls and sliders must expose semantic mouse cursors.'\n}"""
+          new = """if ($styleWindow -notmatch 'WM_SETCURSOR' -or\n    $styleWindow -notmatch 'IDC_HAND' -or\n    $styleWindow -notmatch 'IDC_SIZEWE' -or\n    $styleWindow -notmatch 'IDC_IBEAM' -or\n    $styleWindow -notmatch 'cursor_hwnd' -or\n    $styleWindow -notmatch 'slider_kind_at\\(' -or\n    $styleWindow -notmatch 'hit_target_at\\(') {\n    throw 'Style panel buttons, sliders, and numeric inputs must expose semantic mouse cursors.'\n}"""
+          if "IDC_IBEAM" not in contract:
+              if old not in contract:
+                  raise SystemExit("semantic cursor contract block not found")
+              contract = contract.replace(old, new, 1)
+
+          if "样式设置\\t⚙" not in contract or "Style settings\\t⚙" not in contract:
+              raise SystemExit("right-aligned gear menu contract is missing")
+          contract_path.write_text(contract, encoding="utf-8")
+          '@ | python -
+
+          $temporaryFiles = @(
+            '.github/workflows/temp-red-cursor-titlebar.yml',
+            'scripts/temp-apply-cursor-titlebar.py',
+            'scripts/temp-fix-fixed-caption-contract.py',
+            'scripts/temp-red-cursor-titlebar-contract.py',
+            '.github/workflows/temp-finalize-approved-ui.yml'
+          )
+          foreach ($path in $temporaryFiles) {
+            if (Test-Path $path) {
+              Remove-Item -Force $path
+            }
+          }
+
+      - name: Verify approved UI contract
+        shell: pwsh
+        run: |
+          ./scripts/assert-style-customization.ps1
+          $styleWindow = Get-Content -Raw src/style_window.rs
+          $window = Get-Content -Raw src/window.rs
+          if ($styleWindow -notmatch 'FIXED_CAPTION_COLORREF:\s*u32\s*=\s*0x00524843') { throw 'Fixed #434852 caption is missing.' }
+          if ($styleWindow -notmatch 'FIXED_CAPTION_TEXT_COLORREF:\s*u32\s*=\s*0x00FFFFFF') { throw 'White caption text is missing.' }
+          if ($styleWindow -match 'DWMWA_USE_IMMERSIVE_DARK_MODE') { throw 'Caption must not switch with theme.' }
+          if ($styleWindow -notmatch 'IDC_HAND' -or $styleWindow -notmatch 'IDC_SIZEWE' -or $styleWindow -notmatch 'IDC_IBEAM') { throw 'Style-window semantic cursors are incomplete.' }
+          if ($window -notmatch '样式设置\\t⚙' -or $window -notmatch 'Style settings\\t⚙') { throw 'Right-aligned gear menu label is missing.' }
+          if ($window -match '样式设置\.\.\.' -or $window -match 'Style settings\.\.\.') { throw 'Legacy ellipsis menu label remains.' }
+          if ($window -notmatch 'small_taskbar_mode' -or $window -notmatch 'IDC_HAND') { throw 'Small-taskbar hand cursor is missing.' }
+
+      - name: Verify no temporary development files remain
+        shell: pwsh
+        run: |
+          $leftovers = Get-ChildItem -Recurse -File | Where-Object {
+            $_.Name -like 'temp-*cursor*' -or $_.Name -like 'temp-*caption*'
+          }
+          if ($leftovers) {
+            $leftovers | ForEach-Object { Write-Host $_.FullName }
+            throw 'Temporary cursor/titlebar files remain.'
+          }
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Verify working tree and commit final changes
+        shell: pwsh
+        run: |
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if (git diff --cached --quiet) {
+            Write-Host 'No source changes to commit.'
+          } else {
+            git commit -m "feat: finalize fixed caption and semantic cursors"
+            git push origin HEAD:feature/v1.0.5-style-settings-panel-v1
+          }
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/codex-usage-win.exe dist/codex-usage-win.exe
+          $hash = (Get-FileHash -Algorithm SHA256 dist/codex-usage-win.exe).Hash.ToLowerInvariant()
+          "$hash  codex-usage-win.exe" | Set-Content -Encoding ascii dist/codex-usage-win.exe.sha256
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-usage-win-approved-ui-final
+          path: |
+            dist/codex-usage-win.exe
+            dist/codex-usage-win.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
