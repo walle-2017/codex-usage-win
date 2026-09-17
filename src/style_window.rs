@@ -309,6 +309,8 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         };
         let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
 
+        apply_titlebar_theme(hwnd, snapshot.is_dark);
+
         {
             let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
             *state = Some(PanelState {
@@ -331,7 +333,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 font: font.0 as isize,
             });
         }
-        apply_titlebar_theme(hwnd, snapshot.is_dark);
         layout_numeric_edits(hwnd);
         sync_numeric_edits();
         sync_blur_edit();
@@ -341,6 +342,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
+    let is_dark = snapshot.is_dark;
     let hwnd = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
@@ -361,7 +363,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         }
         s.hwnd.to_hwnd()
     };
-    apply_titlebar_theme(hwnd, snapshot.is_dark);
+    apply_titlebar_theme(hwnd, is_dark);
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
     sync_blur_edit();
@@ -943,6 +945,7 @@ fn set_section(section: Section) {
     };
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
+    sync_blur_edit();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -960,6 +963,7 @@ fn select_editor(editor: EditorSelection) {
     };
     layout_numeric_edits(hwnd);
     sync_numeric_edits();
+    sync_blur_edit();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
