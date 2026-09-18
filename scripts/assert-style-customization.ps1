@@ -20,9 +20,9 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
 }
 if ($styleWindow -notmatch '"排版"' -or
     $styleWindow -notmatch '"主题"' -or
-    $windowProduction -notmatch 'style_settings_menu_label\(' -or
-    $windowProduction -notmatch 'MF_OWNERDRAW') {
-    throw 'Unified panel Theme/Layout labels and the owner-drawn Style Settings menu entry must be present.'
+    $windowProduction -notmatch '"样式设置"' -or
+    $windowProduction -notmatch '"Style settings"') {
+    throw 'Unified panel Theme/Layout labels and the native Style Settings menu entry must be present.'
 }
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
@@ -116,12 +116,12 @@ if ($windowProduction -notmatch 'WM_SETCURSOR' -or
     $windowProduction -notmatch 'IDC_HAND') {
     throw 'Small-taskbar click-to-toggle mode must expose a hand cursor outside the drag handle.'
 }
-if ($windowProduction -notmatch 'WM_MEASUREITEM' -or
-    $windowProduction -notmatch 'WM_DRAWITEM' -or
-    $windowProduction -notmatch 'draw_style_settings_menu_item\(' -or
-    $windowProduction -notmatch 'SM_CXMENUSIZE' -or
-    $windowProduction -notmatch 'ellipsis_center') {
-    throw 'Style Settings ellipsis must be owner-drawn in the native submenu-arrow gutter.'
+if ($windowProduction -match 'MF_OWNERDRAW' -or
+    $windowProduction -match 'WM_MEASUREITEM' -or
+    $windowProduction -match 'draw_style_settings_menu_item\(' -or
+    $windowProduction -match '样式设置\\t' -or
+    $windowProduction -match 'Style settings\\t') {
+    throw 'Style Settings must remain a plain native menu item without right-side adornments.'
 }
 foreach ($hex in @('#E9EEF4FF', '#DCE5EFFF', '#CBD7E4FF', '#C1CCD8FF', '#EEF3F8FF')) {
     if ($styleWindow -notmatch [regex]::Escape($hex)) {
