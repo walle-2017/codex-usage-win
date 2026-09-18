@@ -12,10 +12,7 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
-use windows::Win32::UI::Controls::{
-    InitCommonControls, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_GRAYED, ODS_SELECTED,
-    ODT_MENU,
-};
+use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
@@ -2954,22 +2951,6 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_MEASUREITEM => {
-            let measure = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
-            if measure.CtlType == ODT_MENU && measure.itemID == u32::from(IDM_STYLE_SETTINGS) {
-                measure_style_settings_menu_item(measure);
-                return LRESULT(1);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        WM_DRAWITEM => {
-            let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
-            if draw.CtlType == ODT_MENU && draw.itemID == u32::from(IDM_STYLE_SETTINGS) {
-                draw_style_settings_menu_item(draw);
-                return LRESULT(1);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
         WM_PAINT => {
             let (embedded, frosted_active) = {
                 let state = lock_state();
@@ -4416,110 +4397,6 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
 }
 
 
-fn style_settings_menu_label(language: LanguageId) -> &'static str {
-    if language == LanguageId::SimplifiedChinese {
-        "样式设置"
-    } else {
-        "Style settings"
-    }
-}
-
-unsafe fn measure_style_settings_menu_item(measure: &mut MEASUREITEMSTRUCT) {
-    let language = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| s.language)
-            .unwrap_or(LanguageId::English)
-    };
-    let mut label = native_interop::wide_str(style_settings_menu_label(language));
-    let hdc = GetDC(HWND::default());
-    if !hdc.is_invalid() {
-        let font = GetStockObject(DEFAULT_GUI_FONT);
-        let old_font = SelectObject(hdc, font);
-        let mut size = SIZE::default();
-        if label.last() == Some(&0) {
-            label.pop();
-        }
-        let _ = GetTextExtentPoint32W(hdc, &label, &mut size);
-        if !old_font.is_invalid() {
-            let _ = SelectObject(hdc, old_font);
-        }
-        let _ = ReleaseDC(HWND::default(), hdc);
-
-        let check_gutter = GetSystemMetrics(SM_CXMENUCHECK).max(0) as u32;
-        let right_gutter = GetSystemMetrics(SM_CXMENUSIZE).max(0) as u32;
-        measure.itemWidth = (size.cx.max(0) as u32)
-            .saturating_add(check_gutter)
-            .saturating_add(right_gutter)
-            .saturating_add(28);
-    }
-    measure.itemHeight = GetSystemMetrics(SM_CYMENU).max(22) as u32;
-}
-
-unsafe fn draw_style_settings_menu_item(draw: &DRAWITEMSTRUCT) {
-    let selected = (draw.itemState.0 & ODS_SELECTED.0) != 0;
-    let disabled = (draw.itemState.0 & (ODS_DISABLED.0 | ODS_GRAYED.0)) != 0;
-
-    let background_index = if selected { COLOR_MENUHILIGHT } else { COLOR_MENU };
-    let text_index = if disabled {
-        COLOR_GRAYTEXT
-    } else if selected {
-        COLOR_HIGHLIGHTTEXT
-    } else {
-        COLOR_MENUTEXT
-    };
-
-    let _ = FillRect(draw.hDC, &draw.rcItem, GetSysColorBrush(background_index));
-    let _ = SetBkMode(draw.hDC, TRANSPARENT);
-    let _ = SetTextColor(draw.hDC, COLORREF(GetSysColor(text_index)));
-
-    let font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_font = SelectObject(draw.hDC, font);
-
-    let language = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| s.language)
-            .unwrap_or(LanguageId::English)
-    };
-
-    let check_gutter = GetSystemMetrics(SM_CXMENUCHECK).max(0);
-    let arrow_offset = GetSystemMetrics(SM_CXMENUSIZE).max(16);
-    let mut label_rect = draw.rcItem;
-    label_rect.left += check_gutter + 8;
-    label_rect.right -= arrow_offset * 2;
-    let mut label = native_interop::wide_str(style_settings_menu_label(language));
-    let _ = DrawTextW(
-        draw.hDC,
-        &mut label,
-        &mut label_rect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-
-    // Native submenu arrows occupy a separate right-side gutter. Draw the
-    // ellipsis at that same horizontal anchor instead of the accelerator column.
-    let ellipsis_center = draw.rcItem.right - arrow_offset;
-    let mut ellipsis_rect = RECT {
-        left: ellipsis_center - 12,
-        top: draw.rcItem.top,
-        right: ellipsis_center + 12,
-        bottom: draw.rcItem.bottom,
-    };
-    let mut ellipsis = native_interop::wide_str("…");
-    let _ = DrawTextW(
-        draw.hDC,
-        &mut ellipsis,
-        &mut ellipsis_rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-
-    if !old_font.is_invalid() {
-        let _ = SelectObject(draw.hDC, old_font);
-    }
-}
-
 fn show_context_menu(hwnd: HWND) {
     unsafe {
         let (
@@ -4711,13 +4588,19 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(alert_label.as_ptr()),
         );
 
-        // Unified style settings panel. Owner-draw only this item so the
-        // trailing ellipsis can share the same right-side gutter as submenu arrows.
+        // Unified style settings panel. Keep this as a fully native menu item so
+        // font, spacing, selection background, and DPI behavior match surrounding items.
+        let style_settings_label =
+            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
+                "样式设置"
+            } else {
+                "Style settings"
+            });
         let _ = AppendMenuW(
             menu,
-            MF_OWNERDRAW,
+            MENU_ITEM_FLAGS(0),
             IDM_STYLE_SETTINGS as usize,
-            PCWSTR::null(),
+            PCWSTR::from_raw(style_settings_label.as_ptr()),
         );
 
         // Settings submenu
