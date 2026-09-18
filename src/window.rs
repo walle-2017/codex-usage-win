@@ -4588,21 +4588,6 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(alert_label.as_ptr()),
         );
 
-        // Unified style settings panel. Keep this as a fully native menu item so
-        // font, spacing, selection background, and DPI behavior match surrounding items.
-        let style_settings_label =
-            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "样式设置"
-            } else {
-                "Style settings"
-            });
-        let _ = AppendMenuW(
-            menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_STYLE_SETTINGS as usize,
-            PCWSTR::from_raw(style_settings_label.as_ptr()),
-        );
-
         // Settings submenu
         let settings_menu = CreatePopupMenu().unwrap();
 
@@ -4676,6 +4661,27 @@ fn show_context_menu(hwnd: HWND) {
             language_menu.0 as usize,
             PCWSTR::from_raw(language_label.as_ptr()),
         );
+
+        let style_settings_label = native_interop::wide_str(match language {
+            LanguageId::SimplifiedChinese => "样式...",
+            LanguageId::TraditionalChinese => "樣式...",
+            LanguageId::Japanese => "スタイル...",
+            LanguageId::Korean => "스타일...",
+            LanguageId::Dutch => "Stijl...",
+            LanguageId::Spanish => "Estilo...",
+            LanguageId::French => "Style...",
+            LanguageId::German => "Stil...",
+            LanguageId::Russian => "Стиль...",
+            LanguageId::PortugueseBrazil => "Estilo...",
+            LanguageId::English => "Style...",
+        });
+        let _ = AppendMenuW(
+            settings_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_STYLE_SETTINGS as usize,
+            PCWSTR::from_raw(style_settings_label.as_ptr()),
+        );
+
         let _ = AppendMenuW(settings_menu, MF_SEPARATOR, 0, PCWSTR::null());
         let version_label_text = if cfg!(feature = "github-update") {
             match available_update_version.as_deref() {
