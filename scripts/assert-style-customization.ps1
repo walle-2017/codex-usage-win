@@ -20,9 +20,9 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
 }
 if ($styleWindow -notmatch '"排版"' -or
     $styleWindow -notmatch '"主题"' -or
-    $windowProduction -notmatch '样式设置\\t⚙' -or
-    $windowProduction -notmatch 'Style settings\\t⚙') {
-    throw 'Unified panel Theme/Layout labels and the right-aligned gear Style Settings menu entry must be present.'
+    $windowProduction -notmatch '样式设置\\t…' -or
+    $windowProduction -notmatch 'Style settings\\t…') {
+    throw 'Unified panel Theme/Layout labels and the right-aligned ellipsis Style Settings menu entry must be present.'
 }
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
