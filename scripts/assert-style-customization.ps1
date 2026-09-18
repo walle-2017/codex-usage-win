@@ -20,7 +20,7 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
 }
 if ($styleWindow -notmatch '"排版"' -or
     $styleWindow -notmatch '"主题"' -or
-    $windowProduction -notmatch 'style_settings_menu_label\\(' -or
+    $windowProduction -notmatch 'style_settings_menu_label\(' -or
     $windowProduction -notmatch 'MF_OWNERDRAW') {
     throw 'Unified panel Theme/Layout labels and the owner-drawn Style Settings menu entry must be present.'
 }
@@ -118,7 +118,7 @@ if ($windowProduction -notmatch 'WM_SETCURSOR' -or
 }
 if ($windowProduction -notmatch 'WM_MEASUREITEM' -or
     $windowProduction -notmatch 'WM_DRAWITEM' -or
-    $windowProduction -notmatch 'draw_style_settings_menu_item\\(' -or
+    $windowProduction -notmatch 'draw_style_settings_menu_item\(' -or
     $windowProduction -notmatch 'SM_CXMENUSIZE' -or
     $windowProduction -notmatch 'ellipsis_center') {
     throw 'Style Settings ellipsis must be owner-drawn in the native submenu-arrow gutter.'
