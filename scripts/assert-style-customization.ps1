@@ -20,9 +20,9 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
 }
 if ($styleWindow -notmatch '"排版"' -or
     $styleWindow -notmatch '"主题"' -or
-    $windowProduction -notmatch '"样式设置"' -or
-    $windowProduction -notmatch '"Style settings"') {
-    throw 'Unified panel Theme/Layout labels and the native Style Settings menu entry must be present.'
+    $windowProduction -notmatch '"样式\.\.\."' -or
+    $windowProduction -notmatch '"Style\.\.\."') {
+    throw 'Unified panel Theme/Layout labels and the native Style submenu entry must be present.'
 }
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
@@ -118,10 +118,12 @@ if ($windowProduction -notmatch 'WM_SETCURSOR' -or
 }
 if ($windowProduction -match 'MF_OWNERDRAW' -or
     $windowProduction -match 'WM_MEASUREITEM' -or
-    $windowProduction -match 'draw_style_settings_menu_item\(' -or
-    $windowProduction -match '样式设置\\t' -or
-    $windowProduction -match 'Style settings\\t') {
-    throw 'Style Settings must remain a plain native menu item without right-side adornments.'
+    $windowProduction -match 'draw_style_settings_menu_item\(') {
+    throw 'Style must remain a plain native menu item.'
+}
+if ($windowProduction -notmatch 'AppendMenuW\(\s*settings_menu,[\s\S]{0,180}IDM_STYLE_SETTINGS' -or
+    $windowProduction -match 'AppendMenuW\(\s*menu,[\s\S]{0,180}IDM_STYLE_SETTINGS') {
+    throw 'Style must live only inside the Settings submenu.'
 }
 foreach ($hex in @('#E9EEF4FF', '#DCE5EFFF', '#CBD7E4FF', '#C1CCD8FF', '#EEF3F8FF')) {
     if ($styleWindow -notmatch [regex]::Escape($hex)) {
