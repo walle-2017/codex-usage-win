@@ -4590,9 +4590,9 @@ fn show_context_menu(hwnd: HWND) {
         // Unified style settings panel. Detailed theme styling now lives in one non-modal window.
         let style_settings_label =
             native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "样式设置\t⚙"
+                "样式设置\t…"
             } else {
-                "Style settings\t⚙"
+                "Style settings\t…"
             });
         let _ = AppendMenuW(
             menu,
