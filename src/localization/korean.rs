@@ -9,7 +9,7 @@ pub(super) const STRINGS: Strings = Strings {
     fifteen_minutes: "15분",
     one_hour: "1시간",
     codex_model: "Codex",
-    settings: "기타 설정",
+    settings: "설정",
     start_with_windows: "Windows 시작 시 자동 실행",
     reset_position: "위치 초기화",
     language: "언어",
