@@ -91,6 +91,20 @@ if ($windowProduction -notmatch 'remaining\s*>\s*50\.0' -or $windowProduction -n
 if ($windowProduction -notmatch 'StyleColorTarget::Remaining' -or $windowProduction -notmatch 'StyleColorTarget::Error') {
     throw 'Primary usage text must use configurable remaining/error colors.'
 }
+if ($windowProduction -notmatch 'preset\s*==\s*AppearancePreset::Minimal' -or
+    $windowProduction -notmatch 'draw_minimal_usage_value\(' -or
+    $windowProduction -notmatch 'minimal_percent_hit\(' -or
+    $windowProduction -notmatch 'MinimalHoverTarget::Session' -or
+    $windowProduction -notmatch 'MinimalHoverTarget::Weekly' -or
+    $windowProduction -notmatch 'minimal_hover_text\(' -or
+    $windowProduction -notmatch 'show_minimal_usage_tooltip\(' -or
+    $windowProduction -notmatch 'TrackMouseEvent' -or
+    $windowProduction -notmatch 'WM_MOUSELEAVE_MSG') {
+    throw 'Minimal layout must render percentages only and expose per-percentage hover details.'
+}
+if ($windowProduction -notmatch 'return\s+sc\(DRAG_HANDLE_HIT_W\)[\s\S]{0,220}sc\(metrics\.percent_width\)') {
+    throw 'Minimal widget width must be based only on drag handle, padding, and percentage width.'
+}
 
 if (($appearanceProduction | Select-String -Pattern 'panel_radius:\s*0' -AllMatches).Matches.Count -lt 2) {
     throw 'Default and Minimal panels must both remain square.'
