@@ -138,19 +138,19 @@ impl ThemeStyle {
                 drag_handle: "#648397FF".into(),
             },
             (false, ThemePreset::Ocean) => Self {
-                panel_background: "#EEF8FCFF".into(),
-                panel_border: "#C7E1ECFF".into(),
+                panel_background: "#F3F7FAFF".into(),
+                panel_border: "#CFDCE4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                quota_type: "#477080FF".into(),
-                remaining: "#16333FFF".into(),
-                reset_time: "#58737FFF".into(),
-                error: "#C94D4DFF".into(),
-                progress_high: "#188BC0FF".into(),
-                progress_medium: "#AD7922FF".into(),
-                progress_low: "#CD5151FF".into(),
-                progress_consumed: "#BEDAE5FF".into(),
-                drag_handle: "#6A8C99FF".into(),
+                quota_type: "#49616FFF".into(),
+                remaining: "#1F3440FF".into(),
+                reset_time: "#5E7480FF".into(),
+                error: "#B53F3FFF".into(),
+                progress_high: "#2F8FB8FF".into(),
+                progress_medium: "#B07A2AFF".into(),
+                progress_low: "#C55353FF".into(),
+                progress_consumed: "#CAD7DEFF".into(),
+                drag_handle: "#78909CFF".into(),
             },
             (true, ThemePreset::Forest) => Self {
                 panel_background: "#14211DFF".into(),
@@ -168,19 +168,19 @@ impl ThemeStyle {
                 drag_handle: "#6A887BFF".into(),
             },
             (false, ThemePreset::Forest) => Self {
-                panel_background: "#F1F7F3FF".into(),
-                panel_border: "#CDDED3FF".into(),
+                panel_background: "#F8F4ECFF".into(),
+                panel_border: "#DED4C4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                quota_type: "#52705FFF".into(),
-                remaining: "#1C3025FF".into(),
-                reset_time: "#5C7366FF".into(),
-                error: "#BF4A42FF".into(),
-                progress_high: "#2E9369FF".into(),
-                progress_medium: "#A97921FF".into(),
-                progress_low: "#C55348FF".into(),
-                progress_consumed: "#C6D8CDFF".into(),
-                drag_handle: "#71897BFF".into(),
+                quota_type: "#665A48FF".into(),
+                remaining: "#2E2922FF".into(),
+                reset_time: "#756A59FF".into(),
+                error: "#B4463EFF".into(),
+                progress_high: "#3C8F8AFF".into(),
+                progress_medium: "#B27924FF".into(),
+                progress_low: "#C65349FF".into(),
+                progress_consumed: "#D8CCBAFF".into(),
+                drag_handle: "#958775FF".into(),
             },
         }
     }
@@ -381,6 +381,19 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn redesigned_light_presets_keep_error_text_readable() {
+        for preset in [ThemePreset::Ocean, ThemePreset::Forest] {
+            let style = ThemeStyle::preset(false, preset);
+            let background = style.color(StyleColorTarget::PanelBackground);
+            let ratio = contrast_ratio(background, style.color(StyleColorTarget::Error));
+            assert!(
+                ratio >= 4.5,
+                "{preset:?} error contrast {ratio:.2} is below 4.5"
+            );
         }
     }
 

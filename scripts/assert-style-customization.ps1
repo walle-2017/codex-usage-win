@@ -30,22 +30,41 @@ if ($styleProduction -notmatch 'enum\s+ThemePreset' -or
     $styleProduction -notmatch 'Forest' -or
     $styleProduction -notmatch 'apply_preset\(' -or
     $styleProduction -notmatch 'matches_preset\(' -or
-    $styleWindow -notmatch '"预设"' -or
-    $styleWindow -notmatch '"Preset"' -or
+    $styleWindow -notmatch '"石墨"' -or
+    $styleWindow -notmatch '"深海"' -or
+    $styleWindow -notmatch '"松影"' -or
+    $styleWindow -notmatch '"晨霜"' -or
+    $styleWindow -notmatch '"雾蓝"' -or
+    $styleWindow -notmatch '"暖砂"' -or
+    $styleWindow -notmatch '"Graphite"' -or
+    $styleWindow -notmatch '"Deep Sea"' -or
+    $styleWindow -notmatch '"Pine Shade"' -or
+    $styleWindow -notmatch '"Morning Frost"' -or
+    $styleWindow -notmatch '"Mist Blue"' -or
+    $styleWindow -notmatch '"Warm Sand"' -or
+    $styleWindow -notmatch 'Section::Preset' -or
+    $styleWindow -notmatch 'paint_preset_gallery\(' -or
+    $styleWindow -notmatch 'preset_card_rect\(' -or
     $styleWindow -notmatch 'WM_STYLE_PRESET_CHANGE' -or
     $windowProduction -notmatch 'WM_STYLE_PRESET_CHANGE' -or
     $windowProduction -notmatch 'ThemePreset::from_index') {
-    throw 'Dark/light Classic, Ocean, and Forest theme presets must be selectable from the unified Style panel.'
+    throw 'Dark and light presets must have distinct user-facing names and live in the dedicated Presets section.'
+}
+if ($styleWindow -match 'fn\s+preset_rect\(') {
+    throw 'The old top-row preset strip must stay removed; presets belong in sidebar preview cards.'
 }
 foreach ($hex in @(
-    '#0F1B24FF', '#294252FF', '#3FB7E9FF', '#EEF8FCFF', '#C7E1ECFF', '#188BC0FF',
-    '#14211DFF', '#2B4038FF', '#56C596FF', '#F1F7F3FF', '#CDDED3FF', '#2E9369FF'
+    '#0F1B24FF', '#294252FF', '#3FB7E9FF',
+    '#14211DFF', '#2B4038FF', '#56C596FF',
+    '#F3F7FAFF', '#CFDCE4FF', '#49616FFF', '#1F3440FF', '#5E7480FF', '#B53F3FFF', '#2F8FB8FF',
+    '#F8F4ECFF', '#DED4C4FF', '#665A48FF', '#2E2922FF', '#756A59FF', '#B4463EFF', '#3C8F8AFF'
 )) {
     if ($styleProduction -notmatch [regex]::Escape($hex)) {
         throw "Expected coordinated theme-preset color is missing: $hex"
     }
 }
 if ($style -notmatch 'preset_text_colors_keep_readable_contrast' -or
+    $style -notmatch 'redesigned_light_presets_keep_error_text_readable' -or
     $style -notmatch 'ratio\s*>=\s*4\.5') {
     throw 'Theme presets must keep an automated readable text-contrast quality gate.'
 }
@@ -53,6 +72,7 @@ if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
     $styleWindow -notmatch 'WM_STYLE_COLOR_PREVIEW' -or
     $styleWindow -notmatch 'WM_STYLE_BLUR_PREVIEW' -or
+    $styleWindow -notmatch 'Section::Preset' -or
     $styleWindow -notmatch 'Section::Panel' -or
     $styleWindow -notmatch 'Section::Text' -or
     $styleWindow -notmatch 'Section::Progress' -or

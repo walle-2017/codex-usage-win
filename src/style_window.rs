@@ -54,6 +54,7 @@ pub struct StyleWindowSnapshot {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
+    Preset,
     Panel,
     Text,
     Progress,
@@ -323,7 +324,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 hwnd: SendHwnd::from_hwnd(hwnd),
                 parent: SendHwnd::from_hwnd(parent),
                 snapshot,
-                section: Section::Panel,
+                section: Section::Preset,
                 editor: EditorSelection::Color(StyleColorTarget::PanelBackground),
                 dragging_slider: None,
                 hovered: None,
@@ -479,12 +480,13 @@ fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
 
 fn section_rect(hwnd: HWND, section: Section) -> RECT {
     let index = match section {
-        Section::Panel => 0,
-        Section::Text => 1,
-        Section::Progress => 2,
-        Section::Interaction => 3,
+        Section::Preset => 0,
+        Section::Panel => 1,
+        Section::Text => 2,
+        Section::Progress => 3,
+        Section::Interaction => 4,
     };
-    rect(hwnd, 20, 126 + index * 48, 142, 166 + index * 48)
+    rect(hwnd, 20, 108 + index * 48, 142, 148 + index * 48)
 }
 
 fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
@@ -504,13 +506,14 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     rect(hwnd, 540 + index * 104, 50, 636 + index * 104, 84)
 }
 
-fn preset_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     let index = match preset {
         ThemePreset::Classic => 0,
         ThemePreset::Ocean => 1,
         ThemePreset::Forest => 2,
     };
-    rect(hwnd, 224 + index * 108, 92, 324 + index * 108, 120)
+    let left = 174 + index * 204;
+    rect(hwnd, left, 146, left + 192, 350)
 }
 
 fn current_editor() -> EditorSelection {
@@ -551,6 +554,7 @@ fn rows(section: Section) -> &'static [EditorSelection] {
         [EditorSelection::Color(StyleColorTarget::DragHandle)];
 
     match section {
+        Section::Preset => &[],
         Section::Panel => &PANEL,
         Section::Text => &TEXT,
         Section::Progress => &PROGRESS,
@@ -562,9 +566,9 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
     rect(
         hwnd,
         174,
-        126 + index as i32 * 48,
+        108 + index as i32 * 48,
         786,
-        166 + index as i32 * 48,
+        148 + index as i32 * 48,
     )
 }
 
@@ -639,8 +643,8 @@ fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, bool, bool)> {
     Some((
         s.numeric_edits,
         s.blur_edit,
-        matches!(s.editor, EditorSelection::Color(_)),
-        s.editor == EditorSelection::Blur,
+        s.section != Section::Preset && matches!(s.editor, EditorSelection::Color(_)),
+        s.section != Section::Preset && s.editor == EditorSelection::Blur,
     ))
 }
 
@@ -913,12 +917,8 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
             return Some(HitTarget::Layout(preset));
         }
     }
-    for preset in ThemePreset::ALL {
-        if pt_in_rect(preset_rect(hwnd, preset), x, y) {
-            return Some(HitTarget::Preset(preset));
-        }
-    }
     for section in [
+        Section::Preset,
         Section::Panel,
         Section::Text,
         Section::Progress,
@@ -932,6 +932,13 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| s.section)?
     };
+    if section == Section::Preset {
+        for preset in ThemePreset::ALL {
+            if pt_in_rect(preset_card_rect(hwnd, preset), x, y) {
+                return Some(HitTarget::Preset(preset));
+            }
+        }
+    }
     for (index, editor) in rows(section).iter().copied().enumerate() {
         if pt_in_rect(row_rect(hwnd, index), x, y) {
             return Some(HitTarget::Row(editor));
@@ -1017,7 +1024,9 @@ fn set_section(section: Section) {
             return;
         };
         s.section = section;
-        s.editor = rows(section)[0];
+        if let Some(editor) = rows(section).first().copied() {
+            s.editor = editor;
+        }
         s.dragging_slider = None;
         s.hwnd.to_hwnd()
     };
@@ -1062,7 +1071,11 @@ fn send_parent(message: u32, wparam: usize, lparam: isize) {
 fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
     let editor = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.editor)?
+        let s = state.as_ref()?;
+        if s.section == Section::Preset {
+            return None;
+        }
+        s.editor
     };
     match editor {
         EditorSelection::Color(_) => {
@@ -1652,53 +1665,8 @@ unsafe fn paint(hwnd: HWND) {
         );
     }
 
-    draw_text(
-        hdc,
-        if snapshot.language == LanguageId::SimplifiedChinese {
-            "预设"
-        } else {
-            "Preset"
-        },
-        rect(hwnd, 170, 92, 218, 120),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    for preset in ThemePreset::ALL {
-        let selected = snapshot
-            .active_style
-            .matches_preset(snapshot.is_dark, preset);
-        let target = HitTarget::Preset(preset);
-        let button_bg = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment(
-            hdc,
-            preset_rect(hwnd, preset),
-            selected,
-            button_bg,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            match (snapshot.language == LanguageId::SimplifiedChinese, preset) {
-                (true, ThemePreset::Classic) => "经典",
-                (true, ThemePreset::Ocean) => "海洋",
-                (true, ThemePreset::Forest) => "森屿",
-                (false, ThemePreset::Classic) => "Classic",
-                (false, ThemePreset::Ocean) => "Ocean",
-                (false, ThemePreset::Forest) => "Forest",
-            },
-        );
-    }
-
     for item in [
+        Section::Preset,
         Section::Panel,
         Section::Text,
         Section::Progress,
@@ -1744,7 +1712,23 @@ unsafe fn paint(hwnd: HWND) {
         );
     }
 
-    for (index, row) in rows(section).iter().copied().enumerate() {
+    if section == Section::Preset {
+        paint_preset_gallery(
+            hdc,
+            hwnd,
+            &snapshot,
+            hovered,
+            pressed,
+            card,
+            card_hover,
+            card_pressed,
+            track_background,
+            accent,
+            primary,
+            secondary,
+        );
+    } else {
+        for (index, row) in rows(section).iter().copied().enumerate() {
         let r = row_rect(hwnd, index);
         let selected = row == editor;
         let target = HitTarget::Row(row);
@@ -1833,18 +1817,19 @@ unsafe fn paint(hwnd: HWND) {
             accent,
         );
     }
-    paint_editor(
-        hdc,
-        hwnd,
-        &snapshot,
-        editor,
-        EditorPalette {
-            primary,
-            secondary,
-            track_background,
-            accent,
-        },
-    );
+        paint_editor(
+            hdc,
+            hwnd,
+            &snapshot,
+            editor,
+            EditorPalette {
+                primary,
+                secondary,
+                track_background,
+                accent,
+            },
+        );
+    }
 
     draw_segment(
         hdc,
@@ -1914,6 +1899,205 @@ unsafe fn paint(hwnd: HWND) {
     let _ = DeleteObject(bitmap);
     let _ = DeleteDC(hdc);
     let _ = EndPaint(hwnd, &ps);
+}
+
+fn preset_group_label(is_dark: bool, language: LanguageId) -> &'static str {
+    match (language == LanguageId::SimplifiedChinese, is_dark) {
+        (true, true) => "深色预设",
+        (true, false) => "浅色预设",
+        (false, true) => "Dark presets",
+        (false, false) => "Light presets",
+    }
+}
+
+fn preset_label(preset: ThemePreset, is_dark: bool, language: LanguageId) -> &'static str {
+    match (language == LanguageId::SimplifiedChinese, is_dark, preset) {
+        (true, true, ThemePreset::Classic) => "石墨",
+        (true, true, ThemePreset::Ocean) => "深海",
+        (true, true, ThemePreset::Forest) => "松影",
+        (false, true, ThemePreset::Classic) => "Graphite",
+        (false, true, ThemePreset::Ocean) => "Deep Sea",
+        (false, true, ThemePreset::Forest) => "Pine Shade",
+        (true, false, ThemePreset::Classic) => "晨霜",
+        (true, false, ThemePreset::Ocean) => "雾蓝",
+        (true, false, ThemePreset::Forest) => "暖砂",
+        (false, false, ThemePreset::Classic) => "Morning Frost",
+        (false, false, ThemePreset::Ocean) => "Mist Blue",
+        (false, false, ThemePreset::Forest) => "Warm Sand",
+    }
+}
+
+unsafe fn paint_preset_gallery(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    card: Color,
+    card_hover: Color,
+    card_pressed: Color,
+    track_background: Color,
+    accent: Color,
+    primary: Color,
+    secondary: Color,
+) {
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        preset_group_label(snapshot.is_dark, snapshot.language),
+        rect(hwnd, 174, 108, 786, 136),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    for preset in ThemePreset::ALL {
+        let r = preset_card_rect(hwnd, preset);
+        let target = HitTarget::Preset(preset);
+        let selected = snapshot
+            .active_style
+            .matches_preset(snapshot.is_dark, preset);
+        let surface = if pressed == Some(target) {
+            card_pressed
+        } else if hovered == Some(target) {
+            card_hover
+        } else {
+            card
+        };
+        fill(hdc, r, surface);
+        draw_outline_rect_width(
+            hdc,
+            r,
+            if selected { accent } else { track_background },
+            if selected { 2 } else { 1 },
+        );
+
+        let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+        draw_text(
+            hdc,
+            preset_label(preset, snapshot.is_dark, snapshot.language),
+            RECT {
+                left: r.left + scale(hwnd, 12),
+                top: r.top + scale(hwnd, 8),
+                right: r.right - scale(hwnd, 12),
+                bottom: r.top + scale(hwnd, 38),
+            },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let style = ThemeStyle::preset(snapshot.is_dark, preset);
+        let preview = RECT {
+            left: r.left + scale(hwnd, 12),
+            top: r.top + scale(hwnd, 46),
+            right: r.right - scale(hwnd, 12),
+            bottom: r.top + scale(hwnd, 138),
+        };
+        fill(
+            hdc,
+            preview,
+            style.color(StyleColorTarget::PanelBackground),
+        );
+        draw_outline_rect(
+            hdc,
+            preview,
+            style.color(StyleColorTarget::PanelBorder),
+        );
+
+        let text_left = preview.left + scale(hwnd, 10);
+        let text_right = preview.right - scale(hwnd, 10);
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()),
+        );
+        draw_text(
+            hdc,
+            "5h",
+            RECT {
+                left: text_left,
+                top: preview.top + scale(hwnd, 6),
+                right: text_right,
+                bottom: preview.top + scale(hwnd, 28),
+            },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()),
+        );
+        draw_text(
+            hdc,
+            "82%",
+            RECT {
+                left: text_left,
+                top: preview.top + scale(hwnd, 29),
+                right: preview.left + scale(hwnd, 78),
+                bottom: preview.top + scale(hwnd, 53),
+            },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()),
+        );
+        draw_text(
+            hdc,
+            "21:30",
+            RECT {
+                left: preview.left + scale(hwnd, 76),
+                top: preview.top + scale(hwnd, 29),
+                right: text_right,
+                bottom: preview.top + scale(hwnd, 53),
+            },
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let progress = RECT {
+            left: text_left,
+            top: preview.top + scale(hwnd, 65),
+            right: text_right,
+            bottom: preview.top + scale(hwnd, 72),
+        };
+        fill(
+            hdc,
+            progress,
+            style.color(StyleColorTarget::ProgressConsumed),
+        );
+        let filled = RECT {
+            right: progress.left + (progress.right - progress.left) * 72 / 100,
+            ..progress
+        };
+        fill(hdc, filled, style.color(StyleColorTarget::ProgressHigh));
+
+        let swatches = [
+            StyleColorTarget::ProgressHigh,
+            StyleColorTarget::ProgressMedium,
+            StyleColorTarget::ProgressLow,
+            StyleColorTarget::ProgressConsumed,
+        ];
+        for (index, target) in swatches.iter().copied().enumerate() {
+            let left = r.left + scale(hwnd, 14 + index as i32 * 42);
+            let swatch = RECT {
+                left,
+                top: r.top + scale(hwnd, 158),
+                right: left + scale(hwnd, 30),
+                bottom: r.top + scale(hwnd, 170),
+            };
+            fill(hdc, swatch, style.color(target));
+        }
+
+        let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+        draw_text(
+            hdc,
+            if selected { "✓" } else { "" },
+            RECT {
+                left: r.right - scale(hwnd, 30),
+                top: r.top + scale(hwnd, 8),
+                right: r.right - scale(hwnd, 8),
+                bottom: r.top + scale(hwnd, 38),
+            },
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
 }
 
 unsafe fn paint_numeric_edit_frames(
@@ -2073,6 +2257,13 @@ unsafe fn draw_slider(
 fn section_label(section: Section, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match section {
+        Section::Preset => {
+            if zh {
+                "预设"
+            } else {
+                "Presets"
+            }
+        }
         Section::Panel => {
             if zh {
                 "面板"
@@ -2173,7 +2364,11 @@ unsafe fn draw_segment(
 }
 
 unsafe fn draw_outline_rect(hdc: HDC, rect: RECT, color: Color) {
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(color.to_colorref()));
+    draw_outline_rect_width(hdc, rect, color, 1);
+}
+
+unsafe fn draw_outline_rect_width(hdc: HDC, rect: RECT, color: Color, width: i32) {
+    let pen = CreatePen(PS_SOLID, width, COLORREF(color.to_colorref()));
     let old_pen = SelectObject(hdc, pen);
     let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
     let _ = Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
