@@ -78,6 +78,14 @@ if ($styleWindow -notmatch 'ID_EDIT_BLUR' -or
     $styleWindow -notmatch 'blur_edit_frame_rect\(') {
     throw 'Blur intensity must use a linked 0-100 numeric input beside the slider.'
 }
+if ($styleWindow -notmatch 'editor_layout_snapshot\(' -or
+    $styleWindow -notmatch 'release_editor_focus_before_layout\(' -or
+    $styleWindow -notmatch 'hiding_focused_color' -or
+    $styleWindow -notmatch 'hiding_focused_blur' -or
+    $styleWindow -notmatch 'SetFocus\(hwnd\)' -or
+    $styleWindow -notmatch 'ShowWindow/SetFocus can synchronously send') {
+    throw 'Style editor switching must release STATE before focus/visibility Win32 calls to avoid EDIT focus deadlocks.'
+}
 if ($styleWindow -match 'WS_BORDER' -or
     $styleWindow -notmatch 'numeric_edit_frame_rect\(' -or
     $styleWindow -notmatch 'focused_numeric_edit' -or
