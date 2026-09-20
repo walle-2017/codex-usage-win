@@ -3190,6 +3190,10 @@ fn show_minimal_usage_tooltip(owner: HWND, target: MinimalHoverTarget, hit_rect:
     }
 }
 
+fn point_in_rect(rect: RECT, x: i32, y: i32) -> bool {
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
 fn minimal_percent_hit(
     hwnd: HWND,
     x: i32,
@@ -3242,13 +3246,13 @@ fn minimal_percent_hit(
 
     if effective_show_session {
         let rect = make_rect(if effective_show_weekly { row1_y } else { single_row_y });
-        if pt_in_rect(rect, x, y) {
+        if point_in_rect(rect, x, y) {
             return Some((MinimalHoverTarget::Session, rect));
         }
     }
     if effective_show_weekly {
         let rect = make_rect(if effective_show_session { row2_y } else { single_row_y });
-        if pt_in_rect(rect, x, y) {
+        if point_in_rect(rect, x, y) {
             return Some((MinimalHoverTarget::Weekly, rect));
         }
     }
