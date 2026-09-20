@@ -18,6 +18,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 - Default and minimal taskbar layouts
 - Follow-system, forced dark, and forced light themes
 - Per-theme live style editing for RGBA colors and 0–100% Windows Composition Gaussian backdrop blur
+- Classic, Ocean, and Forest color presets are tuned separately for dark and light themes and remain editable after applying
 - Optional low-quota alerts
 - Configurable refresh interval
 - Windows light/dark theme support

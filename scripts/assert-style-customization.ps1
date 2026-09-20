@@ -24,6 +24,31 @@ if ($styleWindow -notmatch '"排版"' -or
     $windowProduction -notmatch '"Style\.\.\."') {
     throw 'Unified panel Theme/Layout labels and the native Style submenu entry must be present.'
 }
+if ($styleProduction -notmatch 'enum\s+ThemePreset' -or
+    $styleProduction -notmatch 'Classic' -or
+    $styleProduction -notmatch 'Ocean' -or
+    $styleProduction -notmatch 'Forest' -or
+    $styleProduction -notmatch 'apply_preset\(' -or
+    $styleProduction -notmatch 'matches_preset\(' -or
+    $styleWindow -notmatch '"预设"' -or
+    $styleWindow -notmatch '"Preset"' -or
+    $styleWindow -notmatch 'WM_STYLE_PRESET_CHANGE' -or
+    $windowProduction -notmatch 'WM_STYLE_PRESET_CHANGE' -or
+    $windowProduction -notmatch 'ThemePreset::from_index') {
+    throw 'Dark/light Classic, Ocean, and Forest theme presets must be selectable from the unified Style panel.'
+}
+foreach ($hex in @(
+    '#0F1B24FF', '#294252FF', '#3FB7E9FF', '#EEF8FCFF', '#C7E1ECFF', '#188BC0FF',
+    '#14211DFF', '#2B4038FF', '#56C596FF', '#F1F7F3FF', '#CDDED3FF', '#2E9369FF'
+)) {
+    if ($styleProduction -notmatch [regex]::Escape($hex)) {
+        throw "Expected coordinated theme-preset color is missing: $hex"
+    }
+}
+if ($styleProduction -notmatch 'preset_text_colors_keep_readable_contrast' -or
+    $styleProduction -notmatch 'ratio\s*>=\s*4\.5') {
+    throw 'Theme presets must keep an automated readable text-contrast quality gate.'
+}
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
     $styleWindow -notmatch 'WM_STYLE_COLOR_PREVIEW' -or
@@ -146,6 +171,7 @@ if ($styleWindow -notmatch 'WS_CLIPCHILDREN' -or
 }
 if ($styleWindow -notmatch 'WM_APP \+ 120' -or
     $styleWindow -notmatch 'WM_APP \+ 123' -or
+    $styleWindow -notmatch 'WM_APP \+ 126' -or
     $styleWindow -notmatch 'draw_slider\(') {
     throw 'Style panel messages must use a collision-free WM_APP range and self-drawn sliders.'
 }

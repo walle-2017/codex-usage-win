@@ -29,7 +29,7 @@ use crate::native_interop::{
 };
 use crate::poller;
 use crate::style::{
-    StyleColorTarget, StyleSettings, ThemeMode, ThemeStyle, FROSTED_STRENGTH_MAX,
+    StyleColorTarget, StyleSettings, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
 use crate::style_window;
 use crate::theme;
@@ -4228,6 +4228,21 @@ unsafe extern "system" fn wnd_proc(
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
                     s.styles.reset_active(s.is_dark);
+                }
+            }
+            save_state_settings();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_PRESET_CHANGE => {
+            let Some(preset) = ThemePreset::from_index(wparam.0) else {
+                return LRESULT(0);
+            };
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.styles.active_mut(s.is_dark).apply_preset(s.is_dark, preset);
                 }
             }
             save_state_settings();

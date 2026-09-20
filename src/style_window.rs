@@ -14,7 +14,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::appearance::AppearancePreset;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
-use crate::style::{StyleColorTarget, ThemeMode, ThemeStyle, FROSTED_STRENGTH_MAX};
+use crate::style::{
+    StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
+};
 
 // Keep this block well away from updater.rs (WM_APP + 21..23).
 pub const WM_STYLE_COLOR_PREVIEW: u32 = WM_APP + 120;
@@ -23,6 +25,7 @@ pub const WM_STYLE_SAVE: u32 = WM_APP + 122;
 pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
 pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
+pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 
 const WINDOW_CLASS: &str = "CodexUsageStyleSettingsV1";
 const WINDOW_WIDTH: i32 = 820;
@@ -76,6 +79,7 @@ enum SliderKind {
 enum HitTarget {
     Theme(ThemeMode),
     Layout(AppearancePreset),
+    Preset(ThemePreset),
     Section(Section),
     Row(EditorSelection),
     Reset,
@@ -500,6 +504,15 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     rect(hwnd, 540 + index * 104, 50, 636 + index * 104, 84)
 }
 
+fn preset_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+    let index = match preset {
+        ThemePreset::Classic => 0,
+        ThemePreset::Ocean => 1,
+        ThemePreset::Forest => 2,
+    };
+    rect(hwnd, 224 + index * 108, 92, 324 + index * 108, 120)
+}
+
 fn current_editor() -> EditorSelection {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     state
@@ -900,6 +913,11 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
             return Some(HitTarget::Layout(preset));
         }
     }
+    for preset in ThemePreset::ALL {
+        if pt_in_rect(preset_rect(hwnd, preset), x, y) {
+            return Some(HitTarget::Preset(preset));
+        }
+    }
     for section in [
         Section::Panel,
         Section::Text,
@@ -947,6 +965,14 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 if preset == AppearancePreset::Default { 0 } else { 1 },
                 0,
             );
+        }
+        HitTarget::Preset(preset) => {
+            let index = match preset {
+                ThemePreset::Classic => 0,
+                ThemePreset::Ocean => 1,
+                ThemePreset::Forest => 2,
+            };
+            send_parent(WM_STYLE_PRESET_CHANGE, index, 0);
         }
         HitTarget::Section(section) => set_section(section),
         HitTarget::Row(editor) => select_editor(editor),
@@ -1622,6 +1648,52 @@ unsafe fn paint(hwnd: HWND) {
                 (true, AppearancePreset::Minimal) => "极简",
                 (false, AppearancePreset::Default) => "Default",
                 (false, AppearancePreset::Minimal) => "Minimal",
+            },
+        );
+    }
+
+    draw_text(
+        hdc,
+        if snapshot.language == LanguageId::SimplifiedChinese {
+            "预设"
+        } else {
+            "Preset"
+        },
+        rect(hwnd, 170, 92, 218, 120),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    for preset in ThemePreset::ALL {
+        let selected = snapshot
+            .active_style
+            .matches_preset(snapshot.is_dark, preset);
+        let target = HitTarget::Preset(preset);
+        let button_bg = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        draw_segment(
+            hdc,
+            preset_rect(hwnd, preset),
+            selected,
+            button_bg,
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            match (snapshot.language == LanguageId::SimplifiedChinese, preset) {
+                (true, ThemePreset::Classic) => "经典",
+                (true, ThemePreset::Ocean) => "海洋",
+                (true, ThemePreset::Forest) => "森屿",
+                (false, ThemePreset::Classic) => "Classic",
+                (false, ThemePreset::Ocean) => "Ocean",
+                (false, ThemePreset::Forest) => "Forest",
             },
         );
     }

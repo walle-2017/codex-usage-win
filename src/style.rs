@@ -19,6 +19,26 @@ pub enum ThemeMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemePreset {
+    Classic,
+    Ocean,
+    Forest,
+}
+
+impl ThemePreset {
+    pub const ALL: [Self; 3] = [Self::Classic, Self::Ocean, Self::Forest];
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Classic),
+            1 => Some(Self::Ocean),
+            2 => Some(Self::Forest),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StyleColorTarget {
     PanelBackground,
     PanelBorder,
@@ -96,6 +116,86 @@ impl ThemeStyle {
             progress_consumed: "#AAAAAAFF".into(),
             drag_handle: "#8A929AFF".into(),
         }
+    }
+
+    pub fn preset(is_dark: bool, preset: ThemePreset) -> Self {
+        match (is_dark, preset) {
+            (true, ThemePreset::Classic) => Self::dark_default(),
+            (false, ThemePreset::Classic) => Self::light_default(),
+            (true, ThemePreset::Ocean) => Self {
+                panel_background: "#0F1B24FF".into(),
+                panel_border: "#294252FF".into(),
+                panel_blur_radius: 0,
+                panel_frosted_strength: 0,
+                quota_type: "#8CA7B8FF".into(),
+                remaining: "#EAF7FFFF".into(),
+                reset_time: "#7192A8FF".into(),
+                error: "#FF7474FF".into(),
+                progress_high: "#3FB7E9FF".into(),
+                progress_medium: "#E3B65BFF".into(),
+                progress_low: "#F06A6AFF".into(),
+                progress_consumed: "#263B49FF".into(),
+                drag_handle: "#648397FF".into(),
+            },
+            (false, ThemePreset::Ocean) => Self {
+                panel_background: "#EEF8FCFF".into(),
+                panel_border: "#C7E1ECFF".into(),
+                panel_blur_radius: 0,
+                panel_frosted_strength: 0,
+                quota_type: "#477080FF".into(),
+                remaining: "#16333FFF".into(),
+                reset_time: "#58737FFF".into(),
+                error: "#C94D4DFF".into(),
+                progress_high: "#188BC0FF".into(),
+                progress_medium: "#AD7922FF".into(),
+                progress_low: "#CD5151FF".into(),
+                progress_consumed: "#BEDAE5FF".into(),
+                drag_handle: "#6A8C99FF".into(),
+            },
+            (true, ThemePreset::Forest) => Self {
+                panel_background: "#14211DFF".into(),
+                panel_border: "#2B4038FF".into(),
+                panel_blur_radius: 0,
+                panel_frosted_strength: 0,
+                quota_type: "#9AB3A8FF".into(),
+                remaining: "#F0FAF5FF".into(),
+                reset_time: "#7F9C8FFF".into(),
+                error: "#F5746BFF".into(),
+                progress_high: "#56C596FF".into(),
+                progress_medium: "#D9B45BFF".into(),
+                progress_low: "#E96B5DFF".into(),
+                progress_consumed: "#2B3E37FF".into(),
+                drag_handle: "#6A887BFF".into(),
+            },
+            (false, ThemePreset::Forest) => Self {
+                panel_background: "#F1F7F3FF".into(),
+                panel_border: "#CDDED3FF".into(),
+                panel_blur_radius: 0,
+                panel_frosted_strength: 0,
+                quota_type: "#52705FFF".into(),
+                remaining: "#1C3025FF".into(),
+                reset_time: "#5C7366FF".into(),
+                error: "#BF4A42FF".into(),
+                progress_high: "#2E9369FF".into(),
+                progress_medium: "#A97921FF".into(),
+                progress_low: "#C55348FF".into(),
+                progress_consumed: "#C6D8CDFF".into(),
+                drag_handle: "#71897BFF".into(),
+            },
+        }
+    }
+
+    pub fn apply_preset(&mut self, is_dark: bool, preset: ThemePreset) {
+        let frosted_strength = self.panel_frosted_strength;
+        let mut replacement = Self::preset(is_dark, preset);
+        replacement.panel_frosted_strength = frosted_strength;
+        *self = replacement;
+    }
+
+    pub fn matches_preset(&self, is_dark: bool, preset: ThemePreset) -> bool {
+        let mut expected = Self::preset(is_dark, preset);
+        expected.panel_frosted_strength = self.panel_frosted_strength;
+        self == &expected
     }
 
     pub fn normalize(&mut self, fallback: &Self) {
@@ -224,6 +324,64 @@ mod tests {
         let styles = StyleSettings::default();
         assert_eq!(styles.dark.panel_background, "#242A31FF");
         assert_eq!(styles.light.panel_background, "#EEF1F4FF");
+    }
+
+    #[test]
+    fn presets_are_theme_specific_and_preserve_blur_when_applied() {
+        let dark_ocean = ThemeStyle::preset(true, ThemePreset::Ocean);
+        let light_ocean = ThemeStyle::preset(false, ThemePreset::Ocean);
+        assert_ne!(dark_ocean.panel_background, light_ocean.panel_background);
+
+        let mut style = ThemeStyle::dark_default();
+        style.panel_frosted_strength = 37;
+        style.apply_preset(true, ThemePreset::Forest);
+        assert_eq!(style.panel_frosted_strength, 37);
+        assert!(style.matches_preset(true, ThemePreset::Forest));
+
+        style.remaining = "#FFFFFFFF".into();
+        assert!(!style.matches_preset(true, ThemePreset::Forest));
+    }
+
+    fn relative_luminance(color: Color) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    }
+
+    fn contrast_ratio(a: Color, b: Color) -> f64 {
+        let (lighter, darker) = {
+            let a = relative_luminance(a);
+            let b = relative_luminance(b);
+            if a >= b { (a, b) } else { (b, a) }
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn preset_text_colors_keep_readable_contrast() {
+        for is_dark in [true, false] {
+            for preset in ThemePreset::ALL {
+                let style = ThemeStyle::preset(is_dark, preset);
+                let background = style.color(StyleColorTarget::PanelBackground);
+                for target in [
+                    StyleColorTarget::QuotaType,
+                    StyleColorTarget::Remaining,
+                    StyleColorTarget::ResetTime,
+                ] {
+                    let ratio = contrast_ratio(background, style.color(target));
+                    assert!(
+                        ratio >= 4.5,
+                        "{preset:?} {target:?} contrast {ratio:.2} is below 4.5"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
