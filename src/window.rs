@@ -2977,8 +2977,6 @@ unsafe extern "system" fn on_tray_location_changed(
     }
 }
 
-/// Main window procedure
-
 unsafe extern "system" fn minimal_tooltip_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -3285,6 +3283,7 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
+/// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
