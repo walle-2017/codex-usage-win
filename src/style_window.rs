@@ -144,6 +144,17 @@ struct ButtonPalette {
     selected_pressed: Color,
 }
 
+#[derive(Clone, Copy)]
+struct PresetGalleryPalette {
+    card: Color,
+    card_hover: Color,
+    card_pressed: Color,
+    border: Color,
+    accent: Color,
+    primary: Color,
+    secondary: Color,
+}
+
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1719,13 +1730,15 @@ unsafe fn paint(hwnd: HWND) {
             &snapshot,
             hovered,
             pressed,
-            card,
-            card_hover,
-            card_pressed,
-            track_background,
-            accent,
-            primary,
-            secondary,
+            PresetGalleryPalette {
+                card,
+                card_hover,
+                card_pressed,
+                border: track_background,
+                accent,
+                primary,
+                secondary,
+            },
         );
     } else {
         for (index, row) in rows(section).iter().copied().enumerate() {
@@ -1933,14 +1946,17 @@ unsafe fn paint_preset_gallery(
     snapshot: &StyleWindowSnapshot,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
-    card: Color,
-    card_hover: Color,
-    card_pressed: Color,
-    track_background: Color,
-    accent: Color,
-    primary: Color,
-    secondary: Color,
+    palette: PresetGalleryPalette,
 ) {
+    let PresetGalleryPalette {
+        card,
+        card_hover,
+        card_pressed,
+        border,
+        accent,
+        primary,
+        secondary,
+    } = palette;
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
@@ -1966,7 +1982,7 @@ unsafe fn paint_preset_gallery(
         draw_outline_rect_width(
             hdc,
             r,
-            if selected { accent } else { track_background },
+            if selected { accent } else { border },
             if selected { 2 } else { 1 },
         );
 
