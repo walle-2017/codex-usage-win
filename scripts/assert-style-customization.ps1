@@ -45,8 +45,8 @@ foreach ($hex in @(
         throw "Expected coordinated theme-preset color is missing: $hex"
     }
 }
-if ($styleProduction -notmatch 'preset_text_colors_keep_readable_contrast' -or
-    $styleProduction -notmatch 'ratio\s*>=\s*4\.5') {
+if ($style -notmatch 'preset_text_colors_keep_readable_contrast' -or
+    $style -notmatch 'ratio\s*>=\s*4\.5') {
     throw 'Theme presets must keep an automated readable text-contrast quality gate.'
 }
 if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
