@@ -620,15 +620,57 @@ fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
     }
 }
 
-fn layout_numeric_edits(hwnd: HWND) {
+fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, bool, bool)> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(s) = state.as_ref() else {
+    let s = state.as_ref()?;
+    Some((
+        s.numeric_edits,
+        s.blur_edit,
+        matches!(s.editor, EditorSelection::Color(_)),
+        s.editor == EditorSelection::Blur,
+    ))
+}
+
+fn release_editor_focus_before_layout(
+    hwnd: HWND,
+    numeric_edits: &[SendHwnd; 4],
+    blur_edit: SendHwnd,
+    show_color: bool,
+    show_blur: bool,
+) {
+    unsafe {
+        let focused = GetFocus();
+        let hiding_focused_color =
+            !show_color && numeric_edits.iter().any(|edit| edit.to_hwnd() == focused);
+        let hiding_focused_blur = !show_blur && blur_edit.to_hwnd() == focused;
+
+        if hiding_focused_color || hiding_focused_blur {
+            // SetFocus synchronously sends EN_KILLFOCUS to the old EDIT control.
+            // This must run with STATE unlocked or WM_COMMAND would re-enter
+            // STATE.lock() on the same UI thread and deadlock.
+            let _ = SetFocus(hwnd);
+        }
+    }
+}
+
+fn layout_numeric_edits(hwnd: HWND) {
+    // Copy every HWND and visibility decision while STATE is locked, then release
+    // the mutex before calling Win32. ShowWindow/SetFocus can synchronously send
+    // WM_COMMAND focus notifications back into this window procedure.
+    let Some((numeric_edits, blur_edit, show_color, show_blur)) = editor_layout_snapshot() else {
         return;
     };
-    let show_color = matches!(s.editor, EditorSelection::Color(_));
-    let show_blur = s.editor == EditorSelection::Blur;
+
+    release_editor_focus_before_layout(
+        hwnd,
+        &numeric_edits,
+        blur_edit,
+        show_color,
+        show_blur,
+    );
+
     unsafe {
-        for (index, edit) in s.numeric_edits.iter().enumerate() {
+        for (index, edit) in numeric_edits.iter().enumerate() {
             let r = numeric_edit_rect(hwnd, index);
             let _ = SetWindowPos(
                 edit.to_hwnd(),
@@ -647,7 +689,7 @@ fn layout_numeric_edits(hwnd: HWND) {
 
         let blur_rect = blur_edit_rect(hwnd);
         let _ = SetWindowPos(
-            s.blur_edit.to_hwnd(),
+            blur_edit.to_hwnd(),
             HWND::default(),
             blur_rect.left,
             blur_rect.top,
@@ -656,7 +698,7 @@ fn layout_numeric_edits(hwnd: HWND) {
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
         let _ = ShowWindow(
-            s.blur_edit.to_hwnd(),
+            blur_edit.to_hwnd(),
             if show_blur { SW_SHOW } else { SW_HIDE },
         );
     }
