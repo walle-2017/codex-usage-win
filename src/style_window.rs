@@ -152,7 +152,6 @@ struct PresetGalleryPalette {
     border: Color,
     accent: Color,
     primary: Color,
-    secondary: Color,
 }
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
@@ -245,7 +244,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 PCWSTR::from_raw(empty.as_ptr()),
                 WINDOW_STYLE(
                     WS_CHILD.0
-                        | WS_VISIBLE.0
                         | ES_NUMBER as u32
                         | ES_CENTER as u32
                         | ES_AUTOHSCROLL as u32,
@@ -750,6 +748,9 @@ fn sync_numeric_edits() {
         let Some(s) = state.as_mut() else {
             return;
         };
+        if s.section == Section::Preset {
+            return;
+        }
         let EditorSelection::Color(target) = s.editor else {
             return;
         };
@@ -774,6 +775,9 @@ fn sync_blur_edit() {
         let Some(s) = state.as_mut() else {
             return;
         };
+        if s.section == Section::Preset {
+            return;
+        }
         s.syncing_blur_edit = true;
         (
             s.blur_edit.to_hwnd(),
@@ -1737,7 +1741,6 @@ unsafe fn paint(hwnd: HWND) {
                 border: track_background,
                 accent,
                 primary,
-                secondary,
             },
         );
     } else {
@@ -1955,7 +1958,6 @@ unsafe fn paint_preset_gallery(
         border,
         accent,
         primary,
-        secondary,
     } = palette;
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
@@ -2101,18 +2103,15 @@ unsafe fn paint_preset_gallery(
             fill(hdc, swatch, style.color(target));
         }
 
-        let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-        draw_text(
-            hdc,
-            if selected { "✓" } else { "" },
-            RECT {
-                left: r.right - scale(hwnd, 30),
-                top: r.top + scale(hwnd, 8),
-                right: r.right - scale(hwnd, 8),
-                bottom: r.top + scale(hwnd, 38),
-            },
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-        );
+        if selected {
+            let marker = RECT {
+                left: r.right - scale(hwnd, 24),
+                top: r.top + scale(hwnd, 12),
+                right: r.right - scale(hwnd, 12),
+                bottom: r.top + scale(hwnd, 24),
+            };
+            fill(hdc, marker, accent);
+        }
     }
 }
 
@@ -2402,4 +2401,40 @@ unsafe fn fill(hdc: HDC, rect: RECT, color: Color) {
 unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORMAT) {
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     let _ = DrawTextW(hdc, &mut wide, &mut rect, format);
+}
+
+
+#[cfg(test)]
+mod ui_smoke_tests {
+    use super::*;
+
+    #[test]
+    fn preset_page_can_open_paint_and_destroy_without_editor_reentry() {
+        unsafe {
+            let snapshot = StyleWindowSnapshot {
+                language: LanguageId::English,
+                theme_mode: ThemeMode::Dark,
+                is_dark: true,
+                appearance_preset: AppearancePreset::Default,
+                active_style: ThemeStyle::dark_default(),
+            };
+
+            open_or_focus(HWND::default(), snapshot);
+
+            let hwnd = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .map(|s| s.hwnd.to_hwnd())
+                    .expect("style settings window should be created")
+            };
+
+            let _ = UpdateWindow(hwnd);
+            assert!(!hwnd.0.is_null(), "style settings HWND must remain valid");
+            let _ = DestroyWindow(hwnd);
+
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(state.is_none(), "style settings state must be released on destroy");
+        }
+    }
 }

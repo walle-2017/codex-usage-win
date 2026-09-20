@@ -111,10 +111,15 @@ if ($styleWindow -match 'WS_SYSMENU' -or
 }
 if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'ES_NUMBER' -or
+    $styleWindow -match 'WS_CHILD\.0\s*\|\s*WS_VISIBLE\.0\s*\|\s*ES_NUMBER' -or
     $styleWindow -notmatch 'EN_CHANGE_CODE' -or
     $styleWindow -notmatch 'sync_numeric_edits\(' -or
     $styleWindow -notmatch 'update_color_from_numeric_edit\(') {
-    throw 'RGBA values must use linked numeric input controls.'
+    throw 'RGBA values must use linked numeric inputs that are created hidden and shown only on editor pages.'
+}
+if ($styleWindow -notmatch 'if\s+s\.section\s*==\s*Section::Preset\s*\{\s*return;\s*\}' -or
+    $styleWindow -notmatch 'preset_page_can_open_paint_and_destroy_without_editor_reentry') {
+    throw 'Preset-page startup must avoid hidden EDIT synchronization and keep a real Win32 open/paint/destroy smoke test.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_BLUR' -or
     $styleWindow -notmatch 'sync_blur_edit\(' -or
