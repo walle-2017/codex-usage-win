@@ -14,7 +14,9 @@ use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+};
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -66,6 +68,7 @@ struct AppState {
     frosted_popup_session: bool,
     small_taskbar_mode: bool,
     small_show_weekly: bool,
+    minimal_hover_target: Option<MinimalHoverTarget>,
 
     codex_session_percent: f64,
     codex_session_text: String,
@@ -91,6 +94,12 @@ struct AppState {
     dragging: bool,
     drag_anchor_logical_x: i32,
     drag_reparenting: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MinimalHoverTarget {
+    Session,
+    Weekly,
 }
 
 const RETRY_BASE_MS: u32 = 30_000; // 30 seconds
@@ -166,6 +175,8 @@ const DRAG_FRAME_MS: u64 = 8;
 const GITHUB_RELEASES_URL: &str =
     "https://github.com/walle-2017/codex-usage-win/releases";
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
+const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
+const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 
 /// How often the watchdog thread polls for an explorer.exe restart (which
@@ -184,6 +195,8 @@ static BLUR_BACKDROP_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static BLUR_BACKDROP_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
 static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
+static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
+static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -1287,9 +1300,16 @@ fn usage_percent_for_display(_language: LanguageId, used_percentage: f64) -> f64
 }
 
 fn total_widget_width_for_preset(language: LanguageId, preset: AppearancePreset) -> i32 {
+    let metrics = preset.metrics();
+    if preset == AppearancePreset::Minimal {
+        return sc(DRAG_HANDLE_HIT_W)
+            + sc(metrics.outer_padding)
+            + sc(metrics.percent_width)
+            + sc(metrics.outer_padding);
+    }
+
     let bar_segments = row_bar_segment_count(preset);
     let (label_width, reset_width) = usage_layout_widths(language, preset);
-    let metrics = preset.metrics();
     let progress_width = (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * bar_segments - sc(SEGMENT_GAP);
     let usage_width = progress_width
         + sc(metrics.bar_percent_gap)
@@ -1475,6 +1495,7 @@ pub fn run() {
                 frosted_popup_session: false,
                 small_taskbar_mode: false,
                 small_show_weekly: false,
+                minimal_hover_target: None,
                 codex_session_percent: 0.0,
                 codex_session_text: "--".to_string(),
                 codex_weekly_percent: 0.0,
@@ -2475,47 +2496,60 @@ fn paint_content(
         );
         let old_font = SelectObject(hdc, font);
 
-        if effective_show_session {
-            draw_row(
-                hdc,
-                content_x,
-                if effective_show_weekly {
-                    row1_y
-                } else {
-                    single_row_y
-                },
-                &quota_type_color,
-                &primary_color,
-                &reset_color,
-                strings.session_window,
-                codex_session_pct,
-                codex_session_text,
-                &track,
-                label_width,
-                text_width,
-                panel_base,
-            );
-        }
-        if effective_show_weekly {
-            draw_row(
-                hdc,
-                content_x,
-                if effective_show_session {
-                    row2_y
-                } else {
-                    single_row_y
-                },
-                &quota_type_color,
-                &primary_color,
-                &reset_color,
-                strings.weekly_window,
-                codex_weekly_pct,
-                codex_weekly_text,
-                &track,
-                label_width,
-                text_width,
-                panel_base,
-            );
+        if preset == AppearancePreset::Minimal {
+            if effective_show_session {
+                draw_minimal_usage_value(
+                    hdc,
+                    content_x,
+                    if effective_show_weekly { row1_y } else { single_row_y },
+                    codex_session_text,
+                    &primary_color,
+                );
+            }
+            if effective_show_weekly {
+                draw_minimal_usage_value(
+                    hdc,
+                    content_x,
+                    if effective_show_session { row2_y } else { single_row_y },
+                    codex_weekly_text,
+                    &primary_color,
+                );
+            }
+        } else {
+            if effective_show_session {
+                draw_row(
+                    hdc,
+                    content_x,
+                    if effective_show_weekly { row1_y } else { single_row_y },
+                    &quota_type_color,
+                    &primary_color,
+                    &reset_color,
+                    strings.session_window,
+                    codex_session_pct,
+                    codex_session_text,
+                    &track,
+                    label_width,
+                    text_width,
+                    panel_base,
+                );
+            }
+            if effective_show_weekly {
+                draw_row(
+                    hdc,
+                    content_x,
+                    if effective_show_session { row2_y } else { single_row_y },
+                    &quota_type_color,
+                    &primary_color,
+                    &reset_color,
+                    strings.weekly_window,
+                    codex_weekly_pct,
+                    codex_weekly_text,
+                    &track,
+                    label_width,
+                    text_width,
+                    panel_base,
+                );
+            }
         }
 
         SelectObject(hdc, old_font);
@@ -2944,6 +2978,309 @@ unsafe extern "system" fn on_tray_location_changed(
 }
 
 /// Main window procedure
+
+unsafe extern "system" fn minimal_tooltip_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_NCHITTEST => LRESULT(-1),
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+
+            let background = CreateSolidBrush(COLORREF(Color::from_hex("#30343CFF").to_colorref()));
+            let border = CreateSolidBrush(COLORREF(Color::from_hex("#626A76FF").to_colorref()));
+            FillRect(hdc, &client, background);
+            FrameRect(hdc, &client, border);
+            let _ = DeleteObject(background);
+            let _ = DeleteObject(border);
+
+            let font_name = native_interop::wide_str("Segoe UI");
+            let font = CreateFontW(
+                sc(-12),
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_TT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                PCWSTR::from_raw(font_name.as_ptr()),
+            );
+            let old_font = SelectObject(hdc, font);
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, COLORREF(Color::from_hex("#F4F6F8FF").to_colorref()));
+
+            let text = MINIMAL_TOOLTIP_TEXT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            let mut text_rect = client;
+            text_rect.left += sc(8);
+            text_rect.right -= sc(8);
+            let _ = DrawTextW(
+                hdc,
+                &mut wide,
+                &mut text_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+
+            let _ = SelectObject(hdc, old_font);
+            let _ = DeleteObject(font);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn register_minimal_tooltip_class() {
+    unsafe {
+        let class_name = native_interop::wide_str(MINIMAL_TOOLTIP_CLASS);
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(minimal_tooltip_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+    }
+}
+
+fn minimal_tooltip_hwnd() -> Option<HWND> {
+    {
+        let state = MINIMAL_TOOLTIP_HWND
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(hwnd) = *state {
+            return Some(hwnd.to_hwnd());
+        }
+    }
+
+    register_minimal_tooltip_class();
+    unsafe {
+        let class_name = native_interop::wide_str(MINIMAL_TOOLTIP_CLASS);
+        let title = native_interop::wide_str("");
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            sc(112),
+            sc(28),
+            HWND::default(),
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).ok()?,
+            None,
+        )
+        .ok()?;
+        let mut state = MINIMAL_TOOLTIP_HWND
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *state = Some(SendHwnd::from_hwnd(hwnd));
+        Some(hwnd)
+    }
+}
+
+fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
+    let state = lock_state();
+    let s = state.as_ref()?;
+    let codex = s.data.as_ref()?.codex.as_ref()?;
+    let strings = s.language.strings();
+    let (label, section, window) = match target {
+        MinimalHoverTarget::Session => (
+            strings.session_window,
+            &codex.session,
+            poller::UsageWindowKind::Session,
+        ),
+        MinimalHoverTarget::Weekly => (
+            strings.weekly_window,
+            &codex.weekly,
+            poller::UsageWindowKind::Weekly,
+        ),
+    };
+    let reset = appearance::taskbar_value_text(
+        AppearancePreset::Default,
+        s.language,
+        section,
+        window,
+    )
+    .secondary
+    .unwrap_or_else(|| "--".to_string());
+    Some(format!("{label} · {reset}"))
+}
+
+fn hide_minimal_usage_tooltip() {
+    let hwnd = {
+        let state = MINIMAL_TOOLTIP_HWND
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|hwnd| hwnd.to_hwnd())
+    };
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+fn show_minimal_usage_tooltip(owner: HWND, target: MinimalHoverTarget, hit_rect: RECT) {
+    let Some(text) = minimal_hover_text(target) else {
+        hide_minimal_usage_tooltip();
+        return;
+    };
+    let Some(tooltip) = minimal_tooltip_hwnd() else {
+        return;
+    };
+
+    {
+        let mut tooltip_text = MINIMAL_TOOLTIP_TEXT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *tooltip_text = text;
+    }
+
+    unsafe {
+        let width = sc(112);
+        let height = sc(28);
+        let mut owner_rect = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rect);
+        let mut anchor = POINT {
+            x: (hit_rect.left + hit_rect.right) / 2,
+            y: hit_rect.top,
+        };
+        let _ = ClientToScreen(owner, &mut anchor);
+
+        let y = if owner_rect.top >= height + sc(6) {
+            owner_rect.top - height - sc(6)
+        } else {
+            owner_rect.bottom + sc(6)
+        };
+        let x = anchor.x - width / 2;
+
+        let _ = SetWindowPos(
+            tooltip,
+            HWND_TOPMOST,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        let _ = InvalidateRect(tooltip, None, false);
+        let _ = UpdateWindow(tooltip);
+    }
+}
+
+fn minimal_percent_hit(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    let (preset, small_taskbar_mode, small_show_weekly, show_session, show_weekly) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        (
+            s.appearance_preset,
+            s.small_taskbar_mode,
+            s.small_show_weekly,
+            s.show_session_window,
+            s.show_weekly_window,
+        )
+    };
+    if preset != AppearancePreset::Minimal {
+        return None;
+    }
+
+    let effective_show_session = if small_taskbar_mode {
+        !small_show_weekly
+    } else {
+        show_session
+    };
+    let effective_show_weekly = if small_taskbar_mode {
+        small_show_weekly
+    } else {
+        show_weekly
+    };
+
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    let height = client.bottom - client.top;
+    let metrics = preset.metrics();
+    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let row2_y = height - sc(4) - sc(SEGMENT_H);
+    let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
+    let single_row_y = (height - sc(SEGMENT_H)) / 2;
+    let width = sc(metrics.percent_width);
+
+    let make_rect = |top: i32| RECT {
+        left: content_x - sc(2),
+        top: top - sc(2),
+        right: content_x + width + sc(2),
+        bottom: top + sc(SEGMENT_H) + sc(2),
+    };
+
+    if effective_show_session {
+        let rect = make_rect(if effective_show_weekly { row1_y } else { single_row_y });
+        if pt_in_rect(rect, x, y) {
+            return Some((MinimalHoverTarget::Session, rect));
+        }
+    }
+    if effective_show_weekly {
+        let rect = make_rect(if effective_show_session { row2_y } else { single_row_y });
+        if pt_in_rect(rect, x, y) {
+            return Some((MinimalHoverTarget::Weekly, rect));
+        }
+    }
+    None
+}
+
+fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
+    let hit = minimal_percent_hit(hwnd, x, y);
+    let target = hit.map(|(target, _)| target);
+    let changed = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        if s.minimal_hover_target == target {
+            false
+        } else {
+            s.minimal_hover_target = target;
+            true
+        }
+    };
+
+    if !changed {
+        return;
+    }
+    if let Some((target, rect)) = hit {
+        show_minimal_usage_tooltip(hwnd, target, rect);
+    } else {
+        hide_minimal_usage_tooltip();
+    }
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -3128,6 +3465,20 @@ unsafe extern "system" fn wnd_proc(
                 state.as_ref().map(|s| s.dragging).unwrap_or(false)
             };
             if is_dragging {
+                hide_minimal_usage_tooltip();
+            } else {
+                let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                update_minimal_hover(hwnd, client_x, client_y);
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+            }
+            if is_dragging {
                 if !drag_frame_due(false) {
                     return LRESULT(0);
                 }
@@ -3269,6 +3620,16 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
             }
+            LRESULT(0)
+        }
+        _ if msg == WM_MOUSELEAVE_MSG => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.minimal_hover_target = None;
+                }
+            }
+            hide_minimal_usage_tooltip();
             LRESULT(0)
         }
         WM_CANCELMODE => {
@@ -3689,6 +4050,7 @@ unsafe extern "system" fn wnd_proc(
                             refresh_usage_texts(s);
                         }
                     }
+                    hide_minimal_usage_tooltip();
                     save_state_settings();
                     position_at_taskbar();
                     render_layered();
@@ -3850,6 +4212,7 @@ unsafe extern "system" fn wnd_proc(
                     refresh_usage_texts(s);
                 }
             }
+            hide_minimal_usage_tooltip();
             save_state_settings();
             position_at_taskbar();
             render_layered();
@@ -3870,6 +4233,8 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            hide_minimal_usage_tooltip();
+
             destroy_blur_backdrop();
             let hook = {
                 let state = lock_state();
@@ -4831,6 +5196,26 @@ fn paint(hdc: HDC, hwnd: HWND, composition_blur_active: bool) {
         let _ = DeleteObject(mem_bmp);
         let _ = DeleteDC(mem_dc);
     }
+}
+
+fn draw_minimal_usage_value(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    text: &str,
+    primary_color: &Color,
+) {
+    let row_height = sc(SEGMENT_H);
+    draw_usage_value_text(
+        hdc,
+        x,
+        y,
+        row_height,
+        text,
+        primary_color,
+        primary_color,
+        0,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
