@@ -130,4 +130,28 @@ if ($windowProduction -notmatch 'DRAG_HANDLE_VISUAL_INSET_X:\s*i32\s*=\s*7') {
     throw 'Drag-handle dots must retain their inset.'
 }
 
+if ($windowProduction -notmatch 'preset\s*==\s*AppearancePreset::Minimal' -or
+    $windowProduction -notmatch 'draw_minimal_usage_value\(' -or
+    $windowProduction -notmatch 'minimal_percent_hit\(' -or
+    $windowProduction -notmatch 'show_minimal_usage_tooltip\(' -or
+    $windowProduction -notmatch 'MinimalHoverTarget::Session' -or
+    $windowProduction -notmatch 'MinimalHoverTarget::Weekly') {
+    throw 'Minimal layout must use its own percentages-only paint and hover-detail path.'
+}
+$minimalPaintBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)if\s+preset\s*==\s*AppearancePreset::Minimal\s*\{.*?\}\s*else\s*\{'
+).Value
+if ($minimalPaintBlock -match 'draw_row\(' -or
+    $minimalPaintBlock -match 'draw_usage_bar\(') {
+    throw 'Minimal layout must not render quota labels or progress bars.'
+}
+if ($windowProduction -notmatch 'Some\(format!\("\{label\}\s*·\s*\{reset\}"\)\)') {
+    throw 'Minimal hover detail must contain the quota type label and reset time.'
+}
+if ($windowProduction -notmatch 'TrackMouseEvent' -or
+    $windowProduction -notmatch 'WM_MOUSELEAVE_MSG') {
+    throw 'Minimal percentage hover must clear when the pointer leaves the widget.'
+}
+
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
