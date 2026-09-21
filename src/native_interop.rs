@@ -2,6 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, FILETIME, HWND, LPARAM, RECT, SYSTEMTIME};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
@@ -74,10 +77,33 @@ pub fn system_time_to_local(value: SystemTime) -> Option<SYSTEMTIME> {
     Some(local)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TaskbarWindow {
     pub hwnd: HWND,
     pub rect: RECT,
+    pub monitor_device: Option<String>,
+}
+
+pub fn monitor_device_name(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(
+            monitor,
+            &mut info as *mut MONITORINFOEXW as *mut _,
+        )
+        .as_bool()
+        {
+            return None;
+        }
+        let len = info
+            .szDevice
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(info.szDevice.len());
+        String::from_utf16(&info.szDevice[..len]).ok()
+    }
 }
 
 pub fn find_taskbars() -> Vec<TaskbarWindow> {
@@ -89,7 +115,11 @@ pub fn find_taskbars() -> Vec<TaskbarWindow> {
             let class_name = String::from_utf16_lossy(&class_name[..len as usize]);
             if class_name == "Shell_TrayWnd" || class_name == "Shell_SecondaryTrayWnd" {
                 if let Some(rect) = get_taskbar_rect(hwnd).or_else(|| get_window_rect_safe(hwnd)) {
-                    taskbars.push(TaskbarWindow { hwnd, rect });
+                    taskbars.push(TaskbarWindow {
+                        hwnd,
+                        rect,
+                        monitor_device: monitor_device_name(hwnd),
+                    });
                 }
             }
         }
