@@ -19,8 +19,9 @@ if ($moveBody -match 'current_appearance_preset\s*\(') {
 if ($moveBody -notmatch 'taskbar_at_point\s*\(') {
     throw 'WM_MOUSEMOVE must detect the taskbar under the cursor while dragging.'
 }
-if ($moveBody -notmatch 'attach_to_taskbar\s*\(\s*hwnd\s*,\s*hovered_taskbar_index\s*\)') {
-    throw 'WM_MOUSEMOVE must reattach the widget as soon as the cursor enters another taskbar.'
+if ($moveBody -notmatch 'attach_to_taskbar_window\s*\(' -or
+    $moveBody -notmatch 'hovered_taskbar\.hwnd') {
+    throw 'WM_MOUSEMOVE must reattach directly to the exact taskbar HWND under the cursor.'
 }
 if ($moveBody -notmatch 'drag_left_from_cursor\s*\(') {
     throw 'WM_MOUSEMOVE must preserve the cursor grab point with cursor-anchored geometry when switching taskbars.'
@@ -34,13 +35,13 @@ if ($moveBody -notmatch 'SetCapture\s*\(\s*hwnd\s*\)') {
 # restore capture only after the widget is attached to the new taskbar.
 $releaseBeforeAttach = [regex]::Match(
     $moveBody,
-    '(?s)drag_reparenting\s*=\s*true.*?ReleaseCapture\s*\(\s*\).*?attach_to_taskbar\s*\(\s*hwnd\s*,\s*hovered_taskbar_index\s*\)'
+    '(?s)drag_reparenting\s*=\s*true.*?ReleaseCapture\s*\(\s*\).*?attach_to_taskbar_window\s*\('
 )
 if (-not $releaseBeforeAttach.Success) {
-    throw 'Live taskbar switching must mark internal reparenting and release mouse capture before attach_to_taskbar().'
+    throw 'Live taskbar switching must mark internal reparenting and release mouse capture before exact taskbar attachment.'
 }
-if ($moveBody -notmatch '(?s)attach_to_taskbar\s*\(\s*hwnd\s*,\s*hovered_taskbar_index\s*\).*?drag_reparenting\s*=\s*false.*?SetCapture\s*\(\s*hwnd\s*\)') {
-    throw 'Live taskbar switching must clear the reparent marker and restore capture only after attach_to_taskbar().'
+if ($moveBody -notmatch '(?s)attach_to_taskbar_window\s*\(.*?drag_reparenting\s*=\s*false.*?SetCapture\s*\(\s*hwnd\s*\)') {
+    throw 'Live taskbar switching must clear the reparent marker and restore capture only after exact taskbar attachment.'
 }
 
 $hitTestMatch = [regex]::Match(
@@ -97,7 +98,7 @@ if (-not $buttonUpMatch.Success) {
 }
 $buttonUpBody = $buttonUpMatch.Groups['body'].Value
 $releasePos = $buttonUpBody.IndexOf('ReleaseCapture')
-$dragResultBranchPos = $buttonUpBody.IndexOf('if let Some((current_taskbar_index')
+$dragResultBranchPos = $buttonUpBody.IndexOf('if let Some((current_taskbar_hwnd')
 if ($releasePos -lt 0 -or ($dragResultBranchPos -ge 0 -and $releasePos -gt $dragResultBranchPos)) {
     throw 'WM_LBUTTONUP must release mouse capture unconditionally before branching on dragging state.'
 }

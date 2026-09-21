@@ -5,7 +5,7 @@ $required = @(
     'drag_anchor_logical_x',
     'drag_anchor_px_for_dpi',
     'drag_left_from_cursor',
-    'offset_for_drag_left'
+    'left_offset_for_drag_left'
 )
 foreach ($name in $required) {
     if ($source -notmatch $name) {
@@ -23,6 +23,6 @@ if ($body -match 'drag_start_mouse_x\s*-\s*pt\.x') { throw 'Live dragging still 
 
 $up = [regex]::Match($source, '(?s)WM_LBUTTONUP\s*=>\s*\{(?<body>.*?)\n\s*WM_RBUTTONUP\s*=>')
 if (-not $up.Success) { throw 'Unable to locate WM_LBUTTONUP.' }
-if ($up.Groups['body'].Value -notmatch 'offset_for_drag_left\s*\(') { throw 'Docked offset is not finalized from the final drag-left position.' }
+if ($up.Groups['body'].Value -notmatch 'left_offset_for_drag_left\s*\(') { throw 'Persisted left-edge offset is not finalized from the final drag-left position.' }
 
 Write-Host 'PASS: live drag anchor contract.'
