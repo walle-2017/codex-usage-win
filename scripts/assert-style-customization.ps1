@@ -121,12 +121,28 @@ if ($styleWindow -notmatch 'if\s+s\.section\s*==\s*Section::Preset\s*\{\s*return
     $styleWindow -notmatch 'preset_page_can_open_paint_and_destroy_without_editor_reentry') {
     throw 'Preset-page startup must avoid hidden EDIT synchronization and keep a real Win32 open/paint/destroy smoke test.'
 }
+if ($styleWindow -notmatch 'ID_EDIT_HEX_BASE' -or
+    $styleWindow -notmatch 'HEX_EDIT_COUNT:\s*usize\s*=\s*11' -or
+    $styleWindow -notmatch 'sync_hex_edits\(' -or
+    $styleWindow -notmatch 'update_color_from_hex_edit\(' -or
+    $styleWindow -notmatch 'parse_hex_input\(' -or
+    $styleWindow -notmatch 'focused_hex_edit' -or
+    $styleWindow -notmatch 'invalid_hex_edits' -or
+    $styleWindow -notmatch 'select_editor\(EditorSelection::Color\(target\)\)') {
+    throw 'Every color row must expose an editable Hex field that selects and synchronizes the matching RGBA editor.'
+}
+if ($styleWindow -notmatch 'sync_numeric_edits\(\);\s*sync_hex_edits\(\);' -or
+    $styleWindow -notmatch 'set_edit_text_string\(' -or
+    $styleWindow -notmatch 'Color::try_from_hex') {
+    throw 'Hex and RGBA color editors must synchronize in both directions.'
+}
 if ($styleWindow -notmatch 'ID_EDIT_BLUR' -or
     $styleWindow -notmatch 'sync_blur_edit\(' -or
     $styleWindow -notmatch 'update_blur_from_numeric_edit\(' -or
     $styleWindow -notmatch 'focused_blur_edit' -or
-    $styleWindow -notmatch 'blur_edit_frame_rect\(') {
-    throw 'Blur intensity must use a linked 0-100 numeric input beside the slider.'
+    $styleWindow -notmatch 'blur_edit_frame_rect\(' -or
+    $styleWindow -notmatch 's\.section\s*==\s*Section::Panel') {
+    throw 'Blur intensity must use one inline 0-100 slider and numeric input in the Panel row.'
 }
 if ($styleWindow -notmatch 'editor_layout_snapshot\(' -or
     $styleWindow -notmatch 'release_editor_focus_before_layout\(' -or
@@ -144,11 +160,17 @@ if ($styleWindow -match 'WS_BORDER' -or
 }
 if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     $styleWindow -match 'resize_for_editor\(' -or
-    $styleWindow -notmatch '"当前强度"' -or
-    $styleWindow -match '"关闭 0%"' -or
-    $styleWindow -match '"最强 100%"' -or
-    $styleWindow -notmatch 'EditorSelection::Blur => rect\(hwnd, 174, 326, 786, 382\)') {
-    throw 'Style window height must stay fixed while only the blur editor block shrinks to one row.'
+    $styleWindow -match '"当前强度"' -or
+    $styleWindow -match '"Current"' -or
+    $styleWindow -notmatch 'blur_slider_track_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 390, 224, 650, 228\)' -or
+    $styleWindow -notmatch 'matches!\(editor, EditorSelection::Color\(_\)\)\s*&&\s*section\s*!=\s*Section::Preset') {
+    throw 'Blur must stay inline in its row and must never render a lower secondary editor.'
+}
+if ($styleWindow -notmatch 'select_editor\(EditorSelection::Blur\)' -or
+    $styleWindow -notmatch 'blur selection must clear the lower RGBA editor' -or
+    $styleWindow -notmatch 'hex_input_accepts_rgb_rgba_and_transient_partial_values') {
+    throw 'Clicking blur must clear lower RGBA, while Hex focus must restore the matching RGBA editor in the Win32 smoke test.'
 }
 if ($styleWindow -notmatch 'DwmSetWindowAttribute' -or
     $styleWindow -notmatch 'DWMWA_CAPTION_COLOR' -or

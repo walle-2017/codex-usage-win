@@ -17,7 +17,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 - Reset time/date display
 - Default and minimal taskbar layouts
 - Follow-system, forced dark, and forced light themes
-- Per-theme live style editing for RGBA colors and 0–100% Windows Composition Gaussian backdrop blur
+- Per-theme live style editing with bidirectionally linked Hex/RGBA color controls and an inline 0–100% Windows Composition Gaussian backdrop blur control
 - Dark presets: Graphite, Deep Sea, and Pine Shade; light presets: Morning Frost, Mist Blue, and Warm Sand, shown as real-color preview cards and editable after applying
 - Optional low-quota alerts
 - Configurable refresh interval

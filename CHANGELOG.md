@@ -5,8 +5,8 @@
 - Added theme selection in the unified Style settings panel: follow system, dark, or light.
 - Added distinct coordinated presets for each theme: Graphite, Deep Sea, and Pine Shade in dark mode; Morning Frost, Mist Blue, and Warm Sand in light mode. Presets use preview cards, preserve the current frosted intensity, and remain fully editable.
 - Moved layout controls into the Style settings panel and renamed the layouts to Default and Minimal.
-- Added per-theme style customization for panel, text, progress-bar, and drag-handle RGBA colors.
-- Added 0–100% Windows Composition Gaussian backdrop blur with live slider preview; 0% is 0 px and 100% is 20 px.
+- Added per-theme style customization for panel, text, progress-bar, and drag-handle RGBA colors, with directly editable Hex fields linked bidirectionally to the RGBA controls.
+- Added 0–100% Windows Composition Gaussian backdrop blur with a single inline slider/numeric control; 0% is 0 px and 100% is 20 px.
 - Style sliders preview changes continuously and save automatically when the interaction ends.
 - Dark and light theme style values are stored independently; legacy settings keep the v1.0.4 defaults.
 
