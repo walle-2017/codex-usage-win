@@ -2101,6 +2101,7 @@ unsafe fn paint(hwnd: HWND) {
             }
         }
     }
+    }
 
     if section != Section::Preset {
         paint_hex_edit_frames(
