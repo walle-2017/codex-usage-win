@@ -655,7 +655,8 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 390, 224, 650, 228)
+    // Match the RGBA label-to-track spacing and end at the color-swatch edge.
+    rect(hwnd, 292, 224, 646, 228)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -669,7 +670,8 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
 }
 
 fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 670, 210, 730, 238)
+    // Align the percentage input with the Hex input column above.
+    rect(hwnd, 654, 210, 714, 238)
 }
 
 fn blur_edit_rect(hwnd: HWND) -> RECT {
@@ -2101,7 +2103,7 @@ unsafe fn paint(hwnd: HWND) {
                 draw_text(
                     hdc,
                     "%",
-                    rect(hwnd, 740, 210, 766, 238),
+                    rect(hwnd, 722, 210, 746, 238),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }

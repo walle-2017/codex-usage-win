@@ -163,7 +163,9 @@ if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     $styleWindow -match '"当前强度"' -or
     $styleWindow -match '"Current"' -or
     $styleWindow -notmatch 'blur_slider_track_rect\(hwnd\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 390, 224, 650, 228\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 292, 224, 646, 228\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 654, 210, 714, 238\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 722, 210, 746, 238\)' -or
     $styleWindow -notmatch 'matches!\(editor, EditorSelection::Color\(_\)\)\s*&&\s*section\s*!=\s*Section::Preset') {
     throw 'Blur must stay inline in its row and must never render a lower secondary editor.'
 }
