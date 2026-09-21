@@ -134,7 +134,6 @@ static STATE: Mutex<Option<PanelState>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct EditorPalette {
-    primary: Color,
     secondary: Color,
     track_background: Color,
     accent: Color,
@@ -2142,7 +2141,6 @@ unsafe fn paint(hwnd: HWND) {
             &snapshot,
             editor,
             EditorPalette {
-                primary,
                 secondary,
                 track_background,
                 accent,
@@ -2505,69 +2503,34 @@ unsafe fn paint_editor(
     editor: EditorSelection,
     palette: EditorPalette,
 ) {
+    let EditorSelection::Color(target) = editor else {
+        return;
+    };
     let EditorPalette {
-        primary,
         secondary,
         track_background,
         accent,
     } = palette;
-    match editor {
-        EditorSelection::Color(target) => {
-            let color = snapshot.active_style.color(target);
-            let values = [color.r, color.g, color.b, color.a];
-            for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
-                let top = 336 + index as i32 * 32;
-                let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-                draw_text(
-                    hdc,
-                    label,
-                    rect(hwnd, 196, top, 220, top + 22),
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                );
-                draw_slider(
-                    hdc,
-                    hwnd,
-                    color_slider_track_rect(hwnd, index),
-                    value,
-                    u8::MAX,
-                    track_background,
-                    accent,
-                );
-            }
-        }
-        EditorSelection::Blur => {
-            let value = snapshot.active_style.panel_frosted_strength;
-
-            let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-            draw_text(
-                hdc,
-                if snapshot.language == LanguageId::SimplifiedChinese {
-                    "当前强度"
-                } else {
-                    "Current"
-                },
-                rect(hwnd, 196, 338, 286, 370),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-
-            draw_slider(
-                hdc,
-                hwnd,
-                blur_slider_track_rect(hwnd),
-                value,
-                FROSTED_STRENGTH_MAX,
-                track_background,
-                accent,
-            );
-
-            let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-            draw_text(
-                hdc,
-                "%",
-                rect(hwnd, 770, 338, 786, 370),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-        }
+    let color = snapshot.active_style.color(target);
+    let values = [color.r, color.g, color.b, color.a];
+    for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
+        let top = 336 + index as i32 * 32;
+        let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+        draw_text(
+            hdc,
+            label,
+            rect(hwnd, 196, top, 220, top + 22),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_slider(
+            hdc,
+            hwnd,
+            color_slider_track_rect(hwnd, index),
+            value,
+            u8::MAX,
+            track_background,
+            accent,
+        );
     }
 }
 
