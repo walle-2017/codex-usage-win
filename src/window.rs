@@ -347,18 +347,39 @@ fn spawn_taskbar_watchdog() {
         std::thread::sleep(Duration::from_secs(TASKBAR_WATCH_INTERVAL_SECS));
         let stored = {
             let state = lock_state();
-            state.as_ref().and_then(|s| s.taskbar_hwnd)
+            state
+                .as_ref()
+                .and_then(|s| s.taskbar_hwnd.map(|hwnd| (hwnd, s.taskbar_monitor.clone())))
         };
-        // Only relevant once we have embedded into a taskbar at least once.
-        let Some(old) = stored else {
+        let Some((old, preferred_monitor)) = stored else {
             continue;
         };
+
         let taskbars = native_interop::find_taskbars();
-        if !taskbars.is_empty() && !taskbars.iter().any(|taskbar| taskbar.hwnd == old) {
-            let new = taskbars[0].hwnd;
+        if taskbars.iter().any(|taskbar| taskbar.hwnd == old) {
+            continue;
+        }
+
+        if let Some(preferred_monitor) = preferred_monitor.as_deref() {
+            if let Some(replacement) = taskbars
+                .iter()
+                .find(|taskbar| taskbar.monitor_device.as_deref() == Some(preferred_monitor))
+            {
+                diagnose::log(format!(
+                    "watchdog: taskbar recreated on monitor={} old={:?} new={:?} -> relaunching",
+                    preferred_monitor, old.0, replacement.hwnd.0
+                ));
+                relaunch_self();
+            } else {
+                diagnose::log(format!(
+                    "watchdog: taskbar missing on monitor={}; waiting instead of switching monitors",
+                    preferred_monitor
+                ));
+            }
+        } else if let Some(replacement) = taskbars.first() {
             diagnose::log(format!(
-                "watchdog: taskbar changed old={:?} new={:?} -> relaunching",
-                old.0, new.0
+                "watchdog: legacy taskbar identity changed old={:?} new={:?} -> relaunching",
+                old.0, replacement.hwnd.0
             ));
             relaunch_self();
         }
@@ -950,16 +971,25 @@ fn max_left_offset_for_taskbar(
     (tray_left - taskbar_rect.left - widget_width).max(0)
 }
 
+fn clamp_left_offset(left_offset: i32, max_left: i32) -> i32 {
+    left_offset.clamp(0, max_left.max(0))
+}
+
 fn clamp_left_offset_for_taskbar(
     taskbar_hwnd: HWND,
     taskbar_rect: RECT,
     widget_width: i32,
     left_offset: i32,
 ) -> i32 {
-    left_offset.clamp(
-        0,
+    clamp_left_offset(
+        left_offset,
         max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width),
     )
+}
+
+fn legacy_left_offset_from_max(max_left: i32, tray_offset: i32) -> i32 {
+    let max_left = max_left.max(0);
+    max_left - tray_offset.clamp(0, max_left)
 }
 
 fn legacy_left_offset(
@@ -968,8 +998,10 @@ fn legacy_left_offset(
     widget_width: i32,
     tray_offset: i32,
 ) -> i32 {
-    let max_left = max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width);
-    max_left - tray_offset.clamp(0, max_left)
+    legacy_left_offset_from_max(
+        max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width),
+        tray_offset,
+    )
 }
 
 fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
@@ -3609,11 +3641,11 @@ unsafe extern "system" fn wnd_proc(
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
 
-                let (current_taskbar_index, embedded, blur_active) = {
+                let (current_taskbar_hwnd, embedded, blur_active) = {
                     let state = lock_state();
                     state
                         .as_ref()
-                        .map(|s| (Some(s.taskbar_index), s.embedded, s.composition_blur_active))
+                        .map(|s| (s.taskbar_hwnd, s.embedded, s.composition_blur_active))
                         .unwrap_or((None, false, false))
                 };
 
@@ -3628,8 +3660,7 @@ unsafe extern "system" fn wnd_proc(
                 };
 
                 let mut switched_taskbar = false;
-                if let Some(current_index) = current_taskbar_index {
-                    if hovered_taskbar_index != current_index {
+                if current_taskbar_hwnd != Some(hovered_taskbar.hwnd) {
                         let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed);
                         let target_dpi = GetDpiForWindow(hovered_taskbar.hwnd);
                         if target_dpi > 0 {
@@ -3645,9 +3676,16 @@ unsafe extern "system" fn wnd_proc(
                         let _ = ReleaseCapture();
 
                         let switched = if embedded {
-                            attach_to_taskbar(hwnd, hovered_taskbar_index)
+                            attach_to_taskbar_window(
+                                hwnd,
+                                hovered_taskbar_index,
+                                &hovered_taskbar,
+                            )
                         } else {
-                            select_taskbar_for_popup(hovered_taskbar_index)
+                            select_taskbar_for_popup_window(
+                                hovered_taskbar_index,
+                                &hovered_taskbar,
+                            )
                         };
                         if switched {
                             {
@@ -3667,7 +3705,6 @@ unsafe extern "system" fn wnd_proc(
                             }
                             SetCapture(hwnd);
                         }
-                    }
                 }
 
                 let drag_context = {
@@ -3786,7 +3823,7 @@ unsafe extern "system" fn wnd_proc(
                     let was_dragging = s.dragging;
                     s.dragging = false;
                     if was_dragging {
-                        Some((s.taskbar_index, s.drag_anchor_logical_x, s.embedded))
+                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, s.embedded))
                     } else {
                         None
                     }
@@ -3820,14 +3857,16 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_index, anchor_logical_x, embedded)) = drag_result {
+            if let Some((current_taskbar_hwnd, anchor_logical_x, embedded)) = drag_result {
                 let release_taskbar = taskbar_at_point(pt);
-                if let Some((target_index, _)) = release_taskbar {
-                    if target_index != current_taskbar_index {
+                if let Some((target_index, target_taskbar)) = release_taskbar {
+                    if current_taskbar_hwnd != Some(target_taskbar.hwnd) {
                         if embedded {
-                            let _ = attach_to_taskbar(hwnd, target_index);
+                            let _ =
+                                attach_to_taskbar_window(hwnd, target_index, &target_taskbar);
                         } else {
-                            let _ = select_taskbar_for_popup(target_index);
+                            let _ =
+                                select_taskbar_for_popup_window(target_index, &target_taskbar);
                         }
                     }
 
@@ -3847,14 +3886,31 @@ unsafe extern "system" fn wnd_proc(
                                 drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
                             let final_drag_left =
                                 drag_left_from_cursor(taskbar_rect, pt, anchor_px);
-                            let new_offset =
-                                offset_for_drag_left(taskbar_hwnd, taskbar_rect, final_drag_left);
+                            let widget_width = total_widget_width();
+                            let new_left_offset = left_offset_for_drag_left(
+                                taskbar_hwnd,
+                                taskbar_rect,
+                                widget_width,
+                                final_drag_left,
+                            );
                             {
                                 let mut state = lock_state();
                                 if let Some(s) = state.as_mut() {
-                                    s.tray_offset = new_offset;
+                                    s.taskbar_left_offset = new_left_offset;
+                                    s.legacy_tray_offset = None;
                                 }
                             }
+                            let monitor = {
+                                let state = lock_state();
+                                state
+                                    .as_ref()
+                                    .and_then(|s| s.taskbar_monitor.clone())
+                                    .unwrap_or_else(|| "<unknown>".to_string())
+                            };
+                            diagnose::log(format!(
+                                "drag saved taskbar_left_offset={} monitor={}",
+                                new_left_offset, monitor
+                            ));
                             position_at_taskbar();
                             render_layered();
                         }
@@ -5723,6 +5779,58 @@ mod tests {
     }
 
     #[test]
+    fn stable_taskbar_position_round_trips() {
+        let settings = SettingsFile {
+            taskbar_index: 1,
+            taskbar_left_offset: Some(0),
+            taskbar_monitor: Some(r"\\.\DISPLAY2".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let parsed: SettingsFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.taskbar_left_offset, Some(0));
+        assert_eq!(parsed.taskbar_monitor.as_deref(), Some(r"\\.\DISPLAY2"));
+    }
+
+    #[test]
+    fn transient_taskbar_clamp_does_not_change_desired_left_offset() {
+        let desired = 0;
+        assert_eq!(clamp_left_offset(desired, 800), 0);
+        assert_eq!(clamp_left_offset(desired, 120), 0);
+
+        let desired = 700;
+        assert_eq!(clamp_left_offset(desired, 650), 650);
+        assert_eq!(clamp_left_offset(desired, 800), 700);
+    }
+
+    #[test]
+    fn legacy_tray_offset_migrates_to_equivalent_left_offset() {
+        assert_eq!(legacy_left_offset_from_max(1000, 0), 1000);
+        assert_eq!(legacy_left_offset_from_max(1000, 321), 679);
+        assert_eq!(legacy_left_offset_from_max(1000, 1200), 0);
+    }
+
+    #[test]
+    fn monitor_identity_wins_over_legacy_taskbar_index() {
+        let taskbars = vec![
+            native_interop::TaskbarWindow {
+                hwnd: HWND::default(),
+                rect: RECT::default(),
+                monitor_device: Some(r"\\.\DISPLAY1".to_string()),
+            },
+            native_interop::TaskbarWindow {
+                hwnd: HWND::default(),
+                rect: RECT::default(),
+                monitor_device: Some(r"\\.\DISPLAY2".to_string()),
+            },
+        ];
+        let (index, taskbar) =
+            select_preferred_taskbar(&taskbars, Some(r"\\.\DISPLAY2"), 0).unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(taskbar.monitor_device.as_deref(), Some(r"\\.\DISPLAY2"));
+    }
+
+    #[test]
     fn explicit_minimal_appearance_round_trips() {
         let settings = SettingsFile {
             appearance_preset: AppearancePreset::Minimal,
@@ -5747,6 +5855,8 @@ mod tests {
         let (settings, migrated) = load_settings_from_paths(&current, &legacy).unwrap();
         assert!(migrated);
         assert_eq!(settings.tray_offset, 321);
+        assert_eq!(settings.taskbar_left_offset, None);
+        assert_eq!(settings.taskbar_monitor, None);
         assert_eq!(settings.poll_interval_ms, 60_000);
         assert_eq!(settings.language.as_deref(), Some("zh-CN"));
         assert!(settings.show_session_window);
