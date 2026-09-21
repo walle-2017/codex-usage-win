@@ -35,6 +35,8 @@ const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
 const ID_EDIT_A: u16 = 303;
 const ID_EDIT_BLUR: u16 = 304;
+const ID_EDIT_HEX_BASE: u16 = 320;
+const HEX_EDIT_COUNT: usize = 11;
 const EN_SETFOCUS_CODE: u16 = 0x0100;
 const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
@@ -114,10 +116,14 @@ struct PanelState {
     tracking_mouse_leave: bool,
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
+    hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
+    focused_hex_edit: Option<StyleColorTarget>,
+    invalid_hex_edits: [bool; HEX_EDIT_COUNT],
     syncing_numeric_edits: bool,
     syncing_blur_edit: bool,
+    syncing_hex_edits: bool,
     edit_brush: isize,
     font: isize,
 }
@@ -153,6 +159,20 @@ struct PresetGalleryPalette {
     accent: Color,
     primary: Color,
 }
+
+const COLOR_TARGETS: [StyleColorTarget; HEX_EDIT_COUNT] = [
+    StyleColorTarget::PanelBackground,
+    StyleColorTarget::PanelBorder,
+    StyleColorTarget::QuotaType,
+    StyleColorTarget::Remaining,
+    StyleColorTarget::ResetTime,
+    StyleColorTarget::Error,
+    StyleColorTarget::ProgressHigh,
+    StyleColorTarget::ProgressMedium,
+    StyleColorTarget::ProgressLow,
+    StyleColorTarget::ProgressConsumed,
+    StyleColorTarget::DragHandle,
+];
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
@@ -318,6 +338,35 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WPARAM(3),
             LPARAM(0),
         );
+        let mut hex_edits_raw = [HWND::default(); HEX_EDIT_COUNT];
+        for index in 0..HEX_EDIT_COUNT {
+            let edit = match CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PCWSTR::from_raw(edit_class.as_ptr()),
+                PCWSTR::from_raw(empty.as_ptr()),
+                WINDOW_STYLE(WS_CHILD.0 | ES_CENTER as u32 | ES_AUTOHSCROLL as u32),
+                0,
+                0,
+                s(112),
+                s(22),
+                hwnd,
+                HMENU((ID_EDIT_HEX_BASE + index as u16) as usize as *mut _),
+                GetModuleHandleW(PCWSTR::null()).unwrap(),
+                None,
+            ) {
+                Ok(edit) => edit,
+                Err(_) => {
+                    let _ = DestroyWindow(hwnd);
+                    let _ = DeleteObject(font);
+                    return;
+                }
+            };
+            let _ = SendMessageW(edit, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+            let _ = SendMessageW(edit, EM_SETLIMITTEXT_MSG, WPARAM(9), LPARAM(0));
+            hex_edits_raw[index] = edit;
+        }
+        let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
+
         let edit_background = if snapshot.is_dark {
             Color::from_hex("#20242AFF")
         } else {
@@ -341,15 +390,21 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 tracking_mouse_leave: false,
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
+                hex_edits,
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
+                focused_hex_edit: None,
+                invalid_hex_edits: [false; HEX_EDIT_COUNT],
                 syncing_numeric_edits: false,
                 syncing_blur_edit: false,
+                syncing_hex_edits: false,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
             });
         }
         layout_numeric_edits(hwnd);
+        layout_hex_edits(hwnd);
+        sync_hex_edits();
         sync_numeric_edits();
         sync_blur_edit();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -379,6 +434,8 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         s.hwnd.to_hwnd()
     };
     layout_numeric_edits(hwnd);
+    layout_hex_edits(hwnd);
+    sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
     unsafe {
@@ -525,14 +582,6 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     rect(hwnd, left, 146, left + 192, 350)
 }
 
-fn current_editor() -> EditorSelection {
-    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state
-        .as_ref()
-        .map(|s| s.editor)
-        .unwrap_or(EditorSelection::Color(StyleColorTarget::PanelBackground))
-}
-
 fn reset_rect(hwnd: HWND) -> RECT {
     rect(hwnd, 20, 488, 176, 528)
 }
@@ -582,10 +631,7 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
 }
 
 fn editor_box_rect(hwnd: HWND) -> RECT {
-    match current_editor() {
-        EditorSelection::Color(_) => rect(hwnd, 174, 326, 786, 472),
-        EditorSelection::Blur => rect(hwnd, 174, 326, 786, 382),
-    }
+    rect(hwnd, 174, 326, 786, 472)
 }
 
 fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
@@ -604,7 +650,7 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 310, 352, 700, 356)
+    rect(hwnd, 390, 224, 650, 228)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -618,11 +664,37 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
 }
 
 fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 716, 338, 766, 366)
+    rect(hwnd, 670, 210, 730, 238)
 }
 
 fn blur_edit_rect(hwnd: HWND) -> RECT {
     let frame = blur_edit_frame_rect(hwnd);
+    RECT {
+        left: frame.left + scale(hwnd, 3),
+        top: frame.top + scale(hwnd, 3),
+        right: frame.right - scale(hwnd, 3),
+        bottom: frame.bottom - scale(hwnd, 3),
+    }
+}
+
+fn color_row_index(section: Section, target: StyleColorTarget) -> Option<usize> {
+    rows(section)
+        .iter()
+        .position(|row| *row == EditorSelection::Color(target))
+}
+
+fn hex_edit_frame_rect(hwnd: HWND, row_index: usize) -> RECT {
+    let row = row_rect(hwnd, row_index);
+    RECT {
+        left: row.right - scale(hwnd, 132),
+        top: row.top + scale(hwnd, 6),
+        right: row.right - scale(hwnd, 12),
+        bottom: row.bottom - scale(hwnd, 6),
+    }
+}
+
+fn hex_edit_rect(hwnd: HWND, row_index: usize) -> RECT {
+    let frame = hex_edit_frame_rect(hwnd, row_index);
     RECT {
         left: frame.left + scale(hwnd, 3),
         top: frame.top + scale(hwnd, 3),
@@ -653,7 +725,7 @@ fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, bool, bool)> {
         s.numeric_edits,
         s.blur_edit,
         s.section != Section::Preset && matches!(s.editor, EditorSelection::Color(_)),
-        s.section != Section::Preset && s.editor == EditorSelection::Blur,
+        s.section == Section::Panel,
     ))
 }
 
@@ -730,6 +802,59 @@ fn layout_numeric_edits(hwnd: HWND) {
     }
 }
 
+fn hex_layout_snapshot() -> Option<([SendHwnd; HEX_EDIT_COUNT], Section, Option<StyleColorTarget>)> {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let s = state.as_ref()?;
+    Some((s.hex_edits, s.section, s.focused_hex_edit))
+}
+
+fn layout_hex_edits(hwnd: HWND) {
+    let Some((hex_edits, section, focused_target)) = hex_layout_snapshot() else {
+        return;
+    };
+
+    unsafe {
+        if let Some(target) = focused_target {
+            if color_row_index(section, target).is_none() {
+                let index = encode_color_target(target);
+                if hex_edits[index].to_hwnd() == GetFocus() {
+                    let _ = SetFocus(hwnd);
+                }
+            }
+        }
+        for (index, target) in COLOR_TARGETS.iter().copied().enumerate() {
+            let edit = hex_edits[index].to_hwnd();
+            if let Some(row_index) = color_row_index(section, target) {
+                let r = hex_edit_rect(hwnd, row_index);
+                let _ = SetWindowPos(
+                    edit,
+                    HWND::default(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let _ = ShowWindow(edit, SW_SHOW);
+            } else {
+                let _ = ShowWindow(edit, SW_HIDE);
+            }
+        }
+    }
+}
+
+fn set_edit_text_string(edit: HWND, value: &str) {
+    let text = native_interop::wide_str(value);
+    unsafe {
+        let _ = SendMessageW(
+            edit,
+            WM_SETTEXT,
+            WPARAM(0),
+            LPARAM(text.as_ptr() as isize),
+        );
+    }
+}
+
 fn set_edit_text(edit: HWND, value: u8) {
     let text = native_interop::wide_str(&value.to_string());
     unsafe {
@@ -775,7 +900,7 @@ fn sync_blur_edit() {
         let Some(s) = state.as_mut() else {
             return;
         };
-        if s.section == Section::Preset {
+        if s.section != Section::Panel {
             return;
         }
         s.syncing_blur_edit = true;
@@ -807,6 +932,132 @@ fn read_edit_value(edit: HWND) -> Option<u16> {
         return None;
     }
     String::from_utf16_lossy(&buffer[..len]).parse::<u16>().ok()
+}
+
+fn read_edit_text(edit: HWND) -> String {
+    let mut buffer = [0u16; 16];
+    let len = unsafe {
+        SendMessageW(
+            edit,
+            WM_GETTEXT,
+            WPARAM(buffer.len()),
+            LPARAM(buffer.as_mut_ptr() as isize),
+        )
+        .0 as usize
+    };
+    String::from_utf16_lossy(&buffer[..len.min(buffer.len())])
+}
+
+fn parse_hex_input(value: &str) -> Result<Option<Color>, ()> {
+    let trimmed = value.trim();
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if digits.len() > 8 || !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    match digits.len() {
+        6 | 8 => Color::try_from_hex(trimmed).map(Some).ok_or(()),
+        0..=5 | 7 => Ok(None),
+        _ => Err(()),
+    }
+}
+
+fn sync_hex_edits() {
+    let (edits, values) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.syncing_hex_edits = true;
+        let values =
+            COLOR_TARGETS.map(|target| s.snapshot.active_style.color(target).to_hex_rgba());
+        (s.hex_edits, values)
+    };
+    for (edit, value) in edits.iter().zip(values.iter()) {
+        set_edit_text_string(edit.to_hwnd(), value);
+    }
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = state.as_mut() {
+        s.syncing_hex_edits = false;
+        s.invalid_hex_edits = [false; HEX_EDIT_COUNT];
+    }
+}
+
+fn update_color_from_hex_edit(target: StyleColorTarget) {
+    let index = encode_color_target(target);
+    let (edit, syncing) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.hex_edits[index].to_hwnd(), s.syncing_hex_edits)
+    };
+    if syncing {
+        return;
+    }
+
+    let parsed = parse_hex_input(&read_edit_text(edit));
+    let mut applied = None;
+    let mut selected = false;
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        match parsed {
+            Ok(Some(color)) => {
+                s.invalid_hex_edits[index] = false;
+                s.snapshot.active_style.set_color(target, color);
+                selected = s.editor == EditorSelection::Color(target);
+                applied = Some(color);
+            }
+            Ok(None) => s.invalid_hex_edits[index] = false,
+            Err(()) => s.invalid_hex_edits[index] = true,
+        }
+    }
+    if let Some(color) = applied {
+        if selected {
+            sync_numeric_edits();
+        }
+        send_parent(
+            WM_STYLE_COLOR_PREVIEW,
+            encode_color_target(target),
+            pack_color(color),
+        );
+        send_parent(WM_STYLE_SAVE, 0, 0);
+    }
+    unsafe {
+        let hwnd = {
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default()
+        };
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn normalize_hex_edit(target: StyleColorTarget) {
+    let index = encode_color_target(target);
+    let (edit, value) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.syncing_hex_edits = true;
+        s.invalid_hex_edits[index] = false;
+        (
+            s.hex_edits[index].to_hwnd(),
+            s.snapshot.active_style.color(target).to_hex_rgba(),
+        )
+    };
+    set_edit_text_string(edit, &value);
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = state.as_mut() {
+        s.syncing_hex_edits = false;
+    }
+}
+
+fn target_from_hex_control_id(control_id: u16) -> Option<StyleColorTarget> {
+    let index = control_id.checked_sub(ID_EDIT_HEX_BASE)? as usize;
+    COLOR_TARGETS.get(index).copied()
 }
 
 fn update_color_from_numeric_edit(channel_index: usize) {
@@ -857,6 +1108,7 @@ fn update_color_from_numeric_edit(channel_index: usize) {
         }
     }
 
+    sync_hex_edits();
     send_parent(
         WM_STYLE_COLOR_PREVIEW,
         encode_color_target(target),
@@ -1046,6 +1298,8 @@ fn set_section(section: Section) {
         s.hwnd.to_hwnd()
     };
     layout_numeric_edits(hwnd);
+    layout_hex_edits(hwnd);
+    sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
     unsafe {
@@ -1064,6 +1318,8 @@ fn select_editor(editor: EditorSelection) {
         s.hwnd.to_hwnd()
     };
     layout_numeric_edits(hwnd);
+    layout_hex_edits(hwnd);
+    sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
     unsafe {
@@ -1084,36 +1340,30 @@ fn send_parent(message: u32, wparam: usize, lparam: isize) {
 }
 
 fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
-    let editor = {
+    let (section, editor) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
-        if s.section == Section::Preset {
-            return None;
-        }
-        s.editor
+        (s.section, s.editor)
     };
-    match editor {
-        EditorSelection::Color(_) => {
-            for index in 0..4 {
-                if pt_in_rect(color_slider_hit_rect(hwnd, index), x, y) {
-                    return Some(match index {
-                        0 => SliderKind::Red,
-                        1 => SliderKind::Green,
-                        2 => SliderKind::Blue,
-                        _ => SliderKind::Alpha,
-                    });
-                }
-            }
-            None
-        }
-        EditorSelection::Blur => {
-            if pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
-                Some(SliderKind::Blur)
-            } else {
-                None
-            }
+
+    if section == Section::Panel && pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
+        return Some(SliderKind::Blur);
+    }
+
+    let EditorSelection::Color(_) = editor else {
+        return None;
+    };
+    for index in 0..4 {
+        if pt_in_rect(color_slider_hit_rect(hwnd, index), x, y) {
+            return Some(match index {
+                0 => SliderKind::Red,
+                1 => SliderKind::Green,
+                2 => SliderKind::Blue,
+                _ => SliderKind::Alpha,
+            });
         }
     }
+    None
 }
 
 fn slider_value_from_x(track: RECT, x: i32, max: u8) -> u8 {
@@ -1157,7 +1407,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
                 s.snapshot.active_style.set_color(target, color);
                 color_update = Some((target, color));
             }
-            (EditorSelection::Blur, SliderKind::Blur) => {
+            (_, SliderKind::Blur) if s.section == Section::Panel => {
                 let value = slider_value_from_x(
                     blur_slider_track_rect(hwnd),
                     x,
@@ -1172,6 +1422,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
 
     if let Some((target, color)) = color_update {
         sync_numeric_edits();
+        sync_hex_edits();
         send_parent(
             WM_STYLE_COLOR_PREVIEW,
             encode_color_target(target),
@@ -1210,6 +1461,7 @@ unsafe extern "system" fn wnd_proc(
                             .iter()
                             .any(|edit| edit.to_hwnd() == cursor_hwnd)
                             || s.blur_edit.to_hwnd() == cursor_hwnd
+                            || s.hex_edits.iter().any(|edit| edit.to_hwnd() == cursor_hwnd)
                     }
                     None => false,
                 }
@@ -1239,6 +1491,10 @@ unsafe extern "system" fn wnd_proc(
             let (x, y) = point_from_lparam(lparam);
 
             if let Some(kind) = slider_kind_at(hwnd, x, y) {
+                if kind == SliderKind::Blur {
+                    let _ = SetFocus(hwnd);
+                    select_editor(EditorSelection::Blur);
+                }
                 {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
@@ -1364,6 +1620,40 @@ unsafe extern "system" fn wnd_proc(
         WM_COMMAND => {
             let control_id = (wparam.0 & 0xFFFF) as u16;
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
+            if let Some(target) = target_from_hex_control_id(control_id) {
+                match notification {
+                    EN_CHANGE_CODE => {
+                        update_color_from_hex_edit(target);
+                        return LRESULT(0);
+                    }
+                    EN_SETFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.focused_hex_edit = Some(target);
+                            }
+                        }
+                        select_editor(EditorSelection::Color(target));
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    EN_KILLFOCUS_CODE => {
+                        normalize_hex_edit(target);
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                if s.focused_hex_edit == Some(target) {
+                                    s.focused_hex_edit = None;
+                                }
+                            }
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    _ => {}
+                }
+            }
+
             let channel = match control_id {
                 ID_EDIT_R => Some(0),
                 ID_EDIT_G => Some(1),
@@ -1416,6 +1706,7 @@ unsafe extern "system" fn wnd_proc(
                                 s.focused_blur_edit = true;
                             }
                         }
+                        select_editor(EditorSelection::Blur);
                         let _ = InvalidateRect(hwnd, None, false);
                         return LRESULT(0);
                     }
@@ -1470,6 +1761,7 @@ unsafe extern "system" fn wnd_proc(
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
             layout_numeric_edits(hwnd);
+            layout_hex_edits(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
@@ -1524,6 +1816,8 @@ unsafe fn paint(hwnd: HWND) {
         pressed,
         focused_numeric_edit,
         focused_blur_edit,
+        focused_hex_edit,
+        invalid_hex_edits,
         font,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1539,6 +1833,8 @@ unsafe fn paint(hwnd: HWND) {
             s.pressed,
             s.focused_numeric_edit,
             s.focused_blur_edit,
+            s.focused_hex_edit,
+            s.invalid_hex_edits,
             s.font,
         )
     };
@@ -1779,51 +2075,47 @@ unsafe fn paint(hwnd: HWND) {
             EditorSelection::Color(target) => {
                 let color = snapshot.active_style.color(target);
                 let swatch = RECT {
-                    left: r.right - scale(hwnd, 148),
+                    left: r.right - scale(hwnd, 170),
                     top: r.top + scale(hwnd, 9),
-                    right: r.right - scale(hwnd, 118),
+                    right: r.right - scale(hwnd, 140),
                     bottom: r.bottom - scale(hwnd, 9),
                 };
                 fill(hdc, swatch, color);
-                let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-                draw_text(
-                    hdc,
-                    &color.to_hex_rgba(),
-                    RECT {
-                        left: r.right - scale(hwnd, 108),
-                        ..r
-                    },
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                );
             }
             EditorSelection::Blur => {
-                let value = format!("{}%", snapshot.active_style.panel_frosted_strength);
-                let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+                draw_slider(
+                    hdc,
+                    hwnd,
+                    blur_slider_track_rect(hwnd),
+                    snapshot.active_style.panel_frosted_strength,
+                    FROSTED_STRENGTH_MAX,
+                    track_background,
+                    accent,
+                );
+                let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
                 draw_text(
                     hdc,
-                    &value,
-                    RECT {
-                        left: r.right - scale(hwnd, 82),
-                        ..r
-                    },
+                    "%",
+                    rect(hwnd, 740, 210, 766, 238),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
         }
     }
 
-    let editor_box = editor_box_rect(hwnd);
-    fill(hdc, editor_box, card);
-    if matches!(editor, EditorSelection::Color(_)) {
-        paint_numeric_edit_frames(
+    if section != Section::Preset {
+        paint_hex_edit_frames(
             hdc,
             hwnd,
+            section,
             snapshot.is_dark,
-            focused_numeric_edit,
+            focused_hex_edit,
+            &invalid_hex_edits,
             track_background,
             accent,
         );
-    } else if editor == EditorSelection::Blur {
+    }
+    if section == Section::Panel {
         paint_blur_edit_frame(
             hdc,
             hwnd,
@@ -1833,6 +2125,17 @@ unsafe fn paint(hwnd: HWND) {
             accent,
         );
     }
+    if matches!(editor, EditorSelection::Color(_)) && section != Section::Preset {
+        let editor_box = editor_box_rect(hwnd);
+        fill(hdc, editor_box, card);
+        paint_numeric_edit_frames(
+            hdc,
+            hwnd,
+            snapshot.is_dark,
+            focused_numeric_edit,
+            track_background,
+            accent,
+        );
         paint_editor(
             hdc,
             hwnd,
@@ -2112,6 +2415,43 @@ unsafe fn paint_preset_gallery(
             };
             fill(hdc, marker, accent);
         }
+    }
+}
+
+unsafe fn paint_hex_edit_frames(
+    hdc: HDC,
+    hwnd: HWND,
+    section: Section,
+    is_dark: bool,
+    focused: Option<StyleColorTarget>,
+    invalid: &[bool; HEX_EDIT_COUNT],
+    border: Color,
+    accent: Color,
+) {
+    let background = if is_dark {
+        Color::from_hex("#20242AFF")
+    } else {
+        Color::from_hex("#EEF3F8FF")
+    };
+    let error = Color::from_hex("#D95C5CFF");
+
+    for (index, target) in COLOR_TARGETS.iter().copied().enumerate() {
+        let Some(row_index) = color_row_index(section, target) else {
+            continue;
+        };
+        let frame = hex_edit_frame_rect(hwnd, row_index);
+        fill(hdc, frame, background);
+        draw_outline_rect(
+            hdc,
+            frame,
+            if invalid[index] {
+                error
+            } else if focused == Some(target) {
+                accent
+            } else {
+                border
+            },
+        );
     }
 }
 
@@ -2409,6 +2749,20 @@ mod ui_smoke_tests {
     use super::*;
 
     #[test]
+    fn hex_input_accepts_rgb_rgba_and_transient_partial_values() {
+        assert_eq!(
+            parse_hex_input("#123456"),
+            Ok(Some(Color::from_hex("#123456FF")))
+        );
+        assert_eq!(
+            parse_hex_input("89ABCDEF"),
+            Ok(Some(Color::from_hex("#89ABCDEF")))
+        );
+        assert_eq!(parse_hex_input("#1234567"), Ok(None));
+        assert_eq!(parse_hex_input("#12GG56"), Err(()));
+    }
+
+    #[test]
     fn preset_page_can_open_paint_and_destroy_without_editor_reentry() {
         unsafe {
             let snapshot = StyleWindowSnapshot {
@@ -2431,6 +2785,34 @@ mod ui_smoke_tests {
 
             let _ = UpdateWindow(hwnd);
             assert!(!hwnd.0.is_null(), "style settings HWND must remain valid");
+
+            set_section(Section::Panel);
+            let hex_edit = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().unwrap().hex_edits[0].to_hwnd()
+            };
+            let _ = SetFocus(hex_edit);
+            set_edit_text_string(hex_edit, "#12345678");
+            let _ = UpdateWindow(hwnd);
+            {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let s = state.as_ref().unwrap();
+                assert_eq!(
+                    s.editor,
+                    EditorSelection::Color(StyleColorTarget::PanelBackground)
+                );
+                assert_eq!(s.snapshot.active_style.panel_background, "#12345678");
+            }
+
+            let (_, _, show_rgba, show_blur) = editor_layout_snapshot().unwrap();
+            assert!(show_rgba);
+            assert!(show_blur);
+
+            select_editor(EditorSelection::Blur);
+            let (_, _, show_rgba, show_blur) = editor_layout_snapshot().unwrap();
+            assert!(!show_rgba, "blur selection must clear the lower RGBA editor");
+            assert!(show_blur, "blur control must remain visible inline");
+
             let _ = DestroyWindow(hwnd);
 
             let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
