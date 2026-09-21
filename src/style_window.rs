@@ -150,6 +150,12 @@ struct ButtonPalette {
 }
 
 #[derive(Clone, Copy)]
+struct EditFramePalette {
+    border: Color,
+    accent: Color,
+}
+
+#[derive(Clone, Copy)]
 struct PresetGalleryPalette {
     card: Color,
     card_hover: Color,
@@ -338,7 +344,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             LPARAM(0),
         );
         let mut hex_edits_raw = [HWND::default(); HEX_EDIT_COUNT];
-        for index in 0..HEX_EDIT_COUNT {
+        for (index, slot) in hex_edits_raw.iter_mut().enumerate() {
             let edit = match CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 PCWSTR::from_raw(edit_class.as_ptr()),
@@ -362,7 +368,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             };
             let _ = SendMessageW(edit, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
             let _ = SendMessageW(edit, EM_SETLIMITTEXT_MSG, WPARAM(9), LPARAM(0));
-            hex_edits_raw[index] = edit;
+            *slot = edit;
         }
         let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
 
@@ -2111,8 +2117,10 @@ unsafe fn paint(hwnd: HWND) {
             snapshot.is_dark,
             focused_hex_edit,
             &invalid_hex_edits,
-            track_background,
-            accent,
+            EditFramePalette {
+                border: track_background,
+                accent,
+            },
         );
     }
     if section == Section::Panel {
@@ -2424,9 +2432,9 @@ unsafe fn paint_hex_edit_frames(
     is_dark: bool,
     focused: Option<StyleColorTarget>,
     invalid: &[bool; HEX_EDIT_COUNT],
-    border: Color,
-    accent: Color,
+    palette: EditFramePalette,
 ) {
+    let EditFramePalette { border, accent } = palette;
     let background = if is_dark {
         Color::from_hex("#20242AFF")
     } else {
