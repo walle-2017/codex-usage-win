@@ -927,19 +927,6 @@ fn select_taskbar_for_popup_window(
     true
 }
 
-fn select_preferred_taskbar_for_popup(
-    preferred_monitor: Option<&str>,
-    fallback_index: usize,
-) -> bool {
-    let taskbars = native_interop::find_taskbars();
-    let Some((index, taskbar)) =
-        select_preferred_taskbar(&taskbars, preferred_monitor, fallback_index)
-    else {
-        return false;
-    };
-    select_taskbar_for_popup_window(index, &taskbar)
-}
-
 fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)> {
     native_interop::find_taskbars()
         .into_iter()
