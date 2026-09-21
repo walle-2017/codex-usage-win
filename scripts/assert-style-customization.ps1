@@ -356,11 +356,42 @@ if ($backdropOwnerIndex -lt 0 -or
 }
 $popupTaskbarSwitchBlock = [regex]::Match(
     $windowProduction,
-    '(?s)fn\s+select_taskbar_for_popup\s*\(.*?\n\}'
+    '(?s)fn\s+select_taskbar_for_popup_window\s*\(.*?\n\}'
 ).Value
 if ($popupTaskbarSwitchBlock -notmatch 'composition_blur_active' -or
     $popupTaskbarSwitchBlock -notmatch 'if\s+blur_active\s*\{[\s\S]*?sync_blur_backdrop_zorder\(foreground_hwnd\)') {
     throw 'Cross-taskbar popup switches must reassert blur/foreground z-order once after owner rebinding.'
+}
+if ($native -notmatch 'monitor_device_name\(' -or
+    $native -notmatch 'MONITORINFOEXW' -or
+    $native -notmatch 'monitor_device:\s*Option<String>' -or
+    $windowProduction -notmatch 'taskbar_left_offset:\s*i32' -or
+    $windowProduction -notmatch 'taskbar_monitor:\s*Option<String>' -or
+    $windowProduction -notmatch 'legacy_tray_offset:\s*Option<i32>') {
+    throw 'Taskbar placement must use a stable monitor identity and a left-edge offset, while retaining one-time legacy offset migration.'
+}
+$positionBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn\s+position_at_taskbar\s*\(\)\s*\{.*?\n\}'
+).Value
+if ($positionBlock -notmatch 'actual_left_offset\s*=\s*desired_left_offset\.clamp' -or
+    $positionBlock -notmatch 'Never write this transient clamp back' -or
+    $positionBlock -match 'taskbar_left_offset\s*=\s*actual_left_offset') {
+    throw 'Transient TrayNotifyWnd width changes must clamp only the current frame and must never persist positional drift.'
+}
+if ($windowProduction -notmatch 'current_taskbar_hwnd\s*!=\s*Some\(hovered_taskbar\.hwnd\)' -or
+    $windowProduction -notmatch 'attach_to_taskbar_window\(' -or
+    $windowProduction -notmatch 'select_taskbar_for_popup_window\(' -or
+    $windowProduction -match 'attach_to_taskbar\(hwnd,\s*hovered_taskbar_index\)') {
+    throw 'Cross-monitor dragging must bind the exact taskbar HWND already hit-tested instead of re-resolving an array index.'
+}
+$watchdogBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn\s+spawn_taskbar_watchdog\s*\(\)\s*\{.*?\n\}'
+).Value
+if ($watchdogBlock -notmatch 'taskbar_monitor' -or
+    $watchdogBlock -notmatch 'waiting instead of switching monitors') {
+    throw 'Taskbar watchdog recovery must wait for the same monitor instead of silently moving the widget to another taskbar.'
 }
 if ($windowProduction -notmatch 'STYLE_PREVIEW_FRAME_MS:\s*u64\s*=\s*16' -or
     $windowProduction -notmatch 'render_style_preview\(' -or
