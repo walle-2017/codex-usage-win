@@ -165,8 +165,8 @@ if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     $styleWindow -match '"当前强度"' -or
     $styleWindow -match '"Current"' -or
     $styleWindow -notmatch 'blur_slider_track_rect\(hwnd\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 322, 270, 744, 274\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 778, 256, 844, 284\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 396, 337, 770, 341\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 790, 324, 850, 352\)' -or
     $styleWindow -notmatch 'matches!\(editor, EditorSelection::Color\(_\)\)') {
     throw 'Blur must stay inline in its row and must never render a lower secondary editor.'
 }
@@ -199,9 +199,12 @@ if ($windowProduction -notmatch 'WM_SETCURSOR' -or
     $windowProduction -notmatch 'IDC_HAND') {
     throw 'Small-taskbar click-to-toggle mode must expose a hand cursor outside the drag handle.'
 }
-if ($windowProduction -match 'MF_OWNERDRAW' -or
-    $windowProduction -match 'WM_MEASUREITEM') {
-    throw 'Settings must remain a native HMENU instead of a custom owner-drawn menu.'
+if ($windowProduction -notmatch 'MF_OWNERDRAW' -or
+    $windowProduction -notmatch 'WM_MEASUREITEM' -or
+    $windowProduction -notmatch 'WM_DRAWITEM' -or
+    $windowProduction -notmatch 'MNS_NOCHECK' -or
+    $windowProduction -notmatch 'windows_menu_palette') {
+    throw 'Tray menu must owner-draw the complete Windows Dark/Light surface, text, separators, and submenu arrow without the native check gutter.'
 }
 if ($windowProduction -notmatch 'AppendMenuW\(\s*menu,[\s\S]{0,180}IDM_STYLE_SETTINGS' -or
     $windowProduction -match 'settings_menu') {
@@ -450,9 +453,11 @@ if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
     $styleWindow -notmatch 'WS_THICKFRAME' -or
     $styleWindow -notmatch '"常规"' -or
     $styleWindow -notmatch '"JSON 配置"' -or
-    $styleWindow -notmatch 'ID_COMBO_LANGUAGE' -or
+    $styleWindow -notmatch 'language_button_rect' -or
+    $styleWindow -notmatch 'language_popup_open' -or
+    $styleWindow -notmatch 'LanguageOption' -or
     $styleWindow -notmatch 'ID_EDIT_JSON') {
-    throw 'Unified settings window must provide resizable General, Appearance, and JSON pages.'
+    throw 'Unified settings window must provide resizable General, Appearance, JSON pages and a self-drawn language selector.'
 }
 foreach ($message in @(
     'WM_SETTINGS_REFRESH_CHANGE',
@@ -482,16 +487,25 @@ if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
 }
 if ($styleWindow -notmatch 'GetOpenFileNameW' -or
     $styleWindow -notmatch 'GetSaveFileNameW' -or
+    $styleWindow -notmatch 'RICHEDIT50W' -or
+    $styleWindow -notmatch 'Msftedit\.dll' -or
+    $styleWindow -notmatch 'to_windows_newlines' -or
+    $styleWindow -notmatch 'syntax_highlight_json_editor' -or
+    $styleWindow -notmatch 'friendly_json_error' -or
+    $styleWindow -notmatch 'locate_json_error' -or
     $styleWindow -notmatch 'reload_json_editor_from_snapshot' -or
     $styleWindow -notmatch 'format_json_editor' -or
     $styleWindow -notmatch 'apply_json_editor') {
-    throw 'JSON settings page must support reload, format, import, export, and validated apply.'
+    throw 'JSON settings page must use RichEdit JSONC formatting/highlighting, friendly error navigation, reload, import/export, and validated apply.'
 }
-if ($windowProduction -notmatch 'MIM_BACKGROUND\s*\|\s*MIM_APPLYTOSUBMENUS' -or
+if ($windowProduction -notmatch 'MIM_BACKGROUND\s*\|\s*MIM_APPLYTOSUBMENUS\s*\|\s*MIM_STYLE' -or
     $windowProduction -notmatch 'theme::is_dark_mode\(\)' -or
+    $windowProduction -notmatch '#202020FF' -or
+    $windowProduction -notmatch '#F9F9F9FF' -or
+    $windowProduction -notmatch 'draw_owner_draw_menu_item' -or
     $windowProduction -notmatch 'format!\("v\{\}"' -or
-    $windowProduction -notmatch 'MF_POPUP[\s\S]{0,180}version_menu') {
-    throw 'Tray menu must follow Windows Dark/Light and expose the version as a submenu.'
+    $windowProduction -notmatch 'MF_POPUP') {
+    throw 'Tray menu must owner-draw Windows Dark/Light colors and expose the version as a submenu.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
