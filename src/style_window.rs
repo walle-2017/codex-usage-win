@@ -3362,6 +3362,9 @@ unsafe fn draw_slider(
 fn section_label(section: Section, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match section {
+        Section::General => {
+            if zh { "常规" } else { "General" }
+        }
         Section::Preset => {
             if zh {
                 "预设"
@@ -3396,6 +3399,9 @@ fn section_label(section: Section, language: LanguageId) -> &'static str {
             } else {
                 "Interaction"
             }
+        }
+        Section::Json => {
+            if zh { "JSON 配置" } else { "JSON config" }
         }
     }
 }
