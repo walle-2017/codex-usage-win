@@ -263,7 +263,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_CLIPCHILDREN,
+            WS_OVERLAPPED | WS_CAPTION | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MAXIMIZEBOX,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
@@ -305,6 +305,23 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             CLEARTYPE_QUALITY.0 as u32,
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
+        );
+        let mono_name = native_interop::wide_str("Consolas");
+        let json_font = CreateFontW(
+            -s(13),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(mono_name.as_ptr()),
         );
 
         let edit_class = native_interop::wide_str("EDIT");
@@ -424,6 +441,85 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
 
+        let combo_class = native_interop::wide_str("COMBOBOX");
+        let language_combo = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(combo_class.as_ptr()),
+            PCWSTR::null(),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32),
+            0,
+            0,
+            s(260),
+            s(240),
+            hwnd,
+            HMENU(ID_COMBO_LANGUAGE as usize as *mut _),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                let _ = DeleteObject(json_font);
+                return;
+            }
+        };
+        let _ = SendMessageW(language_combo, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+        let system_label = if snapshot.language == LanguageId::SimplifiedChinese {
+            "跟随系统"
+        } else {
+            "System default"
+        };
+        let system_wide = native_interop::wide_str(system_label);
+        let _ = SendMessageW(
+            language_combo,
+            CB_ADDSTRING_MSG,
+            WPARAM(0),
+            LPARAM(system_wide.as_ptr() as isize),
+        );
+        for language in LanguageId::ALL {
+            let label = native_interop::wide_str(language.native_name());
+            let _ = SendMessageW(
+                language_combo,
+                CB_ADDSTRING_MSG,
+                WPARAM(0),
+                LPARAM(label.as_ptr() as isize),
+            );
+        }
+
+        let json_edit = match CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            PCWSTR::from_raw(edit_class.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WINDOW_STYLE(
+                WS_CHILD.0
+                    | WS_VSCROLL.0
+                    | WS_HSCROLL.0
+                    | ES_MULTILINE as u32
+                    | ES_AUTOVSCROLL as u32
+                    | ES_AUTOHSCROLL as u32
+                    | ES_WANTRETURN as u32,
+            ),
+            0,
+            0,
+            s(700),
+            s(480),
+            hwnd,
+            HMENU(ID_EDIT_JSON as usize as *mut _),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                let _ = DeleteObject(json_font);
+                return;
+            }
+        };
+        let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
+        let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
+
         let edit_background = if snapshot.is_dark {
             Color::from_hex("#20242AFF")
         } else {
@@ -439,7 +535,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 hwnd: SendHwnd::from_hwnd(hwnd),
                 parent: SendHwnd::from_hwnd(parent),
                 snapshot,
-                section: Section::Preset,
+                section: Section::General,
                 editor: EditorSelection::Color(StyleColorTarget::PanelBackground),
                 dragging_slider: None,
                 hovered: None,
@@ -448,6 +544,8 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
                 hex_edits,
+                language_combo: SendHwnd::from_hwnd(language_combo),
+                json_edit: SendHwnd::from_hwnd(json_edit),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
                 focused_hex_edit: None,
@@ -455,12 +553,19 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 syncing_numeric_edits: false,
                 syncing_blur_edit: false,
                 syncing_hex_edits: false,
+                syncing_json_edit: false,
+                json_dirty: false,
+                json_status: String::new(),
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
+                json_font: json_font.0 as isize,
             });
         }
         layout_numeric_edits(hwnd);
         layout_hex_edits(hwnd);
+        layout_settings_children(hwnd);
+        sync_language_combo();
+        reload_json_editor_from_snapshot();
         sync_hex_edits();
         sync_numeric_edits();
         sync_blur_edit();
