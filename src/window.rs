@@ -12,7 +12,10 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
-use windows::Win32::UI::Controls::InitCommonControls;
+use windows::Win32::UI::Controls::{
+    InitCommonControls, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_GRAYED,
+    ODS_SELECTED, ODT_MENU,
+};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
@@ -4066,6 +4069,28 @@ unsafe extern "system" fn wnd_proc(
         WM_RBUTTONUP => {
             show_context_menu(hwnd);
             LRESULT(0)
+        }
+        WM_MEASUREITEM => {
+            let measure = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
+            if measure.CtlType == ODT_MENU && measure.itemData != 0 {
+                let item = &*(measure.itemData as *const MenuDrawItem);
+                measure.itemWidth = sc(220).max(1) as u32;
+                measure.itemHeight = if item.separator {
+                    sc(10).max(1) as u32
+                } else {
+                    sc(32).max(1) as u32
+                };
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_DRAWITEM => {
+            let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
+            if draw.CtlType == ODT_MENU && draw.itemData != 0 {
+                draw_owner_draw_menu_item(draw);
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_COMMAND => {
             let id = wparam.0 as u16;
