@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::appearance::AppearancePreset;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
-use crate::settings_model::{parse_jsonc, EditableSettings};
+use crate::settings_model::{parse_jsonc, EditableSettings, EditableThemeStyle};
 use crate::style::{
     StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
@@ -1569,6 +1569,15 @@ fn parse_hex_input(value: &str) -> Result<Option<Color>, ()> {
     }
 }
 
+fn sync_active_style_into_editable(state: &mut PanelState) {
+    let editable = EditableThemeStyle::from_theme_style(&state.snapshot.active_style);
+    if state.snapshot.is_dark {
+        state.snapshot.editable_settings.appearance.dark = editable;
+    } else {
+        state.snapshot.editable_settings.appearance.light = editable;
+    }
+}
+
 fn sync_hex_edits() {
     let (edits, values) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1615,6 +1624,7 @@ fn update_color_from_hex_edit(target: StyleColorTarget) {
             Ok(Some(color)) => {
                 s.invalid_hex_edits[index] = false;
                 s.snapshot.active_style.set_color(target, color);
+                sync_active_style_into_editable(s);
                 selected = s.editor == EditorSelection::Color(target);
                 applied = Some(color);
             }
@@ -1700,6 +1710,7 @@ fn update_color_from_numeric_edit(channel_index: usize) {
             _ => Color::rgba(current.r, current.g, current.b, value),
         };
         s.snapshot.active_style.set_color(target, color);
+        sync_active_style_into_editable(s);
         color
     };
 
@@ -1755,6 +1766,7 @@ fn update_blur_from_numeric_edit() {
             return;
         };
         s.snapshot.active_style.panel_frosted_strength = value;
+        sync_active_style_into_editable(s);
     }
 
     if raw_value > u16::from(FROSTED_STRENGTH_MAX) {
@@ -2015,6 +2027,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
                     SliderKind::Blur => current,
                 };
                 s.snapshot.active_style.set_color(target, color);
+                sync_active_style_into_editable(s);
                 color_update = Some((target, color));
             }
             (_, SliderKind::Blur) if s.section == Section::Panel => {
@@ -2024,6 +2037,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
                     FROSTED_STRENGTH_MAX,
                 );
                 s.snapshot.active_style.panel_frosted_strength = value;
+                sync_active_style_into_editable(s);
                 blur_update = Some(value);
             }
             _ => {}
