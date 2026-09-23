@@ -1,0 +1,16 @@
+{
+  "sources": {
+    "inter": "https://raw.githubusercontent.com/rsms/inter/master/docs/font-files/InterVariable.ttf",
+    "jetbrains": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/master/fonts/variable/JetBrainsMono%5Bwght%5D.ttf",
+    "noto": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
+    "inter_license": "https://raw.githubusercontent.com/rsms/inter/master/LICENSE.txt",
+    "jetbrains_license": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/master/OFL.txt",
+    "noto_license": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/OFL.txt"
+  },
+  "glyph_count": 665,
+  "files": {
+    "InterVariable.ttf": 879708,
+    "JetBrainsMono.ttf": 300144,
+    "NotoSansSC-UI.ttf": 173404
+  }
+}
