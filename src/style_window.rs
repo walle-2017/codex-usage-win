@@ -1481,7 +1481,10 @@ fn sync_numeric_edits() {
         let Some(s) = state.as_mut() else {
             return;
         };
-        if s.section == Section::Preset {
+        if !matches!(
+            s.section,
+            Section::Panel | Section::Text | Section::Progress | Section::Interaction
+        ) {
             return;
         }
         let EditorSelection::Color(target) = s.editor else {
@@ -1584,6 +1587,12 @@ fn sync_hex_edits() {
         let Some(s) = state.as_mut() else {
             return;
         };
+        if !matches!(
+            s.section,
+            Section::Panel | Section::Text | Section::Progress | Section::Interaction
+        ) {
+            return;
+        }
         s.syncing_hex_edits = true;
         let values =
             COLOR_TARGETS.map(|target| s.snapshot.active_style.color(target).to_hex_rgba());
@@ -4016,6 +4025,25 @@ mod ui_smoke_tests {
                 is_dark: true,
                 appearance_preset: AppearancePreset::Default,
                 active_style: ThemeStyle::dark_default(),
+                editable_settings: EditableSettings {
+                    schema_version: 1,
+                    general: crate::settings_model::EditableGeneral {
+                        refresh_interval: "15m".into(),
+                        show_usage: crate::settings_model::EditableUsage {
+                            session_5h: true,
+                            weekly: true,
+                        },
+                        quota_alert_percent: 0,
+                        start_with_windows: false,
+                        language: "system".into(),
+                    },
+                    appearance: crate::settings_model::EditableAppearance {
+                        theme: "dark".into(),
+                        layout: "default".into(),
+                        dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
+                        light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
+                    },
+                },
             };
 
             open_or_focus(HWND::default(), snapshot);
