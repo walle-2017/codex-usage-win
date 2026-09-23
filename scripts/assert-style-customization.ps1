@@ -5,6 +5,8 @@ $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
+$fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 
@@ -199,16 +201,22 @@ if ($windowProduction -notmatch 'WM_SETCURSOR' -or
     $windowProduction -notmatch 'IDC_HAND') {
     throw 'Small-taskbar click-to-toggle mode must expose a hand cursor outside the drag handle.'
 }
-if ($windowProduction -notmatch 'MF_OWNERDRAW' -or
-    $windowProduction -notmatch 'WM_MEASUREITEM' -or
-    $windowProduction -notmatch 'WM_DRAWITEM' -or
-    $windowProduction -notmatch 'MNS_NOCHECK' -or
-    $windowProduction -notmatch 'windows_menu_palette') {
-    throw 'Tray menu must owner-draw the complete Windows Dark/Light surface, text, separators, and submenu arrow without the native check gutter.'
+if ($windowProduction -notmatch 'popup_menu::show' -or
+    $windowProduction -notmatch 'PopupItem::submenu' -or
+    $windowProduction -match 'TrackPopupMenu' -or
+    $windowProduction -match 'CreatePopupMenu') {
+    throw 'Tray menu must use the standalone custom popup window rather than native HMENU/TrackPopupMenu.'
 }
-if ($windowProduction -notmatch 'append_owner_draw_menu_item\([\s\S]{0,180}IDM_STYLE_SETTINGS as usize' -or
+if ($popupMenu -notmatch 'WS_POPUP' -or
+    $popupMenu -notmatch 'CS_DROPSHADOW' -or
+    $popupMenu -notmatch 'DWMWA_WINDOW_CORNER_PREFERENCE' -or
+    $popupMenu -notmatch 'ITEM_RADIUS' -or
+    $popupMenu -notmatch 'PopupAction::Submenu') {
+    throw 'Custom popup menu must provide popup-window shadow, rounded corners, hover rows, and a real custom submenu.'
+}
+if ($windowProduction -notmatch 'PopupItem::command\(settings_text, IDM_STYLE_SETTINGS\)' -or
     $windowProduction -match 'settings_menu') {
-    throw 'Unified Settings must be a single top-level tray-menu entry with no legacy Settings submenu.'
+    throw 'Unified Settings must remain one top-level custom-popup entry.'
 }
 foreach ($hex in @('#E9EEF4FF', '#DCE5EFFF', '#CBD7E4FF', '#C1CCD8FF', '#EEF3F8FF')) {
     if ($styleWindow -notmatch [regex]::Escape($hex)) {
@@ -498,14 +506,24 @@ if ($styleWindow -notmatch 'GetOpenFileNameW' -or
     $styleWindow -notmatch 'apply_json_editor') {
     throw 'JSON settings page must use RichEdit JSONC formatting/highlighting, friendly error navigation, reload, import/export, and validated apply.'
 }
-if ($windowProduction -notmatch 'MIM_BACKGROUND\s*\|\s*MIM_APPLYTOSUBMENUS\s*\|\s*MIM_STYLE' -or
-    $windowProduction -notmatch 'theme::is_dark_mode\(\)' -or
-    $windowProduction -notmatch '#202020FF' -or
-    $windowProduction -notmatch '#F9F9F9FF' -or
-    $windowProduction -notmatch 'draw_owner_draw_menu_item' -or
-    $windowProduction -notmatch 'format!\("v\{\}"' -or
-    $windowProduction -notmatch 'MF_POPUP') {
-    throw 'Tray menu must owner-draw Windows Dark/Light colors and expose the version as a submenu.'
+if ($windowProduction -notmatch 'theme::is_dark_mode\(\)' -or
+    $windowProduction -notmatch 'PopupItem::submenu\(version_label' -or
+    $popupMenu -notmatch '#1F1F1FFF' -or
+    $popupMenu -notmatch '#FAFAFAFF' -or
+    $popupMenu -notmatch 'draw_text' -and $popupMenu -notmatch 'DrawTextW' -or
+    $popupMenu -match 'AppendMenuW') {
+    throw 'Custom tray popup must follow Windows Dark/Light, draw its own single submenu arrow, and avoid native menu arrows.'
+}
+if ($fonts -notmatch 'AddFontMemResourceEx' -or
+    $fonts -notmatch 'Inter Variable' -or
+    $fonts -notmatch 'Noto Sans SC' -or
+    $fonts -notmatch 'JetBrains Mono' -or
+    $fonts -notmatch '3 \* 1024 \* 1024') {
+    throw 'Portable build must privately register compact Inter/Noto Sans SC/JetBrains Mono assets and enforce the font-size budget.'
+}
+if ($styleWindow -notmatch 'fonts::ui_face' -or
+    $styleWindow -notmatch 'fonts::mono_face') {
+    throw 'Settings and JSON editors must use the bundled UI/mono font selection.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
