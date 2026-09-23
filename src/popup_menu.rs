@@ -624,7 +624,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_KEYDOWN => {
-            if wparam.0 as u32 == VK_ESCAPE.0 {
+            if wparam.0 as u32 == u32::from(VK_ESCAPE.0) {
                 close();
                 return LRESULT(0);
             }
