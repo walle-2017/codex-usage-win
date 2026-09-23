@@ -620,6 +620,8 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     layout_settings_children(hwnd);
     if !json_dirty {
         reload_json_editor_from_snapshot();
+    } else {
+        refresh_json_editor_theme();
     }
     sync_hex_edits();
     sync_numeric_edits();
@@ -960,29 +962,29 @@ fn json_edit_rect(hwnd: HWND) -> RECT {
     unsafe { let _ = GetClientRect(hwnd, &mut client); }
     RECT {
         left: scale(hwnd, 200),
-        top: scale(hwnd, 132),
+        top: scale(hwnd, 142),
         right: client.right - scale(hwnd, 24),
-        bottom: client.bottom - scale(hwnd, 106),
+        bottom: client.bottom - scale(hwnd, 140),
     }
 }
 
 fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
-    let (left, right) = match action {
-        JsonAction::Reload => (200, 300),
-        JsonAction::Format => (310, 410),
-        JsonAction::Import => (650, 750),
-        JsonAction::Export => (760, 860),
-        JsonAction::Apply => (814, 940),
-    };
-    let (top, bottom) = if action == JsonAction::Apply {
-        let mut client = RECT::default();
-        unsafe { let _ = GetClientRect(hwnd, &mut client); }
-        let bottom = client.bottom / scale(hwnd, 1) - 20;
-        (bottom - 40, bottom)
-    } else {
-        (88, 122)
-    };
-    rect(hwnd, left, top, right, bottom)
+    match action {
+        JsonAction::Reload => rect(hwnd, 200, 92, 306, 128),
+        JsonAction::Format => rect(hwnd, 318, 92, 424, 128),
+        JsonAction::Import => rect(hwnd, 700, 92, 808, 128),
+        JsonAction::Export => rect(hwnd, 818, 92, 926, 128),
+        JsonAction::Apply => {
+            let mut client = RECT::default();
+            unsafe { let _ = GetClientRect(hwnd, &mut client); }
+            RECT {
+                left: scale(hwnd, 660),
+                top: client.bottom - scale(hwnd, 60),
+                right: scale(hwnd, 800),
+                bottom: client.bottom - scale(hwnd, 20),
+            }
+        }
+    }
 }
 
 fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
@@ -1407,6 +1409,18 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
+}
+
+fn refresh_json_editor_theme() {
+    let (edit, is_dark) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.json_edit.to_hwnd(), s.snapshot.is_dark)
+    };
+    let text = read_large_edit_text(edit);
+    syntax_highlight_json_editor(edit, &text, is_dark);
 }
 
 fn reload_json_editor_from_snapshot() {
