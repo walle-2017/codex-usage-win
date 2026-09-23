@@ -5220,11 +5220,19 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 
 fn show_context_menu(hwnd: HWND) {
     unsafe {
-        let (strings, language) = {
+        let (strings, language, available_update_version) = {
             let state = lock_state();
             match state.as_ref() {
-                Some(s) => (s.language.strings(), s.language),
-                None => (LanguageId::English.strings(), LanguageId::English),
+                Some(s) => (
+                    s.language.strings(),
+                    s.language,
+                    s.available_update_version.clone(),
+                ),
+                None => (
+                    LanguageId::English.strings(),
+                    LanguageId::English,
+                    None,
+                ),
             }
         };
 
@@ -5298,7 +5306,14 @@ fn show_context_menu(hwnd: HWND) {
         );
 
         let version_label_text = if cfg!(feature = "github-update") {
-            format!("v{}", env!("CARGO_PKG_VERSION"))
+            match available_update_version.as_deref() {
+                Some(latest) => format!(
+                    "v{} --> v{}",
+                    env!("CARGO_PKG_VERSION"),
+                    latest
+                ),
+                None => format!("v{}", env!("CARGO_PKG_VERSION")),
+            }
         } else {
             format!("v{} (Microsoft Store)", env!("CARGO_PKG_VERSION"))
         };
