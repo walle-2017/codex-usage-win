@@ -1,13 +1,14 @@
 use std::sync::Mutex;
 use std::{fs, path::PathBuf};
 
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
+    OFN_PATHMUSTEXIST,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -785,7 +786,7 @@ fn rows(section: Section) -> &'static [EditorSelection] {
         [EditorSelection::Color(StyleColorTarget::DragHandle)];
 
     match section {
-        Section::Preset => &[],
+        Section::General | Section::Preset | Section::Json => &[],
         Section::Panel => &PANEL,
         Section::Text => &TEXT,
         Section::Progress => &PROGRESS,
@@ -957,13 +958,23 @@ fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
     }
 }
 
+fn is_appearance_section(section: Section) -> bool {
+    matches!(
+        section,
+        Section::Preset | Section::Panel | Section::Text | Section::Progress | Section::Interaction
+    )
+}
+
 fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, bool, bool)> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let s = state.as_ref()?;
     Some((
         s.numeric_edits,
         s.blur_edit,
-        s.section != Section::Preset && matches!(s.editor, EditorSelection::Color(_)),
+        matches!(
+            s.section,
+            Section::Panel | Section::Text | Section::Progress | Section::Interaction
+        ) && matches!(s.editor, EditorSelection::Color(_)),
         s.section == Section::Panel,
     ))
 }
@@ -1039,6 +1050,361 @@ fn layout_numeric_edits(hwnd: HWND) {
             if show_blur { SW_SHOW } else { SW_HIDE },
         );
     }
+}
+
+
+fn layout_settings_children(hwnd: HWND) {
+    let Some((language_combo, json_edit, section)) = ({
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .as_ref()
+            .map(|s| (s.language_combo, s.json_edit, s.section))
+    }) else {
+        return;
+    };
+
+    unsafe {
+        let focused = GetFocus();
+        let hide_language =
+            section != Section::General && focused == language_combo.to_hwnd();
+        let hide_json = section != Section::Json && focused == json_edit.to_hwnd();
+        if hide_language || hide_json {
+            let _ = SetFocus(hwnd);
+        }
+
+        let language_rect = language_combo_rect(hwnd);
+        let _ = SetWindowPos(
+            language_combo.to_hwnd(),
+            HWND::default(),
+            language_rect.left,
+            language_rect.top,
+            language_rect.right - language_rect.left,
+            language_rect.bottom - language_rect.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(
+            language_combo.to_hwnd(),
+            if section == Section::General {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+
+        let json_rect = json_edit_rect(hwnd);
+        let _ = SetWindowPos(
+            json_edit.to_hwnd(),
+            HWND::default(),
+            json_rect.left,
+            json_rect.top,
+            (json_rect.right - json_rect.left).max(1),
+            (json_rect.bottom - json_rect.top).max(1),
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(
+            json_edit.to_hwnd(),
+            if section == Section::Json {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
+}
+
+fn sync_language_combo() {
+    let (combo, language_code) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (
+            s.language_combo.to_hwnd(),
+            s.snapshot.editable_settings.general.language.clone(),
+        )
+    };
+
+    let index = if language_code == "system" {
+        0
+    } else {
+        LanguageId::ALL
+            .iter()
+            .position(|language| language.code() == language_code)
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    };
+    unsafe {
+        let _ = SendMessageW(combo, CB_SETCURSEL_MSG, WPARAM(index), LPARAM(0));
+    }
+}
+
+fn read_large_edit_text(edit: HWND) -> String {
+    unsafe {
+        let len = GetWindowTextLengthW(edit);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(edit, &mut buffer) as usize;
+        String::from_utf16_lossy(&buffer[..copied])
+    }
+}
+
+fn write_json_editor(text: &str, status: String, dirty: bool) {
+    let (edit, hwnd) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.syncing_json_edit = true;
+        s.json_status = status;
+        s.json_dirty = dirty;
+        (s.json_edit.to_hwnd(), s.hwnd.to_hwnd())
+    };
+    set_edit_text_string(edit, text);
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_json_edit = false;
+        }
+    }
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn reload_json_editor_from_snapshot() {
+    let (settings, language) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.snapshot.editable_settings.clone(), s.snapshot.language)
+    };
+    let text = settings.to_jsonc(language);
+    let status = if language == LanguageId::SimplifiedChinese {
+        "✓ 已从当前应用设置重新载入".to_string()
+    } else {
+        "✓ Reloaded from current application settings".to_string()
+    };
+    write_json_editor(&text, status, false);
+}
+
+fn update_json_validation_status(mark_dirty: bool) {
+    let (edit, syncing, language, hwnd) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (
+            s.json_edit.to_hwnd(),
+            s.syncing_json_edit,
+            s.snapshot.language,
+            s.hwnd.to_hwnd(),
+        )
+    };
+    if syncing {
+        return;
+    }
+    let text = read_large_edit_text(edit);
+    let status = match parse_jsonc(&text) {
+        Ok(_) => {
+            if language == LanguageId::SimplifiedChinese {
+                "✓ JSON 格式和属性有效".to_string()
+            } else {
+                "✓ JSON syntax and properties are valid".to_string()
+            }
+        }
+        Err(error) => format!("× {error}"),
+    };
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.json_status = status;
+            if mark_dirty {
+                s.json_dirty = true;
+            }
+        }
+    }
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn format_json_editor() {
+    let (edit, language) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.json_edit.to_hwnd(), s.snapshot.language)
+    };
+    match parse_jsonc(&read_large_edit_text(edit)) {
+        Ok(settings) => {
+            let text = settings.to_jsonc(language);
+            let status = if language == LanguageId::SimplifiedChinese {
+                "✓ 已格式化并恢复完整官方注释".to_string()
+            } else {
+                "✓ Formatted and restored all official comments".to_string()
+            };
+            write_json_editor(&text, status, true);
+        }
+        Err(error) => write_json_status_error(error),
+    }
+}
+
+fn write_json_status_error(error: String) {
+    let hwnd = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.json_status = format!("× {error}");
+        s.hwnd.to_hwnd()
+    };
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn file_dialog(hwnd: HWND, save: bool) -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 4096];
+    let filter: Vec<u16> =
+        "JSON/JSONC (*.json;*.jsonc)\0*.json;*.jsonc\0JSON (*.json)\0*.json\0All files (*.*)\0*.*\0\0"
+            .encode_utf16()
+            .collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: hwnd,
+        lpstrFilter: PCWSTR::from_raw(filter.as_ptr()),
+        lpstrFile: PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        Flags: if save {
+            OFN_OVERWRITEPROMPT
+        } else {
+            OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+        },
+        ..Default::default()
+    };
+    let accepted = unsafe {
+        if save {
+            GetSaveFileNameW(&mut ofn).as_bool()
+        } else {
+            GetOpenFileNameW(&mut ofn).as_bool()
+        }
+    };
+    if !accepted {
+        return None;
+    }
+    let len = buffer.iter().position(|unit| *unit == 0).unwrap_or(0);
+    (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
+}
+
+fn import_json_file(hwnd: HWND) {
+    let Some(path) = file_dialog(hwnd, false) else {
+        return;
+    };
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            write_json_status_error(format!("{}: {error}", path.display()));
+            return;
+        }
+    };
+    let language = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .as_ref()
+            .map(|s| s.snapshot.language)
+            .unwrap_or(LanguageId::English)
+    };
+    match parse_jsonc(&text) {
+        Ok(settings) => {
+            let standard = settings.to_jsonc(language);
+            let status = if language == LanguageId::SimplifiedChinese {
+                format!("✓ 已导入并校验：{}", path.display())
+            } else {
+                format!("✓ Imported and validated: {}", path.display())
+            };
+            write_json_editor(&standard, status, true);
+        }
+        Err(error) => write_json_status_error(error),
+    }
+}
+
+fn export_json_file(hwnd: HWND) {
+    let (edit, language) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.json_edit.to_hwnd(), s.snapshot.language)
+    };
+    let settings = match parse_jsonc(&read_large_edit_text(edit)) {
+        Ok(value) => value,
+        Err(error) => {
+            write_json_status_error(error);
+            return;
+        }
+    };
+    let Some(mut path) = file_dialog(hwnd, true) else {
+        return;
+    };
+    if path.extension().is_none() {
+        path.set_extension("json");
+    }
+    let json = match settings.to_pretty_json() {
+        Ok(value) => value,
+        Err(error) => {
+            write_json_status_error(error);
+            return;
+        }
+    };
+    match fs::write(&path, json) {
+        Ok(()) => {
+            let status = if language == LanguageId::SimplifiedChinese {
+                format!("✓ 已导出纯 JSON：{}", path.display())
+            } else {
+                format!("✓ Exported plain JSON: {}", path.display())
+            };
+            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = state.as_mut() {
+                s.json_status = status;
+            }
+        }
+        Err(error) => write_json_status_error(format!("{}: {error}", path.display())),
+    }
+}
+
+fn apply_json_editor() {
+    let (edit, language) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.json_edit.to_hwnd(), s.snapshot.language)
+    };
+    let settings = match parse_jsonc(&read_large_edit_text(edit)) {
+        Ok(value) => value,
+        Err(error) => {
+            write_json_status_error(error);
+            return;
+        }
+    };
+    {
+        let mut pending = PENDING_EDITABLE_SETTINGS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *pending = Some(settings.clone());
+    }
+    let standard = settings.to_jsonc(language);
+    let status = if language == LanguageId::SimplifiedChinese {
+        "✓ 配置有效，正在应用".to_string()
+    } else {
+        "✓ Configuration valid; applying".to_string()
+    };
+    write_json_editor(&standard, status, false);
+    send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
 }
 
 fn hex_layout_snapshot() -> Option<([SendHwnd; HEX_EDIT_COUNT], Section, Option<StyleColorTarget>)> {
