@@ -4147,7 +4147,7 @@ unsafe fn paint_preset_gallery(
     draw_text(
         hdc,
         preset_group_label(snapshot.is_dark, snapshot.language),
-        rect(hwnd, 200, 112, 940, 146),
+        rect(hwnd, 200, 180, 940, 212),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -4187,7 +4187,7 @@ unsafe fn paint_preset_gallery(
         draw_text(
             hdc,
             if zh { "当前自定义" } else { "Current custom" },
-            rect(hwnd, 200, 360, 940, 390),
+            rect(hwnd, 200, 400, 940, 430),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
         paint_style_preview_card(
