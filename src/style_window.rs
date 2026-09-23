@@ -3805,10 +3805,10 @@ unsafe fn paint_json_page(
         RECT {
             left: scale(hwnd, 200),
             top: edit_rect.bottom + scale(hwnd, 8),
-            right: client.right - scale(hwnd, 180),
-            bottom: edit_rect.bottom + scale(hwnd, 42),
+            right: scale(hwnd, 630),
+            bottom: client.bottom - scale(hwnd, 18),
         },
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        DT_LEFT | DT_WORDBREAK,
     );
 
     let apply = JsonAction::Apply;
