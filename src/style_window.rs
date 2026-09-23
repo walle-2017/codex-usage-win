@@ -43,7 +43,7 @@ const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const WINDOW_WIDTH: i32 = 980;
 const WINDOW_HEIGHT: i32 = 700;
 const WINDOW_MIN_WIDTH: i32 = 980;
-const WINDOW_MIN_HEIGHT: i32 = 620;
+const WINDOW_MIN_HEIGHT: i32 = 700;
 const ID_EDIT_R: u16 = 300;
 const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
@@ -775,7 +775,7 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
         ThemePreset::Forest => 2,
     };
     let left = 200 + index * 244;
-    rect(hwnd, left, 220, left + 224, 390)
+    rect(hwnd, left, 220, left + 224, 404)
 }
 
 fn reset_rect(hwnd: HWND) -> RECT {
@@ -919,7 +919,7 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
 }
 
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 438, 424, 608)
+    rect(hwnd, 200, 438, 424, 622)
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
