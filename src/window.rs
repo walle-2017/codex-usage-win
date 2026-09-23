@@ -1111,6 +1111,21 @@ fn open_github_releases(hwnd: HWND) {
     }
 }
 
+fn open_github_repository(hwnd: HWND) {
+    unsafe {
+        let operation = native_interop::wide_str("open");
+        let url = native_interop::wide_str(GITHUB_REPOSITORY_URL);
+        let _ = ShellExecuteW(
+            hwnd,
+            PCWSTR::from_raw(operation.as_ptr()),
+            PCWSTR::from_raw(url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 fn set_window_title(hwnd: HWND, strings: Strings) {
     unsafe {
         let title = native_interop::wide_str(strings.window_title);
@@ -4106,7 +4121,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 IDM_OPEN_RELEASES => {
-                    open_github_releases(hwnd);
+                    open_github_repository(hwnd);
                 }
                 IDM_RESET_POSITION => {
                     let target = {
@@ -5112,341 +5127,124 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 
 fn show_context_menu(hwnd: HWND) {
     unsafe {
-        let (
-            current_interval,
-            strings,
-            language,
-            language_override,
-            show_session_window,
-            show_weekly_window,
-            alert_threshold_percent,
-            available_update_version,
-        ) = {
+        let (strings, language) = {
             let state = lock_state();
             match state.as_ref() {
-                Some(s) => (
-                    s.poll_interval_ms,
-                    s.language.strings(),
-                    s.language,
-                    s.language_override,
-                    s.show_session_window,
-                    s.show_weekly_window,
-                    s.alert_threshold_percent,
-                    s.available_update_version.clone(),
-                ),
-                None => (
-                    POLL_15_MIN,
-                    LanguageId::English.strings(),
-                    LanguageId::English,
-                    None,
-                    true,
-                    true,
-                    0,
-                    None,
-                ),
+                Some(s) => (s.language.strings(), s.language),
+                None => (LanguageId::English.strings(), LanguageId::English),
             }
         };
 
         let menu = CreatePopupMenu().unwrap();
+        let version_menu = CreatePopupMenu().unwrap();
 
-        let refresh_str = native_interop::wide_str(strings.refresh);
+        let refresh = native_interop::wide_str(strings.refresh);
         let _ = AppendMenuW(
             menu,
             MENU_ITEM_FLAGS(0),
             1,
-            PCWSTR::from_raw(refresh_str.as_ptr()),
+            PCWSTR::from_raw(refresh.as_ptr()),
         );
 
-        // Update Frequency submenu
-        let freq_menu = CreatePopupMenu().unwrap();
-        let freq_items: [(u16, u32, &str); 4] = [
-            (IDM_FREQ_1MIN, POLL_1_MIN, strings.one_minute),
-            (IDM_FREQ_5MIN, POLL_5_MIN, strings.five_minutes),
-            (IDM_FREQ_15MIN, POLL_15_MIN, strings.fifteen_minutes),
-            (IDM_FREQ_1HOUR, POLL_1_HOUR, strings.one_hour),
-        ];
-        for (id, interval, label) in freq_items {
-            let label_str = native_interop::wide_str(label);
-            let flags = if interval == current_interval {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            };
-            let _ = AppendMenuW(
-                freq_menu,
-                flags,
-                id as usize,
-                PCWSTR::from_raw(label_str.as_ptr()),
-            );
-        }
-
-        let freq_label = native_interop::wide_str(strings.update_frequency);
+        let reset = native_interop::wide_str(strings.reset_position);
         let _ = AppendMenuW(
             menu,
-            MF_POPUP,
-            freq_menu.0 as usize,
-            PCWSTR::from_raw(freq_label.as_ptr()),
-        );
-
-        // Usage window visibility submenu. Keep at least one window enabled.
-        let usage_menu = CreatePopupMenu().unwrap();
-        let session_label =
-            native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-                "5 小时额度"
-            } else {
-                "5-hour quota"
-            });
-        let session_flags = if show_session_window {
-            MF_CHECKED
-        } else {
-            MENU_ITEM_FLAGS(0)
-        };
-        let _ = AppendMenuW(
-            usage_menu,
-            session_flags,
-            IDM_SHOW_SESSION_WINDOW as usize,
-            PCWSTR::from_raw(session_label.as_ptr()),
-        );
-        let weekly_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "每周额度"
-        } else {
-            "Weekly quota"
-        });
-        let weekly_flags = if show_weekly_window {
-            MF_CHECKED
-        } else {
-            MENU_ITEM_FLAGS(0)
-        };
-        let _ = AppendMenuW(
-            usage_menu,
-            weekly_flags,
-            IDM_SHOW_WEEKLY_WINDOW as usize,
-            PCWSTR::from_raw(weekly_label.as_ptr()),
-        );
-        let usage_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "显示用量"
-        } else {
-            "Usage display"
-        });
-        let _ = AppendMenuW(
-            menu,
-            MF_POPUP,
-            usage_menu.0 as usize,
-            PCWSTR::from_raw(usage_label.as_ptr()),
-        );
-
-        // Low-quota alert threshold submenu. Zero means opt-out.
-        let alert_menu = CreatePopupMenu().unwrap();
-        let alert_items = [
-            (
-                IDM_ALERT_OFF,
-                0u8,
-                if language == LanguageId::SimplifiedChinese {
-                    "关闭"
-                } else {
-                    "Off"
-                },
-            ),
-            (
-                IDM_ALERT_10,
-                10u8,
-                if language == LanguageId::SimplifiedChinese {
-                    "剩余 10%"
-                } else {
-                    "10% remaining"
-                },
-            ),
-            (
-                IDM_ALERT_20,
-                20u8,
-                if language == LanguageId::SimplifiedChinese {
-                    "剩余 20%"
-                } else {
-                    "20% remaining"
-                },
-            ),
-            (
-                IDM_ALERT_30,
-                30u8,
-                if language == LanguageId::SimplifiedChinese {
-                    "剩余 30%"
-                } else {
-                    "30% remaining"
-                },
-            ),
-        ];
-        for (id, threshold, label) in alert_items {
-            let label = native_interop::wide_str(label);
-            let flags = if alert_threshold_percent == threshold {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            };
-            let _ = AppendMenuW(
-                alert_menu,
-                flags,
-                id as usize,
-                PCWSTR::from_raw(label.as_ptr()),
-            );
-        }
-        let alert_label = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "额度提醒"
-        } else {
-            "Quota alerts"
-        });
-        let _ = AppendMenuW(
-            menu,
-            MF_POPUP,
-            alert_menu.0 as usize,
-            PCWSTR::from_raw(alert_label.as_ptr()),
-        );
-
-        // Settings submenu
-        let settings_menu = CreatePopupMenu().unwrap();
-
-        let startup_str = native_interop::wide_str(strings.start_with_windows);
-        let startup_flags = if is_startup_enabled() {
-            MF_CHECKED
-        } else {
-            MENU_ITEM_FLAGS(0)
-        };
-        let _ = AppendMenuW(
-            settings_menu,
-            startup_flags,
-            IDM_START_WITH_WINDOWS as usize,
-            PCWSTR::from_raw(startup_str.as_ptr()),
-        );
-
-        let reset_pos_str = native_interop::wide_str(strings.reset_position);
-        let _ = AppendMenuW(
-            settings_menu,
             MENU_ITEM_FLAGS(0),
             IDM_RESET_POSITION as usize,
-            PCWSTR::from_raw(reset_pos_str.as_ptr()),
+            PCWSTR::from_raw(reset.as_ptr()),
         );
 
-        let language_menu = CreatePopupMenu().unwrap();
-        let system_label = native_interop::wide_str(strings.system_default);
-        let system_flags = if language_override.is_none() {
-            MF_CHECKED
-        } else {
-            MENU_ITEM_FLAGS(0)
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+
+        let settings_text = match language {
+            LanguageId::SimplifiedChinese => "设置...",
+            LanguageId::TraditionalChinese => "設定...",
+            _ => "Settings...",
         };
+        let settings = native_interop::wide_str(settings_text);
         let _ = AppendMenuW(
-            language_menu,
-            system_flags,
-            IDM_LANG_SYSTEM as usize,
-            PCWSTR::from_raw(system_label.as_ptr()),
-        );
-
-        for language in LanguageId::ALL {
-            let id = match language {
-                LanguageId::English => IDM_LANG_ENGLISH,
-                LanguageId::Dutch => IDM_LANG_DUTCH,
-                LanguageId::Spanish => IDM_LANG_SPANISH,
-                LanguageId::French => IDM_LANG_FRENCH,
-                LanguageId::German => IDM_LANG_GERMAN,
-                LanguageId::Japanese => IDM_LANG_JAPANESE,
-                LanguageId::Korean => IDM_LANG_KOREAN,
-                LanguageId::SimplifiedChinese => IDM_LANG_SIMPLIFIED_CHINESE,
-                LanguageId::TraditionalChinese => IDM_LANG_TRADITIONAL_CHINESE,
-                LanguageId::Russian => IDM_LANG_RUSSIAN,
-                LanguageId::PortugueseBrazil => IDM_LANG_PORTUGUESE_BRAZIL,
-            };
-            let label_str = native_interop::wide_str(language.native_name());
-            let flags = if language_override == Some(language) {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            };
-            let _ = AppendMenuW(
-                language_menu,
-                flags,
-                id as usize,
-                PCWSTR::from_raw(label_str.as_ptr()),
-            );
-        }
-
-        let language_label = native_interop::wide_str(strings.language);
-        let _ = AppendMenuW(
-            settings_menu,
-            MF_POPUP,
-            language_menu.0 as usize,
-            PCWSTR::from_raw(language_label.as_ptr()),
-        );
-
-        let style_settings_label = native_interop::wide_str(match language {
-            LanguageId::SimplifiedChinese => "样式...",
-            LanguageId::TraditionalChinese => "樣式...",
-            LanguageId::Japanese => "スタイル...",
-            LanguageId::Korean => "스타일...",
-            LanguageId::Dutch => "Stijl...",
-            LanguageId::Spanish => "Estilo...",
-            LanguageId::French => "Style...",
-            LanguageId::German => "Stil...",
-            LanguageId::Russian => "Стиль...",
-            LanguageId::PortugueseBrazil => "Estilo...",
-            LanguageId::English => "Style...",
-        });
-        let _ = AppendMenuW(
-            settings_menu,
+            menu,
             MENU_ITEM_FLAGS(0),
             IDM_STYLE_SETTINGS as usize,
-            PCWSTR::from_raw(style_settings_label.as_ptr()),
+            PCWSTR::from_raw(settings.as_ptr()),
         );
 
-        let _ = AppendMenuW(settings_menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let version_label_text = if cfg!(feature = "github-update") {
-            match available_update_version.as_deref() {
-                Some(latest) => format!("v{} --> v{}", env!("CARGO_PKG_VERSION"), latest),
-                None => format!("v{}", env!("CARGO_PKG_VERSION")),
-            }
-        } else {
-            format!("v{} (Microsoft Store)", env!("CARGO_PKG_VERSION"))
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+
+        let check_text = match language {
+            LanguageId::SimplifiedChinese => "检查更新",
+            LanguageId::TraditionalChinese => "檢查更新",
+            LanguageId::Japanese => "更新を確認",
+            LanguageId::Korean => "업데이트 확인",
+            _ => "Check for updates",
         };
-        let version_label = native_interop::wide_str(&version_label_text);
-        let version_flags = if cfg!(feature = "github-update") {
+        let check = native_interop::wide_str(check_text);
+        let check_flags = if cfg!(feature = "github-update") {
             MENU_ITEM_FLAGS(0)
         } else {
             MF_GRAYED
         };
         let _ = AppendMenuW(
-            settings_menu,
-            version_flags,
+            version_menu,
+            check_flags,
             IDM_CHECK_UPDATE as usize,
-            PCWSTR::from_raw(version_label.as_ptr()),
-        );
-        let releases_label = native_interop::wide_str(github_releases_menu_label(language));
-        let _ = AppendMenuW(
-            settings_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_OPEN_RELEASES as usize,
-            PCWSTR::from_raw(releases_label.as_ptr()),
+            PCWSTR::from_raw(check.as_ptr()),
         );
 
-        let settings_label = native_interop::wide_str(strings.settings);
+        let github_text = match language {
+            LanguageId::SimplifiedChinese => "前往 GitHub",
+            LanguageId::TraditionalChinese => "前往 GitHub",
+            _ => "Open GitHub",
+        };
+        let github = native_interop::wide_str(github_text);
+        let _ = AppendMenuW(
+            version_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_OPEN_RELEASES as usize,
+            PCWSTR::from_raw(github.as_ptr()),
+        );
+
+        let version = native_interop::wide_str(&format!("v{}", env!("CARGO_PKG_VERSION")));
         let _ = AppendMenuW(
             menu,
             MF_POPUP,
-            settings_menu.0 as usize,
-            PCWSTR::from_raw(settings_label.as_ptr()),
+            version_menu.0 as usize,
+            PCWSTR::from_raw(version.as_ptr()),
         );
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
-        let exit_str = native_interop::wide_str(strings.exit);
+        let exit = native_interop::wide_str(strings.exit);
         let _ = AppendMenuW(
             menu,
             MENU_ITEM_FLAGS(0),
             2,
-            PCWSTR::from_raw(exit_str.as_ptr()),
+            PCWSTR::from_raw(exit.as_ptr()),
         );
+
+        // The tray menu follows Windows Dark/Light only. Application presets
+        // and custom ThemeStyle colors intentionally do not affect it.
+        let menu_background = if theme::is_dark_mode() {
+            Color::from_hex("#202020FF")
+        } else {
+            Color::from_hex("#F9F9F9FF")
+        };
+        let menu_brush = CreateSolidBrush(COLORREF(menu_background.to_colorref()));
+        let menu_info = MENUINFO {
+            cbSize: std::mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS,
+            hbrBack: menu_brush,
+            ..Default::default()
+        };
+        let _ = SetMenuInfo(menu, &menu_info);
+        let _ = SetMenuInfo(version_menu, &menu_info);
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
         let _ = DestroyMenu(menu);
+        let _ = DeleteObject(menu_brush);
     }
 }
 
