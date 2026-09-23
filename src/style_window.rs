@@ -1144,6 +1144,15 @@ fn layout_settings_children(hwnd: HWND) {
     }
 }
 
+
+fn normalize_to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn to_windows_newlines(text: &str) -> String {
+    normalize_to_lf(text).replace('\n', "\r\n")
+}
+
 fn read_large_edit_text(edit: HWND) -> String {
     unsafe {
         let len = GetWindowTextLengthW(edit);
@@ -1152,12 +1161,222 @@ fn read_large_edit_text(edit: HWND) -> String {
         }
         let mut buffer = vec![0u16; len as usize + 1];
         let copied = GetWindowTextW(edit, &mut buffer) as usize;
-        String::from_utf16_lossy(&buffer[..copied])
+        normalize_to_lf(&String::from_utf16_lossy(&buffer[..copied]))
+    }
+}
+
+fn json_token_color(kind: JsonTokenKind, is_dark: bool) -> Color {
+    match (is_dark, kind) {
+        (true, JsonTokenKind::Comment) => Color::from_hex("#6A9955FF"),
+        (true, JsonTokenKind::Key) => Color::from_hex("#9CDCFEFF"),
+        (true, JsonTokenKind::String) => Color::from_hex("#CE9178FF"),
+        (true, JsonTokenKind::Number) => Color::from_hex("#B5CEA8FF"),
+        (true, JsonTokenKind::Keyword) => Color::from_hex("#C586C0FF"),
+        (false, JsonTokenKind::Comment) => Color::from_hex("#008000FF"),
+        (false, JsonTokenKind::Key) => Color::from_hex("#0451A5FF"),
+        (false, JsonTokenKind::String) => Color::from_hex("#A31515FF"),
+        (false, JsonTokenKind::Number) => Color::from_hex("#098658FF"),
+        (false, JsonTokenKind::Keyword) => Color::from_hex("#AF00DBFF"),
+    }
+}
+
+fn json_default_text_color(is_dark: bool) -> Color {
+    if is_dark {
+        Color::from_hex("#D4D4D4FF")
+    } else {
+        Color::from_hex("#202020FF")
+    }
+}
+
+fn json_editor_background(is_dark: bool) -> Color {
+    if is_dark {
+        Color::from_hex("#1E1E1EFF")
+    } else {
+        Color::from_hex("#FFFFFFFF")
+    }
+}
+
+fn jsonc_highlight_ranges(text: &str) -> Vec<(i32, i32, JsonTokenKind)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut utf16_offsets = Vec::with_capacity(chars.len() + 1);
+    let mut offset = 0i32;
+    utf16_offsets.push(offset);
+    for ch in &chars {
+        offset += ch.len_utf16() as i32;
+        utf16_offsets.push(offset);
+    }
+
+    let mut ranges = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+            let start = i;
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            ranges.push((
+                utf16_offsets[start],
+                utf16_offsets[i],
+                JsonTokenKind::Comment,
+            ));
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            let start = i;
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            if i + 1 < chars.len() {
+                i += 2;
+            } else {
+                i = chars.len();
+            }
+            ranges.push((
+                utf16_offsets[start],
+                utf16_offsets[i],
+                JsonTokenKind::Comment,
+            ));
+            continue;
+        }
+        if chars[i] == '"' {
+            let start = i;
+            i += 1;
+            let mut escaped = false;
+            while i < chars.len() {
+                let ch = chars[i];
+                i += 1;
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    break;
+                }
+            }
+            let mut lookahead = i;
+            while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                lookahead += 1;
+            }
+            let kind = if chars.get(lookahead) == Some(&':') {
+                JsonTokenKind::Key
+            } else {
+                JsonTokenKind::String
+            };
+            ranges.push((utf16_offsets[start], utf16_offsets[i], kind));
+            continue;
+        }
+        if chars[i].is_ascii_digit() || chars[i] == '-' {
+            let start = i;
+            i += 1;
+            while i < chars.len()
+                && matches!(
+                    chars[i],
+                    '0'..='9' | '.' | 'e' | 'E' | '+' | '-'
+                )
+            {
+                i += 1;
+            }
+            ranges.push((
+                utf16_offsets[start],
+                utf16_offsets[i],
+                JsonTokenKind::Number,
+            ));
+            continue;
+        }
+
+        let remaining: String = chars[i..].iter().take(5).collect();
+        let keyword_len = if remaining.starts_with("false") {
+            Some(5)
+        } else if remaining.starts_with("true") || remaining.starts_with("null") {
+            Some(4)
+        } else {
+            None
+        };
+        if let Some(len) = keyword_len {
+            let end = (i + len).min(chars.len());
+            ranges.push((
+                utf16_offsets[i],
+                utf16_offsets[end],
+                JsonTokenKind::Keyword,
+            ));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    ranges
+}
+
+unsafe fn rich_set_selection(edit: HWND, start: i32, end: i32) {
+    let mut range = RichCharRange {
+        cp_min: start,
+        cp_max: end,
+    };
+    let _ = SendMessageW(
+        edit,
+        EM_EXSETSEL_MSG,
+        WPARAM(0),
+        LPARAM((&mut range as *mut RichCharRange) as isize),
+    );
+}
+
+unsafe fn rich_set_selected_color(edit: HWND, color: Color) {
+    let mut format = RichCharFormatW {
+        cb_size: std::mem::size_of::<RichCharFormatW>() as u32,
+        dw_mask: CFM_COLOR_MASK,
+        cr_text_color: COLORREF(color.to_colorref()),
+        ..Default::default()
+    };
+    let _ = SendMessageW(
+        edit,
+        EM_SETCHARFORMAT_MSG,
+        WPARAM(SCF_SELECTION_FLAG),
+        LPARAM((&mut format as *mut RichCharFormatW) as isize),
+    );
+}
+
+fn syntax_highlight_json_editor(edit: HWND, text: &str, is_dark: bool) {
+    unsafe {
+        let mut previous = RichCharRange::default();
+        let _ = SendMessageW(
+            edit,
+            EM_EXGETSEL_MSG,
+            WPARAM(0),
+            LPARAM((&mut previous as *mut RichCharRange) as isize),
+        );
+        let _ = SendMessageW(edit, WM_SETREDRAW, WPARAM(0), LPARAM(0));
+
+        rich_set_selection(edit, 0, -1);
+        rich_set_selected_color(edit, json_default_text_color(is_dark));
+
+        for (start, end, kind) in jsonc_highlight_ranges(text) {
+            rich_set_selection(edit, start, end);
+            rich_set_selected_color(edit, json_token_color(kind, is_dark));
+        }
+
+        let _ = SendMessageW(
+            edit,
+            EM_SETBKGNDCOLOR_MSG,
+            WPARAM(0),
+            LPARAM(json_editor_background(is_dark).to_colorref() as isize),
+        );
+        let _ = SendMessageW(
+            edit,
+            EM_EXSETSEL_MSG,
+            WPARAM(0),
+            LPARAM((&mut previous as *mut RichCharRange) as isize),
+        );
+        let _ = SendMessageW(edit, WM_SETREDRAW, WPARAM(1), LPARAM(0));
+        let _ = InvalidateRect(edit, None, false);
     }
 }
 
 fn write_json_editor(text: &str, status: String, dirty: bool) {
-    let (edit, hwnd) = {
+    let (edit, hwnd, is_dark) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
@@ -1165,9 +1384,14 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
         s.syncing_json_edit = true;
         s.json_status = status;
         s.json_dirty = dirty;
-        (s.json_edit.to_hwnd(), s.hwnd.to_hwnd())
+        (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
-    set_edit_text_string(edit, text);
+
+    let normalized = normalize_to_lf(text);
+    let windows_text = to_windows_newlines(&normalized);
+    set_edit_text_string(edit, &windows_text);
+    syntax_highlight_json_editor(edit, &normalized, is_dark);
+
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
