@@ -28,6 +28,8 @@ const DWMWA_WINDOW_CORNER_PREFERENCE_VALUE: i32 = 33;
 const DWMWCP_ROUND_VALUE: u32 = 2;
 
 static ROOT_POPUP: AtomicIsize = AtomicIsize::new(0);
+static DISMISS_MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+static DISMISS_KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone)]
 pub enum PopupAction {
@@ -121,6 +123,7 @@ struct PopupState {
     font_face: String,
     font: isize,
     is_root: bool,
+    activate_on_show: bool,
 }
 
 fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
@@ -251,6 +254,99 @@ unsafe fn state_ptr(hwnd: HWND) -> *mut PopupState {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PopupState
 }
 
+fn point_in_rect(point: POINT, rect: RECT) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
+
+unsafe fn point_in_popup_chain(root: HWND, point: POINT) -> bool {
+    let mut rect = RECT::default();
+    if GetWindowRect(root, &mut rect).is_ok() && point_in_rect(point, rect) {
+        return true;
+    }
+
+    let raw = state_ptr(root);
+    if raw.is_null() {
+        return false;
+    }
+    if let Some(submenu) = (*raw).submenu_hwnd {
+        let mut submenu_rect = RECT::default();
+        if GetWindowRect(submenu, &mut submenu_rect).is_ok() && point_in_rect(point, submenu_rect) {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe extern "system" fn dismiss_mouse_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0
+        && matches!(
+            wparam.0 as u32,
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+        )
+    {
+        let root_raw = ROOT_POPUP.load(Ordering::Acquire);
+        if root_raw != 0 {
+            let event = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            let root = HWND(root_raw as *mut _);
+            if !point_in_popup_chain(root, event.pt) {
+                let _ = PostMessageW(root, WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+    CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+}
+
+unsafe extern "system" fn dismiss_keyboard_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 && matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        let event = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        if event.vkCode == u32::from(VK_ESCAPE.0) {
+            let root_raw = ROOT_POPUP.load(Ordering::Acquire);
+            if root_raw != 0 {
+                let _ = PostMessageW(
+                    HWND(root_raw as *mut _),
+                    WM_CLOSE,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        }
+    }
+    CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+}
+
+unsafe fn uninstall_dismiss_hooks() {
+    let mouse = DISMISS_MOUSE_HOOK.swap(0, Ordering::AcqRel);
+    if mouse != 0 {
+        let _ = UnhookWindowsHookEx(HHOOK(mouse as *mut _));
+    }
+    let keyboard = DISMISS_KEYBOARD_HOOK.swap(0, Ordering::AcqRel);
+    if keyboard != 0 {
+        let _ = UnhookWindowsHookEx(HHOOK(keyboard as *mut _));
+    }
+}
+
+unsafe fn install_dismiss_hooks() {
+    uninstall_dismiss_hooks();
+
+    let module = GetModuleHandleW(PCWSTR::null()).unwrap();
+    if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(dismiss_mouse_hook), module.into(), 0) {
+        DISMISS_MOUSE_HOOK.store(hook.0 as isize, Ordering::Release);
+    }
+    if let Ok(hook) =
+        SetWindowsHookExW(WH_KEYBOARD_LL, Some(dismiss_keyboard_hook), module.into(), 0)
+    {
+        DISMISS_KEYBOARD_HOOK.store(hook.0 as isize, Ordering::Release);
+    }
+}
+
 unsafe fn close_submenu(state: &mut PopupState) {
     if let Some(submenu) = state.submenu_hwnd.take() {
         let _ = DestroyWindow(submenu);
@@ -297,6 +393,7 @@ unsafe fn open_submenu(hwnd: HWND, index: usize) {
         false,
         position,
         dpi,
+        false,
     );
     if !submenu.0.is_null() {
         state.submenu_hwnd = Some(submenu);
@@ -400,6 +497,7 @@ unsafe fn create_window(
     is_root: bool,
     position: POINT,
     dpi: u32,
+    activate_on_show: bool,
 ) -> HWND {
     register_window_class();
 
@@ -419,12 +517,13 @@ unsafe fn create_window(
         font_face,
         font: 0,
         is_root,
+        activate_on_show,
     });
     let raw = Box::into_raw(state);
 
     let class_name = native_interop::wide_str(WINDOW_CLASS);
     let empty = native_interop::wide_str("");
-    let ex_style = if is_root {
+    let ex_style = if is_root && activate_on_show {
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST
     } else {
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
@@ -476,6 +575,7 @@ pub fn show(
     dark: bool,
     font_face: impl Into<String>,
     anchor: POINT,
+    preserve_foreground: bool,
 ) {
     unsafe {
         close();
@@ -493,23 +593,29 @@ pub fn show(
             true,
             position,
             dpi,
+            !preserve_foreground,
         );
         if hwnd.0.is_null() {
             return;
         }
 
         ROOT_POPUP.store(hwnd.0 as isize, Ordering::Release);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetActiveWindow(hwnd);
-        let _ = SetFocus(hwnd);
+        if preserve_foreground {
+            install_dismiss_hooks();
+        } else {
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(hwnd);
+        }
         let _ = InvalidateRect(hwnd, None, false);
     }
 }
 
 pub fn close() {
     let raw = ROOT_POPUP.swap(0, Ordering::AcqRel);
-    if raw != 0 {
-        unsafe {
+    unsafe {
+        uninstall_dismiss_hooks();
+        if raw != 0 {
             let _ = DestroyWindow(HWND(raw as *mut _));
         }
     }
@@ -727,7 +833,10 @@ unsafe extern "system" fn wnd_proc(
             let raw = state_ptr(hwnd);
             if !raw.is_null() {
                 let state = &*raw;
-                if state.is_root && (wparam.0 & 0xFFFF) == WA_INACTIVE as usize {
+                if state.is_root
+                    && state.activate_on_show
+                    && (wparam.0 & 0xFFFF) == WA_INACTIVE as usize
+                {
                     close();
                     return LRESULT(0);
                 }
@@ -744,6 +853,7 @@ unsafe extern "system" fn wnd_proc(
                     let _ = DeleteObject(HGDIOBJ(state.font as *mut _));
                 }
                 if state.is_root {
+                    uninstall_dismiss_hooks();
                     let _ = ROOT_POPUP.compare_exchange(
                         hwnd.0 as isize,
                         0,
