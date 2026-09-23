@@ -2902,12 +2902,16 @@ unsafe fn paint_general_page(
         "1h" => 3_600_000,
         _ => 900_000,
     };
+    let popup_open = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.language_popup_open).unwrap_or(false)
+    };
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
-        strings.settings,
-        rect(hwnd, 200, 18, 940, 48),
+        if zh { "常规" } else { "General" },
+        rect(hwnd, 200, 18, 940, 46),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
@@ -2923,16 +2927,21 @@ unsafe fn paint_general_page(
     );
 
     for r in [
-        rect(hwnd, 200, 92, 940, 182),
-        rect(hwnd, 200, 198, 940, 304),
-        rect(hwnd, 200, 318, 940, 394),
-        rect(hwnd, 200, 404, 940, 510),
+        rect(hwnd, 200, 92, 940, 190),
+        rect(hwnd, 200, 206, 940, 326),
+        rect(hwnd, 200, 342, 940, 430),
+        rect(hwnd, 200, 446, 940, 548),
     ] {
         fill(hdc, r, card);
     }
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(hdc, strings.update_frequency, rect(hwnd, 218, 98, 500, 124), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        strings.update_frequency,
+        rect(hwnd, 218, 100, 500, 130),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     for (interval, label) in [
         (60_000u32, strings.one_minute),
         (300_000, strings.five_minutes),
@@ -2964,10 +2973,26 @@ unsafe fn paint_general_page(
         );
     }
 
-    draw_text(hdc, if zh { "显示用量" } else { "Usage display" }, rect(hwnd, 218, 204, 500, 230), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh { "显示用量" } else { "Usage display" },
+        rect(hwnd, 218, 214, 500, 240),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(hdc, if zh { "5 小时额度" } else { "5-hour quota" }, rect(hwnd, 238, 220, 650, 252), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(hdc, if zh { "每周额度" } else { "Weekly quota" }, rect(hwnd, 238, 262, 650, 294), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        if zh { "5 小时额度" } else { "5-hour quota" },
+        rect(hwnd, 238, 246, 650, 278),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc,
+        if zh { "每周额度" } else { "Weekly quota" },
+        rect(hwnd, 238, 286, 650, 318),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     for (target, enabled, weekly) in [
         (HitTarget::UsageSession, general.show_usage.session_5h, false),
         (HitTarget::UsageWeekly, general.show_usage.weekly, true),
@@ -3002,7 +3027,12 @@ unsafe fn paint_general_page(
     }
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(hdc, if zh { "额度提醒" } else { "Quota alerts" }, rect(hwnd, 218, 324, 500, 344), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        if zh { "额度提醒" } else { "Quota alerts" },
+        rect(hwnd, 218, 350, 500, 378),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     for (threshold, zh_label, en_label) in [
         (0u8, "关闭", "Off"),
         (10, "10%", "10%"),
@@ -3035,9 +3065,19 @@ unsafe fn paint_general_page(
     }
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(hdc, if zh { "应用" } else { "Application" }, rect(hwnd, 218, 410, 500, 432), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        if zh { "应用" } else { "Application" },
+        rect(hwnd, 218, 452, 500, 478),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(hdc, strings.start_with_windows, rect(hwnd, 238, 416, 650, 448), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        strings.start_with_windows,
+        rect(hwnd, 238, 464, 650, 496),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     let startup = general.start_with_windows;
     draw_segment(
         hdc,
@@ -3066,7 +3106,133 @@ unsafe fn paint_general_page(
             "Off"
         },
     );
-    draw_text(hdc, strings.language, rect(hwnd, 238, 458, 650, 492), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    draw_text(
+        hdc,
+        strings.language,
+        rect(hwnd, 238, 500, 600, 532),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    let current_language_index = if general.language == "system" {
+        0
+    } else {
+        LanguageId::ALL
+            .iter()
+            .position(|language| language.code() == general.language)
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    };
+    let language_target = HitTarget::LanguageToggle;
+    let language_button = language_button_rect(hwnd);
+    fill(
+        hdc,
+        language_button,
+        button_background(
+            language_target,
+            false,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card_hover,
+                hover: card_pressed,
+                pressed: card_pressed,
+                selected: card_hover,
+                selected_hover: card_pressed,
+                selected_pressed: card_pressed,
+            },
+        ),
+    );
+    draw_outline_rect(hdc, language_button, if popup_open { accent } else { secondary });
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        language_label_for_index(current_language_index, snapshot.language),
+        RECT {
+            left: language_button.left + scale(hwnd, 12),
+            top: language_button.top,
+            right: language_button.right - scale(hwnd, 38),
+            bottom: language_button.bottom,
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc,
+        if popup_open { "▲" } else { "▼" },
+        RECT {
+            left: language_button.right - scale(hwnd, 34),
+            top: language_button.top,
+            right: language_button.right - scale(hwnd, 8),
+            bottom: language_button.bottom,
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    if popup_open {
+        for index in 0..language_option_count() {
+            let option = language_option_rect(hwnd, index);
+            let selected = current_language_index == index;
+            let target = HitTarget::LanguageOption(index);
+            fill(
+                hdc,
+                option,
+                button_background(
+                    target,
+                    selected,
+                    hovered,
+                    pressed,
+                    ButtonPalette {
+                        normal: card,
+                        hover: card_hover,
+                        pressed: card_pressed,
+                        selected: card_hover,
+                        selected_hover: card_pressed,
+                        selected_pressed: card_pressed,
+                    },
+                ),
+            );
+            let _ = SetTextColor(
+                hdc,
+                COLORREF(if selected { accent } else { primary }.to_colorref()),
+            );
+            draw_text(
+                hdc,
+                language_label_for_index(index, snapshot.language),
+                RECT {
+                    left: option.left + scale(hwnd, 12),
+                    top: option.top,
+                    right: option.right - scale(hwnd, 34),
+                    bottom: option.bottom,
+                },
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            if selected {
+                draw_text(
+                    hdc,
+                    "✓",
+                    RECT {
+                        left: option.right - scale(hwnd, 30),
+                        top: option.top,
+                        right: option.right - scale(hwnd, 8),
+                        bottom: option.bottom,
+                    },
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+        }
+        let first = language_option_rect(hwnd, 0);
+        let last = language_option_rect(hwnd, language_option_count() - 1);
+        draw_outline_rect(
+            hdc,
+            RECT {
+                left: first.left,
+                top: first.top,
+                right: last.right,
+                bottom: last.bottom,
+            },
+            accent,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
