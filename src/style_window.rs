@@ -1995,6 +1995,9 @@ fn set_section(section: Section) {
             return;
         };
         s.section = section;
+        if section != Section::General {
+            s.language_popup_open = false;
+        }
         if let Some(editor) = rows(section).first().copied() {
             s.editor = editor;
         }
@@ -2197,6 +2200,32 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let (x, y) = point_from_lparam(lparam);
 
+            let popup_open = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .map(|s| s.section == Section::General && s.language_popup_open)
+                    .unwrap_or(false)
+            };
+            if popup_open {
+                let target = hit_target_at(hwnd, x, y);
+                if !matches!(
+                    target,
+                    Some(HitTarget::LanguageToggle | HitTarget::LanguageOption(_))
+                ) {
+                    {
+                        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(s) = state.as_mut() {
+                            s.language_popup_open = false;
+                            s.hovered = None;
+                            s.pressed = None;
+                        }
+                    }
+                    let _ = InvalidateRect(hwnd, None, false);
+                    return LRESULT(0);
+                }
+            }
+
             if let Some(kind) = slider_kind_at(hwnd, x, y) {
                 if kind == SliderKind::Blur {
                     let _ = SetFocus(hwnd);
@@ -2327,35 +2356,6 @@ unsafe extern "system" fn wnd_proc(
         WM_COMMAND => {
             let control_id = (wparam.0 & 0xFFFF) as u16;
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
-
-            if control_id == ID_COMBO_LANGUAGE && notification == CBN_SELCHANGE_CODE {
-                let combo = {
-                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    state.as_ref().map(|s| s.language_combo.to_hwnd())
-                };
-                if let Some(combo) = combo {
-                    let selected =
-                        SendMessageW(combo, CB_GETCURSEL_MSG, WPARAM(0), LPARAM(0)).0 as isize;
-                    if selected >= 0 {
-                        let index = selected as usize;
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.snapshot.editable_settings.general.language = if index == 0 {
-                                    "system".to_string()
-                                } else {
-                                    LanguageId::ALL
-                                        .get(index - 1)
-                                        .map(|language| language.code().to_string())
-                                        .unwrap_or_else(|| "system".to_string())
-                                };
-                            }
-                        }
-                        send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
-                        return LRESULT(0);
-                    }
-                }
-            }
 
             if control_id == ID_EDIT_JSON && notification == EN_CHANGE_CODE {
                 update_json_validation_status(true);
