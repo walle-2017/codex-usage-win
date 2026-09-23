@@ -206,7 +206,7 @@ if ($windowProduction -notmatch 'MF_OWNERDRAW' -or
     $windowProduction -notmatch 'windows_menu_palette') {
     throw 'Tray menu must owner-draw the complete Windows Dark/Light surface, text, separators, and submenu arrow without the native check gutter.'
 }
-if ($windowProduction -notmatch 'AppendMenuW\(\s*menu,[\s\S]{0,180}IDM_STYLE_SETTINGS' -or
+if ($windowProduction -notmatch 'append_owner_draw_menu_item\([\s\S]{0,180}IDM_STYLE_SETTINGS as usize' -or
     $windowProduction -match 'settings_menu') {
     throw 'Unified Settings must be a single top-level tray-menu entry with no legacy Settings submenu.'
 }
