@@ -4940,7 +4940,70 @@ fn open_blur_editor(owner: HWND) {
     }
 }
 
+fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> EditableSettings {
+    EditableSettings {
+        schema_version: EDITABLE_SETTINGS_SCHEMA_VERSION,
+        general: EditableGeneral {
+            refresh_interval: match state.poll_interval_ms {
+                POLL_1_MIN => "1m",
+                POLL_5_MIN => "5m",
+                POLL_1_HOUR => "1h",
+                _ => "15m",
+            }
+            .to_string(),
+            show_usage: EditableUsage {
+                session_5h: state.show_session_window,
+                weekly: state.show_weekly_window,
+            },
+            quota_alert_percent: state.alert_threshold_percent,
+            start_with_windows: startup_enabled,
+            language: state
+                .language_override
+                .map(|language| language.code().to_string())
+                .unwrap_or_else(|| "system".to_string()),
+        },
+        appearance: EditableAppearance {
+            theme: match state.theme_mode {
+                ThemeMode::System => "system",
+                ThemeMode::Dark => "dark",
+                ThemeMode::Light => "light",
+            }
+            .to_string(),
+            layout: match state.appearance_preset {
+                AppearancePreset::Default => "default",
+                AppearancePreset::Minimal => "minimal",
+            }
+            .to_string(),
+            dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
+            light: EditableThemeStyle::from_theme_style(&state.styles.light),
+        },
+    }
+}
+
+fn default_editable_settings() -> EditableSettings {
+    EditableSettings {
+        schema_version: EDITABLE_SETTINGS_SCHEMA_VERSION,
+        general: EditableGeneral {
+            refresh_interval: "15m".to_string(),
+            show_usage: EditableUsage {
+                session_5h: true,
+                weekly: true,
+            },
+            quota_alert_percent: 0,
+            start_with_windows: false,
+            language: "system".to_string(),
+        },
+        appearance: EditableAppearance {
+            theme: "system".to_string(),
+            layout: "default".to_string(),
+            dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
+            light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
+        },
+    }
+}
+
 fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
+    let startup_enabled = is_startup_enabled();
     let state = lock_state();
     if let Some(s) = state.as_ref() {
         style_window::StyleWindowSnapshot {
@@ -4949,6 +5012,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             is_dark: s.is_dark,
             appearance_preset: s.appearance_preset,
             active_style: s.styles.active(s.is_dark).clone(),
+            editable_settings: editable_settings_from_state(s, startup_enabled),
         }
     } else {
         style_window::StyleWindowSnapshot {
@@ -4957,10 +5021,10 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             is_dark: true,
             appearance_preset: AppearancePreset::Default,
             active_style: ThemeStyle::dark_default(),
+            editable_settings: default_editable_settings(),
         }
     }
 }
-
 
 fn show_context_menu(hwnd: HWND) {
     unsafe {
