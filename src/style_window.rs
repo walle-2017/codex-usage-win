@@ -56,11 +56,13 @@ const JSON_EDIT_LIMIT: usize = 262_144;
 const RICH_EDIT_CLASS: &str = "RICHEDIT50W";
 const EM_SETBKGNDCOLOR_MSG: u32 = WM_USER + 67;
 const EM_SETCHARFORMAT_MSG: u32 = WM_USER + 68;
+const EM_SETEVENTMASK_MSG: u32 = WM_USER + 69;
 const EM_EXGETSEL_MSG: u32 = WM_USER + 52;
 const EM_EXSETSEL_MSG: u32 = WM_USER + 55;
 const EM_LINEINDEX_MSG: u32 = 0x00BB;
 const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
+const ENM_CHANGE_MASK: isize = 0x00000001;
 
 #[repr(C)]
 #[derive(Default)]
@@ -529,6 +531,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
+        let _ = SendMessageW(
+            json_edit,
+            EM_SETEVENTMASK_MSG,
+            WPARAM(0),
+            LPARAM(ENM_CHANGE_MASK),
+        );
         let json_background = if snapshot.is_dark {
             Color::from_hex("#1E1E1EFF")
         } else {
