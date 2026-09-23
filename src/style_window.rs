@@ -3500,16 +3500,18 @@ unsafe fn paint_preset_gallery(
     draw_text(
         hdc,
         preset_group_label(snapshot.is_dark, snapshot.language),
-        rect(hwnd, 174, 108, 786, 136),
+        rect(hwnd, 200, 112, 940, 146),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
+    let mut matched = false;
     for preset in ThemePreset::ALL {
         let r = preset_card_rect(hwnd, preset);
         let target = HitTarget::Preset(preset);
         let selected = snapshot
             .active_style
             .matches_preset(snapshot.is_dark, preset);
+        matched |= selected;
         let surface = if pressed == Some(target) {
             card_pressed
         } else if hovered == Some(target) {
@@ -3517,138 +3519,176 @@ unsafe fn paint_preset_gallery(
         } else {
             card
         };
-        fill(hdc, r, surface);
-        draw_outline_rect_width(
+        let style = ThemeStyle::preset(snapshot.is_dark, preset);
+        paint_style_preview_card(
             hdc,
+            hwnd,
             r,
-            if selected { accent } else { border },
-            if selected { 2 } else { 1 },
+            &style,
+            preset_label(preset, snapshot.is_dark, snapshot.language),
+            selected,
+            surface,
+            border,
+            accent,
+            primary,
         );
+    }
 
+    if !matched {
+        let zh = snapshot.language == LanguageId::SimplifiedChinese;
         let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
         draw_text(
             hdc,
-            preset_label(preset, snapshot.is_dark, snapshot.language),
-            RECT {
-                left: r.left + scale(hwnd, 12),
-                top: r.top + scale(hwnd, 8),
-                right: r.right - scale(hwnd, 12),
-                bottom: r.top + scale(hwnd, 38),
-            },
+            if zh { "当前自定义" } else { "Current custom" },
+            rect(hwnd, 200, 360, 940, 390),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
+        paint_style_preview_card(
+            hdc,
+            hwnd,
+            custom_preset_card_rect(hwnd),
+            &snapshot.active_style,
+            if zh { "自定义" } else { "Custom" },
+            true,
+            card,
+            border,
+            accent,
+            primary,
+        );
+    }
+}
 
-        let style = ThemeStyle::preset(snapshot.is_dark, preset);
-        let preview = RECT {
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_style_preview_card(
+    hdc: HDC,
+    hwnd: HWND,
+    r: RECT,
+    style: &ThemeStyle,
+    label: &str,
+    selected: bool,
+    surface: Color,
+    border: Color,
+    accent: Color,
+    primary: Color,
+) {
+    fill(hdc, r, surface);
+    draw_outline_rect_width(
+        hdc,
+        r,
+        if selected { accent } else { border },
+        if selected { 2 } else { 1 },
+    );
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        label,
+        RECT {
             left: r.left + scale(hwnd, 12),
-            top: r.top + scale(hwnd, 46),
+            top: r.top + scale(hwnd, 8),
             right: r.right - scale(hwnd, 12),
-            bottom: r.top + scale(hwnd, 138),
-        };
-        fill(
-            hdc,
-            preview,
-            style.color(StyleColorTarget::PanelBackground),
-        );
-        draw_outline_rect(
-            hdc,
-            preview,
-            style.color(StyleColorTarget::PanelBorder),
-        );
+            bottom: r.top + scale(hwnd, 38),
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
 
-        let text_left = preview.left + scale(hwnd, 10);
-        let text_right = preview.right - scale(hwnd, 10);
-        let _ = SetTextColor(
-            hdc,
-            COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()),
-        );
-        draw_text(
-            hdc,
-            "5h",
-            RECT {
-                left: text_left,
-                top: preview.top + scale(hwnd, 6),
-                right: text_right,
-                bottom: preview.top + scale(hwnd, 28),
-            },
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
+    let preview = RECT {
+        left: r.left + scale(hwnd, 12),
+        top: r.top + scale(hwnd, 46),
+        right: r.right - scale(hwnd, 12),
+        bottom: r.top + scale(hwnd, 138),
+    };
+    fill(hdc, preview, style.color(StyleColorTarget::PanelBackground));
+    draw_outline_rect(hdc, preview, style.color(StyleColorTarget::PanelBorder));
 
-        let _ = SetTextColor(
-            hdc,
-            COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()),
-        );
-        draw_text(
-            hdc,
-            "82%",
-            RECT {
-                left: text_left,
-                top: preview.top + scale(hwnd, 29),
-                right: preview.left + scale(hwnd, 78),
-                bottom: preview.top + scale(hwnd, 53),
-            },
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-
-        let _ = SetTextColor(
-            hdc,
-            COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()),
-        );
-        draw_text(
-            hdc,
-            "21:30",
-            RECT {
-                left: preview.left + scale(hwnd, 76),
-                top: preview.top + scale(hwnd, 29),
-                right: text_right,
-                bottom: preview.top + scale(hwnd, 53),
-            },
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-        );
-
-        let progress = RECT {
+    let text_left = preview.left + scale(hwnd, 10);
+    let text_right = preview.right - scale(hwnd, 10);
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
+    draw_text(
+        hdc,
+        "5h",
+        RECT {
             left: text_left,
-            top: preview.top + scale(hwnd, 65),
+            top: preview.top + scale(hwnd, 6),
             right: text_right,
-            bottom: preview.top + scale(hwnd, 72),
-        };
-        fill(
-            hdc,
-            progress,
-            style.color(StyleColorTarget::ProgressConsumed),
-        );
-        let filled = RECT {
+            bottom: preview.top + scale(hwnd, 28),
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+    draw_text(
+        hdc,
+        "82%",
+        RECT {
+            left: text_left,
+            top: preview.top + scale(hwnd, 29),
+            right: preview.left + scale(hwnd, 88),
+            bottom: preview.top + scale(hwnd, 53),
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+    draw_text(
+        hdc,
+        "21:30",
+        RECT {
+            left: preview.left + scale(hwnd, 86),
+            top: preview.top + scale(hwnd, 29),
+            right: text_right,
+            bottom: preview.top + scale(hwnd, 53),
+        },
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    let progress = RECT {
+        left: text_left,
+        top: preview.top + scale(hwnd, 65),
+        right: text_right,
+        bottom: preview.top + scale(hwnd, 72),
+    };
+    fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
+    fill(
+        hdc,
+        RECT {
             right: progress.left + (progress.right - progress.left) * 72 / 100,
             ..progress
-        };
-        fill(hdc, filled, style.color(StyleColorTarget::ProgressHigh));
+        },
+        style.color(StyleColorTarget::ProgressHigh),
+    );
 
-        let swatches = [
-            StyleColorTarget::ProgressHigh,
-            StyleColorTarget::ProgressMedium,
-            StyleColorTarget::ProgressLow,
-            StyleColorTarget::ProgressConsumed,
-        ];
-        for (index, target) in swatches.iter().copied().enumerate() {
-            let left = r.left + scale(hwnd, 14 + index as i32 * 42);
-            let swatch = RECT {
+    for (index, target) in [
+        StyleColorTarget::ProgressHigh,
+        StyleColorTarget::ProgressMedium,
+        StyleColorTarget::ProgressLow,
+        StyleColorTarget::ProgressConsumed,
+    ]
+    .iter()
+    .copied()
+    .enumerate()
+    {
+        let left = r.left + scale(hwnd, 14 + index as i32 * 48);
+        fill(
+            hdc,
+            RECT {
                 left,
                 top: r.top + scale(hwnd, 158),
-                right: left + scale(hwnd, 30),
-                bottom: r.top + scale(hwnd, 170),
-            };
-            fill(hdc, swatch, style.color(target));
-        }
+                right: left + scale(hwnd, 34),
+                bottom: r.top + scale(hwnd, 172),
+            },
+            style.color(target),
+        );
+    }
 
-        if selected {
-            let marker = RECT {
+    if selected {
+        fill(
+            hdc,
+            RECT {
                 left: r.right - scale(hwnd, 24),
                 top: r.top + scale(hwnd, 12),
                 right: r.right - scale(hwnd, 12),
                 bottom: r.top + scale(hwnd, 24),
-            };
-            fill(hdc, marker, accent);
-        }
+            },
+            accent,
+        );
     }
 }
 
