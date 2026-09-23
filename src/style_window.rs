@@ -51,12 +51,7 @@ const ID_EDIT_A: u16 = 303;
 const ID_EDIT_BLUR: u16 = 304;
 const ID_EDIT_HEX_BASE: u16 = 320;
 const HEX_EDIT_COUNT: usize = 11;
-const ID_COMBO_LANGUAGE: u16 = 360;
 const ID_EDIT_JSON: u16 = 400;
-const CBN_SELCHANGE_CODE: u16 = 1;
-const CB_ADDSTRING_MSG: u32 = 0x0143;
-const CB_GETCURSEL_MSG: u32 = 0x0147;
-const CB_SETCURSEL_MSG: u32 = 0x014E;
 const JSON_EDIT_LIMIT: usize = 262_144;
 const EN_SETFOCUS_CODE: u16 = 0x0100;
 const EN_KILLFOCUS_CODE: u16 = 0x0200;
@@ -124,6 +119,8 @@ enum HitTarget {
     Alert(u8),
     Startup,
     Json(JsonAction),
+    LanguageToggle,
+    LanguageOption(usize),
     Reset,
     Close,
 }
@@ -156,7 +153,6 @@ struct PanelState {
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
-    language_combo: SendHwnd,
     json_edit: SendHwnd,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
@@ -166,6 +162,7 @@ struct PanelState {
     syncing_blur_edit: bool,
     syncing_hex_edits: bool,
     syncing_json_edit: bool,
+    language_popup_open: bool,
     json_dirty: bool,
     json_status: String,
     edit_brush: isize,
@@ -442,48 +439,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
 
-        let combo_class = native_interop::wide_str("COMBOBOX");
-        let language_combo = match CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR::from_raw(combo_class.as_ptr()),
-            PCWSTR::null(),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32),
-            0,
-            0,
-            s(260),
-            s(240),
-            hwnd,
-            HMENU(ID_COMBO_LANGUAGE as usize as *mut _),
-            GetModuleHandleW(PCWSTR::null()).unwrap(),
-            None,
-        ) {
-            Ok(value) => value,
-            Err(_) => {
-                let _ = DestroyWindow(hwnd);
-                let _ = DeleteObject(font);
-                let _ = DeleteObject(json_font);
-                return;
-            }
-        };
-        let _ = SendMessageW(language_combo, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
-        let system_label = snapshot.language.strings().system_default;
-        let system_wide = native_interop::wide_str(system_label);
-        let _ = SendMessageW(
-            language_combo,
-            CB_ADDSTRING_MSG,
-            WPARAM(0),
-            LPARAM(system_wide.as_ptr() as isize),
-        );
-        for language in LanguageId::ALL {
-            let label = native_interop::wide_str(language.native_name());
-            let _ = SendMessageW(
-                language_combo,
-                CB_ADDSTRING_MSG,
-                WPARAM(0),
-                LPARAM(label.as_ptr() as isize),
-            );
-        }
-
         let json_edit = match CreateWindowExW(
             WS_EX_CLIENTEDGE,
             PCWSTR::from_raw(edit_class.as_ptr()),
@@ -541,7 +496,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
                 hex_edits,
-                language_combo: SendHwnd::from_hwnd(language_combo),
                 json_edit: SendHwnd::from_hwnd(json_edit),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
@@ -551,6 +505,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 syncing_blur_edit: false,
                 syncing_hex_edits: false,
                 syncing_json_edit: false,
+                language_popup_open: false,
                 json_dirty: false,
                 json_status: String::new(),
                 edit_brush: edit_brush.0 as isize,
@@ -561,7 +516,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         layout_numeric_edits(hwnd);
         layout_hex_edits(hwnd);
         layout_settings_children(hwnd);
-        sync_language_combo();
         reload_json_editor_from_snapshot();
         sync_hex_edits();
         sync_numeric_edits();
@@ -725,7 +679,7 @@ fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
         ThemeMode::Dark => 1,
         ThemeMode::Light => 2,
     };
-    rect(hwnd, 278 + index * 118, 62, 388 + index * 118, 96)
+    rect(hwnd, 314 + index * 108, 70, 414 + index * 108, 104)
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -733,7 +687,7 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
         AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
     };
-    rect(hwnd, 704 + index * 108, 62, 804 + index * 108, 96)
+    rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
 }
 
 fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
@@ -743,11 +697,11 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
         ThemePreset::Forest => 2,
     };
     let left = 200 + index * 244;
-    rect(hwnd, left, 154, left + 224, 356)
+    rect(hwnd, left, 220, left + 224, 390)
 }
 
 fn reset_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 748, 108, 940, 142)
+    rect(hwnd, 700, 116, 924, 150)
 }
 
 fn close_rect(hwnd: HWND) -> RECT {
@@ -797,19 +751,19 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
     rect(
         hwnd,
         200,
-        154 + index as i32 * 48,
+        218 + index as i32 * 50,
         940,
-        194 + index as i32 * 48,
+        260 + index as i32 * 50,
     )
 }
 
 fn editor_box_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 366, 940, 570)
+    rect(hwnd, 200, 382, 940, 590)
 }
 
 fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 392 + channel_index as i32 * 38;
-    rect(hwnd, 278, top, 796, top + 4)
+    let top = 429 + channel_index as i32 * 40;
+    rect(hwnd, 330, top, 790, top + 4)
 }
 
 fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
@@ -823,7 +777,7 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 322, 270, 744, 274)
+    rect(hwnd, 396, 337, 770, 341)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -837,7 +791,7 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
 }
 
 fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 778, 256, 844, 284)
+    rect(hwnd, 790, 324, 850, 352)
 }
 
 fn blur_edit_rect(hwnd: HWND) -> RECT {
@@ -877,16 +831,55 @@ fn hex_edit_rect(hwnd: HWND, row_index: usize) -> RECT {
 }
 
 fn numeric_edit_frame_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 378 + channel_index as i32 * 38;
-    rect(hwnd, 820, top, 914, top + 28)
+    let top = 416 + channel_index as i32 * 40;
+    rect(hwnd, 812, top, 920, top + 28)
 }
 
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 392, 424, 594)
+    rect(hwnd, 200, 438, 424, 608)
 }
 
-fn language_combo_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 676, 462, 920, 490)
+fn language_button_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 660, 492, 920, 528)
+}
+
+fn language_option_count() -> usize {
+    LanguageId::ALL.len() + 1
+}
+
+fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
+    let button = language_button_rect(hwnd);
+    let row_h = scale(hwnd, 28);
+    let total_h = row_h * language_option_count() as i32;
+    let bottom = button.top - scale(hwnd, 6);
+    RECT {
+        left: scale(hwnd, 610),
+        top: bottom - total_h + row_h * index as i32,
+        right: button.right,
+        bottom: bottom - total_h + row_h * (index as i32 + 1),
+    }
+}
+
+fn language_code_for_index(index: usize) -> String {
+    if index == 0 {
+        "system".to_string()
+    } else {
+        LanguageId::ALL
+            .get(index - 1)
+            .map(|language| language.code().to_string())
+            .unwrap_or_else(|| "system".to_string())
+    }
+}
+
+fn language_label_for_index(index: usize, ui_language: LanguageId) -> &'static str {
+    if index == 0 {
+        ui_language.strings().system_default
+    } else {
+        LanguageId::ALL
+            .get(index - 1)
+            .map(|language| language.native_name())
+            .unwrap_or(ui_language.strings().system_default)
+    }
 }
 
 fn json_edit_rect(hwnd: HWND) -> RECT {
@@ -1053,42 +1046,18 @@ fn layout_numeric_edits(hwnd: HWND) {
 
 
 fn layout_settings_children(hwnd: HWND) {
-    let Some((language_combo, json_edit, section)) = ({
+    let Some((json_edit, section)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state
-            .as_ref()
-            .map(|s| (s.language_combo, s.json_edit, s.section))
+        state.as_ref().map(|s| (s.json_edit, s.section))
     }) else {
         return;
     };
 
     unsafe {
         let focused = GetFocus();
-        let hide_language =
-            section != Section::General && focused == language_combo.to_hwnd();
-        let hide_json = section != Section::Json && focused == json_edit.to_hwnd();
-        if hide_language || hide_json {
+        if section != Section::Json && focused == json_edit.to_hwnd() {
             let _ = SetFocus(hwnd);
         }
-
-        let language_rect = language_combo_rect(hwnd);
-        let _ = SetWindowPos(
-            language_combo.to_hwnd(),
-            HWND::default(),
-            language_rect.left,
-            language_rect.top,
-            language_rect.right - language_rect.left,
-            language_rect.bottom - language_rect.top,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-        let _ = ShowWindow(
-            language_combo.to_hwnd(),
-            if section == Section::General {
-                SW_SHOW
-            } else {
-                SW_HIDE
-            },
-        );
 
         let json_rect = json_edit_rect(hwnd);
         let _ = SetWindowPos(
@@ -1102,38 +1071,8 @@ fn layout_settings_children(hwnd: HWND) {
         );
         let _ = ShowWindow(
             json_edit.to_hwnd(),
-            if section == Section::Json {
-                SW_SHOW
-            } else {
-                SW_HIDE
-            },
+            if section == Section::Json { SW_SHOW } else { SW_HIDE },
         );
-    }
-}
-
-fn sync_language_combo() {
-    let (combo, language_code) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        (
-            s.language_combo.to_hwnd(),
-            s.snapshot.editable_settings.general.language.clone(),
-        )
-    };
-
-    let index = if language_code == "system" {
-        0
-    } else {
-        LanguageId::ALL
-            .iter()
-            .position(|language| language.code() == language_code)
-            .map(|index| index + 1)
-            .unwrap_or(0)
-    };
-    unsafe {
-        let _ = SendMessageW(combo, CB_SETCURSEL_MSG, WPARAM(index), LPARAM(0));
     }
 }
 
