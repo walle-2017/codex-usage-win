@@ -576,7 +576,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let hwnd = {
+    let (hwnd, json_dirty) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
@@ -594,17 +594,20 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
             s.edit_brush = brush.0 as isize;
         }
-        s.hwnd.to_hwnd()
+        (s.hwnd.to_hwnd(), s.json_dirty)
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
+    layout_settings_children(hwnd);
+    sync_language_combo();
+    if !json_dirty {
+        reload_json_editor_from_snapshot();
+    }
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
-        // Commit the client-area theme in this UI turn so it lands together
-        // with the now non-animated DWM title-bar update.
         let _ = UpdateWindow(hwnd);
     }
 }
@@ -1904,6 +1907,8 @@ fn set_section(section: Section) {
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
+    layout_settings_children(hwnd);
+    sync_language_combo();
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
