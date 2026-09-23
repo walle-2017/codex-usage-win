@@ -707,14 +707,16 @@ fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
 }
 
 fn section_rect(hwnd: HWND, section: Section) -> RECT {
-    let index = match section {
-        Section::Preset => 0,
-        Section::Panel => 1,
-        Section::Text => 2,
-        Section::Progress => 3,
-        Section::Interaction => 4,
+    let (top, bottom) = match section {
+        Section::General => (76, 116),
+        Section::Preset => (188, 228),
+        Section::Panel => (232, 272),
+        Section::Text => (276, 316),
+        Section::Progress => (320, 360),
+        Section::Interaction => (364, 404),
+        Section::Json => (486, 526),
     };
-    rect(hwnd, 20, 108 + index * 48, 142, 148 + index * 48)
+    rect(hwnd, 20, top, 166, bottom)
 }
 
 fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
@@ -723,7 +725,7 @@ fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
         ThemeMode::Dark => 1,
         ThemeMode::Light => 2,
     };
-    rect(hwnd, 170 + index * 112, 50, 274 + index * 112, 84)
+    rect(hwnd, 278 + index * 118, 62, 388 + index * 118, 96)
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -731,7 +733,7 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
         AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
     };
-    rect(hwnd, 540 + index * 104, 50, 636 + index * 104, 84)
+    rect(hwnd, 704 + index * 108, 62, 804 + index * 108, 96)
 }
 
 fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
@@ -740,16 +742,25 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
         ThemePreset::Ocean => 1,
         ThemePreset::Forest => 2,
     };
-    let left = 174 + index * 204;
-    rect(hwnd, left, 146, left + 192, 350)
+    let left = 200 + index * 244;
+    rect(hwnd, left, 154, left + 224, 356)
 }
 
 fn reset_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 20, 488, 176, 528)
+    rect(hwnd, 748, 108, 940, 142)
 }
 
 fn close_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 690, 488, 786, 528)
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let w = scale(hwnd, 96);
+    let h = scale(hwnd, 40);
+    RECT {
+        left: client.right - scale(hwnd, 24) - w,
+        top: client.bottom - scale(hwnd, 20) - h,
+        right: client.right - scale(hwnd, 24),
+        bottom: client.bottom - scale(hwnd, 20),
+    }
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -785,20 +796,20 @@ fn rows(section: Section) -> &'static [EditorSelection] {
 fn row_rect(hwnd: HWND, index: usize) -> RECT {
     rect(
         hwnd,
-        174,
-        108 + index as i32 * 48,
-        786,
-        148 + index as i32 * 48,
+        200,
+        154 + index as i32 * 48,
+        940,
+        194 + index as i32 * 48,
     )
 }
 
 fn editor_box_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 174, 326, 786, 472)
+    rect(hwnd, 200, 366, 940, 570)
 }
 
 fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 348 + channel_index as i32 * 32;
-    rect(hwnd, 244, top, 676, top + 4)
+    let top = 392 + channel_index as i32 * 38;
+    rect(hwnd, 278, top, 796, top + 4)
 }
 
 fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
@@ -812,8 +823,7 @@ fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
 }
 
 fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    // Match the RGBA label-to-track spacing and end at the color-swatch edge.
-    rect(hwnd, 292, 224, 646, 228)
+    rect(hwnd, 322, 270, 744, 274)
 }
 
 fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
@@ -827,8 +837,7 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
 }
 
 fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    // Align the percentage input with the Hex input column above.
-    rect(hwnd, 654, 210, 714, 238)
+    rect(hwnd, 778, 256, 844, 284)
 }
 
 fn blur_edit_rect(hwnd: HWND) -> RECT {
@@ -850,7 +859,7 @@ fn color_row_index(section: Section, target: StyleColorTarget) -> Option<usize> 
 fn hex_edit_frame_rect(hwnd: HWND, row_index: usize) -> RECT {
     let row = row_rect(hwnd, row_index);
     RECT {
-        left: row.right - scale(hwnd, 132),
+        left: row.right - scale(hwnd, 162),
         top: row.top + scale(hwnd, 6),
         right: row.right - scale(hwnd, 12),
         bottom: row.bottom - scale(hwnd, 6),
@@ -868,8 +877,74 @@ fn hex_edit_rect(hwnd: HWND, row_index: usize) -> RECT {
 }
 
 fn numeric_edit_frame_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 334 + channel_index as i32 * 32;
-    rect(hwnd, 690, top, 764, top + 26)
+    let top = 378 + channel_index as i32 * 38;
+    rect(hwnd, 820, top, 914, top + 28)
+}
+
+fn custom_preset_card_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 200, 392, 424, 594)
+}
+
+fn language_combo_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 676, 462, 920, 490)
+}
+
+fn json_edit_rect(hwnd: HWND) -> RECT {
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    RECT {
+        left: scale(hwnd, 200),
+        top: scale(hwnd, 132),
+        right: client.right - scale(hwnd, 24),
+        bottom: client.bottom - scale(hwnd, 106),
+    }
+}
+
+fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
+    let (left, right) = match action {
+        JsonAction::Reload => (200, 300),
+        JsonAction::Format => (310, 410),
+        JsonAction::Import => (650, 750),
+        JsonAction::Export => (760, 860),
+        JsonAction::Apply => (814, 940),
+    };
+    let (top, bottom) = if action == JsonAction::Apply {
+        let mut client = RECT::default();
+        unsafe { let _ = GetClientRect(hwnd, &mut client); }
+        let bottom = client.bottom / scale(hwnd, 1) - 20;
+        (bottom - 40, bottom)
+    } else {
+        (88, 122)
+    };
+    rect(hwnd, left, top, right, bottom)
+}
+
+fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
+    let index = match interval {
+        60_000 => 0,
+        300_000 => 1,
+        900_000 => 2,
+        _ => 3,
+    };
+    rect(hwnd, 222 + index * 158, 128, 366 + index * 158, 164)
+}
+
+fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
+    rect(hwnd, 812, if weekly { 262 } else { 220 }, 920, if weekly { 294 } else { 252 })
+}
+
+fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
+    let index = match threshold {
+        0 => 0,
+        10 => 1,
+        20 => 2,
+        _ => 3,
+    };
+    rect(hwnd, 222 + index * 158, 346, 366 + index * 158, 382)
+}
+
+fn general_startup_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 812, 416, 920, 448)
 }
 
 fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
