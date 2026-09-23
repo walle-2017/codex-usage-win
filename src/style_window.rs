@@ -42,7 +42,7 @@ pub const WM_SETTINGS_JSON_APPLY: u32 = WM_APP + 132;
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const WINDOW_WIDTH: i32 = 980;
 const WINDOW_HEIGHT: i32 = 700;
-const WINDOW_MIN_WIDTH: i32 = 900;
+const WINDOW_MIN_WIDTH: i32 = 980;
 const WINDOW_MIN_HEIGHT: i32 = 620;
 const ID_EDIT_R: u16 = 300;
 const ID_EDIT_G: u16 = 301;
@@ -466,11 +466,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             }
         };
         let _ = SendMessageW(language_combo, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
-        let system_label = if snapshot.language == LanguageId::SimplifiedChinese {
-            "跟随系统"
-        } else {
-            "System default"
-        };
+        let system_label = snapshot.language.strings().system_default;
         let system_wide = native_interop::wide_str(system_label);
         let _ = SendMessageW(
             language_combo,
@@ -2930,6 +2926,7 @@ unsafe fn paint_general_page(
     secondary: Color,
 ) {
     let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let strings = snapshot.language.strings();
     let general = &snapshot.editable_settings.general;
     let current_interval = match general.refresh_interval.as_str() {
         "1m" => 60_000,
@@ -2941,7 +2938,7 @@ unsafe fn paint_general_page(
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
-        if zh { "常规" } else { "General" },
+        strings.settings,
         rect(hwnd, 200, 18, 940, 48),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
@@ -2967,12 +2964,12 @@ unsafe fn paint_general_page(
     }
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(hdc, if zh { "数据刷新" } else { "Data refresh" }, rect(hwnd, 218, 98, 500, 124), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    for (interval, zh_label, en_label) in [
-        (60_000u32, "1 分钟", "1 min"),
-        (300_000, "5 分钟", "5 min"),
-        (900_000, "15 分钟", "15 min"),
-        (3_600_000, "1 小时", "1 hour"),
+    draw_text(hdc, strings.update_frequency, rect(hwnd, 218, 98, 500, 124), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (interval, label) in [
+        (60_000u32, strings.one_minute),
+        (300_000, strings.five_minutes),
+        (900_000, strings.fifteen_minutes),
+        (3_600_000, strings.one_hour),
     ] {
         let selected = current_interval == interval;
         let target = HitTarget::Refresh(interval);
@@ -2995,7 +2992,7 @@ unsafe fn paint_general_page(
                 },
             ),
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            if zh { zh_label } else { en_label },
+            label,
         );
     }
 
@@ -3072,7 +3069,7 @@ unsafe fn paint_general_page(
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(hdc, if zh { "应用" } else { "Application" }, rect(hwnd, 218, 410, 500, 432), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(hdc, if zh { "开机启动" } else { "Start with Windows" }, rect(hwnd, 238, 416, 650, 448), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, strings.start_with_windows, rect(hwnd, 238, 416, 650, 448), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     let startup = general.start_with_windows;
     draw_segment(
         hdc,
@@ -3101,7 +3098,7 @@ unsafe fn paint_general_page(
             "Off"
         },
     );
-    draw_text(hdc, if zh { "界面语言" } else { "UI language" }, rect(hwnd, 238, 458, 650, 492), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, strings.language, rect(hwnd, 238, 458, 650, 492), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 #[allow(clippy::too_many_arguments)]

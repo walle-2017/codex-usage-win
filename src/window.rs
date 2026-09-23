@@ -178,8 +178,6 @@ const FROSTED_MAX_BLUR_PX: f32 = 20.0;
 const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
 
-const GITHUB_RELEASES_URL: &str =
-    "https://github.com/walle-2017/codex-usage-win/releases";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/walle-2017/codex-usage-win";
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
@@ -1042,22 +1040,6 @@ fn refresh_usage_texts(state: &mut AppState) {
     );
 }
 
-fn github_releases_menu_label(language: LanguageId) -> &'static str {
-    match language {
-        LanguageId::English => "Open GitHub Releases",
-        LanguageId::Dutch => "GitHub Releases openen",
-        LanguageId::Spanish => "Abrir GitHub Releases",
-        LanguageId::French => "Ouvrir GitHub Releases",
-        LanguageId::German => "GitHub Releases öffnen",
-        LanguageId::Japanese => "GitHub Releases を開く",
-        LanguageId::Korean => "GitHub Releases 열기",
-        LanguageId::SimplifiedChinese => "前往 GitHub Releases",
-        LanguageId::TraditionalChinese => "前往 GitHub Releases",
-        LanguageId::Russian => "Открыть GitHub Releases",
-        LanguageId::PortugueseBrazil => "Abrir GitHub Releases",
-    }
-}
-
 fn manual_update_required_message(language: LanguageId, version: &str) -> String {
     match language {
         LanguageId::English => format!(
@@ -1093,21 +1075,6 @@ fn manual_update_required_message(language: LanguageId, version: &str) -> String
         LanguageId::PortugueseBrazil => format!(
             "A versão v{version} está disponível, mas o nome do programa ou do arquivo da versão mudou. A atualização automática não está disponível. Abra o GitHub Releases e atualize manualmente."
         ),
-    }
-}
-
-fn open_github_releases(hwnd: HWND) {
-    unsafe {
-        let operation = native_interop::wide_str("open");
-        let url = native_interop::wide_str(GITHUB_RELEASES_URL);
-        let _ = ShellExecuteW(
-            hwnd,
-            PCWSTR::from_raw(operation.as_ptr()),
-            PCWSTR::from_raw(url.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
     }
 }
 
