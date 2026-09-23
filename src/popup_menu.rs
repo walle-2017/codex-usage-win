@@ -7,7 +7,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+    SetActiveWindow, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -180,7 +180,7 @@ unsafe fn register_window_class() {
     let instance = GetModuleHandleW(PCWSTR::null()).unwrap();
     let class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: CLASS_STYLE(CS_HREDRAW.0 | CS_VREDRAW.0 | CS_DROPSHADOW_VALUE),
+        style: WNDCLASS_STYLES(CS_HREDRAW.0 | CS_VREDRAW.0 | CS_DROPSHADOW_VALUE),
         lpfnWndProc: Some(wnd_proc),
         hInstance: instance.into(),
         hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
@@ -634,7 +634,7 @@ unsafe extern "system" fn wnd_proc(
             let raw = state_ptr(hwnd);
             if !raw.is_null() {
                 let state = &*raw;
-                if state.is_root && (wparam.0 & 0xFFFF) == WA_INACTIVE.0 as usize {
+                if state.is_root && (wparam.0 & 0xFFFF) == WA_INACTIVE as usize {
                     close();
                     return LRESULT(0);
                 }
