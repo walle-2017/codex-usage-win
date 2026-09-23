@@ -5026,6 +5026,90 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
     }
 }
 
+fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(), String> {
+    let settings = settings.validate_and_normalize()?;
+    let poll_interval_ms = match settings.general.refresh_interval.as_str() {
+        "1m" => POLL_1_MIN,
+        "5m" => POLL_5_MIN,
+        "1h" => POLL_1_HOUR,
+        _ => POLL_15_MIN,
+    };
+    let language_override = if settings.general.language == "system" {
+        None
+    } else {
+        LanguageId::ALL
+            .iter()
+            .copied()
+            .find(|language| language.code() == settings.general.language)
+    };
+    if settings.general.language != "system" && language_override.is_none() {
+        return Err(format!(
+            "unsupported language code: {}",
+            settings.general.language
+        ));
+    }
+    let theme_mode = match settings.appearance.theme.as_str() {
+        "dark" => ThemeMode::Dark,
+        "light" => ThemeMode::Light,
+        _ => ThemeMode::System,
+    };
+    let appearance_preset = if settings.appearance.layout == "minimal" {
+        AppearancePreset::Minimal
+    } else {
+        AppearancePreset::Default
+    };
+    let startup_enabled = settings.general.start_with_windows;
+
+    let alerts = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            return Err("application state is unavailable".to_string());
+        };
+        s.poll_interval_ms = poll_interval_ms;
+        s.show_session_window = settings.general.show_usage.session_5h;
+        s.show_weekly_window = settings.general.show_usage.weekly;
+        s.alert_threshold_percent = settings.general.quota_alert_percent;
+        if s.alert_threshold_percent == 0 {
+            s.notified_quota_windows.clear();
+        }
+
+        s.theme_mode = theme_mode;
+        s.is_dark = match theme_mode {
+            ThemeMode::System => theme::is_dark_mode(),
+            ThemeMode::Dark => true,
+            ThemeMode::Light => false,
+        };
+        s.appearance_preset = appearance_preset;
+        s.styles.dark = settings.appearance.dark.to_theme_style();
+        s.styles.light = settings.appearance.light.to_theme_style();
+        apply_language_to_state(s, language_override);
+        refresh_usage_texts(s);
+
+        if s.alert_threshold_percent > 0 {
+            if let Some(data) = s.data.clone() {
+                collect_low_quota_alerts(s, &data)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    };
+
+    set_startup_enabled(startup_enabled);
+    save_state_settings();
+    unsafe {
+        SetTimer(hwnd, TIMER_POLL, poll_interval_ms, None);
+    }
+    hide_minimal_usage_tooltip();
+    position_at_taskbar();
+    render_layered();
+    sync_tray_icons(hwnd);
+    notify_quota_alerts(hwnd, &alerts);
+    style_window::sync(style_settings_snapshot());
+    Ok(())
+}
+
 fn show_context_menu(hwnd: HWND) {
     unsafe {
         let (
