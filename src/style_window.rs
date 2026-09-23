@@ -825,17 +825,22 @@ fn row_rect(hwnd: HWND, index: usize) -> RECT {
     )
 }
 
-fn editor_box_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 382, 940, 590)
+fn editor_top(section: Section) -> i32 {
+    382 + (rows(section).len() as i32 - 3) * 50
 }
 
-fn color_slider_track_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 429 + channel_index as i32 * 40;
+fn editor_box_rect(hwnd: HWND, section: Section) -> RECT {
+    let top = editor_top(section);
+    rect(hwnd, 200, top, 940, top + 208)
+}
+
+fn color_slider_track_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
+    let top = editor_top(section) + 47 + channel_index as i32 * 40;
     rect(hwnd, 330, top, 790, top + 4)
 }
 
-fn color_slider_hit_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let track = color_slider_track_rect(hwnd, channel_index);
+fn color_slider_hit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
+    let track = color_slider_track_rect(hwnd, section, channel_index);
     RECT {
         left: track.left - scale(hwnd, 8),
         top: track.top - scale(hwnd, 10),
@@ -898,8 +903,8 @@ fn hex_edit_rect(hwnd: HWND, row_index: usize) -> RECT {
     }
 }
 
-fn numeric_edit_frame_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let top = 416 + channel_index as i32 * 40;
+fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
+    let top = editor_top(section) + 34 + channel_index as i32 * 40;
     rect(hwnd, 812, top, 920, top + 28)
 }
 
@@ -1008,8 +1013,8 @@ fn general_startup_rect(hwnd: HWND) -> RECT {
     rect(hwnd, 812, 464, 920, 496)
 }
 
-fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
-    let frame = numeric_edit_frame_rect(hwnd, channel_index);
+fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
+    let frame = numeric_edit_frame_rect(hwnd, section, channel_index);
     RECT {
         left: frame.left + scale(hwnd, 3),
         top: frame.top + scale(hwnd, 3),
@@ -1025,12 +1030,13 @@ fn is_appearance_section(section: Section) -> bool {
     )
 }
 
-fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, bool, bool)> {
+fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, Section, bool, bool)> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let s = state.as_ref()?;
     Some((
         s.numeric_edits,
         s.blur_edit,
+        s.section,
         matches!(
             s.section,
             Section::Panel | Section::Text | Section::Progress | Section::Interaction
@@ -1065,7 +1071,7 @@ fn layout_numeric_edits(hwnd: HWND) {
     // Copy every HWND and visibility decision while STATE is locked, then release
     // the mutex before calling Win32. ShowWindow/SetFocus can synchronously send
     // WM_COMMAND focus notifications back into this window procedure.
-    let Some((numeric_edits, blur_edit, show_color, show_blur)) = editor_layout_snapshot() else {
+    let Some((numeric_edits, blur_edit, section, show_color, show_blur)) = editor_layout_snapshot() else {
         return;
     };
 
@@ -1079,7 +1085,7 @@ fn layout_numeric_edits(hwnd: HWND) {
 
     unsafe {
         for (index, edit) in numeric_edits.iter().enumerate() {
-            let r = numeric_edit_rect(hwnd, index);
+            let r = numeric_edit_rect(hwnd, section, index);
             let _ = SetWindowPos(
                 edit.to_hwnd(),
                 HWND::default(),
@@ -2528,7 +2534,7 @@ fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
         return None;
     };
     for index in 0..4 {
-        if pt_in_rect(color_slider_hit_rect(hwnd, index), x, y) {
+        if pt_in_rect(color_slider_hit_rect(hwnd, section, index), x, y) {
             return Some(match index {
                 0 => SliderKind::Red,
                 1 => SliderKind::Green,
@@ -2569,7 +2575,11 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
                     SliderKind::Alpha => 3,
                     SliderKind::Blur => return,
                 };
-                let value = slider_value_from_x(color_slider_track_rect(hwnd, index), x, u8::MAX);
+                let value = slider_value_from_x(
+                    color_slider_track_rect(hwnd, s.section, index),
+                    x,
+                    u8::MAX,
+                );
                 let current = s.snapshot.active_style.color(target);
                 let color = match kind {
                     SliderKind::Red => Color::rgba(value, current.g, current.b, current.a),
@@ -4037,10 +4047,11 @@ unsafe fn paint_appearance_page(
         );
     }
     if matches!(editor, EditorSelection::Color(_)) {
-        fill(hdc, editor_box_rect(hwnd), card);
+        fill(hdc, editor_box_rect(hwnd, section), card);
         paint_numeric_edit_frames(
             hdc,
             hwnd,
+            section,
             snapshot.is_dark,
             focused_numeric_edit,
             track_background,
@@ -4049,6 +4060,7 @@ unsafe fn paint_appearance_page(
         paint_editor(
             hdc,
             hwnd,
+            section,
             snapshot,
             editor,
             EditorPalette {
@@ -4338,6 +4350,7 @@ unsafe fn paint_hex_edit_frames(
 unsafe fn paint_numeric_edit_frames(
     hdc: HDC,
     hwnd: HWND,
+    section: Section,
     is_dark: bool,
     focused: Option<usize>,
     border: Color,
@@ -4350,7 +4363,7 @@ unsafe fn paint_numeric_edit_frames(
     };
 
     for index in 0..4 {
-        let frame = numeric_edit_frame_rect(hwnd, index);
+        let frame = numeric_edit_frame_rect(hwnd, section, index);
         fill(hdc, frame, background);
         draw_outline_rect(
             hdc,
@@ -4381,6 +4394,7 @@ unsafe fn paint_blur_edit_frame(
 unsafe fn paint_editor(
     hdc: HDC,
     hwnd: HWND,
+    section: Section,
     snapshot: &StyleWindowSnapshot,
     editor: EditorSelection,
     palette: EditorPalette,
@@ -4395,19 +4409,30 @@ unsafe fn paint_editor(
     } = palette;
     let color = snapshot.active_style.color(target);
     let values = [color.r, color.g, color.b, color.a];
+    let editor_top = editor_top(section);
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        if snapshot.language == LanguageId::SimplifiedChinese {
+            "颜色通道"
+        } else {
+            "Color channels"
+        },
+        rect(hwnd, 218, editor_top + 6, 420, editor_top + 32),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
-        let top = 336 + index as i32 * 32;
-        let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+        let center = editor_top + 49 + index as i32 * 40;
         draw_text(
             hdc,
             label,
-            rect(hwnd, 196, top, 220, top + 22),
+            rect(hwnd, 224, center - 14, 272, center + 14),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
         draw_slider(
             hdc,
             hwnd,
-            color_slider_track_rect(hwnd, index),
+            color_slider_track_rect(hwnd, section, index),
             value,
             u8::MAX,
             track_background,
