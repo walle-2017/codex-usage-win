@@ -196,10 +196,12 @@ r#"{{
     // {refresh_options}
     "refresh_interval": {refresh},
 
-    // {session_desc}
-    // {bool_options}; {usage_rule}
+    // {usage_group_desc}
     "show_usage": {{
+      // {session_desc}
+      // {bool_options}; {usage_rule}
       "session_5h": {session},
+
       // {weekly_desc}
       // {bool_options}; {usage_rule}
       "weekly": {weekly}
@@ -248,6 +250,7 @@ r#"{{
             refresh_desc = localized(zh, "自动刷新额度数据的时间间隔", "Automatic usage refresh interval"),
             refresh_options = localized(zh, "可选：1m | 5m | 15m | 1h", "Options: 1m | 5m | 15m | 1h"),
             refresh = q(&g.refresh_interval),
+            usage_group_desc = localized(zh, "任务栏组件中显示的额度类型", "Quota types shown in the taskbar widget"),
             session_desc = localized(zh, "是否显示 5 小时额度", "Show the 5-hour quota"),
             weekly_desc = localized(zh, "是否显示每周额度", "Show the weekly quota"),
             bool_options = localized(zh, "可选：true | false", "Options: true | false"),
