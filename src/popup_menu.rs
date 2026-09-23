@@ -337,11 +337,11 @@ unsafe fn install_dismiss_hooks() {
     uninstall_dismiss_hooks();
 
     let module = GetModuleHandleW(PCWSTR::null()).unwrap();
-    if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(dismiss_mouse_hook), module.into(), 0) {
+    if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(dismiss_mouse_hook), module, 0) {
         DISMISS_MOUSE_HOOK.store(hook.0 as isize, Ordering::Release);
     }
     if let Ok(hook) =
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(dismiss_keyboard_hook), module.into(), 0)
+        SetWindowsHookExW(WH_KEYBOARD_LL, Some(dismiss_keyboard_hook), module, 0)
     {
         DISMISS_KEYBOARD_HOOK.store(hook.0 as isize, Ordering::Release);
     }
