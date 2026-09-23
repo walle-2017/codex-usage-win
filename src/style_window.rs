@@ -5,7 +5,7 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST,
@@ -53,6 +53,55 @@ const ID_EDIT_HEX_BASE: u16 = 320;
 const HEX_EDIT_COUNT: usize = 11;
 const ID_EDIT_JSON: u16 = 400;
 const JSON_EDIT_LIMIT: usize = 262_144;
+const RICH_EDIT_CLASS: &str = "RICHEDIT50W";
+const EM_SETBKGNDCOLOR_MSG: u32 = WM_USER + 67;
+const EM_SETCHARFORMAT_MSG: u32 = WM_USER + 68;
+const EM_EXGETSEL_MSG: u32 = WM_USER + 52;
+const EM_EXSETSEL_MSG: u32 = WM_USER + 55;
+const EM_LINEINDEX_MSG: u32 = 0x00BB;
+const SCF_SELECTION_FLAG: usize = 0x0001;
+const CFM_COLOR_MASK: u32 = 0x40000000;
+
+#[repr(C)]
+#[derive(Default)]
+struct RichCharFormatW {
+    cb_size: u32,
+    dw_mask: u32,
+    dw_effects: u32,
+    y_height: i32,
+    y_offset: i32,
+    cr_text_color: COLORREF,
+    b_char_set: u8,
+    b_pitch_and_family: u8,
+    sz_face_name: [u16; 32],
+    w_weight: u16,
+    s_spacing: i16,
+    cr_back_color: COLORREF,
+    lcid: u32,
+    reserved: u32,
+    s_style: i16,
+    w_kerning: u16,
+    b_underline_type: u8,
+    b_animation: u8,
+    b_rev_author: u8,
+    b_underline_color: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RichCharRange {
+    cp_min: i32,
+    cp_max: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonTokenKind {
+    Comment,
+    Key,
+    String,
+    Number,
+    Keyword,
+}
 const EN_SETFOCUS_CODE: u16 = 0x0100;
 const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
@@ -439,9 +488,17 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
 
+        let msftedit = native_interop::wide_str("Msftedit.dll");
+        if LoadLibraryW(PCWSTR::from_raw(msftedit.as_ptr())).is_err() {
+            let _ = DestroyWindow(hwnd);
+            let _ = DeleteObject(font);
+            let _ = DeleteObject(json_font);
+            return;
+        }
+        let rich_edit_class = native_interop::wide_str(RICH_EDIT_CLASS);
         let json_edit = match CreateWindowExW(
             WS_EX_CLIENTEDGE,
-            PCWSTR::from_raw(edit_class.as_ptr()),
+            PCWSTR::from_raw(rich_edit_class.as_ptr()),
             PCWSTR::from_raw(empty.as_ptr()),
             WINDOW_STYLE(
                 WS_CHILD.0
@@ -450,7 +507,8 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                     | ES_MULTILINE as u32
                     | ES_AUTOVSCROLL as u32
                     | ES_AUTOHSCROLL as u32
-                    | ES_WANTRETURN as u32,
+                    | ES_WANTRETURN as u32
+                    | ES_NOHIDESEL as u32,
             ),
             0,
             0,
@@ -471,6 +529,17 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
+        let json_background = if snapshot.is_dark {
+            Color::from_hex("#1E1E1EFF")
+        } else {
+            Color::from_hex("#FFFFFFFF")
+        };
+        let _ = SendMessageW(
+            json_edit,
+            EM_SETBKGNDCOLOR_MSG,
+            WPARAM(0),
+            LPARAM(json_background.to_colorref() as isize),
+        );
 
         let edit_background = if snapshot.is_dark {
             Color::from_hex("#20242AFF")
