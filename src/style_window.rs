@@ -3170,11 +3170,7 @@ unsafe fn paint(hwnd: HWND) {
 
     draw_text(
         hdc,
-        if snapshot.language == LanguageId::SimplifiedChinese {
-            "设置"
-        } else {
-            "Settings"
-        },
+        snapshot.language.strings().settings,
         rect(hwnd, 20, 16, 160, 46),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );

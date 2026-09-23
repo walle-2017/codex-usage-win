@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -5254,14 +5255,14 @@ unsafe fn append_owner_draw_menu_item(
     text: String,
     separator: bool,
     submenu: bool,
-    storage: &mut Vec<Box<MenuDrawItem>>,
+    storage: &mut Vec<Rc<MenuDrawItem>>,
 ) {
-    let item = Box::new(MenuDrawItem {
+    let item = Rc::new(MenuDrawItem {
         text,
         separator,
         submenu,
     });
-    let data_ptr = (&*item as *const MenuDrawItem).cast::<u16>();
+    let data_ptr = Rc::as_ptr(&item).cast::<u16>();
     let _ = AppendMenuW(
         menu,
         flags | MF_OWNERDRAW,
@@ -5365,7 +5366,7 @@ fn show_context_menu(hwnd: HWND) {
 
         let menu = CreatePopupMenu().unwrap();
         let version_menu = CreatePopupMenu().unwrap();
-        let mut draw_items: Vec<Box<MenuDrawItem>> = Vec::new();
+        let mut draw_items: Vec<Rc<MenuDrawItem>> = Vec::new();
 
         append_owner_draw_menu_item(
             menu,
