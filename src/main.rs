@@ -2,10 +2,12 @@
 
 mod appearance;
 mod diagnose;
+mod fonts;
 mod localization;
 mod models;
 mod native_interop;
 mod poller;
+mod popup_menu;
 mod settings_model;
 mod system_proxy;
 mod style;
@@ -31,6 +33,8 @@ fn main() {
         }
     }
     system_proxy::apply_windows_system_proxy_env();
+    let bundled_fonts = fonts::init();
+    diagnose::log(format!("bundled_fonts_registered={bundled_fonts}"));
     diagnose::log("entering window::run");
     window::run();
 }

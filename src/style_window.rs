@@ -17,6 +17,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::AppearancePreset;
+use crate::fonts;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
 use crate::settings_model::{parse_jsonc, EditableSettings, EditableThemeStyle};
@@ -338,7 +339,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
-        let font_name = native_interop::wide_str("Segoe UI");
+        let font_name = native_interop::wide_str(fonts::ui_face(snapshot.language));
         let font = CreateFontW(
             -s(14),
             0,
@@ -355,7 +356,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
-        let mono_name = native_interop::wide_str("Consolas");
+        let mono_name = native_interop::wide_str(fonts::mono_face());
         let json_font = CreateFontW(
             -s(13),
             0,

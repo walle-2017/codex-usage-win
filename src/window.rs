@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,10 +12,7 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
-use windows::Win32::UI::Controls::{
-    InitCommonControls, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_GRAYED,
-    ODS_SELECTED, ODT_MENU,
-};
+use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
@@ -26,12 +22,14 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::{self, AppearancePreset};
 use crate::diagnose;
+use crate::fonts;
 use crate::localization::{self, LanguageId, Strings};
 use crate::models::AppUsageData;
 use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TRAY, WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
+use crate::popup_menu::{self, PopupItem};
 use crate::settings_model::{
     EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
     EDITABLE_SETTINGS_SCHEMA_VERSION,
@@ -188,21 +186,6 @@ const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
-
-struct MenuDrawItem {
-    text: String,
-    separator: bool,
-    submenu: bool,
-}
-
-#[derive(Clone, Copy)]
-struct MenuPalette {
-    background: Color,
-    hover: Color,
-    text: Color,
-    disabled: Color,
-    separator: Color,
-}
 
 /// How often the watchdog thread polls for an explorer.exe restart (which
 /// recreates the taskbar and wipes our tray-icon registration).
@@ -2593,7 +2576,7 @@ fn paint_content(
         let single_row_y = (height - sc(SEGMENT_H)) / 2;
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let font_name = native_interop::wide_str("Segoe UI");
+        let font_name = native_interop::wide_str(fonts::taskbar_face());
         let font = CreateFontW(
             sc(metrics.font_height),
             0,
@@ -3146,7 +3129,7 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
             let _ = DeleteObject(background);
             let _ = DeleteObject(border);
 
-            let font_name = native_interop::wide_str("Segoe UI");
+            let font_name = native_interop::wide_str(fonts::taskbar_face());
             let font = CreateFontW(
                 sc(-12),
                 0,
@@ -4070,28 +4053,6 @@ unsafe extern "system" fn wnd_proc(
         WM_RBUTTONUP => {
             show_context_menu(hwnd);
             LRESULT(0)
-        }
-        WM_MEASUREITEM => {
-            let measure = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
-            if measure.CtlType == ODT_MENU && measure.itemData != 0 {
-                let item = &*(measure.itemData as *const MenuDrawItem);
-                measure.itemWidth = sc(220).max(1) as u32;
-                measure.itemHeight = if item.separator {
-                    sc(10).max(1) as u32
-                } else {
-                    sc(32).max(1) as u32
-                };
-                return LRESULT(1);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        WM_DRAWITEM => {
-            let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
-            if draw.CtlType == ODT_MENU && draw.itemData != 0 {
-                draw_owner_draw_menu_item(draw);
-                return LRESULT(1);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_COMMAND => {
             let id = wparam.0 as u16;
@@ -5228,296 +5189,75 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 }
 
 
-fn windows_menu_palette() -> MenuPalette {
-    if theme::is_dark_mode() {
-        MenuPalette {
-            background: Color::from_hex("#202020FF"),
-            hover: Color::from_hex("#333333FF"),
-            text: Color::from_hex("#F2F2F2FF"),
-            disabled: Color::from_hex("#858585FF"),
-            separator: Color::from_hex("#3A3A3AFF"),
-        }
-    } else {
-        MenuPalette {
-            background: Color::from_hex("#F9F9F9FF"),
-            hover: Color::from_hex("#E9E9E9FF"),
-            text: Color::from_hex("#202020FF"),
-            disabled: Color::from_hex("#8A8A8AFF"),
-            separator: Color::from_hex("#D8D8D8FF"),
-        }
-    }
-}
-
-unsafe fn append_owner_draw_menu_item(
-    menu: HMENU,
-    flags: MENU_ITEM_FLAGS,
-    id: usize,
-    text: String,
-    separator: bool,
-    submenu: bool,
-    storage: &mut Vec<Rc<MenuDrawItem>>,
-) {
-    let item = Rc::new(MenuDrawItem {
-        text,
-        separator,
-        submenu,
-    });
-    let data_ptr = Rc::as_ptr(&item).cast::<u16>();
-    let _ = AppendMenuW(
-        menu,
-        flags | MF_OWNERDRAW,
-        id,
-        PCWSTR::from_raw(data_ptr),
-    );
-    storage.push(item);
-}
-
-unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
-    if draw.itemData == 0 {
-        return;
-    }
-    let item = &*(draw.itemData as *const MenuDrawItem);
-    let palette = windows_menu_palette();
-    let selected = draw.itemState.0 & ODS_SELECTED.0 != 0;
-    let disabled = draw.itemState.0 & ODS_DISABLED.0 != 0
-        || draw.itemState.0 & ODS_GRAYED.0 != 0;
-
-    let background = if selected && !disabled {
-        palette.hover
-    } else {
-        palette.background
-    };
-    let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
-    let _ = FillRect(draw.hDC, &draw.rcItem, brush);
-    let _ = DeleteObject(brush);
-
-    if item.separator {
-        let y = (draw.rcItem.top + draw.rcItem.bottom) / 2;
-        let line_brush = CreateSolidBrush(COLORREF(palette.separator.to_colorref()));
-        let line = RECT {
-            left: draw.rcItem.left + 10,
-            top: y,
-            right: draw.rcItem.right - 10,
-            bottom: y + 1,
-        };
-        let _ = FillRect(draw.hDC, &line, line_brush);
-        let _ = DeleteObject(line_brush);
-        return;
-    }
-
-    let foreground = if disabled {
-        palette.disabled
-    } else {
-        palette.text
-    };
-    let _ = SetBkMode(draw.hDC, TRANSPARENT);
-    let _ = SetTextColor(draw.hDC, COLORREF(foreground.to_colorref()));
-
-    let mut text = native_interop::wide_str(&item.text);
-    let text_len = text.len().saturating_sub(1);
-    let mut text_rect = RECT {
-        left: draw.rcItem.left + 14,
-        top: draw.rcItem.top,
-        right: draw.rcItem.right - if item.submenu { 34 } else { 14 },
-        bottom: draw.rcItem.bottom,
-    };
-    let _ = DrawTextW(
-        draw.hDC,
-        &mut text[..text_len],
-        &mut text_rect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-
-    if item.submenu {
-        let mut arrow = native_interop::wide_str("›");
-        let arrow_len = arrow.len().saturating_sub(1);
-        let mut arrow_rect = RECT {
-            left: draw.rcItem.right - 30,
-            top: draw.rcItem.top,
-            right: draw.rcItem.right - 8,
-            bottom: draw.rcItem.bottom,
-        };
-        let _ = DrawTextW(
-            draw.hDC,
-            &mut arrow[..arrow_len],
-            &mut arrow_rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-    }
-}
-
 fn show_context_menu(hwnd: HWND) {
-    unsafe {
-        let (strings, language, available_update_version) = {
-            let state = lock_state();
-            match state.as_ref() {
-                Some(s) => (
-                    s.language.strings(),
-                    s.language,
-                    s.available_update_version.clone(),
-                ),
-                None => (
-                    LanguageId::English.strings(),
-                    LanguageId::English,
-                    None,
-                ),
-            }
-        };
+    let (strings, language, available_update_version) = {
+        let state = lock_state();
+        match state.as_ref() {
+            Some(s) => (
+                s.language.strings(),
+                s.language,
+                s.available_update_version.clone(),
+            ),
+            None => (
+                LanguageId::English.strings(),
+                LanguageId::English,
+                None,
+            ),
+        }
+    };
 
-        let menu = CreatePopupMenu().unwrap();
-        let version_menu = CreatePopupMenu().unwrap();
-        let mut draw_items: Vec<Rc<MenuDrawItem>> = Vec::new();
+    let settings_text = match language {
+        LanguageId::SimplifiedChinese => "设置...",
+        LanguageId::TraditionalChinese => "設定...",
+        _ => "Settings...",
+    };
+    let check_text = match language {
+        LanguageId::SimplifiedChinese => "检查更新",
+        LanguageId::TraditionalChinese => "檢查更新",
+        LanguageId::Japanese => "更新を確認",
+        LanguageId::Korean => "업데이트 확인",
+        _ => "Check for updates",
+    };
+    let github_text = match language {
+        LanguageId::SimplifiedChinese | LanguageId::TraditionalChinese => "前往 GitHub",
+        _ => "Open GitHub",
+    };
+    let version_label = if cfg!(feature = "github-update") {
+        match available_update_version.as_deref() {
+            Some(latest) => format!("v{} --> v{}", env!("CARGO_PKG_VERSION"), latest),
+            None => format!("v{}", env!("CARGO_PKG_VERSION")),
+        }
+    } else {
+        format!("v{} (Microsoft Store)", env!("CARGO_PKG_VERSION"))
+    };
 
-        append_owner_draw_menu_item(
-            menu,
-            MENU_ITEM_FLAGS(0),
-            1,
-            strings.refresh.to_string(),
-            false,
-            false,
-            &mut draw_items,
-        );
-        append_owner_draw_menu_item(
-            menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_RESET_POSITION as usize,
-            strings.reset_position.to_string(),
-            false,
-            false,
-            &mut draw_items,
-        );
-        append_owner_draw_menu_item(
-            menu,
-            MF_SEPARATOR,
-            0,
-            String::new(),
-            true,
-            false,
-            &mut draw_items,
-        );
+    let check_item = if cfg!(feature = "github-update") {
+        PopupItem::command(check_text, IDM_CHECK_UPDATE)
+    } else {
+        PopupItem::disabled_command(check_text, IDM_CHECK_UPDATE)
+    };
 
-        let settings_text = match language {
-            LanguageId::SimplifiedChinese => "设置...",
-            LanguageId::TraditionalChinese => "設定...",
-            _ => "Settings...",
-        };
-        append_owner_draw_menu_item(
-            menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_STYLE_SETTINGS as usize,
-            settings_text.to_string(),
-            false,
-            false,
-            &mut draw_items,
-        );
-        append_owner_draw_menu_item(
-            menu,
-            MF_SEPARATOR,
-            0,
-            String::new(),
-            true,
-            false,
-            &mut draw_items,
-        );
+    let version_items = vec![
+        check_item,
+        PopupItem::command(github_text, IDM_OPEN_RELEASES),
+    ];
+    let items = vec![
+        PopupItem::command(strings.refresh, 1),
+        PopupItem::command(strings.reset_position, IDM_RESET_POSITION),
+        PopupItem::separator(),
+        PopupItem::command(settings_text, IDM_STYLE_SETTINGS),
+        PopupItem::separator(),
+        PopupItem::submenu(version_label, version_items),
+        PopupItem::separator(),
+        PopupItem::command(strings.exit, 2),
+    ];
 
-        let check_text = match language {
-            LanguageId::SimplifiedChinese => "检查更新",
-            LanguageId::TraditionalChinese => "檢查更新",
-            LanguageId::Japanese => "更新を確認",
-            LanguageId::Korean => "업데이트 확인",
-            _ => "Check for updates",
-        };
-        let check_flags = if cfg!(feature = "github-update") {
-            MENU_ITEM_FLAGS(0)
-        } else {
-            MF_GRAYED
-        };
-        append_owner_draw_menu_item(
-            version_menu,
-            check_flags,
-            IDM_CHECK_UPDATE as usize,
-            check_text.to_string(),
-            false,
-            false,
-            &mut draw_items,
-        );
-
-        let github_text = match language {
-            LanguageId::SimplifiedChinese | LanguageId::TraditionalChinese => "前往 GitHub",
-            _ => "Open GitHub",
-        };
-        append_owner_draw_menu_item(
-            version_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_OPEN_RELEASES as usize,
-            github_text.to_string(),
-            false,
-            false,
-            &mut draw_items,
-        );
-
-        let version_label_text = if cfg!(feature = "github-update") {
-            match available_update_version.as_deref() {
-                Some(latest) => format!(
-                    "v{} --> v{}",
-                    env!("CARGO_PKG_VERSION"),
-                    latest
-                ),
-                None => format!("v{}", env!("CARGO_PKG_VERSION")),
-            }
-        } else {
-            format!("v{} (Microsoft Store)", env!("CARGO_PKG_VERSION"))
-        };
-        append_owner_draw_menu_item(
-            menu,
-            MF_POPUP,
-            version_menu.0 as usize,
-            version_label_text,
-            false,
-            true,
-            &mut draw_items,
-        );
-
-        append_owner_draw_menu_item(
-            menu,
-            MF_SEPARATOR,
-            0,
-            String::new(),
-            true,
-            false,
-            &mut draw_items,
-        );
-        append_owner_draw_menu_item(
-            menu,
-            MENU_ITEM_FLAGS(0),
-            2,
-            strings.exit.to_string(),
-            false,
-            false,
-            &mut draw_items,
-        );
-
-        let palette = windows_menu_palette();
-        let menu_brush = CreateSolidBrush(COLORREF(palette.background.to_colorref()));
-        let menu_info = MENUINFO {
-            cbSize: std::mem::size_of::<MENUINFO>() as u32,
-            fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS | MIM_STYLE,
-            dwStyle: MENUINFO_STYLE(0x80000000), // MNS_NOCHECK: remove the native checkmark gutter.
-            hbrBack: menu_brush,
-            ..Default::default()
-        };
-        let _ = SetMenuInfo(menu, &menu_info);
-        let _ = SetMenuInfo(version_menu, &menu_info);
-
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
-
-        let _ = DestroyMenu(menu);
-        let _ = DeleteObject(menu_brush);
-        drop(draw_items);
-    }
+    popup_menu::show(
+        hwnd,
+        items,
+        theme::is_dark_mode(),
+        fonts::ui_face(language),
+    );
 }
 
 /// Paint for non-embedded fallback (normal WM_PAINT path)
@@ -5771,7 +5511,7 @@ fn draw_usage_value_text(
         .unwrap_or((text, None));
 
     unsafe {
-        let font_name = native_interop::wide_str("Segoe UI");
+        let font_name = native_interop::wide_str(fonts::taskbar_face());
         let primary_font = CreateFontW(
             sc(metrics.value_font_height),
             0,
