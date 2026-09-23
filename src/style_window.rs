@@ -549,7 +549,6 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
     layout_settings_children(hwnd);
-    sync_language_combo();
     if !json_dirty {
         reload_json_editor_from_snapshot();
     }
@@ -919,11 +918,11 @@ fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
         900_000 => 2,
         _ => 3,
     };
-    rect(hwnd, 222 + index * 158, 128, 366 + index * 158, 164)
+    rect(hwnd, 222 + index * 158, 140, 366 + index * 158, 176)
 }
 
 fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
-    rect(hwnd, 812, if weekly { 262 } else { 220 }, 920, if weekly { 294 } else { 252 })
+    rect(hwnd, 812, if weekly { 286 } else { 246 }, 920, if weekly { 318 } else { 278 })
 }
 
 fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
@@ -933,11 +932,11 @@ fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
         20 => 2,
         _ => 3,
     };
-    rect(hwnd, 222 + index * 158, 346, 366 + index * 158, 382)
+    rect(hwnd, 222 + index * 158, 382, 366 + index * 158, 418)
 }
 
 fn general_startup_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 812, 416, 920, 448)
+    rect(hwnd, 812, 464, 920, 496)
 }
 
 fn numeric_edit_rect(hwnd: HWND, channel_index: usize) -> RECT {
@@ -1738,10 +1737,22 @@ fn update_blur_from_numeric_edit() {
 }
 
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
-    let section = {
+    let (section, language_popup_open) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.section)?
+        let s = state.as_ref()?;
+        (s.section, s.language_popup_open)
     };
+
+    if section == Section::General && language_popup_open {
+        for index in 0..language_option_count() {
+            if pt_in_rect(language_option_rect(hwnd, index), x, y) {
+                return Some(HitTarget::LanguageOption(index));
+            }
+        }
+        if pt_in_rect(language_button_rect(hwnd), x, y) {
+            return Some(HitTarget::LanguageToggle);
+        }
+    }
 
     for item in [
         Section::General,
@@ -1786,6 +1797,9 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
     }
 
     if section == Section::General {
+        if pt_in_rect(language_button_rect(hwnd), x, y) {
+            return Some(HitTarget::LanguageToggle);
+        }
         for interval in [60_000u32, 300_000, 900_000, 3_600_000] {
             if pt_in_rect(general_refresh_rect(hwnd, interval), x, y) {
                 return Some(HitTarget::Refresh(interval));
@@ -1921,6 +1935,22 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             JsonAction::Export => export_json_file(hwnd),
             JsonAction::Apply => apply_json_editor(),
         },
+        HitTarget::LanguageToggle => {
+            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = state.as_mut() {
+                s.language_popup_open = !s.language_popup_open;
+            }
+        }
+        HitTarget::LanguageOption(index) => {
+            {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.snapshot.editable_settings.general.language = language_code_for_index(index);
+                    s.language_popup_open = false;
+                }
+            }
+            send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
+        }
         HitTarget::Reset => send_parent(WM_STYLE_RESET_CURRENT, 0, 0),
         HitTarget::Close => unsafe {
             send_parent(WM_STYLE_SAVE, 0, 0);
@@ -1974,7 +2004,6 @@ fn set_section(section: Section) {
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
     layout_settings_children(hwnd);
-    sync_language_combo();
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
