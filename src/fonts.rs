@@ -17,12 +17,12 @@ static JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMon
 
 fn register_font(bytes: &'static [u8]) -> bool {
     unsafe {
-        let mut count = 0u32;
+        let count = 0u32;
         let handle = AddFontMemResourceEx(
             bytes.as_ptr().cast::<c_void>(),
             bytes.len() as u32,
             None,
-            &mut count,
+            &count,
         );
         !handle.0.is_null() && count > 0
     }
