@@ -178,7 +178,8 @@ const FROSTED_MAX_BLUR_PX: f32 = 20.0;
 const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
 
-const GITHUB_REPOSITORY_URL: &str = "https://github.com/walle-2017/codex-usage-win";
+const GITHUB_RELEASES_URL: &str =
+    "https://github.com/walle-2017/codex-usage-win/releases";
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
@@ -1078,10 +1079,10 @@ fn manual_update_required_message(language: LanguageId, version: &str) -> String
     }
 }
 
-fn open_github_repository(hwnd: HWND) {
+fn open_github_releases(hwnd: HWND) {
     unsafe {
         let operation = native_interop::wide_str("open");
-        let url = native_interop::wide_str(GITHUB_REPOSITORY_URL);
+        let url = native_interop::wide_str(GITHUB_RELEASES_URL);
         let _ = ShellExecuteW(
             hwnd,
             PCWSTR::from_raw(operation.as_ptr()),
@@ -4088,7 +4089,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 IDM_OPEN_RELEASES => {
-                    open_github_repository(hwnd);
+                    open_github_releases(hwnd);
                 }
                 IDM_RESET_POSITION => {
                     let target = {
