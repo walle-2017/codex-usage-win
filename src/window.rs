@@ -5297,7 +5297,12 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(github.as_ptr()),
         );
 
-        let version = native_interop::wide_str(&format!("v{}", env!("CARGO_PKG_VERSION")));
+        let version_label_text = if cfg!(feature = "github-update") {
+            format!("v{}", env!("CARGO_PKG_VERSION"))
+        } else {
+            format!("v{} (Microsoft Store)", env!("CARGO_PKG_VERSION"))
+        };
+        let version = native_interop::wide_str(&version_label_text);
         let _ = AppendMenuW(
             menu,
             MF_POPUP,
