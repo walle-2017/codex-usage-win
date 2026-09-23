@@ -5313,6 +5313,7 @@ unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
     let _ = SetTextColor(draw.hDC, COLORREF(foreground.to_colorref()));
 
     let mut text = native_interop::wide_str(&item.text);
+    let text_len = text.len().saturating_sub(1);
     let mut text_rect = RECT {
         left: draw.rcItem.left + 14,
         top: draw.rcItem.top,
@@ -5321,13 +5322,14 @@ unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
     };
     let _ = DrawTextW(
         draw.hDC,
-        &mut text[..text.len().saturating_sub(1)],
+        &mut text[..text_len],
         &mut text_rect,
         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
     );
 
     if item.submenu {
         let mut arrow = native_interop::wide_str("›");
+        let arrow_len = arrow.len().saturating_sub(1);
         let mut arrow_rect = RECT {
             left: draw.rcItem.right - 30,
             top: draw.rcItem.top,
@@ -5336,7 +5338,7 @@ unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
         };
         let _ = DrawTextW(
             draw.hDC,
-            &mut arrow[..arrow.len().saturating_sub(1)],
+            &mut arrow[..arrow_len],
             &mut arrow_rect,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
@@ -5499,7 +5501,7 @@ fn show_context_menu(hwnd: HWND) {
         let menu_info = MENUINFO {
             cbSize: std::mem::size_of::<MENUINFO>() as u32,
             fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS | MIM_STYLE,
-            dwStyle: 0x80000000, // MNS_NOCHECK: remove the native checkmark gutter.
+            dwStyle: MENUINFO_STYLE(0x80000000), // MNS_NOCHECK: remove the native checkmark gutter.
             hbrBack: menu_brush,
             ..Default::default()
         };
