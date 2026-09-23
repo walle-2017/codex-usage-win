@@ -5312,7 +5312,7 @@ unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
     let _ = SetBkMode(draw.hDC, TRANSPARENT);
     let _ = SetTextColor(draw.hDC, COLORREF(foreground.to_colorref()));
 
-    let text = native_interop::wide_str(&item.text);
+    let mut text = native_interop::wide_str(&item.text);
     let mut text_rect = RECT {
         left: draw.rcItem.left + 14,
         top: draw.rcItem.top,
@@ -5327,7 +5327,7 @@ unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
     );
 
     if item.submenu {
-        let arrow = native_interop::wide_str("›");
+        let mut arrow = native_interop::wide_str("›");
         let mut arrow_rect = RECT {
             left: draw.rcItem.right - 30,
             top: draw.rcItem.top,
