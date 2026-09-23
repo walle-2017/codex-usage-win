@@ -6,6 +6,10 @@ use crate::style::ThemeStyle;
 
 pub const EDITABLE_SETTINGS_SCHEMA_VERSION: u32 = 1;
 
+fn localized<'a>(zh: bool, zh_text: &'a str, en_text: &'a str) -> &'a str {
+    if zh { zh_text } else { en_text }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditableSettings {
@@ -178,7 +182,6 @@ impl EditableSettings {
 
     pub fn to_jsonc(&self, language: LanguageId) -> String {
         let zh = language == L::SimplifiedChinese;
-        let c = |zh_text: &str, en_text: &str| if zh { zh_text } else { en_text };
         let q = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"?\"".into());
         let g = &self.general;
         let a = &self.appearance;
@@ -241,79 +244,128 @@ r#"{{
   "schema_version": {schema}
 }}
 "#,
-            general_group = c("常规设置", "General settings"),
-            refresh_desc = c("自动刷新额度数据的时间间隔", "Automatic usage refresh interval"),
-            refresh_options = c("可选：1m | 5m | 15m | 1h", "Options: 1m | 5m | 15m | 1h"),
+            general_group = localized(zh, "常规设置", "General settings"),
+            refresh_desc = localized(zh, "自动刷新额度数据的时间间隔", "Automatic usage refresh interval"),
+            refresh_options = localized(zh, "可选：1m | 5m | 15m | 1h", "Options: 1m | 5m | 15m | 1h"),
             refresh = q(&g.refresh_interval),
-            session_desc = c("是否显示 5 小时额度", "Show the 5-hour quota"),
-            weekly_desc = c("是否显示每周额度", "Show the weekly quota"),
-            bool_options = c("可选：true | false", "Options: true | false"),
-            usage_rule = c("5 小时额度和每周额度至少开启一个", "at least one quota must stay enabled"),
+            session_desc = localized(zh, "是否显示 5 小时额度", "Show the 5-hour quota"),
+            weekly_desc = localized(zh, "是否显示每周额度", "Show the weekly quota"),
+            bool_options = localized(zh, "可选：true | false", "Options: true | false"),
+            usage_rule = localized(zh, "5 小时额度和每周额度至少开启一个", "at least one quota must stay enabled"),
             session = g.show_usage.session_5h,
             weekly = g.show_usage.weekly,
-            alert_desc = c("剩余额度达到阈值时发送提醒；0 表示关闭", "Notify when remaining quota reaches the threshold; 0 disables alerts"),
-            alert_options = c("可选：0 | 10 | 20 | 30", "Options: 0 | 10 | 20 | 30"),
+            alert_desc = localized(zh, "剩余额度达到阈值时发送提醒；0 表示关闭", "Notify when remaining quota reaches the threshold; 0 disables alerts"),
+            alert_options = localized(zh, "可选：0 | 10 | 20 | 30", "Options: 0 | 10 | 20 | 30"),
             alert = g.quota_alert_percent,
-            startup_desc = c("是否随 Windows 启动", "Start with Windows"),
+            startup_desc = localized(zh, "是否随 Windows 启动", "Start with Windows"),
             startup = g.start_with_windows,
-            language_desc = c("界面语言", "UI language"),
-            language_options = c(
+            language_desc = localized(zh, "界面语言", "UI language"),
+            language_options = localized(zh, 
                 "可选：system | en | nl | es | fr | de | ja | ko | zh-CN | zh-TW | ru | pt-BR",
                 "Options: system | en | nl | es | fr | de | ja | ko | zh-CN | zh-TW | ru | pt-BR",
             ),
             language = q(&g.language),
-            appearance_group = c("外观设置", "Appearance settings"),
-            theme_desc = c("主题模式", "Theme mode"),
-            theme_options = c("可选：system | dark | light", "Options: system | dark | light"),
+            appearance_group = localized(zh, "外观设置", "Appearance settings"),
+            theme_desc = localized(zh, "主题模式", "Theme mode"),
+            theme_options = localized(zh, "可选：system | dark | light", "Options: system | dark | light"),
             theme = q(&a.theme),
-            layout_desc = c("组件排版", "Widget layout"),
-            layout_options = c("可选：default | minimal", "Options: default | minimal"),
+            layout_desc = localized(zh, "组件排版", "Widget layout"),
+            layout_options = localized(zh, "可选：default | minimal", "Options: default | minimal"),
             layout = q(&a.layout),
-            dark_desc = c("深色主题可编辑样式", "Editable dark-theme style"),
-            light_desc = c("浅色主题可编辑样式", "Editable light-theme style"),
+            dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
+            light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
             dark_json = theme_jsonc(dark, zh, 6),
             light_json = theme_jsonc(light, zh, 6),
-            schema_desc = c("公开配置结构版本", "Public configuration schema version"),
-            schema_options = c("固定值：1", "Fixed value: 1"),
+            schema_desc = localized(zh, "公开配置结构版本", "Public configuration schema version"),
+            schema_options = localized(zh, "固定值：1", "Fixed value: 1"),
             schema = self.schema_version,
         )
     }
 }
 
+fn push_color_jsonc(
+    lines: &mut Vec<String>,
+    pad: &str,
+    zh: bool,
+    comment: &str,
+    key: &str,
+    value: &str,
+    comma: bool,
+) {
+    let quoted = serde_json::to_string(value).unwrap_or_else(|_| "\"?\"".into());
+    lines.push(format!("{pad}// {comment}"));
+    lines.push(format!(
+        "{pad}// {}",
+        localized(
+            zh,
+            "格式：#RRGGBB 或 #RRGGBBAA",
+            "Format: #RRGGBB or #RRGGBBAA"
+        )
+    ));
+    lines.push(format!(
+        "{pad}\"{key}\": {quoted}{}",
+        if comma { "," } else { "" }
+    ));
+    lines.push(String::new());
+}
+
 fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
     let pad = " ".repeat(indent);
-    let c = |zh_text: &str, en_text: &str| if zh { zh_text } else { en_text };
-    let q = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"?\"".into());
     let mut lines = Vec::new();
-    let mut push_color = |comment: &str, key: &str, value: &str, comma: bool| {
-        lines.push(format!("{pad}// {comment}"));
-        lines.push(format!(
-            "{pad}// {}",
-            c("格式：#RRGGBB 或 #RRGGBBAA", "Format: #RRGGBB or #RRGGBBAA")
-        ));
-        lines.push(format!(
-            "{pad}\"{key}\": {}{}",
-            q(value),
-            if comma { "," } else { "" }
-        ));
-        lines.push(String::new());
-    };
 
-    push_color(c("面板背景颜色", "Panel background color"), "panel_background", &style.panel_background, true);
-    push_color(c("面板边框颜色", "Panel border color"), "panel_border", &style.panel_border, true);
-    lines.push(format!("{pad}// {}", c("磨砂强度", "Frosted intensity")));
-    lines.push(format!("{pad}// {}", c("范围：0–100", "Range: 0–100")));
-    lines.push(format!("{pad}\"frosted_strength\": {},", style.frosted_strength));
+    push_color_jsonc(
+        &mut lines,
+        &pad,
+        zh,
+        localized(zh, "面板背景颜色", "Panel background color"),
+        "panel_background",
+        &style.panel_background,
+        true,
+    );
+    push_color_jsonc(
+        &mut lines,
+        &pad,
+        zh,
+        localized(zh, "面板边框颜色", "Panel border color"),
+        "panel_border",
+        &style.panel_border,
+        true,
+    );
+    lines.push(format!(
+        "{pad}// {}",
+        localized(zh, "磨砂强度", "Frosted intensity")
+    ));
+    lines.push(format!(
+        "{pad}// {}",
+        localized(zh, "范围：0–100", "Range: 0–100")
+    ));
+    lines.push(format!(
+        "{pad}\"frosted_strength\": {},",
+        style.frosted_strength
+    ));
     lines.push(String::new());
-    push_color(c("额度类型文字颜色", "Quota-type text color"), "quota_type", &style.quota_type, true);
-    push_color(c("剩余额度文字颜色", "Remaining-quota text color"), "remaining", &style.remaining, true);
-    push_color(c("重置时间文字颜色", "Reset-time text color"), "reset_time", &style.reset_time, true);
-    push_color(c("异常状态文字颜色", "Error-state text color"), "error", &style.error, true);
-    push_color(c("充足额度颜色", "High-quota color"), "progress_high", &style.progress_high, true);
-    push_color(c("中等额度颜色", "Medium-quota color"), "progress_medium", &style.progress_medium, true);
-    push_color(c("低额度颜色", "Low-quota color"), "progress_low", &style.progress_low, true);
-    push_color(c("已消耗部分颜色", "Consumed-progress color"), "progress_consumed", &style.progress_consumed, true);
-    push_color(c("拖拽点颜色", "Drag-handle color"), "drag_handle", &style.drag_handle, false);
+
+    for (comment_zh, comment_en, key, value, comma) in [
+        ("额度类型文字颜色", "Quota-type text color", "quota_type", style.quota_type.as_str(), true),
+        ("剩余额度文字颜色", "Remaining-quota text color", "remaining", style.remaining.as_str(), true),
+        ("重置时间文字颜色", "Reset-time text color", "reset_time", style.reset_time.as_str(), true),
+        ("异常状态文字颜色", "Error-state text color", "error", style.error.as_str(), true),
+        ("充足额度颜色", "High-quota color", "progress_high", style.progress_high.as_str(), true),
+        ("中等额度颜色", "Medium-quota color", "progress_medium", style.progress_medium.as_str(), true),
+        ("低额度颜色", "Low-quota color", "progress_low", style.progress_low.as_str(), true),
+        ("已消耗部分颜色", "Consumed-progress color", "progress_consumed", style.progress_consumed.as_str(), true),
+        ("拖拽点颜色", "Drag-handle color", "drag_handle", style.drag_handle.as_str(), false),
+    ] {
+        push_color_jsonc(
+            &mut lines,
+            &pad,
+            zh,
+            localized(zh, comment_zh, comment_en),
+            key,
+            value,
+            comma,
+        );
+    }
 
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
