@@ -2354,6 +2354,40 @@ unsafe extern "system" fn wnd_proc(
         WM_COMMAND => {
             let control_id = (wparam.0 & 0xFFFF) as u16;
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
+
+            if control_id == ID_COMBO_LANGUAGE && notification == CBN_SELCHANGE_CODE {
+                let combo = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.as_ref().map(|s| s.language_combo.to_hwnd())
+                };
+                if let Some(combo) = combo {
+                    let selected =
+                        SendMessageW(combo, CB_GETCURSEL_MSG, WPARAM(0), LPARAM(0)).0 as isize;
+                    if selected >= 0 {
+                        let index = selected as usize;
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.snapshot.editable_settings.general.language = if index == 0 {
+                                    "system".to_string()
+                                } else {
+                                    LanguageId::ALL
+                                        .get(index - 1)
+                                        .map(|language| language.code().to_string())
+                                        .unwrap_or_else(|| "system".to_string())
+                                };
+                            }
+                        }
+                        send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
+                        return LRESULT(0);
+                    }
+                }
+            }
+
+            if control_id == ID_EDIT_JSON && notification == EN_CHANGE_CODE {
+                update_json_validation_status(true);
+                return LRESULT(0);
+            }
             if let Some(target) = target_from_hex_control_id(control_id) {
                 match notification {
                     EN_CHANGE_CODE => {
@@ -2496,18 +2530,33 @@ unsafe extern "system" fn wnd_proc(
             );
             layout_numeric_edits(hwnd);
             layout_hex_edits(hwnd);
+            layout_settings_children(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            layout_settings_children(hwnd);
+            let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            let info = &mut *(lparam.0 as *mut MINMAXINFO);
+            info.ptMinTrackSize.x = scale(hwnd, WINDOW_MIN_WIDTH);
+            info.ptMinTrackSize.y = scale(hwnd, WINDOW_MIN_HEIGHT);
             LRESULT(0)
         }
         WM_CLOSE => LRESULT(0),
         WM_DESTROY => {
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.take().map(|s| (s.font, s.edit_brush))
+                state.take().map(|s| (s.font, s.json_font, s.edit_brush))
             };
-            if let Some((font, edit_brush)) = resources {
+            if let Some((font, json_font, edit_brush)) = resources {
                 if font != 0 {
                     let _ = DeleteObject(HGDIOBJ(font as *mut _));
+                }
+                if json_font != 0 {
+                    let _ = DeleteObject(HGDIOBJ(json_font as *mut _));
                 }
                 if edit_brush != 0 {
                     let _ = DeleteObject(HGDIOBJ(edit_brush as *mut _));
