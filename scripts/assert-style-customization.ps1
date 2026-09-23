@@ -20,9 +20,9 @@ if ($windowProduction -notmatch 'IDM_THEME_SYSTEM' -or
 }
 if ($styleWindow -notmatch '"排版"' -or
     $styleWindow -notmatch '"主题"' -or
-    $windowProduction -notmatch '"样式\.\.\."' -or
-    $windowProduction -notmatch '"Style\.\.\."') {
-    throw 'Unified panel Theme/Layout labels and the native Style submenu entry must be present.'
+    $windowProduction -notmatch '"设置\.\.\."' -or
+    $windowProduction -notmatch '"Settings\.\.\."') {
+    throw 'Unified settings must retain appearance Theme/Layout controls and expose one top-level Settings entry.'
 }
 if ($styleProduction -notmatch 'enum\s+ThemePreset' -or
     $styleProduction -notmatch 'Classic' -or
@@ -72,12 +72,14 @@ if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'StyleWindowSnapshot' -or
     $styleWindow -notmatch 'WM_STYLE_COLOR_PREVIEW' -or
     $styleWindow -notmatch 'WM_STYLE_BLUR_PREVIEW' -or
+    $styleWindow -notmatch 'Section::General' -or
     $styleWindow -notmatch 'Section::Preset' -or
     $styleWindow -notmatch 'Section::Panel' -or
     $styleWindow -notmatch 'Section::Text' -or
     $styleWindow -notmatch 'Section::Progress' -or
-    $styleWindow -notmatch 'Section::Interaction') {
-    throw 'Unified style settings panel contract is missing.'
+    $styleWindow -notmatch 'Section::Interaction' -or
+    $styleWindow -notmatch 'Section::Json') {
+    throw 'Unified General/Appearance/Advanced settings center contract is missing.'
 }
 if ($windowProduction -match 'AppendMenuW\([\s\S]{0,180}theme_menu' -or
     $windowProduction -match 'AppendMenuW\([\s\S]{0,180}layout_menu') {
@@ -117,9 +119,9 @@ if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'update_color_from_numeric_edit\(') {
     throw 'RGBA values must use linked numeric inputs that are created hidden and shown only on editor pages.'
 }
-if ($styleWindow -notmatch 'if\s+s\.section\s*==\s*Section::Preset\s*\{\s*return;\s*\}' -or
+if ($styleWindow -notmatch 'Section::General\s*\|\s*Section::Preset\s*\|\s*Section::Json' -or
     $styleWindow -notmatch 'preset_page_can_open_paint_and_destroy_without_editor_reentry') {
-    throw 'Preset-page startup must avoid hidden EDIT synchronization and keep a real Win32 open/paint/destroy smoke test.'
+    throw 'Non-color settings pages must avoid hidden EDIT synchronization and keep the Win32 open/paint/destroy smoke test.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_HEX_BASE' -or
     $styleWindow -notmatch 'HEX_EDIT_COUNT:\s*usize\s*=\s*11' -or
@@ -163,10 +165,9 @@ if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     $styleWindow -match '"当前强度"' -or
     $styleWindow -match '"Current"' -or
     $styleWindow -notmatch 'blur_slider_track_rect\(hwnd\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 292, 224, 646, 228\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 654, 210, 714, 238\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 722, 210, 746, 238\)' -or
-    $styleWindow -notmatch 'matches!\(editor, EditorSelection::Color\(_\)\)\s*&&\s*section\s*!=\s*Section::Preset') {
+    $styleWindow -notmatch 'rect\(hwnd, 322, 270, 744, 274\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 778, 256, 844, 284\)' -or
+    $styleWindow -notmatch 'matches!\(editor, EditorSelection::Color\(_\)\)') {
     throw 'Blur must stay inline in its row and must never render a lower secondary editor.'
 }
 if ($styleWindow -notmatch 'select_editor\(EditorSelection::Blur\)' -or
@@ -199,13 +200,12 @@ if ($windowProduction -notmatch 'WM_SETCURSOR' -or
     throw 'Small-taskbar click-to-toggle mode must expose a hand cursor outside the drag handle.'
 }
 if ($windowProduction -match 'MF_OWNERDRAW' -or
-    $windowProduction -match 'WM_MEASUREITEM' -or
-    $windowProduction -match 'draw_style_settings_menu_item\(') {
-    throw 'Style must remain a plain native menu item.'
+    $windowProduction -match 'WM_MEASUREITEM') {
+    throw 'Settings must remain a native HMENU instead of a custom owner-drawn menu.'
 }
-if ($windowProduction -notmatch 'AppendMenuW\(\s*settings_menu,[\s\S]{0,180}IDM_STYLE_SETTINGS' -or
-    $windowProduction -match 'AppendMenuW\(\s*menu,[\s\S]{0,180}IDM_STYLE_SETTINGS') {
-    throw 'Style must live only inside the Settings submenu.'
+if ($windowProduction -notmatch 'AppendMenuW\(\s*menu,[\s\S]{0,180}IDM_STYLE_SETTINGS' -or
+    $windowProduction -match 'settings_menu') {
+    throw 'Unified Settings must be a single top-level tray-menu entry with no legacy Settings submenu.'
 }
 foreach ($hex in @('#E9EEF4FF', '#DCE5EFFF', '#CBD7E4FF', '#C1CCD8FF', '#EEF3F8FF')) {
     if ($styleWindow -notmatch [regex]::Escape($hex)) {
@@ -219,10 +219,10 @@ if ($styleWindow -notmatch 'WS_CLIPCHILDREN' -or
     throw 'Style panel must use clipped child controls and double-buffered painting to reduce flicker.'
 }
 if ($styleWindow -notmatch 'WM_APP \+ 120' -or
-    $styleWindow -notmatch 'WM_APP \+ 123' -or
     $styleWindow -notmatch 'WM_APP \+ 126' -or
+    $styleWindow -notmatch 'WM_APP \+ 132' -or
     $styleWindow -notmatch 'draw_slider\(') {
-    throw 'Style panel messages must use a collision-free WM_APP range and self-drawn sliders.'
+    throw 'Unified settings messages must use a collision-free WM_APP range and appearance must keep self-drawn sliders.'
 }
 if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -notmatch 'pub\s+light:\s+ThemeStyle') {
     throw 'Dark and light theme styles must be stored separately.'
@@ -442,6 +442,56 @@ if ($windowProduction -notmatch 'reset_active\(s\.is_dark\)') {
 }
 if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)') {
     throw 'Style menu/rendering must resolve the currently active theme.'
+}
+
+
+$settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
+if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
+    $styleWindow -notmatch 'WS_THICKFRAME' -or
+    $styleWindow -notmatch '"常规"' -or
+    $styleWindow -notmatch '"JSON 配置"' -or
+    $styleWindow -notmatch 'ID_COMBO_LANGUAGE' -or
+    $styleWindow -notmatch 'ID_EDIT_JSON') {
+    throw 'Unified settings window must provide resizable General, Appearance, and JSON pages.'
+}
+foreach ($message in @(
+    'WM_SETTINGS_REFRESH_CHANGE',
+    'WM_SETTINGS_USAGE_CHANGE',
+    'WM_SETTINGS_ALERT_CHANGE',
+    'WM_SETTINGS_STARTUP_CHANGE',
+    'WM_SETTINGS_LANGUAGE_CHANGE',
+    'WM_SETTINGS_JSON_APPLY'
+)) {
+    if ($styleWindow -notmatch $message -or $windowProduction -notmatch $message) {
+        throw "Unified settings message is not connected end-to-end: $message"
+    }
+}
+if ($styleWindow -notmatch '"当前自定义"' -or
+    $styleWindow -notmatch '"Current custom"' -or
+    $styleWindow -notmatch 'paint_style_preview_card\(' -or
+    $styleWindow -notmatch 'if\s+!matched') {
+    throw 'Preset page must dynamically show a current custom preview only when no official preset matches.'
+}
+if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
+    $settingsModel -notmatch 'strip_jsonc_comments' -or
+    $settingsModel -notmatch 'parse_jsonc' -or
+    $settingsModel -notmatch 'show_usage.*cannot both be false' -or
+    $settingsModel -notmatch 'expected #RRGGBB or #RRGGBBAA' -or
+    $settingsModel -notmatch 'to_jsonc') {
+    throw 'Advanced JSONC settings must use a strict public schema, safe comment parsing, and business validation.'
+}
+if ($styleWindow -notmatch 'GetOpenFileNameW' -or
+    $styleWindow -notmatch 'GetSaveFileNameW' -or
+    $styleWindow -notmatch 'reload_json_editor_from_snapshot' -or
+    $styleWindow -notmatch 'format_json_editor' -or
+    $styleWindow -notmatch 'apply_json_editor') {
+    throw 'JSON settings page must support reload, format, import, export, and validated apply.'
+}
+if ($windowProduction -notmatch 'MIM_BACKGROUND\s*\|\s*MIM_APPLYTOSUBMENUS' -or
+    $windowProduction -notmatch 'theme::is_dark_mode\(\)' -or
+    $windowProduction -notmatch 'format!\("v\{\}"' -or
+    $windowProduction -notmatch 'MF_POPUP[\s\S]{0,180}version_menu') {
+    throw 'Tray menu must follow Windows Dark/Light and expose the version as a submenu.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
