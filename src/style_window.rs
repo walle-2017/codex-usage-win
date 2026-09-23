@@ -1,10 +1,14 @@
 use std::sync::Mutex;
+use std::{fs, path::PathBuf};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
@@ -14,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::appearance::AppearancePreset;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
+use crate::settings_model::{parse_jsonc, EditableSettings};
 use crate::style::{
     StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
@@ -26,10 +31,18 @@ pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
 pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
+pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
+pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
+pub const WM_SETTINGS_ALERT_CHANGE: u32 = WM_APP + 129;
+pub const WM_SETTINGS_STARTUP_CHANGE: u32 = WM_APP + 130;
+pub const WM_SETTINGS_LANGUAGE_CHANGE: u32 = WM_APP + 131;
+pub const WM_SETTINGS_JSON_APPLY: u32 = WM_APP + 132;
 
-const WINDOW_CLASS: &str = "CodexUsageStyleSettingsV1";
-const WINDOW_WIDTH: i32 = 820;
-const WINDOW_HEIGHT: i32 = 570;
+const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
+const WINDOW_WIDTH: i32 = 980;
+const WINDOW_HEIGHT: i32 = 700;
+const WINDOW_MIN_WIDTH: i32 = 900;
+const WINDOW_MIN_HEIGHT: i32 = 620;
 const ID_EDIT_R: u16 = 300;
 const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
@@ -37,6 +50,13 @@ const ID_EDIT_A: u16 = 303;
 const ID_EDIT_BLUR: u16 = 304;
 const ID_EDIT_HEX_BASE: u16 = 320;
 const HEX_EDIT_COUNT: usize = 11;
+const ID_COMBO_LANGUAGE: u16 = 360;
+const ID_EDIT_JSON: u16 = 400;
+const CBN_SELCHANGE_CODE: u16 = 1;
+const CB_ADDSTRING_MSG: u32 = 0x0143;
+const CB_GETCURSEL_MSG: u32 = 0x0147;
+const CB_SETCURSEL_MSG: u32 = 0x014E;
+const JSON_EDIT_LIMIT: usize = 262_144;
 const EN_SETFOCUS_CODE: u16 = 0x0100;
 const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
@@ -52,15 +72,18 @@ pub struct StyleWindowSnapshot {
     pub is_dark: bool,
     pub appearance_preset: AppearancePreset,
     pub active_style: ThemeStyle,
+    pub editable_settings: EditableSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
+    General,
     Preset,
     Panel,
     Text,
     Progress,
     Interaction,
+    Json,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,12 +102,27 @@ enum SliderKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonAction {
+    Reload,
+    Format,
+    Import,
+    Export,
+    Apply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitTarget {
     Theme(ThemeMode),
     Layout(AppearancePreset),
     Preset(ThemePreset),
     Section(Section),
     Row(EditorSelection),
+    Refresh(u32),
+    UsageSession,
+    UsageWeekly,
+    Alert(u8),
+    Startup,
+    Json(JsonAction),
     Reset,
     Close,
 }
@@ -117,6 +155,8 @@ struct PanelState {
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
+    language_combo: SendHwnd,
+    json_edit: SendHwnd,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
     focused_hex_edit: Option<StyleColorTarget>,
@@ -124,13 +164,25 @@ struct PanelState {
     syncing_numeric_edits: bool,
     syncing_blur_edit: bool,
     syncing_hex_edits: bool,
+    syncing_json_edit: bool,
+    json_dirty: bool,
+    json_status: String,
     edit_brush: isize,
     font: isize,
+    json_font: isize,
 }
 
 unsafe impl Send for PanelState {}
 
 static STATE: Mutex<Option<PanelState>> = Mutex::new(None);
+static PENDING_EDITABLE_SETTINGS: Mutex<Option<EditableSettings>> = Mutex::new(None);
+
+pub fn take_pending_editable_settings() -> Option<EditableSettings> {
+    PENDING_EDITABLE_SETTINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
 
 #[derive(Clone, Copy)]
 struct EditorPalette {
