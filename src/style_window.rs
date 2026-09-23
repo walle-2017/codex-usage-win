@@ -1420,8 +1420,128 @@ fn reload_json_editor_from_snapshot() {
     write_json_editor(&text, status, false);
 }
 
+
+fn json_error_location(error: &str) -> Option<(usize, usize)> {
+    let rest = error.strip_prefix("line ")?;
+    let (line, rest) = rest.split_once(", column ")?;
+    let (column, _) = rest.split_once(':')?;
+    Some((line.trim().parse().ok()?, column.trim().parse().ok()?))
+}
+
+fn friendly_json_error(error: &str, language: LanguageId) -> String {
+    let zh = language == LanguageId::SimplifiedChinese;
+    let location = json_error_location(error);
+    let raw_detail = error
+        .split_once(": ")
+        .map(|(_, detail)| detail)
+        .unwrap_or(error);
+
+    let detail = if raw_detail.contains("control character") {
+        if zh {
+            "字符串中包含非法控制字符。请检查这一行的引号、换行或转义字符。".to_string()
+        } else {
+            "A string contains an invalid control character. Check quotes, line breaks, and escapes on this line.".to_string()
+        }
+    } else if raw_detail.contains("unknown field") {
+        let field = raw_detail
+            .split(char::from(96u8))
+            .nth(1)
+            .unwrap_or("?");
+        if zh {
+            format!("未知配置项：{field}。请检查属性名是否拼写正确。")
+        } else {
+            format!("Unknown setting: {field}. Check the property name.")
+        }
+    } else if raw_detail.contains("expected #RRGGBB or #RRGGBBAA") {
+        if zh {
+            "颜色格式无效。允许 #RRGGBB 或 #RRGGBBAA。".to_string()
+        } else {
+            "Invalid color format. Use #RRGGBB or #RRGGBBAA.".to_string()
+        }
+    } else if raw_detail.contains("frosted_strength: allowed range is 0-100") {
+        if zh {
+            "磨砂强度超出范围。允许范围：0–100。".to_string()
+        } else {
+            "Frosted intensity is out of range. Allowed range: 0–100.".to_string()
+        }
+    } else if raw_detail.contains("session_5h and weekly cannot both be false") {
+        if zh {
+            "显示用量设置无效：5 小时额度和每周额度不能同时关闭。".to_string()
+        } else {
+            "Usage display is invalid: the 5-hour and weekly quotas cannot both be disabled.".to_string()
+        }
+    } else if raw_detail.contains("quota_alert_percent: allowed values") {
+        if zh {
+            "额度提醒值无效。允许：0、10、20、30。".to_string()
+        } else {
+            "Invalid quota alert value. Allowed values: 0, 10, 20, 30.".to_string()
+        }
+    } else if raw_detail.contains("refresh_interval: allowed values") {
+        if zh {
+            "刷新频率无效。允许：1m、5m、15m、1h。".to_string()
+        } else {
+            "Invalid refresh interval. Allowed values: 1m, 5m, 15m, 1h.".to_string()
+        }
+    } else {
+        raw_detail.to_string()
+    };
+
+    if let Some((line, column)) = location {
+        if zh {
+            format!("第 {line} 行，第 {column} 列\n{detail}")
+        } else {
+            format!("Line {line}, column {column}\n{detail}")
+        }
+    } else {
+        detail
+    }
+}
+
+fn locate_json_error(edit: HWND, error: &str) {
+    let Some((line, column)) = json_error_location(error) else {
+        return;
+    };
+    unsafe {
+        let line_index = SendMessageW(
+            edit,
+            EM_LINEINDEX_MSG,
+            WPARAM(line.saturating_sub(1)),
+            LPARAM(0),
+        )
+        .0 as i32;
+        if line_index >= 0 {
+            let start = line_index.saturating_add(column.saturating_sub(1) as i32);
+            rich_set_selection(edit, start, start.saturating_add(1));
+            let _ = SetFocus(edit);
+        }
+    }
+}
+
+fn set_json_status(status: String) {
+    let hwnd = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.json_status = status;
+        s.hwnd.to_hwnd()
+    };
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: LanguageId) -> String {
+    let detail = friendly_json_error(error, language);
+    if language == LanguageId::SimplifiedChinese {
+        format!("× {action_zh}\n{detail}")
+    } else {
+        format!("× {action_en}\n{detail}")
+    }
+}
+
 fn update_json_validation_status(mark_dirty: bool) {
-    let (edit, syncing, language, hwnd) = {
+    let (edit, syncing, language, hwnd, is_dark) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
@@ -1431,22 +1551,33 @@ fn update_json_validation_status(mark_dirty: bool) {
             s.syncing_json_edit,
             s.snapshot.language,
             s.hwnd.to_hwnd(),
+            s.snapshot.is_dark,
         )
     };
     if syncing {
         return;
     }
+
     let text = read_large_edit_text(edit);
+    syntax_highlight_json_editor(edit, &text, is_dark);
     let status = match parse_jsonc(&text) {
         Ok(_) => {
             if language == LanguageId::SimplifiedChinese {
-                "✓ JSON 格式和属性有效".to_string()
+                "✓ 配置有效".to_string()
             } else {
-                "✓ JSON syntax and properties are valid".to_string()
+                "✓ Configuration is valid".to_string()
             }
         }
-        Err(error) => format!("× {error}"),
+        Err(error) => {
+            let detail = friendly_json_error(&error, language);
+            if language == LanguageId::SimplifiedChinese {
+                format!("× 配置存在错误\n{detail}")
+            } else {
+                format!("× Configuration has errors\n{detail}")
+            }
+        }
     };
+
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
@@ -1469,31 +1600,26 @@ fn format_json_editor() {
         };
         (s.json_edit.to_hwnd(), s.snapshot.language)
     };
-    match parse_jsonc(&read_large_edit_text(edit)) {
+    let raw = read_large_edit_text(edit);
+    match parse_jsonc(&raw) {
         Ok(settings) => {
             let text = settings.to_jsonc(language);
             let status = if language == LanguageId::SimplifiedChinese {
-                "✓ 已格式化并恢复完整官方注释".to_string()
+                "✓ 已格式化，并恢复完整官方注释".to_string()
             } else {
                 "✓ Formatted and restored all official comments".to_string()
             };
             write_json_editor(&text, status, true);
         }
-        Err(error) => write_json_status_error(error),
-    }
-}
-
-fn write_json_status_error(error: String) {
-    let hwnd = {
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_mut() else {
-            return;
-        };
-        s.json_status = format!("× {error}");
-        s.hwnd.to_hwnd()
-    };
-    unsafe {
-        let _ = InvalidateRect(hwnd, None, false);
+        Err(error) => {
+            set_json_status(json_action_error(
+                "无法格式化：请先修复配置错误",
+                "Cannot format: fix the configuration first",
+                &error,
+                language,
+            ));
+            locate_json_error(edit, &error);
+        }
     }
 }
 
@@ -1530,6 +1656,7 @@ fn file_dialog(hwnd: HWND, save: bool) -> Option<PathBuf> {
     (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
 }
 
+
 fn import_json_file(hwnd: HWND) {
     let Some(path) = file_dialog(hwnd, false) else {
         return;
@@ -1537,7 +1664,18 @@ fn import_json_file(hwnd: HWND) {
     let text = match fs::read_to_string(&path) {
         Ok(value) => value,
         Err(error) => {
-            write_json_status_error(format!("{}: {error}", path.display()));
+            let language = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .map(|s| s.snapshot.language)
+                    .unwrap_or(LanguageId::English)
+            };
+            set_json_status(if language == LanguageId::SimplifiedChinese {
+                format!("× 无法读取导入文件\n{}：{error}", path.display())
+            } else {
+                format!("× Cannot read imported file\n{}: {error}", path.display())
+            });
             return;
         }
     };
@@ -1548,6 +1686,7 @@ fn import_json_file(hwnd: HWND) {
             .map(|s| s.snapshot.language)
             .unwrap_or(LanguageId::English)
     };
+
     match parse_jsonc(&text) {
         Ok(settings) => {
             let standard = settings.to_jsonc(language);
@@ -1558,7 +1697,22 @@ fn import_json_file(hwnd: HWND) {
             };
             write_json_editor(&standard, status, true);
         }
-        Err(error) => write_json_status_error(error),
+        Err(error) => {
+            let status = json_action_error(
+                "导入文件存在错误，可直接在编辑器中修复",
+                "Imported file has errors; edit it directly below",
+                &error,
+                language,
+            );
+            write_json_editor(&text, status, true);
+            let edit = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.json_edit.to_hwnd())
+            };
+            if let Some(edit) = edit {
+                locate_json_error(edit, &error);
+            }
+        }
     }
 }
 
@@ -1570,13 +1724,21 @@ fn export_json_file(hwnd: HWND) {
         };
         (s.json_edit.to_hwnd(), s.snapshot.language)
     };
-    let settings = match parse_jsonc(&read_large_edit_text(edit)) {
+    let raw = read_large_edit_text(edit);
+    let settings = match parse_jsonc(&raw) {
         Ok(value) => value,
         Err(error) => {
-            write_json_status_error(error);
+            set_json_status(json_action_error(
+                "无法导出：配置存在错误",
+                "Cannot export: configuration has errors",
+                &error,
+                language,
+            ));
+            locate_json_error(edit, &error);
             return;
         }
     };
+
     let Some(mut path) = file_dialog(hwnd, true) else {
         return;
     };
@@ -1586,23 +1748,27 @@ fn export_json_file(hwnd: HWND) {
     let json = match settings.to_pretty_json() {
         Ok(value) => value,
         Err(error) => {
-            write_json_status_error(error);
+            set_json_status(if language == LanguageId::SimplifiedChinese {
+                format!("× 无法导出\n{error}")
+            } else {
+                format!("× Cannot export\n{error}")
+            });
             return;
         }
     };
     match fs::write(&path, json) {
         Ok(()) => {
-            let status = if language == LanguageId::SimplifiedChinese {
+            set_json_status(if language == LanguageId::SimplifiedChinese {
                 format!("✓ 已导出纯 JSON：{}", path.display())
             } else {
                 format!("✓ Exported plain JSON: {}", path.display())
-            };
-            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = state.as_mut() {
-                s.json_status = status;
-            }
+            });
         }
-        Err(error) => write_json_status_error(format!("{}: {error}", path.display())),
+        Err(error) => set_json_status(if language == LanguageId::SimplifiedChinese {
+            format!("× 无法写入导出文件\n{}：{error}", path.display())
+        } else {
+            format!("× Cannot write exported file\n{}: {error}", path.display())
+        }),
     }
 }
 
@@ -1614,10 +1780,17 @@ fn apply_json_editor() {
         };
         (s.json_edit.to_hwnd(), s.snapshot.language)
     };
-    let settings = match parse_jsonc(&read_large_edit_text(edit)) {
+    let raw = read_large_edit_text(edit);
+    let settings = match parse_jsonc(&raw) {
         Ok(value) => value,
         Err(error) => {
-            write_json_status_error(error);
+            set_json_status(json_action_error(
+                "无法应用：配置存在错误",
+                "Cannot apply: configuration has errors",
+                &error,
+                language,
+            ));
+            locate_json_error(edit, &error);
             return;
         }
     };
@@ -1629,9 +1802,9 @@ fn apply_json_editor() {
     }
     let standard = settings.to_jsonc(language);
     let status = if language == LanguageId::SimplifiedChinese {
-        "✓ 配置有效，正在应用".to_string()
+        "✓ 配置有效，已提交应用".to_string()
     } else {
-        "✓ Configuration valid; applying".to_string()
+        "✓ Configuration is valid and has been submitted".to_string()
     };
     write_json_editor(&standard, status, false);
     send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
