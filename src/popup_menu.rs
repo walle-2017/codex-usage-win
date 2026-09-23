@@ -5,7 +5,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SetActiveWindow, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, VK_ESCAPE,
 };
@@ -20,6 +20,8 @@ const OUTER_PADDING: i32 = 8;
 const ITEM_HEIGHT: i32 = 40;
 const SEPARATOR_HEIGHT: i32 = 14;
 const ITEM_RADIUS: i32 = 6;
+const SUBMENU_GAP: i32 = 2;
+const SHADOW_CLEARANCE: i32 = 6;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const CS_DROPSHADOW_VALUE: u32 = 0x0002_0000;
 const DWMWA_WINDOW_CORNER_PREFERENCE_VALUE: i32 = 33;
@@ -129,6 +131,25 @@ fn dpi_for_target(target: HWND) -> u32 {
     unsafe {
         let dpi = GetDpiForWindow(target);
         if dpi == 0 { 96 } else { dpi }
+    }
+}
+
+unsafe fn dpi_for_point(point: POINT, fallback_target: HWND) -> u32 {
+    let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    let mut dpi_x = 0;
+    let mut dpi_y = 0;
+    if GetDpiForMonitor(
+        monitor,
+        MDT_EFFECTIVE_DPI,
+        &mut dpi_x,
+        &mut dpi_y,
+    )
+    .is_ok()
+        && dpi_x > 0
+    {
+        dpi_x
+    } else {
+        dpi_for_target(fallback_target)
     }
 }
 
@@ -250,13 +271,22 @@ unsafe fn open_submenu(hwnd: HWND, index: usize) {
     close_submenu(state);
 
     let dpi = GetDpiForWindow(hwnd).max(96);
-    let width = scale_for_dpi(ROOT_WIDTH, dpi);
-    let row = item_rect(&state.items, index, width, dpi);
-    let mut origin = POINT {
-        x: row.right,
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let row = item_rect(&state.items, index, client.right.max(1), dpi);
+    let mut row_origin = POINT {
+        x: row.left,
         y: row.top,
     };
-    let _ = ClientToScreen(hwnd, &mut origin);
+    let _ = ClientToScreen(hwnd, &mut row_origin);
+
+    let mut parent_rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut parent_rect);
+
+    let width = scale_for_dpi(SUBMENU_WIDTH, dpi);
+    let height = menu_height(&items, dpi);
+    let work = inset_work_area(menu_work_area(row_origin), dpi);
+    let position = submenu_position(parent_rect, row_origin.y, width, height, work, dpi);
 
     let submenu = create_window(
         state.command_target,
@@ -265,10 +295,8 @@ unsafe fn open_submenu(hwnd: HWND, index: usize) {
         state.dark,
         state.font_face.clone(),
         false,
-        POINT {
-            x: origin.x - scale_for_dpi(2, dpi),
-            y: origin.y - scale_for_dpi(OUTER_PADDING, dpi),
-        },
+        position,
+        dpi,
     );
     if !submenu.0.is_null() {
         state.submenu_hwnd = Some(submenu);
@@ -293,6 +321,75 @@ unsafe fn menu_work_area(point: POINT) -> RECT {
     }
 }
 
+fn inset_work_area(work: RECT, dpi: u32) -> RECT {
+    let margin = scale_for_dpi(SHADOW_CLEARANCE, dpi);
+    let mut inset = work;
+    if work.right - work.left > margin * 2 {
+        inset.left += margin;
+        inset.right -= margin;
+    }
+    if work.bottom - work.top > margin * 2 {
+        inset.top += margin;
+        inset.bottom -= margin;
+    }
+    inset
+}
+
+fn clamp_origin(value: i32, size: i32, min: i32, max: i32) -> i32 {
+    value.clamp(min, (max - size).max(min))
+}
+
+fn flipped_axis_position(primary: i32, flipped: i32, size: i32, min: i32, max: i32) -> i32 {
+    if primary >= min && primary + size <= max {
+        primary
+    } else if flipped >= min && flipped + size <= max {
+        flipped
+    } else {
+        clamp_origin(primary, size, min, max)
+    }
+}
+
+fn root_position(anchor: POINT, width: i32, height: i32, work: RECT) -> POINT {
+    POINT {
+        x: flipped_axis_position(anchor.x, anchor.x - width, width, work.left, work.right),
+        y: flipped_axis_position(anchor.y, anchor.y - height, height, work.top, work.bottom),
+    }
+}
+
+fn submenu_position(
+    parent: RECT,
+    row_top: i32,
+    width: i32,
+    height: i32,
+    work: RECT,
+    dpi: u32,
+) -> POINT {
+    let gap = scale_for_dpi(SUBMENU_GAP, dpi);
+    let right_x = parent.right + gap;
+    let left_x = parent.left - width - gap;
+
+    let x = if right_x + width <= work.right {
+        right_x
+    } else if left_x >= work.left {
+        left_x
+    } else {
+        let right_space = work.right.saturating_sub(parent.right + gap);
+        let left_space = (parent.left - gap).saturating_sub(work.left);
+        let preferred = if left_space > right_space {
+            left_x
+        } else {
+            right_x
+        };
+        clamp_origin(preferred, width, work.left, work.right)
+    };
+
+    let desired_y = row_top - scale_for_dpi(OUTER_PADDING, dpi);
+    POINT {
+        x,
+        y: clamp_origin(desired_y, height, work.top, work.bottom),
+    }
+}
+
 unsafe fn create_window(
     command_target: HWND,
     root_hwnd: HWND,
@@ -300,26 +397,16 @@ unsafe fn create_window(
     dark: bool,
     font_face: String,
     is_root: bool,
-    desired: POINT,
+    position: POINT,
+    dpi: u32,
 ) -> HWND {
     register_window_class();
 
-    let dpi = dpi_for_target(command_target);
     let logical_width = if is_root { ROOT_WIDTH } else { SUBMENU_WIDTH };
     let width = scale_for_dpi(logical_width, dpi);
     let height = menu_height(&items, dpi);
-    let work = menu_work_area(desired);
-
-    let mut x = desired.x;
-    let mut y = desired.y;
-    if x + width > work.right {
-        x = (desired.x - width).max(work.left);
-    }
-    if y + height > work.bottom {
-        y = (work.bottom - height).max(work.top);
-    }
-    x = x.clamp(work.left, (work.right - width).max(work.left));
-    y = y.clamp(work.top, (work.bottom - height).max(work.top));
+    let x = position.x;
+    let y = position.y;
 
     let state = Box::new(PopupState {
         command_target,
@@ -387,11 +474,15 @@ pub fn show(
     items: Vec<PopupItem>,
     dark: bool,
     font_face: impl Into<String>,
+    anchor: POINT,
 ) {
     unsafe {
         close();
-        let mut point = POINT::default();
-        let _ = GetCursorPos(&mut point);
+        let dpi = dpi_for_point(anchor, command_target);
+        let width = scale_for_dpi(ROOT_WIDTH, dpi);
+        let height = menu_height(&items, dpi);
+        let work = inset_work_area(menu_work_area(anchor), dpi);
+        let position = root_position(anchor, width, height, work);
         let hwnd = create_window(
             command_target,
             HWND::default(),
@@ -399,7 +490,8 @@ pub fn show(
             dark,
             font_face.into(),
             true,
-            point,
+            position,
+            dpi,
         );
         if hwnd.0.is_null() {
             return;
@@ -662,5 +754,54 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+
+#[cfg(test)]
+mod positioning_tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn root_menu_flips_above_and_left_of_click_near_bottom_right() {
+        let work = rect(0, 0, 1920, 1040);
+        let position = root_position(POINT { x: 1800, y: 900 }, 300, 320, work);
+        assert_eq!(position.x, 1500);
+        assert_eq!(position.y, 580);
+    }
+
+    #[test]
+    fn root_menu_keeps_click_as_origin_when_space_is_available() {
+        let work = rect(0, 0, 1920, 1040);
+        let position = root_position(POINT { x: 400, y: 240 }, 300, 320, work);
+        assert_eq!(position.x, 400);
+        assert_eq!(position.y, 240);
+    }
+
+    #[test]
+    fn submenu_moves_left_without_overlapping_parent_when_right_side_is_full() {
+        let work = rect(0, 0, 1920, 1040);
+        let parent = rect(1500, 120, 1800, 470);
+        let position = submenu_position(parent, 260, 238, 120, work, 96);
+        assert_eq!(position.x, 1260);
+        assert!(position.x + 238 < parent.left);
+    }
+
+    #[test]
+    fn submenu_prefers_right_side_when_it_fits() {
+        let work = rect(0, 0, 1920, 1040);
+        let parent = rect(200, 120, 500, 470);
+        let position = submenu_position(parent, 260, 238, 120, work, 96);
+        assert_eq!(position.x, 502);
+        assert!(position.x > parent.right);
     }
 }

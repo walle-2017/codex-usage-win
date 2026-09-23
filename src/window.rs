@@ -4051,7 +4051,12 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_RBUTTONUP => {
-            show_context_menu(hwnd);
+            let mut anchor = POINT {
+                x: (lparam.0 & 0xFFFF) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+            };
+            let _ = ClientToScreen(hwnd, &mut anchor);
+            show_context_menu(hwnd, anchor);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -4314,7 +4319,9 @@ unsafe extern "system" fn wnd_proc(
         _ if msg == WM_APP_TRAY => {
             match tray_icon::handle_message(lparam) {
                 tray_icon::TrayAction::ShowContextMenu => {
-                    show_context_menu(hwnd);
+                    let mut anchor = POINT::default();
+                    let _ = GetCursorPos(&mut anchor);
+                    show_context_menu(hwnd, anchor);
                 }
                 tray_icon::TrayAction::None => {}
             }
@@ -5189,7 +5196,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 }
 
 
-fn show_context_menu(hwnd: HWND) {
+fn show_context_menu(hwnd: HWND, anchor: POINT) {
     let (strings, language, available_update_version) = {
         let state = lock_state();
         match state.as_ref() {
@@ -5257,6 +5264,7 @@ fn show_context_menu(hwnd: HWND) {
         items,
         theme::is_dark_mode(),
         fonts::ui_face(language),
+        anchor,
     );
 }
 
