@@ -2601,6 +2601,7 @@ unsafe fn paint(hwnd: HWND) {
         focused_blur_edit,
         focused_hex_edit,
         invalid_hex_edits,
+        json_status,
         font,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -2618,6 +2619,7 @@ unsafe fn paint(hwnd: HWND) {
             s.focused_blur_edit,
             s.focused_hex_edit,
             s.invalid_hex_edits,
+            s.json_status.clone(),
             s.font,
         )
     };
@@ -2627,6 +2629,11 @@ unsafe fn paint(hwnd: HWND) {
         Color::from_hex("#1F2125FF")
     } else {
         Color::from_hex("#E9EEF4FF")
+    };
+    let sidebar = if dark {
+        Color::from_hex("#191B1FFF")
+    } else {
+        Color::from_hex("#F5F7FAFF")
     };
     let card = if dark {
         Color::from_hex("#292C31FF")
@@ -2665,6 +2672,26 @@ unsafe fn paint(hwnd: HWND) {
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
     fill(hdc, client, background);
+    fill(
+        hdc,
+        RECT {
+            left: 0,
+            top: 0,
+            right: scale(hwnd, 180),
+            bottom: client.bottom,
+        },
+        sidebar,
+    );
+    fill(
+        hdc,
+        RECT {
+            left: scale(hwnd, 179),
+            top: 0,
+            right: scale(hwnd, 180),
+            bottom: client.bottom,
+        },
+        track_background,
+    );
 
     let old_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
     let _ = SetBkMode(hdc, TRANSPARENT);
@@ -2673,293 +2700,107 @@ unsafe fn paint(hwnd: HWND) {
     draw_text(
         hdc,
         if snapshot.language == LanguageId::SimplifiedChinese {
-            "样式设置"
+            "设置"
         } else {
-            "Style settings"
+            "Settings"
         },
-        rect(hwnd, 20, 14, 150, 42),
+        rect(hwnd, 20, 16, 160, 46),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        if snapshot.language == LanguageId::SimplifiedChinese {
+            "外观"
+        } else {
+            "Appearance"
+        },
+        rect(hwnd, 20, 148, 166, 176),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     draw_text(
         hdc,
-        if snapshot.language == LanguageId::SimplifiedChinese { "主题" } else { "Theme" },
-        rect(hwnd, 170, 18, 230, 42),
+        if snapshot.language == LanguageId::SimplifiedChinese {
+            "高级"
+        } else {
+            "Advanced"
+        },
+        rect(hwnd, 20, 446, 166, 474),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-    draw_text(
+
+    paint_navigation(
         hdc,
-        if snapshot.language == LanguageId::SimplifiedChinese { "排版" } else { "Layout" },
-        rect(hwnd, 540, 18, 600, 42),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        hwnd,
+        &snapshot,
+        section,
+        hovered,
+        pressed,
+        background,
+        card_hover,
+        card_pressed,
+        accent,
+        primary,
+        secondary,
     );
 
-    for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
-        let selected = snapshot.theme_mode == mode;
-        let target = HitTarget::Theme(mode);
-        let button_bg = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment(
-            hdc,
-            theme_rect(hwnd, mode),
-            selected,
-            button_bg,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            match (snapshot.language == LanguageId::SimplifiedChinese, mode) {
-                (true, ThemeMode::System) => "跟随系统",
-                (true, ThemeMode::Dark) => "深色",
-                (true, ThemeMode::Light) => "浅色",
-                (false, ThemeMode::System) => "System",
-                (false, ThemeMode::Dark) => "Dark",
-                (false, ThemeMode::Light) => "Light",
-            },
-        );
-    }
-
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
-        let selected = snapshot.appearance_preset == preset;
-        let target = HitTarget::Layout(preset);
-        let button_bg = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment(
-            hdc,
-            layout_rect(hwnd, preset),
-            selected,
-            button_bg,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            match (snapshot.language == LanguageId::SimplifiedChinese, preset) {
-                (true, AppearancePreset::Default) => "默认",
-                (true, AppearancePreset::Minimal) => "极简",
-                (false, AppearancePreset::Default) => "Default",
-                (false, AppearancePreset::Minimal) => "Minimal",
-            },
-        );
-    }
-
-    for item in [
-        Section::Preset,
-        Section::Panel,
-        Section::Text,
-        Section::Progress,
-        Section::Interaction,
-    ] {
-        let selected = item == section;
-        let r = section_rect(hwnd, item);
-        let target = HitTarget::Section(item);
-        let section_bg = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: background,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: card_hover,
-                selected_hover: card_hover,
-                selected_pressed: card_pressed,
-            },
-        );
-        fill(hdc, r, section_bg);
-        if selected {
-            let bar = RECT {
-                right: r.left + scale(hwnd, 3),
-                ..r
-            };
-            fill(hdc, bar, accent);
-        }
-        let _ = SetTextColor(
-            hdc,
-            COLORREF(if selected { primary } else { secondary }.to_colorref()),
-        );
-        draw_text(
-            hdc,
-            section_label(item, snapshot.language),
-            RECT {
-                left: r.left + scale(hwnd, 14),
-                ..r
-            },
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-    }
-
-    if section == Section::Preset {
-        paint_preset_gallery(
+    match section {
+        Section::General => paint_general_page(
             hdc,
             hwnd,
             &snapshot,
             hovered,
             pressed,
-            PresetGalleryPalette {
-                card,
-                card_hover,
-                card_pressed,
-                border: track_background,
-                accent,
-                primary,
-            },
-        );
-    } else {
-        for (index, row) in rows(section).iter().copied().enumerate() {
-        let r = row_rect(hwnd, index);
-        let selected = row == editor;
-        let target = HitTarget::Row(row);
-        let row_bg = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: card_hover,
-                selected_hover: card_hover,
-                selected_pressed: card_pressed,
-            },
-        );
-        fill(hdc, r, row_bg);
-        let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-        draw_text(
-            hdc,
-            row_label(row, snapshot.language),
-            RECT {
-                left: r.left + scale(hwnd, 14),
-                right: r.left + scale(hwnd, 230),
-                ..r
-            },
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-
-        match row {
-            EditorSelection::Color(target) => {
-                let color = snapshot.active_style.color(target);
-                let swatch = RECT {
-                    left: r.right - scale(hwnd, 170),
-                    top: r.top + scale(hwnd, 9),
-                    right: r.right - scale(hwnd, 140),
-                    bottom: r.bottom - scale(hwnd, 9),
-                };
-                fill(hdc, swatch, color);
-            }
-            EditorSelection::Blur => {
-                draw_slider(
-                    hdc,
-                    hwnd,
-                    blur_slider_track_rect(hwnd),
-                    snapshot.active_style.panel_frosted_strength,
-                    FROSTED_STRENGTH_MAX,
-                    track_background,
-                    accent,
-                );
-                let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-                draw_text(
-                    hdc,
-                    "%",
-                    rect(hwnd, 722, 210, 746, 238),
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
-        }
-    }
-    }
-
-    if section != Section::Preset {
-        paint_hex_edit_frames(
+            card,
+            card_hover,
+            card_pressed,
+            accent,
+            accent_hover,
+            accent_pressed,
+            primary,
+            secondary,
+        ),
+        Section::Json => paint_json_page(
             hdc,
             hwnd,
+            &snapshot,
+            &json_status,
+            hovered,
+            pressed,
+            card,
+            card_hover,
+            card_pressed,
+            accent,
+            accent_hover,
+            accent_pressed,
+            primary,
+            secondary,
+        ),
+        _ => paint_appearance_page(
+            hdc,
+            hwnd,
+            &snapshot,
             section,
-            snapshot.is_dark,
+            editor,
+            hovered,
+            pressed,
+            focused_numeric_edit,
+            focused_blur_edit,
             focused_hex_edit,
             &invalid_hex_edits,
-            EditFramePalette {
-                border: track_background,
-                accent,
-            },
-        );
-    }
-    if section == Section::Panel {
-        paint_blur_edit_frame(
-            hdc,
-            hwnd,
-            snapshot.is_dark,
-            focused_blur_edit,
+            card,
+            card_hover,
+            card_pressed,
             track_background,
             accent,
-        );
-    }
-    if matches!(editor, EditorSelection::Color(_)) && section != Section::Preset {
-        let editor_box = editor_box_rect(hwnd);
-        fill(hdc, editor_box, card);
-        paint_numeric_edit_frames(
-            hdc,
-            hwnd,
-            snapshot.is_dark,
-            focused_numeric_edit,
-            track_background,
-            accent,
-        );
-        paint_editor(
-            hdc,
-            hwnd,
-            &snapshot,
-            editor,
-            EditorPalette {
-                secondary,
-                track_background,
-                accent,
-            },
-        );
+            accent_hover,
+            accent_pressed,
+            primary,
+            secondary,
+        ),
     }
 
-    draw_segment(
-        hdc,
-        reset_rect(hwnd),
-        false,
-        button_background(
-            HitTarget::Reset,
-            false,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: card,
-                selected_hover: card_hover,
-                selected_pressed: card_pressed,
-            },
-        ),
-        primary,
-        if snapshot.language == LanguageId::SimplifiedChinese {
-            "恢复当前主题默认"
-        } else {
-            "Reset theme"
-        },
-    );
     draw_segment(
         hdc,
         close_rect(hwnd),
@@ -2987,22 +2828,630 @@ unsafe fn paint(hwnd: HWND) {
     );
 
     SelectObject(hdc, old_font);
-
-    let _ = BitBlt(
-        screen_hdc,
-        0,
-        0,
-        width,
-        height,
-        hdc,
-        0,
-        0,
-        SRCCOPY,
-    );
+    let _ = BitBlt(screen_hdc, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
     SelectObject(hdc, old_bitmap);
     let _ = DeleteObject(bitmap);
     let _ = DeleteDC(hdc);
     let _ = EndPaint(hwnd, &ps);
+}
+
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_navigation(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    section: Section,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    background: Color,
+    hover: Color,
+    pressed_color: Color,
+    accent: Color,
+    primary: Color,
+    secondary: Color,
+) {
+    for item in [
+        Section::General,
+        Section::Preset,
+        Section::Panel,
+        Section::Text,
+        Section::Progress,
+        Section::Interaction,
+        Section::Json,
+    ] {
+        let selected = item == section;
+        let r = section_rect(hwnd, item);
+        let target = HitTarget::Section(item);
+        let section_bg = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: background,
+                hover,
+                pressed: pressed_color,
+                selected: hover,
+                selected_hover: hover,
+                selected_pressed: pressed_color,
+            },
+        );
+        fill(hdc, r, section_bg);
+        if selected {
+            fill(
+                hdc,
+                RECT {
+                    right: r.left + scale(hwnd, 3),
+                    ..r
+                },
+                accent,
+            );
+        }
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(if selected { primary } else { secondary }.to_colorref()),
+        );
+        draw_text(
+            hdc,
+            section_label(item, snapshot.language),
+            RECT {
+                left: r.left + scale(hwnd, 14),
+                ..r
+            },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_general_page(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    card: Color,
+    card_hover: Color,
+    card_pressed: Color,
+    accent: Color,
+    accent_hover: Color,
+    accent_pressed: Color,
+    primary: Color,
+    secondary: Color,
+) {
+    let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let general = &snapshot.editable_settings.general;
+    let current_interval = match general.refresh_interval.as_str() {
+        "1m" => 60_000,
+        "5m" => 300_000,
+        "1h" => 3_600_000,
+        _ => 900_000,
+    };
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh { "常规" } else { "General" },
+        rect(hwnd, 200, 18, 940, 48),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh {
+            "管理刷新、显示、提醒和应用行为"
+        } else {
+            "Manage refresh, display, alerts, and application behavior"
+        },
+        rect(hwnd, 200, 48, 940, 76),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    for r in [
+        rect(hwnd, 200, 92, 940, 182),
+        rect(hwnd, 200, 198, 940, 304),
+        rect(hwnd, 200, 318, 940, 394),
+        rect(hwnd, 200, 404, 940, 510),
+    ] {
+        fill(hdc, r, card);
+    }
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(hdc, if zh { "数据刷新" } else { "Data refresh" }, rect(hwnd, 218, 98, 500, 124), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (interval, zh_label, en_label) in [
+        (60_000u32, "1 分钟", "1 min"),
+        (300_000, "5 分钟", "5 min"),
+        (900_000, "15 分钟", "15 min"),
+        (3_600_000, "1 小时", "1 hour"),
+    ] {
+        let selected = current_interval == interval;
+        let target = HitTarget::Refresh(interval);
+        draw_segment(
+            hdc,
+            general_refresh_rect(hwnd, interval),
+            selected,
+            button_background(
+                target,
+                selected,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card_hover,
+                    hover: card_pressed,
+                    pressed: card_pressed,
+                    selected: accent,
+                    selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            ),
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            if zh { zh_label } else { en_label },
+        );
+    }
+
+    draw_text(hdc, if zh { "显示用量" } else { "Usage display" }, rect(hwnd, 218, 204, 500, 230), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(hdc, if zh { "5 小时额度" } else { "5-hour quota" }, rect(hwnd, 238, 220, 650, 252), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, if zh { "每周额度" } else { "Weekly quota" }, rect(hwnd, 238, 262, 650, 294), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (target, enabled, weekly) in [
+        (HitTarget::UsageSession, general.show_usage.session_5h, false),
+        (HitTarget::UsageWeekly, general.show_usage.weekly, true),
+    ] {
+        draw_segment(
+            hdc,
+            general_usage_rect(hwnd, weekly),
+            enabled,
+            button_background(
+                target,
+                enabled,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card_hover,
+                    hover: card_pressed,
+                    pressed: card_pressed,
+                    selected: accent,
+                    selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            ),
+            if enabled { Color::from_hex("#FFFFFFFF") } else { primary },
+            if enabled {
+                if zh { "开启" } else { "On" }
+            } else if zh {
+                "关闭"
+            } else {
+                "Off"
+            },
+        );
+    }
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(hdc, if zh { "额度提醒" } else { "Quota alerts" }, rect(hwnd, 218, 324, 500, 344), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (threshold, zh_label, en_label) in [
+        (0u8, "关闭", "Off"),
+        (10, "10%", "10%"),
+        (20, "20%", "20%"),
+        (30, "30%", "30%"),
+    ] {
+        let selected = general.quota_alert_percent == threshold;
+        let target = HitTarget::Alert(threshold);
+        draw_segment(
+            hdc,
+            general_alert_rect(hwnd, threshold),
+            selected,
+            button_background(
+                target,
+                selected,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card_hover,
+                    hover: card_pressed,
+                    pressed: card_pressed,
+                    selected: accent,
+                    selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            ),
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            if zh { zh_label } else { en_label },
+        );
+    }
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(hdc, if zh { "应用" } else { "Application" }, rect(hwnd, 218, 410, 500, 432), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(hdc, if zh { "开机启动" } else { "Start with Windows" }, rect(hwnd, 238, 416, 650, 448), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let startup = general.start_with_windows;
+    draw_segment(
+        hdc,
+        general_startup_rect(hwnd),
+        startup,
+        button_background(
+            HitTarget::Startup,
+            startup,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card_hover,
+                hover: card_pressed,
+                pressed: card_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        ),
+        if startup { Color::from_hex("#FFFFFFFF") } else { primary },
+        if startup {
+            if zh { "开启" } else { "On" }
+        } else if zh {
+            "关闭"
+        } else {
+            "Off"
+        },
+    );
+    draw_text(hdc, if zh { "界面语言" } else { "UI language" }, rect(hwnd, 238, 458, 650, 492), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_json_page(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    status: &str,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    card: Color,
+    card_hover: Color,
+    card_pressed: Color,
+    accent: Color,
+    accent_hover: Color,
+    accent_pressed: Color,
+    primary: Color,
+    secondary: Color,
+) {
+    let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(hdc, if zh { "JSON 配置" } else { "JSON configuration" }, rect(hwnd, 200, 18, 940, 48), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh {
+            "编辑公开设置；注释仅用于说明，应用、保存和导出时不会写入配置"
+        } else {
+            "Edit public settings; comments are documentation only and are omitted when applying or exporting"
+        },
+        rect(hwnd, 200, 48, 940, 78),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    for (action, zh_label, en_label) in [
+        (JsonAction::Reload, "重新载入", "Reload"),
+        (JsonAction::Format, "格式化", "Format"),
+        (JsonAction::Import, "导入", "Import"),
+        (JsonAction::Export, "导出", "Export"),
+    ] {
+        let target = HitTarget::Json(action);
+        draw_segment(
+            hdc,
+            json_action_rect(hwnd, action),
+            false,
+            button_background(
+                target,
+                false,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card,
+                    hover: card_hover,
+                    pressed: card_pressed,
+                    selected: card,
+                    selected_hover: card_hover,
+                    selected_pressed: card_pressed,
+                },
+            ),
+            primary,
+            if zh { zh_label } else { en_label },
+        );
+    }
+
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let edit_rect = json_edit_rect(hwnd);
+    let _ = SetTextColor(
+        hdc,
+        COLORREF(if status.starts_with('×') {
+            Color::from_hex("#D95C5CFF")
+        } else {
+            secondary
+        }
+        .to_colorref()),
+    );
+    draw_text(
+        hdc,
+        status,
+        RECT {
+            left: scale(hwnd, 200),
+            top: edit_rect.bottom + scale(hwnd, 8),
+            right: client.right - scale(hwnd, 180),
+            bottom: edit_rect.bottom + scale(hwnd, 42),
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    let apply = JsonAction::Apply;
+    draw_segment(
+        hdc,
+        json_action_rect(hwnd, apply),
+        true,
+        button_background(
+            HitTarget::Json(apply),
+            true,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: accent,
+                hover: accent_hover,
+                pressed: accent_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        ),
+        Color::from_hex("#FFFFFFFF"),
+        if zh { "应用更改" } else { "Apply changes" },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_appearance_page(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    section: Section,
+    editor: EditorSelection,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    focused_numeric_edit: Option<usize>,
+    focused_blur_edit: bool,
+    focused_hex_edit: Option<StyleColorTarget>,
+    invalid_hex_edits: &[bool; HEX_EDIT_COUNT],
+    card: Color,
+    card_hover: Color,
+    card_pressed: Color,
+    track_background: Color,
+    accent: Color,
+    accent_hover: Color,
+    accent_pressed: Color,
+    primary: Color,
+    secondary: Color,
+) {
+    let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(hdc, if zh { "外观" } else { "Appearance" }, rect(hwnd, 200, 18, 500, 48), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, if zh { "主题" } else { "Theme" }, rect(hwnd, 200, 62, 270, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, if zh { "排版" } else { "Layout" }, rect(hwnd, 636, 62, 698, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
+        let selected = snapshot.theme_mode == mode;
+        let target = HitTarget::Theme(mode);
+        draw_segment(
+            hdc,
+            theme_rect(hwnd, mode),
+            selected,
+            button_background(
+                target,
+                selected,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card,
+                    hover: card_hover,
+                    pressed: card_pressed,
+                    selected: accent,
+                    selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            ),
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            match (zh, mode) {
+                (true, ThemeMode::System) => "跟随系统",
+                (true, ThemeMode::Dark) => "深色",
+                (true, ThemeMode::Light) => "浅色",
+                (false, ThemeMode::System) => "System",
+                (false, ThemeMode::Dark) => "Dark",
+                (false, ThemeMode::Light) => "Light",
+            },
+        );
+    }
+    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+        let selected = snapshot.appearance_preset == preset;
+        let target = HitTarget::Layout(preset);
+        draw_segment(
+            hdc,
+            layout_rect(hwnd, preset),
+            selected,
+            button_background(
+                target,
+                selected,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card,
+                    hover: card_hover,
+                    pressed: card_pressed,
+                    selected: accent,
+                    selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            ),
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            match (zh, preset) {
+                (true, AppearancePreset::Default) => "默认",
+                (true, AppearancePreset::Minimal) => "极简",
+                (false, AppearancePreset::Default) => "Default",
+                (false, AppearancePreset::Minimal) => "Minimal",
+            },
+        );
+    }
+
+    draw_segment(
+        hdc,
+        reset_rect(hwnd),
+        false,
+        button_background(
+            HitTarget::Reset,
+            false,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: card,
+                selected_hover: card_hover,
+                selected_pressed: card_pressed,
+            },
+        ),
+        primary,
+        if zh { "恢复当前主题默认" } else { "Reset theme" },
+    );
+
+    if section == Section::Preset {
+        paint_preset_gallery(
+            hdc,
+            hwnd,
+            snapshot,
+            hovered,
+            pressed,
+            PresetGalleryPalette {
+                card,
+                card_hover,
+                card_pressed,
+                border: track_background,
+                accent,
+                primary,
+            },
+        );
+        return;
+    }
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        section_label(section, snapshot.language),
+        rect(hwnd, 200, 112, 600, 146),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    for (index, row) in rows(section).iter().copied().enumerate() {
+        let r = row_rect(hwnd, index);
+        let selected = row == editor;
+        let target = HitTarget::Row(row);
+        fill(
+            hdc,
+            r,
+            button_background(
+                target,
+                selected,
+                hovered,
+                pressed,
+                ButtonPalette {
+                    normal: card,
+                    hover: card_hover,
+                    pressed: card_pressed,
+                    selected: card_hover,
+                    selected_hover: card_hover,
+                    selected_pressed: card_pressed,
+                },
+            ),
+        );
+        let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+        draw_text(
+            hdc,
+            row_label(row, snapshot.language),
+            RECT {
+                left: r.left + scale(hwnd, 14),
+                right: r.left + scale(hwnd, 250),
+                ..r
+            },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        match row {
+            EditorSelection::Color(target) => {
+                let color = snapshot.active_style.color(target);
+                fill(
+                    hdc,
+                    RECT {
+                        left: r.right - scale(hwnd, 202),
+                        top: r.top + scale(hwnd, 9),
+                        right: r.right - scale(hwnd, 172),
+                        bottom: r.bottom - scale(hwnd, 9),
+                    },
+                    color,
+                );
+            }
+            EditorSelection::Blur => {
+                draw_slider(
+                    hdc,
+                    hwnd,
+                    blur_slider_track_rect(hwnd),
+                    snapshot.active_style.panel_frosted_strength,
+                    FROSTED_STRENGTH_MAX,
+                    track_background,
+                    accent,
+                );
+                draw_text(hdc, "%", rect(hwnd, 852, 256, 878, 284), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+    }
+
+    paint_hex_edit_frames(
+        hdc,
+        hwnd,
+        section,
+        snapshot.is_dark,
+        focused_hex_edit,
+        invalid_hex_edits,
+        EditFramePalette {
+            border: track_background,
+            accent,
+        },
+    );
+    if section == Section::Panel {
+        paint_blur_edit_frame(
+            hdc,
+            hwnd,
+            snapshot.is_dark,
+            focused_blur_edit,
+            track_background,
+            accent,
+        );
+    }
+    if matches!(editor, EditorSelection::Color(_)) {
+        fill(hdc, editor_box_rect(hwnd), card);
+        paint_numeric_edit_frames(
+            hdc,
+            hwnd,
+            snapshot.is_dark,
+            focused_numeric_edit,
+            track_background,
+            accent,
+        );
+        paint_editor(
+            hdc,
+            hwnd,
+            snapshot,
+            editor,
+            EditorPalette {
+                secondary,
+                track_background,
+                accent,
+            },
+        );
+    }
 }
 
 fn preset_group_label(is_dark: bool, language: LanguageId) -> &'static str {
