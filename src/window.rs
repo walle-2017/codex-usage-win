@@ -28,6 +28,10 @@ use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TRAY, WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
+use crate::settings_model::{
+    EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
+    EDITABLE_SETTINGS_SCHEMA_VERSION,
+};
 use crate::style::{
     StyleColorTarget, StyleSettings, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
@@ -176,6 +180,7 @@ const DRAG_FRAME_MS: u64 = 8;
 
 const GITHUB_RELEASES_URL: &str =
     "https://github.com/walle-2017/codex-usage-win/releases";
+const GITHUB_REPOSITORY_URL: &str = "https://github.com/walle-2017/codex-usage-win";
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
