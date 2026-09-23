@@ -6,6 +6,7 @@ mod localization;
 mod models;
 mod native_interop;
 mod poller;
+mod settings_model;
 mod system_proxy;
 mod style;
 mod style_window;
