@@ -4056,7 +4056,7 @@ unsafe extern "system" fn wnd_proc(
                 y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
             };
             let _ = ClientToScreen(hwnd, &mut anchor);
-            show_context_menu(hwnd, anchor);
+            show_context_menu(hwnd, anchor, false);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -4321,7 +4321,7 @@ unsafe extern "system" fn wnd_proc(
                 tray_icon::TrayAction::ShowContextMenu => {
                     let mut anchor = POINT::default();
                     let _ = GetCursorPos(&mut anchor);
-                    show_context_menu(hwnd, anchor);
+                    show_context_menu(hwnd, anchor, true);
                 }
                 tray_icon::TrayAction::None => {}
             }
@@ -5196,7 +5196,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 }
 
 
-fn show_context_menu(hwnd: HWND, anchor: POINT) {
+fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
     let (strings, language, available_update_version) = {
         let state = lock_state();
         match state.as_ref() {
@@ -5265,6 +5265,7 @@ fn show_context_menu(hwnd: HWND, anchor: POINT) {
         theme::is_dark_mode(),
         fonts::ui_face(language),
         anchor,
+        preserve_foreground,
     );
 }
 
