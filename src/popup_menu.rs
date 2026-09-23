@@ -390,6 +390,7 @@ fn submenu_position(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn create_window(
     command_target: HWND,
     root_hwnd: HWND,
