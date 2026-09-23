@@ -185,6 +185,21 @@ const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 
+struct MenuDrawItem {
+    text: String,
+    separator: bool,
+    submenu: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MenuPalette {
+    background: Color,
+    hover: Color,
+    text: Color,
+    disabled: Color,
+    separator: Color,
+}
+
 /// How often the watchdog thread polls for an explorer.exe restart (which
 /// recreates the taskbar and wipes our tray-icon registration).
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
@@ -5186,6 +5201,123 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     Ok(())
 }
 
+
+fn windows_menu_palette() -> MenuPalette {
+    if theme::is_dark_mode() {
+        MenuPalette {
+            background: Color::from_hex("#202020FF"),
+            hover: Color::from_hex("#333333FF"),
+            text: Color::from_hex("#F2F2F2FF"),
+            disabled: Color::from_hex("#858585FF"),
+            separator: Color::from_hex("#3A3A3AFF"),
+        }
+    } else {
+        MenuPalette {
+            background: Color::from_hex("#F9F9F9FF"),
+            hover: Color::from_hex("#E9E9E9FF"),
+            text: Color::from_hex("#202020FF"),
+            disabled: Color::from_hex("#8A8A8AFF"),
+            separator: Color::from_hex("#D8D8D8FF"),
+        }
+    }
+}
+
+unsafe fn append_owner_draw_menu_item(
+    menu: HMENU,
+    flags: MENU_ITEM_FLAGS,
+    id: usize,
+    text: String,
+    separator: bool,
+    submenu: bool,
+    storage: &mut Vec<Box<MenuDrawItem>>,
+) {
+    let item = Box::new(MenuDrawItem {
+        text,
+        separator,
+        submenu,
+    });
+    let data_ptr = (&*item as *const MenuDrawItem).cast::<u16>();
+    let _ = AppendMenuW(
+        menu,
+        flags | MF_OWNERDRAW,
+        id,
+        PCWSTR::from_raw(data_ptr),
+    );
+    storage.push(item);
+}
+
+unsafe fn draw_owner_draw_menu_item(draw: &DRAWITEMSTRUCT) {
+    if draw.itemData == 0 {
+        return;
+    }
+    let item = &*(draw.itemData as *const MenuDrawItem);
+    let palette = windows_menu_palette();
+    let selected = draw.itemState.0 & ODS_SELECTED.0 != 0;
+    let disabled = draw.itemState.0 & ODS_DISABLED.0 != 0
+        || draw.itemState.0 & ODS_GRAYED.0 != 0;
+
+    let background = if selected && !disabled {
+        palette.hover
+    } else {
+        palette.background
+    };
+    let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
+    let _ = FillRect(draw.hDC, &draw.rcItem, brush);
+    let _ = DeleteObject(brush);
+
+    if item.separator {
+        let y = (draw.rcItem.top + draw.rcItem.bottom) / 2;
+        let line_brush = CreateSolidBrush(COLORREF(palette.separator.to_colorref()));
+        let line = RECT {
+            left: draw.rcItem.left + 10,
+            top: y,
+            right: draw.rcItem.right - 10,
+            bottom: y + 1,
+        };
+        let _ = FillRect(draw.hDC, &line, line_brush);
+        let _ = DeleteObject(line_brush);
+        return;
+    }
+
+    let foreground = if disabled {
+        palette.disabled
+    } else {
+        palette.text
+    };
+    let _ = SetBkMode(draw.hDC, TRANSPARENT);
+    let _ = SetTextColor(draw.hDC, COLORREF(foreground.to_colorref()));
+
+    let text = native_interop::wide_str(&item.text);
+    let mut text_rect = RECT {
+        left: draw.rcItem.left + 14,
+        top: draw.rcItem.top,
+        right: draw.rcItem.right - if item.submenu { 34 } else { 14 },
+        bottom: draw.rcItem.bottom,
+    };
+    let _ = DrawTextW(
+        draw.hDC,
+        &mut text[..text.len().saturating_sub(1)],
+        &mut text_rect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+    );
+
+    if item.submenu {
+        let arrow = native_interop::wide_str("›");
+        let mut arrow_rect = RECT {
+            left: draw.rcItem.right - 30,
+            top: draw.rcItem.top,
+            right: draw.rcItem.right - 8,
+            bottom: draw.rcItem.bottom,
+        };
+        let _ = DrawTextW(
+            draw.hDC,
+            &mut arrow[..arrow.len().saturating_sub(1)],
+            &mut arrow_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+    }
+}
+
 fn show_context_menu(hwnd: HWND) {
     unsafe {
         let (strings, language, available_update_version) = {
@@ -5206,39 +5338,59 @@ fn show_context_menu(hwnd: HWND) {
 
         let menu = CreatePopupMenu().unwrap();
         let version_menu = CreatePopupMenu().unwrap();
+        let mut draw_items: Vec<Box<MenuDrawItem>> = Vec::new();
 
-        let refresh = native_interop::wide_str(strings.refresh);
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
             menu,
             MENU_ITEM_FLAGS(0),
             1,
-            PCWSTR::from_raw(refresh.as_ptr()),
+            strings.refresh.to_string(),
+            false,
+            false,
+            &mut draw_items,
         );
-
-        let reset = native_interop::wide_str(strings.reset_position);
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
             menu,
             MENU_ITEM_FLAGS(0),
             IDM_RESET_POSITION as usize,
-            PCWSTR::from_raw(reset.as_ptr()),
+            strings.reset_position.to_string(),
+            false,
+            false,
+            &mut draw_items,
         );
-
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_owner_draw_menu_item(
+            menu,
+            MF_SEPARATOR,
+            0,
+            String::new(),
+            true,
+            false,
+            &mut draw_items,
+        );
 
         let settings_text = match language {
             LanguageId::SimplifiedChinese => "设置...",
             LanguageId::TraditionalChinese => "設定...",
             _ => "Settings...",
         };
-        let settings = native_interop::wide_str(settings_text);
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
             menu,
             MENU_ITEM_FLAGS(0),
             IDM_STYLE_SETTINGS as usize,
-            PCWSTR::from_raw(settings.as_ptr()),
+            settings_text.to_string(),
+            false,
+            false,
+            &mut draw_items,
         );
-
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_owner_draw_menu_item(
+            menu,
+            MF_SEPARATOR,
+            0,
+            String::new(),
+            true,
+            false,
+            &mut draw_items,
+        );
 
         let check_text = match language {
             LanguageId::SimplifiedChinese => "检查更新",
@@ -5247,30 +5399,33 @@ fn show_context_menu(hwnd: HWND) {
             LanguageId::Korean => "업데이트 확인",
             _ => "Check for updates",
         };
-        let check = native_interop::wide_str(check_text);
         let check_flags = if cfg!(feature = "github-update") {
             MENU_ITEM_FLAGS(0)
         } else {
             MF_GRAYED
         };
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
             version_menu,
             check_flags,
             IDM_CHECK_UPDATE as usize,
-            PCWSTR::from_raw(check.as_ptr()),
+            check_text.to_string(),
+            false,
+            false,
+            &mut draw_items,
         );
 
         let github_text = match language {
-            LanguageId::SimplifiedChinese => "前往 GitHub",
-            LanguageId::TraditionalChinese => "前往 GitHub",
+            LanguageId::SimplifiedChinese | LanguageId::TraditionalChinese => "前往 GitHub",
             _ => "Open GitHub",
         };
-        let github = native_interop::wide_str(github_text);
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
             version_menu,
             MENU_ITEM_FLAGS(0),
             IDM_OPEN_RELEASES as usize,
-            PCWSTR::from_raw(github.as_ptr()),
+            github_text.to_string(),
+            false,
+            false,
+            &mut draw_items,
         );
 
         let version_label_text = if cfg!(feature = "github-update") {
@@ -5285,35 +5440,41 @@ fn show_context_menu(hwnd: HWND) {
         } else {
             format!("v{} (Microsoft Store)", env!("CARGO_PKG_VERSION"))
         };
-        let version = native_interop::wide_str(&version_label_text);
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
             menu,
             MF_POPUP,
             version_menu.0 as usize,
-            PCWSTR::from_raw(version.as_ptr()),
+            version_label_text,
+            false,
+            true,
+            &mut draw_items,
         );
 
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-
-        let exit = native_interop::wide_str(strings.exit);
-        let _ = AppendMenuW(
+        append_owner_draw_menu_item(
+            menu,
+            MF_SEPARATOR,
+            0,
+            String::new(),
+            true,
+            false,
+            &mut draw_items,
+        );
+        append_owner_draw_menu_item(
             menu,
             MENU_ITEM_FLAGS(0),
             2,
-            PCWSTR::from_raw(exit.as_ptr()),
+            strings.exit.to_string(),
+            false,
+            false,
+            &mut draw_items,
         );
 
-        // The tray menu follows Windows Dark/Light only. Application presets
-        // and custom ThemeStyle colors intentionally do not affect it.
-        let menu_background = if theme::is_dark_mode() {
-            Color::from_hex("#202020FF")
-        } else {
-            Color::from_hex("#F9F9F9FF")
-        };
-        let menu_brush = CreateSolidBrush(COLORREF(menu_background.to_colorref()));
+        let palette = windows_menu_palette();
+        let menu_brush = CreateSolidBrush(COLORREF(palette.background.to_colorref()));
         let menu_info = MENUINFO {
             cbSize: std::mem::size_of::<MENUINFO>() as u32,
-            fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS,
+            fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS | MIM_STYLE,
+            dwStyle: 0x80000000, // MNS_NOCHECK: remove the native checkmark gutter.
             hbrBack: menu_brush,
             ..Default::default()
         };
@@ -5324,8 +5485,10 @@ fn show_context_menu(hwnd: HWND) {
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
+
         let _ = DestroyMenu(menu);
         let _ = DeleteObject(menu_brush);
+        drop(draw_items);
     }
 }
 
