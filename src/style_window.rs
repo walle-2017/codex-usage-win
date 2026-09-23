@@ -1794,46 +1794,89 @@ fn update_blur_from_numeric_edit() {
 }
 
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
-    for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
-        if pt_in_rect(theme_rect(hwnd, mode), x, y) {
-            return Some(HitTarget::Theme(mode));
-        }
-    }
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
-        if pt_in_rect(layout_rect(hwnd, preset), x, y) {
-            return Some(HitTarget::Layout(preset));
-        }
-    }
-    for section in [
+    let section = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.section)?
+    };
+
+    for item in [
+        Section::General,
         Section::Preset,
         Section::Panel,
         Section::Text,
         Section::Progress,
         Section::Interaction,
+        Section::Json,
     ] {
-        if pt_in_rect(section_rect(hwnd, section), x, y) {
-            return Some(HitTarget::Section(section));
+        if pt_in_rect(section_rect(hwnd, item), x, y) {
+            return Some(HitTarget::Section(item));
         }
     }
-    let section = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.section)?
-    };
-    if section == Section::Preset {
-        for preset in ThemePreset::ALL {
-            if pt_in_rect(preset_card_rect(hwnd, preset), x, y) {
-                return Some(HitTarget::Preset(preset));
+
+    if is_appearance_section(section) {
+        for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
+            if pt_in_rect(theme_rect(hwnd, mode), x, y) {
+                return Some(HitTarget::Theme(mode));
+            }
+        }
+        for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+            if pt_in_rect(layout_rect(hwnd, preset), x, y) {
+                return Some(HitTarget::Layout(preset));
+            }
+        }
+        if section == Section::Preset {
+            for preset in ThemePreset::ALL {
+                if pt_in_rect(preset_card_rect(hwnd, preset), x, y) {
+                    return Some(HitTarget::Preset(preset));
+                }
+            }
+        }
+        for (index, editor) in rows(section).iter().copied().enumerate() {
+            if pt_in_rect(row_rect(hwnd, index), x, y) {
+                return Some(HitTarget::Row(editor));
+            }
+        }
+        if pt_in_rect(reset_rect(hwnd), x, y) {
+            return Some(HitTarget::Reset);
+        }
+    }
+
+    if section == Section::General {
+        for interval in [60_000u32, 300_000, 900_000, 3_600_000] {
+            if pt_in_rect(general_refresh_rect(hwnd, interval), x, y) {
+                return Some(HitTarget::Refresh(interval));
+            }
+        }
+        if pt_in_rect(general_usage_rect(hwnd, false), x, y) {
+            return Some(HitTarget::UsageSession);
+        }
+        if pt_in_rect(general_usage_rect(hwnd, true), x, y) {
+            return Some(HitTarget::UsageWeekly);
+        }
+        for threshold in [0u8, 10, 20, 30] {
+            if pt_in_rect(general_alert_rect(hwnd, threshold), x, y) {
+                return Some(HitTarget::Alert(threshold));
+            }
+        }
+        if pt_in_rect(general_startup_rect(hwnd), x, y) {
+            return Some(HitTarget::Startup);
+        }
+    }
+
+    if section == Section::Json {
+        for action in [
+            JsonAction::Reload,
+            JsonAction::Format,
+            JsonAction::Import,
+            JsonAction::Export,
+            JsonAction::Apply,
+        ] {
+            if pt_in_rect(json_action_rect(hwnd, action), x, y) {
+                return Some(HitTarget::Json(action));
             }
         }
     }
-    for (index, editor) in rows(section).iter().copied().enumerate() {
-        if pt_in_rect(row_rect(hwnd, index), x, y) {
-            return Some(HitTarget::Row(editor));
-        }
-    }
-    if pt_in_rect(reset_rect(hwnd), x, y) {
-        return Some(HitTarget::Reset);
-    }
+
     if pt_in_rect(close_rect(hwnd), x, y) {
         return Some(HitTarget::Close);
     }
@@ -1870,11 +1913,78 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
         }
         HitTarget::Section(section) => set_section(section),
         HitTarget::Row(editor) => select_editor(editor),
+        HitTarget::Refresh(interval) => {
+            {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.snapshot.editable_settings.general.refresh_interval =
+                        match interval {
+                            60_000 => "1m",
+                            300_000 => "5m",
+                            900_000 => "15m",
+                            _ => "1h",
+                        }
+                        .to_string();
+                }
+            }
+            send_parent(WM_SETTINGS_REFRESH_CHANGE, interval as usize, 0);
+        }
+        HitTarget::UsageSession | HitTarget::UsageWeekly => {
+            let mask = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return;
+                };
+                let usage = &mut s.snapshot.editable_settings.general.show_usage;
+                match target {
+                    HitTarget::UsageSession if usage.weekly || !usage.session_5h => {
+                        usage.session_5h = !usage.session_5h;
+                    }
+                    HitTarget::UsageWeekly if usage.session_5h || !usage.weekly => {
+                        usage.weekly = !usage.weekly;
+                    }
+                    _ => {}
+                }
+                usize::from(usage.session_5h) | (usize::from(usage.weekly) << 1)
+            };
+            send_parent(WM_SETTINGS_USAGE_CHANGE, mask, 0);
+        }
+        HitTarget::Alert(threshold) => {
+            {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.snapshot.editable_settings.general.quota_alert_percent = threshold;
+                }
+            }
+            send_parent(WM_SETTINGS_ALERT_CHANGE, threshold as usize, 0);
+        }
+        HitTarget::Startup => {
+            let enabled = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return;
+                };
+                let value = !s.snapshot.editable_settings.general.start_with_windows;
+                s.snapshot.editable_settings.general.start_with_windows = value;
+                value
+            };
+            send_parent(WM_SETTINGS_STARTUP_CHANGE, usize::from(enabled), 0);
+        }
+        HitTarget::Json(action) => match action {
+            JsonAction::Reload => reload_json_editor_from_snapshot(),
+            JsonAction::Format => format_json_editor(),
+            JsonAction::Import => import_json_file(hwnd),
+            JsonAction::Export => export_json_file(hwnd),
+            JsonAction::Apply => apply_json_editor(),
+        },
         HitTarget::Reset => send_parent(WM_STYLE_RESET_CURRENT, 0, 0),
         HitTarget::Close => unsafe {
             send_parent(WM_STYLE_SAVE, 0, 0);
             let _ = DestroyWindow(hwnd);
         },
+    }
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
     }
 }
 
