@@ -4447,6 +4447,99 @@ unsafe extern "system" fn wnd_proc(
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
+        _ if msg == style_window::WM_SETTINGS_REFRESH_CHANGE => {
+            let interval = wparam.0 as u32;
+            if matches!(interval, POLL_1_MIN | POLL_5_MIN | POLL_15_MIN | POLL_1_HOUR) {
+                {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        s.poll_interval_ms = interval;
+                    }
+                }
+                save_state_settings();
+                unsafe {
+                    SetTimer(hwnd, TIMER_POLL, interval, None);
+                }
+                style_window::sync(style_settings_snapshot());
+            }
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_SETTINGS_USAGE_CHANGE => {
+            let mask = wparam.0;
+            let show_session = mask & 1 != 0;
+            let show_weekly = mask & 2 != 0;
+            if show_session || show_weekly {
+                {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        s.show_session_window = show_session;
+                        s.show_weekly_window = show_weekly;
+                    }
+                }
+                save_state_settings();
+                position_at_taskbar();
+                render_layered();
+                sync_tray_icons(hwnd);
+                style_window::sync(style_settings_snapshot());
+            }
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_SETTINGS_ALERT_CHANGE => {
+            let threshold = wparam.0 as u8;
+            if matches!(threshold, 0 | 10 | 20 | 30) {
+                let alerts = {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        s.alert_threshold_percent = threshold;
+                        if threshold == 0 {
+                            s.notified_quota_windows.clear();
+                            Vec::new()
+                        } else if let Some(data) = s.data.clone() {
+                            collect_low_quota_alerts(s, &data)
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                };
+                notify_quota_alerts(hwnd, &alerts);
+                save_state_settings();
+                style_window::sync(style_settings_snapshot());
+            }
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_SETTINGS_STARTUP_CHANGE => {
+            set_startup_enabled(wparam.0 != 0);
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_SETTINGS_LANGUAGE_CHANGE => {
+            let index = wparam.0;
+            let language_override = if index == 0 {
+                None
+            } else {
+                LanguageId::ALL.get(index - 1).copied()
+            };
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    apply_language_to_state(s, language_override);
+                }
+            }
+            save_state_settings();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_SETTINGS_JSON_APPLY => {
+            if let Some(settings) = style_window::take_pending_editable_settings() {
+                if let Err(error) = apply_editable_settings(hwnd, settings) {
+                    diagnose::log(format!("JSON settings apply rejected: {error}"));
+                }
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
             hide_minimal_usage_tooltip();
 
