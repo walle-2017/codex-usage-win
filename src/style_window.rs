@@ -3845,10 +3845,29 @@ unsafe fn paint_appearance_page(
     secondary: Color,
 ) {
     let zh = snapshot.language == LanguageId::SimplifiedChinese;
+
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(hdc, if zh { "外观" } else { "Appearance" }, rect(hwnd, 200, 18, 500, 48), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(hdc, if zh { "主题" } else { "Theme" }, rect(hwnd, 200, 62, 270, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(hdc, if zh { "排版" } else { "Layout" }, rect(hwnd, 636, 62, 698, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        if zh { "外观" } else { "Appearance" },
+        rect(hwnd, 200, 18, 500, 46),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    fill(hdc, rect(hwnd, 200, 58, 940, 164), card);
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh { "主题" } else { "Theme" },
+        rect(hwnd, 218, 70, 300, 104),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc,
+        if zh { "排版" } else { "Layout" },
+        rect(hwnd, 218, 116, 300, 150),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
 
     for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
         let selected = snapshot.theme_mode == mode;
@@ -3863,8 +3882,8 @@ unsafe fn paint_appearance_page(
                 hovered,
                 pressed,
                 ButtonPalette {
-                    normal: card,
-                    hover: card_hover,
+                    normal: card_hover,
+                    hover: card_pressed,
                     pressed: card_pressed,
                     selected: accent,
                     selected_hover: accent_hover,
@@ -3882,6 +3901,7 @@ unsafe fn paint_appearance_page(
             },
         );
     }
+
     for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
         let selected = snapshot.appearance_preset == preset;
         let target = HitTarget::Layout(preset);
@@ -3895,8 +3915,8 @@ unsafe fn paint_appearance_page(
                 hovered,
                 pressed,
                 ButtonPalette {
-                    normal: card,
-                    hover: card_hover,
+                    normal: card_hover,
+                    hover: card_pressed,
                     pressed: card_pressed,
                     selected: accent,
                     selected_hover: accent_hover,
@@ -3923,16 +3943,16 @@ unsafe fn paint_appearance_page(
             hovered,
             pressed,
             ButtonPalette {
-                normal: card,
-                hover: card_hover,
+                normal: card_hover,
+                hover: card_pressed,
                 pressed: card_pressed,
-                selected: card,
-                selected_hover: card_hover,
+                selected: card_hover,
+                selected_hover: card_pressed,
                 selected_pressed: card_pressed,
             },
         ),
         primary,
-        if zh { "恢复当前主题默认" } else { "Reset theme" },
+        if zh { "恢复当前主题默认" } else { "Reset current theme" },
     );
 
     if section == Section::Preset {
@@ -3958,7 +3978,7 @@ unsafe fn paint_appearance_page(
     draw_text(
         hdc,
         section_label(section, snapshot.language),
-        rect(hwnd, 200, 112, 600, 146),
+        rect(hwnd, 200, 180, 600, 212),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -3989,12 +4009,13 @@ unsafe fn paint_appearance_page(
             hdc,
             row_label(row, snapshot.language),
             RECT {
-                left: r.left + scale(hwnd, 14),
-                right: r.left + scale(hwnd, 250),
+                left: r.left + scale(hwnd, 18),
+                right: r.left + scale(hwnd, 280),
                 ..r
             },
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
+
         match row {
             EditorSelection::Color(target) => {
                 let color = snapshot.active_style.color(target);
@@ -4002,9 +4023,9 @@ unsafe fn paint_appearance_page(
                     hdc,
                     RECT {
                         left: r.right - scale(hwnd, 202),
-                        top: r.top + scale(hwnd, 9),
+                        top: r.top + scale(hwnd, 10),
                         right: r.right - scale(hwnd, 172),
-                        bottom: r.bottom - scale(hwnd, 9),
+                        bottom: r.bottom - scale(hwnd, 10),
                     },
                     color,
                 );
@@ -4019,7 +4040,13 @@ unsafe fn paint_appearance_page(
                     track_background,
                     accent,
                 );
-                draw_text(hdc, "%", rect(hwnd, 852, 256, 878, 284), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+                draw_text(
+                    hdc,
+                    "%",
+                    rect(hwnd, 860, 324, 886, 352),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
             }
         }
     }
@@ -4036,6 +4063,7 @@ unsafe fn paint_appearance_page(
             accent,
         },
     );
+
     if section == Section::Panel {
         paint_blur_edit_frame(
             hdc,
@@ -4046,6 +4074,7 @@ unsafe fn paint_appearance_page(
             accent,
         );
     }
+
     if matches!(editor, EditorSelection::Color(_)) {
         fill(hdc, editor_box_rect(hwnd, section), card);
         paint_numeric_edit_frames(
