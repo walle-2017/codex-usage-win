@@ -7,15 +7,20 @@ fn main() {
         cc::Build::new()
             .cpp(true)
             .file("native/composition_blur.cpp")
+            .file("native/directwrite_text.cpp")
             .flag_if_supported("/std:c++20")
             .flag_if_supported("/EHsc")
             .compile("codex_composition_blur");
 
         println!("cargo:rerun-if-changed=native/composition_blur.cpp");
+        println!("cargo:rerun-if-changed=native/directwrite_text.cpp");
         println!("cargo:rustc-link-lib=windowsapp");
         println!("cargo:rustc-link-lib=CoreMessaging");
         println!("cargo:rustc-link-lib=runtimeobject");
         println!("cargo:rustc-link-lib=d2d1");
+        println!("cargo:rustc-link-lib=dwrite");
+        println!("cargo:rustc-link-lib=windowscodecs");
+        println!("cargo:rustc-link-lib=ole32");
     }
 
     // Embed the icon and richer PE version metadata into the executable.

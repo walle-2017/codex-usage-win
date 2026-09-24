@@ -41,6 +41,17 @@ unsafe extern "C" {
         a: u8,
     ) -> i32;
     fn codex_composition_blur_destroy(context: *mut std::ffi::c_void);
+    fn codex_directwrite_text_mask(
+        text: *const u16,
+        text_len: u32,
+        font_family: *const u16,
+        font_size_px: f32,
+        font_weight: i32,
+        width: i32,
+        height: i32,
+        coverage: *mut u8,
+        coverage_len: usize,
+    ) -> i32;
 }
 
 // Win event constants
@@ -360,6 +371,38 @@ pub fn destroy_composition_blur(context: usize) {
             codex_composition_blur_destroy(context as *mut std::ffi::c_void);
         }
     }
+}
+
+pub fn directwrite_text_mask(
+    text: &str,
+    font_family: &str,
+    font_size_px: f32,
+    font_weight: i32,
+    width: i32,
+    height: i32,
+) -> Option<Vec<u8>> {
+    if text.is_empty() || width <= 0 || height <= 0 || font_size_px <= 0.0 {
+        return None;
+    }
+
+    let text_wide: Vec<u16> = text.encode_utf16().collect();
+    let family_wide = wide_str(font_family);
+    let pixel_count = (width as usize).checked_mul(height as usize)?;
+    let mut coverage = vec![0u8; pixel_count];
+    let ok = unsafe {
+        codex_directwrite_text_mask(
+            text_wide.as_ptr(),
+            text_wide.len() as u32,
+            family_wide.as_ptr(),
+            font_size_px,
+            font_weight,
+            width,
+            height,
+            coverage.as_mut_ptr(),
+            coverage.len(),
+        )
+    };
+    (ok != 0).then_some(coverage)
 }
 
 /// Move the window

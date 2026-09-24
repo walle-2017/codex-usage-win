@@ -534,10 +534,8 @@ if ($styleWindow -match 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
     $styleWindow -match 'DWMWA_USE_IMMERSIVE_DARK_MODE') {
     throw 'The fixed neutral style-window caption must not switch or animate with the active theme.'
 }
-if ($windowProduction -notmatch 'text_quality_for_layered_surface' -or
-    $windowProduction -notmatch 'ANTIALIASED_QUALITY' -or
-    $windowProduction -notmatch 'repair_translucent_taskbar_text' -or
-    $windowProduction -notmatch 'composite_premultiplied_text' -or
-    $windowProduction -notmatch 'widget_text_quality\(\)') {
-    throw 'Layered taskbar text must keep grayscale AA and preserve glyph coverage through translucent/frosted alpha composition.'
+if ($windowProduction -notmatch 'repair_taskbar_text' -or
+    $windowProduction -notmatch 'directwrite_text_mask' -or
+    $windowProduction -notmatch 'composite_premultiplied_text') {
+    throw 'Layered taskbar text must use DirectWrite grayscale coverage and preserve that coverage through premultiplied alpha composition.'
 }

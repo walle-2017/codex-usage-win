@@ -2350,24 +2350,21 @@ fn render_layered() {
             &surface_style,
         );
 
-        if composition_blur_active || background.a < u8::MAX {
-            repair_translucent_taskbar_text(
-                mem_dc,
-                pixel_data,
-                width,
-                height,
-                &surface_style,
-                &style,
-                &bg_color,
-                language,
-                strings,
-                &codex_session_text,
-                &codex_weekly_text,
-                show_session_window,
-                show_weekly_window,
-                last_poll_ok,
-            );
-        }
+        repair_taskbar_text(
+            pixel_data,
+            width,
+            height,
+            &surface_style,
+            &style,
+            &bg_color,
+            language,
+            strings,
+            &codex_session_text,
+            &codex_weekly_text,
+            show_session_window,
+            show_weekly_window,
+            last_poll_ok,
+        );
 
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
@@ -2550,7 +2547,6 @@ fn restore_panel_rect(
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_layered_antialiased_text(
-    reference_dc: HDC,
     pixels: &mut [u32],
     surface_width: i32,
     surface_height: i32,
@@ -2569,70 +2565,16 @@ unsafe fn draw_layered_antialiased_text(
 
     restore_panel_rect(pixels, surface_width, surface_height, surface_style, rect);
 
-    let mask_dc = CreateCompatibleDC(reference_dc);
-    if mask_dc.0.is_null() {
-        return;
-    }
-
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: mask_width,
-            biHeight: -mask_height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut mask_bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mask_bitmap =
-        CreateDIBSection(mask_dc, &bmi, DIB_RGB_COLORS, &mut mask_bits, None, 0).unwrap_or_default();
-    if mask_bitmap.is_invalid() || mask_bits.is_null() {
-        let _ = DeleteDC(mask_dc);
-        return;
-    }
-
-    let old_bitmap = SelectObject(mask_dc, mask_bitmap);
-    let mask_len = (mask_width * mask_height) as usize;
-    let mask_pixels = std::slice::from_raw_parts_mut(mask_bits as *mut u32, mask_len);
-    mask_pixels.fill(0);
-
-    let font_name = native_interop::wide_str(fonts::taskbar_widget_face());
-    let font = CreateFontW(
-        font_height,
-        0,
-        0,
-        0,
+    let Some(mask) = native_interop::directwrite_text_mask(
+        text,
+        fonts::taskbar_widget_face(),
+        font_height.abs() as f32,
         font_weight,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET.0 as u32,
-        OUT_TT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32,
-        ANTIALIASED_QUALITY.0 as u32,
-        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-        PCWSTR::from_raw(font_name.as_ptr()),
-    );
-    let old_font = SelectObject(mask_dc, font);
-    let _ = SetBkMode(mask_dc, TRANSPARENT);
-    let _ = SetTextColor(mask_dc, COLORREF(0x00FFFFFF));
-
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
-    let mut mask_rect = RECT {
-        left: 0,
-        top: 0,
-        right: mask_width,
-        bottom: mask_height,
+        mask_width,
+        mask_height,
+    ) else {
+        return;
     };
-    let _ = DrawTextW(
-        mask_dc,
-        &mut wide,
-        &mut mask_rect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
 
     for mask_y in 0..mask_height {
         let dst_y = rect.top + mask_y;
@@ -2644,8 +2586,7 @@ unsafe fn draw_layered_antialiased_text(
             if dst_x < 0 || dst_x >= surface_width {
                 continue;
             }
-            let mask = mask_pixels[(mask_y * mask_width + mask_x) as usize];
-            let coverage = (mask & 0xFF) as u8;
+            let coverage = mask[(mask_y * mask_width + mask_x) as usize];
             if coverage == 0 {
                 continue;
             }
@@ -2653,17 +2594,10 @@ unsafe fn draw_layered_antialiased_text(
             pixels[idx] = composite_premultiplied_text(pixels[idx], color, coverage);
         }
     }
-
-    let _ = SelectObject(mask_dc, old_font);
-    let _ = DeleteObject(font);
-    let _ = SelectObject(mask_dc, old_bitmap);
-    let _ = DeleteObject(mask_bitmap);
-    let _ = DeleteDC(mask_dc);
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn repair_translucent_taskbar_text(
-    reference_dc: HDC,
+unsafe fn repair_taskbar_text(
     pixels: &mut [u32],
     width: i32,
     height: i32,
@@ -2724,7 +2658,6 @@ unsafe fn repair_translucent_taskbar_text(
                 .map(|(primary, _)| primary)
                 .unwrap_or(value_text);
             draw_layered_antialiased_text(
-                reference_dc,
                 pixels,
                 width,
                 height,
@@ -2744,7 +2677,6 @@ unsafe fn repair_translucent_taskbar_text(
         }
 
         draw_layered_antialiased_text(
-            reference_dc,
             pixels,
             width,
             height,
@@ -2775,7 +2707,6 @@ unsafe fn repair_translucent_taskbar_text(
             .unwrap_or((value_text, None));
 
         draw_layered_antialiased_text(
-            reference_dc,
             pixels,
             width,
             height,
@@ -2796,7 +2727,6 @@ unsafe fn repair_translucent_taskbar_text(
             let secondary_x =
                 text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
             draw_layered_antialiased_text(
-                reference_dc,
                 pixels,
                 width,
                 height,
