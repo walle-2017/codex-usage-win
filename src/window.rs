@@ -1295,6 +1295,8 @@ fn set_startup_enabled(enable: bool) {
 const SEGMENT_W: i32 = 10;
 const SEGMENT_H: i32 = 13;
 const SEGMENT_GAP: i32 = 1;
+const TASKBAR_SESSION_LABEL: &str = "5h";
+const TASKBAR_WEEKLY_LABEL: &str = "7d";
 
 const DRAG_HANDLE_HIT_W: i32 = 12;
 const DRAG_HANDLE_VISUAL_INSET_X: i32 = 7;
@@ -2818,14 +2820,14 @@ unsafe fn repair_translucent_taskbar_text(
     if effective_show_session {
         repair_row(
             if effective_show_weekly { row1_y } else { single_row_y },
-            strings.session_window,
+            TASKBAR_SESSION_LABEL,
             codex_session_text,
         );
     }
     if effective_show_weekly {
         repair_row(
             if effective_show_session { row2_y } else { single_row_y },
-            strings.weekly_window,
+            TASKBAR_WEEKLY_LABEL,
             codex_weekly_text,
         );
     }
@@ -2963,7 +2965,7 @@ fn paint_content(
                     &quota_type_color,
                     &primary_color,
                     &reset_color,
-                    strings.session_window,
+                    TASKBAR_SESSION_LABEL,
                     codex_session_pct,
                     codex_session_text,
                     &track,
@@ -2980,7 +2982,7 @@ fn paint_content(
                     &quota_type_color,
                     &primary_color,
                     &reset_color,
-                    strings.weekly_window,
+                    TASKBAR_WEEKLY_LABEL,
                     codex_weekly_pct,
                     codex_weekly_text,
                     &track,

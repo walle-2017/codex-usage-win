@@ -12,16 +12,22 @@ use crate::localization::LanguageId;
 pub const INTER_FACE: &str = "Inter Variable";
 pub const NOTO_SANS_SC_FACE: &str = "Noto Sans SC";
 pub const JETBRAINS_MONO_FACE: &str = "JetBrains Mono";
+pub const CODEX_DIGITAL_FACE: &str = "Codex Digital 7";
 pub const SEGOE_UI_FACE: &str = "Segoe UI";
 pub const MICROSOFT_YAHEI_UI_FACE: &str = "Microsoft YaHei UI";
 const SANS_SERIF_FALLBACK_FACE: &str = "Arial";
 
 static INITIALIZED: OnceLock<bool> = OnceLock::new();
+static DIGITAL_INITIALIZED: OnceLock<bool> = OnceLock::new();
 static TASKBAR_WIDGET_FACE: OnceLock<&'static str> = OnceLock::new();
 
 static INTER_FONT: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
 static NOTO_SANS_SC_FONT: &[u8] = include_bytes!("../assets/fonts/NotoSansSC-UI.ttf");
 static JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono.ttf");
+static CODEX_DIGITAL_REGULAR_FONT: &[u8] =
+    include_bytes!("../assets/fonts/CodexDigital7-Regular.ttf");
+static CODEX_DIGITAL_BOLD_FONT: &[u8] =
+    include_bytes!("../assets/fonts/CodexDigital7-Bold.ttf");
 
 fn register_font(bytes: &'static [u8]) -> bool {
     unsafe {
@@ -97,10 +103,17 @@ pub fn taskbar_face() -> &'static str {
 
 pub fn taskbar_widget_face() -> &'static str {
     TASKBAR_WIDGET_FACE.get_or_init(|| {
-        [SEGOE_UI_FACE, MICROSOFT_YAHEI_UI_FACE]
-            .into_iter()
-            .find(|face| font_available(face))
-            .unwrap_or(SANS_SERIF_FALLBACK_FACE)
+        let digital_ready = *DIGITAL_INITIALIZED.get_or_init(|| {
+            register_font(CODEX_DIGITAL_REGULAR_FONT) && register_font(CODEX_DIGITAL_BOLD_FONT)
+        });
+        if digital_ready {
+            CODEX_DIGITAL_FACE
+        } else {
+            [SEGOE_UI_FACE, MICROSOFT_YAHEI_UI_FACE]
+                .into_iter()
+                .find(|face| font_available(face))
+                .unwrap_or(SANS_SERIF_FALLBACK_FACE)
+        }
     })
 }
 
@@ -118,11 +131,17 @@ mod tests {
 
     #[test]
     fn bundled_font_assets_remain_small() {
-        let total = INTER_FONT.len() + NOTO_SANS_SC_FONT.len() + JETBRAINS_MONO_FONT.len();
+        let total = INTER_FONT.len()
+            + NOTO_SANS_SC_FONT.len()
+            + JETBRAINS_MONO_FONT.len()
+            + CODEX_DIGITAL_REGULAR_FONT.len()
+            + CODEX_DIGITAL_BOLD_FONT.len();
         assert!(
             total <= 3 * 1024 * 1024,
             "embedded fonts unexpectedly exceed 3 MiB: {total}"
         );
         assert!(NOTO_SANS_SC_FONT.len() < 1024 * 1024);
+        assert!(CODEX_DIGITAL_REGULAR_FONT.len() < 16 * 1024);
+        assert!(CODEX_DIGITAL_BOLD_FONT.len() < 16 * 1024);
     }
 }
