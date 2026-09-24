@@ -658,7 +658,7 @@ fn append_provider_alerts(
     provider_key: &str,
     provider_label: &str,
     usage: &crate::models::UsageData,
-    _strings: Strings,
+    strings: Strings,
 ) {
     append_quota_alert(
         alerts,
@@ -741,7 +741,7 @@ fn append_quota_alert(
 fn full_usage_line(
     section: &crate::models::UsageSection,
     language: LanguageId,
-    _strings: Strings,
+    strings: Strings,
     window: poller::UsageWindowKind,
 ) -> String {
     poller::format_line(
@@ -2673,7 +2673,7 @@ unsafe fn repair_translucent_taskbar_text(
     style: &ThemeStyle,
     bg: &Color,
     language: LanguageId,
-    strings: Strings,
+    _strings: Strings,
     codex_session_text: &str,
     codex_weekly_text: &str,
     show_session_window: bool,
@@ -2844,7 +2844,7 @@ fn paint_content(
     _is_dark: bool,
     bg: &Color,
     language: LanguageId,
-    strings: Strings,
+    _strings: Strings,
     codex_session_pct: f64,
     codex_session_text: &str,
     codex_weekly_pct: f64,
