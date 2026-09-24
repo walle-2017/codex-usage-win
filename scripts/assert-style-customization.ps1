@@ -535,7 +535,7 @@ if ($styleWindow -match 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
     throw 'The fixed neutral style-window caption must not switch or animate with the active theme.'
 }
 if ($windowProduction -notmatch 'text_quality_for_layered_surface' -or
-    $windowProduction -notmatch 'NONANTIALIASED_QUALITY' -or
+    $windowProduction -notmatch 'ANTIALIASED_QUALITY' -or
     $windowProduction -notmatch 'widget_text_quality\(\)') {
-    throw 'Transparent/frosted taskbar text must avoid ClearType background-fringe artifacts.'
+    throw 'Layered taskbar text must use grayscale antialiasing instead of ClearType subpixel rendering.'
 }
