@@ -339,7 +339,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
-        let font_name = native_interop::wide_str(fonts::ui_face(snapshot.language));
+        let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(snapshot.language)));
         let font = CreateFontW(
             -s(14),
             0,
@@ -356,7 +356,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
-        let mono_name = native_interop::wide_str(fonts::mono_face());
+        let mono_name = native_interop::wide_str(fonts::face(fonts::FontRole::Mono, None));
         let json_font = CreateFontW(
             -s(13),
             0,

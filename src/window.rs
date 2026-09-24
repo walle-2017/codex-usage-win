@@ -2554,7 +2554,7 @@ unsafe fn draw_directwrite_text(
 
     let Some(mask) = native_interop::directwrite_text_mask(
         text,
-        fonts::taskbar_widget_face(),
+        fonts::face(fonts::FontRole::Taskbar, None),
         font_height.abs() as f32,
         font_weight,
         mask_width,
@@ -2833,7 +2833,7 @@ fn paint_content(
         let single_row_y = (height - sc(SEGMENT_H)) / 2;
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let font_name = native_interop::wide_str(fonts::taskbar_widget_face());
+        let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
         let font = CreateFontW(
             sc(metrics.font_height),
             0,
@@ -3386,7 +3386,7 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
             let _ = DeleteObject(background);
             let _ = DeleteObject(border);
 
-            let font_name = native_interop::wide_str(fonts::taskbar_face());
+            let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
             let font = CreateFontW(
                 sc(-12),
                 0,
@@ -5520,7 +5520,7 @@ fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
         hwnd,
         items,
         theme::is_dark_mode(),
-        fonts::ui_face(language),
+        fonts::face(fonts::FontRole::Ui, Some(language)),
         anchor,
         preserve_foreground,
     );
@@ -5777,7 +5777,7 @@ fn draw_usage_value_text(
         .unwrap_or((text, None));
 
     unsafe {
-        let font_name = native_interop::wide_str(fonts::taskbar_widget_face());
+        let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
         let primary_font = CreateFontW(
             sc(metrics.value_font_height),
             0,

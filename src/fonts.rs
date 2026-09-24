@@ -17,7 +17,17 @@ pub const MICROSOFT_YAHEI_UI_FACE: &str = "Microsoft YaHei UI";
 const SANS_SERIF_FALLBACK_FACE: &str = "Arial";
 
 static INITIALIZED: OnceLock<bool> = OnceLock::new();
-static TASKBAR_WIDGET_FACE: OnceLock<&'static str> = OnceLock::new();
+static TASKBAR_FACE: OnceLock<&'static str> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontRole {
+    /// General application UI such as menus and settings panels.
+    Ui,
+    /// Small taskbar widget text rendered by the DirectWrite taskbar path.
+    Taskbar,
+    /// Monospaced editor/code text such as the JSON editor.
+    Mono,
+}
 
 static INTER_FONT: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
 static NOTO_SANS_SC_FONT: &[u8] = include_bytes!("../assets/fonts/NotoSansSC-UI.ttf");
@@ -77,26 +87,18 @@ pub fn init() -> bool {
     })
 }
 
-pub fn ui_face(language: LanguageId) -> &'static str {
+fn ui_role_face(language: Option<LanguageId>) -> &'static str {
     if !init() {
-        return "Segoe UI";
+        return SEGOE_UI_FACE;
     }
     match language {
-        LanguageId::SimplifiedChinese => NOTO_SANS_SC_FACE,
+        Some(LanguageId::SimplifiedChinese) => NOTO_SANS_SC_FACE,
         _ => INTER_FACE,
     }
 }
 
-pub fn taskbar_face() -> &'static str {
-    if init() {
-        INTER_FACE
-    } else {
-        "Segoe UI"
-    }
-}
-
-pub fn taskbar_widget_face() -> &'static str {
-    TASKBAR_WIDGET_FACE.get_or_init(|| {
+fn taskbar_role_face() -> &'static str {
+    TASKBAR_FACE.get_or_init(|| {
         [SEGOE_UI_FACE, MICROSOFT_YAHEI_UI_FACE]
             .into_iter()
             .find(|face| font_available(face))
@@ -104,7 +106,7 @@ pub fn taskbar_widget_face() -> &'static str {
     })
 }
 
-pub fn mono_face() -> &'static str {
+fn mono_role_face() -> &'static str {
     if init() {
         JETBRAINS_MONO_FACE
     } else {
@@ -112,9 +114,34 @@ pub fn mono_face() -> &'static str {
     }
 }
 
+/// Resolve the font family for a semantic UI role.
+///
+/// The language is only used by FontRole::Ui. None preserves the existing
+/// neutral UI behavior used by the compact taskbar tooltip.
+pub fn face(role: FontRole, language: Option<LanguageId>) -> &'static str {
+    match role {
+        FontRole::Ui => ui_role_face(language),
+        FontRole::Taskbar => taskbar_role_face(),
+        FontRole::Mono => mono_role_face(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_roles_preserve_existing_bundled_ui_mapping() {
+        if init() {
+            assert_eq!(
+                face(FontRole::Ui, Some(LanguageId::SimplifiedChinese)),
+                NOTO_SANS_SC_FACE
+            );
+            assert_eq!(face(FontRole::Ui, Some(LanguageId::English)), INTER_FACE);
+            assert_eq!(face(FontRole::Ui, None), INTER_FACE);
+            assert_eq!(face(FontRole::Mono, None), JETBRAINS_MONO_FACE);
+        }
+    }
 
     #[test]
     fn bundled_font_assets_remain_small() {
