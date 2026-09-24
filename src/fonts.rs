@@ -98,14 +98,10 @@ pub fn taskbar_face() -> &'static str {
 
 pub fn taskbar_widget_face() -> &'static str {
     TASKBAR_WIDGET_FACE.get_or_init(|| {
-        [
-            SEGOE_UI_VARIABLE_TEXT_FACE,
-            SEGOE_UI_FACE,
-            MICROSOFT_YAHEI_UI_FACE,
-        ]
-        .into_iter()
-        .find(|face| font_available(face))
-        .unwrap_or(SANS_SERIF_FALLBACK_FACE)
+        [SEGOE_UI_FACE, MICROSOFT_YAHEI_UI_FACE]
+            .into_iter()
+            .find(|face| font_available(face))
+            .unwrap_or(SANS_SERIF_FALLBACK_FACE)
     })
 }
 
