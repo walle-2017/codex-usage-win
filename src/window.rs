@@ -658,7 +658,7 @@ fn append_provider_alerts(
     provider_key: &str,
     provider_label: &str,
     usage: &crate::models::UsageData,
-    strings: Strings,
+    _strings: Strings,
 ) {
     append_quota_alert(
         alerts,
@@ -741,7 +741,7 @@ fn append_quota_alert(
 fn full_usage_line(
     section: &crate::models::UsageSection,
     language: LanguageId,
-    strings: Strings,
+    _strings: Strings,
     window: poller::UsageWindowKind,
 ) -> String {
     poller::format_line(
