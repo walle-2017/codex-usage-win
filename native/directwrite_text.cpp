@@ -153,7 +153,7 @@ extern "C" __declspec(dllexport) int codex_directwrite_text_mask(
 
         target->BeginDraw();
         target->Clear(D2D1::ColorF(0.0f, 0.0f));
-        target->DrawTextW(
+        target->DrawText(
             text,
             text_len,
             format.Get(),
