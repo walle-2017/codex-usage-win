@@ -2576,7 +2576,7 @@ fn paint_content(
         let single_row_y = (height - sc(SEGMENT_H)) / 2;
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let font_name = native_interop::wide_str(fonts::taskbar_face());
+        let font_name = native_interop::wide_str(fonts::taskbar_widget_face());
         let font = CreateFontW(
             sc(metrics.font_height),
             0,
@@ -5520,7 +5520,7 @@ fn draw_usage_value_text(
         .unwrap_or((text, None));
 
     unsafe {
-        let font_name = native_interop::wide_str(fonts::taskbar_face());
+        let font_name = native_interop::wide_str(fonts::taskbar_widget_face());
         let primary_font = CreateFontW(
             sc(metrics.value_font_height),
             0,

@@ -1,15 +1,24 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-use windows::Win32::Graphics::Gdi::AddFontMemResourceEx;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::LPARAM;
+use windows::Win32::Graphics::Gdi::{
+    AddFontMemResourceEx, CreateCompatibleDC, DeleteDC, EnumFontFamiliesW, LOGFONTW, TEXTMETRICW,
+};
 
 use crate::localization::LanguageId;
 
 pub const INTER_FACE: &str = "Inter Variable";
 pub const NOTO_SANS_SC_FACE: &str = "Noto Sans SC";
 pub const JETBRAINS_MONO_FACE: &str = "JetBrains Mono";
+pub const SEGOE_UI_VARIABLE_TEXT_FACE: &str = "Segoe UI Variable Text";
+pub const SEGOE_UI_FACE: &str = "Segoe UI";
+pub const MICROSOFT_YAHEI_UI_FACE: &str = "Microsoft YaHei UI";
+const SANS_SERIF_FALLBACK_FACE: &str = "Arial";
 
 static INITIALIZED: OnceLock<bool> = OnceLock::new();
+static TASKBAR_WIDGET_FACE: OnceLock<&'static str> = OnceLock::new();
 
 static INTER_FONT: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
 static NOTO_SANS_SC_FONT: &[u8] = include_bytes!("../assets/fonts/NotoSansSC-UI.ttf");
@@ -25,6 +34,39 @@ fn register_font(bytes: &'static [u8]) -> bool {
             &count,
         );
         !handle.0.is_null() && count > 0
+    }
+}
+
+unsafe extern "system" fn mark_font_found(
+    _log_font: *const LOGFONTW,
+    _text_metric: *const TEXTMETRICW,
+    _font_type: u32,
+    lparam: LPARAM,
+) -> i32 {
+    let found = lparam.0 as *mut bool;
+    if !found.is_null() {
+        *found = true;
+    }
+    0
+}
+
+fn font_available(face: &str) -> bool {
+    unsafe {
+        let hdc = CreateCompatibleDC(None);
+        if hdc.0.is_null() {
+            return false;
+        }
+
+        let mut found = false;
+        let wide: Vec<u16> = face.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = EnumFontFamiliesW(
+            hdc,
+            PCWSTR::from_raw(wide.as_ptr()),
+            Some(mark_font_found),
+            LPARAM((&mut found as *mut bool) as isize),
+        );
+        let _ = DeleteDC(hdc);
+        found
     }
 }
 
@@ -52,6 +94,19 @@ pub fn taskbar_face() -> &'static str {
     } else {
         "Segoe UI"
     }
+}
+
+pub fn taskbar_widget_face() -> &'static str {
+    *TASKBAR_WIDGET_FACE.get_or_init(|| {
+        [
+            SEGOE_UI_VARIABLE_TEXT_FACE,
+            SEGOE_UI_FACE,
+            MICROSOFT_YAHEI_UI_FACE,
+        ]
+        .into_iter()
+        .find(|face| font_available(face))
+        .unwrap_or(SANS_SERIF_FALLBACK_FACE)
+    })
 }
 
 pub fn mono_face() -> &'static str {
