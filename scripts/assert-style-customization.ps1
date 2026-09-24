@@ -536,6 +536,7 @@ if ($styleWindow -match 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
 }
 if ($windowProduction -notmatch 'text_quality_for_layered_surface' -or
     $windowProduction -notmatch 'ANTIALIASED_QUALITY' -or
+    $windowProduction -notmatch 'NONANTIALIASED_QUALITY' -or
     $windowProduction -notmatch 'widget_text_quality\(\)') {
-    throw 'Layered taskbar text must use grayscale antialiasing instead of ClearType subpixel rendering.'
+    throw 'Layered taskbar text must keep grayscale AA on opaque panels and avoid AA coverage fringes on translucent/frosted panels.'
 }
