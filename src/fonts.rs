@@ -12,7 +12,6 @@ use crate::localization::LanguageId;
 pub const INTER_FACE: &str = "Inter Variable";
 pub const NOTO_SANS_SC_FACE: &str = "Noto Sans SC";
 pub const JETBRAINS_MONO_FACE: &str = "JetBrains Mono";
-pub const SEGOE_UI_VARIABLE_TEXT_FACE: &str = "Segoe UI Variable Text";
 pub const SEGOE_UI_FACE: &str = "Segoe UI";
 pub const MICROSOFT_YAHEI_UI_FACE: &str = "Microsoft YaHei UI";
 const SANS_SERIF_FALLBACK_FACE: &str = "Arial";
