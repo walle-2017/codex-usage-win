@@ -236,21 +236,17 @@ fn sc(px: i32) -> i32 {
     (px as f64 * dpi as f64 / 96.0).round() as i32
 }
 
-fn text_quality_for_layered_surface(panel_alpha: u8, composition_blur_active: bool) -> u32 {
-    if composition_blur_active || panel_alpha < u8::MAX {
-        // ClearType/antialiased GDI glyph edges are pre-blended against the
-        // panel RGB. The layered-window finalizer later promotes changed pixels
-        // to opaque foreground, turning those edge blends into visible halos.
-        NONANTIALIASED_QUALITY.0 as u32
-    } else {
-        CLEARTYPE_QUALITY.0 as u32
-    }
+fn text_quality_for_layered_surface(_panel_alpha: u8, _composition_blur_active: bool) -> u32 {
+    // The taskbar widget is rendered into a 32-bit DIB and then submitted through
+    // UpdateLayeredWindow. Use grayscale antialiasing so glyph coverage is stored
+    // uniformly per pixel instead of relying on ClearType RGB subpixel samples.
+    ANTIALIASED_QUALITY.0 as u32
 }
 
 fn widget_text_quality() -> u32 {
     let state = lock_state();
     let Some(s) = state.as_ref() else {
-        return CLEARTYPE_QUALITY.0 as u32;
+        return ANTIALIASED_QUALITY.0 as u32;
     };
     let panel_alpha = s
         .styles
@@ -5665,19 +5661,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transparent_layered_text_avoids_cleartype_background_fringe() {
-        assert_eq!(
-            text_quality_for_layered_surface(255, false),
-            CLEARTYPE_QUALITY.0 as u32
-        );
-        assert_eq!(
-            text_quality_for_layered_surface(254, false),
-            NONANTIALIASED_QUALITY.0 as u32
-        );
-        assert_eq!(
-            text_quality_for_layered_surface(255, true),
-            NONANTIALIASED_QUALITY.0 as u32
-        );
+    fn layered_text_uses_grayscale_antialiasing() {
+        for (panel_alpha, composition_blur_active) in
+            [(255, false), (254, false), (255, true)]
+        {
+            assert_eq!(
+                text_quality_for_layered_surface(panel_alpha, composition_blur_active),
+                ANTIALIASED_QUALITY.0 as u32
+            );
+        }
     }
 
     #[test]
