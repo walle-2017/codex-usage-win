@@ -536,7 +536,8 @@ if ($styleWindow -match 'DWMWA_TRANSITIONS_FORCEDISABLED' -or
 }
 if ($windowProduction -notmatch 'text_quality_for_layered_surface' -or
     $windowProduction -notmatch 'ANTIALIASED_QUALITY' -or
-    $windowProduction -notmatch 'NONANTIALIASED_QUALITY' -or
+    $windowProduction -notmatch 'repair_translucent_taskbar_text' -or
+    $windowProduction -notmatch 'composite_premultiplied_text' -or
     $windowProduction -notmatch 'widget_text_quality\(\)') {
-    throw 'Layered taskbar text must keep grayscale AA on opaque panels and avoid AA coverage fringes on translucent/frosted panels.'
+    throw 'Layered taskbar text must keep grayscale AA and preserve glyph coverage through translucent/frosted alpha composition.'
 }

@@ -236,17 +236,10 @@ fn sc(px: i32) -> i32 {
     (px as f64 * dpi as f64 / 96.0).round() as i32
 }
 
-fn text_quality_for_layered_surface(panel_alpha: u8, composition_blur_active: bool) -> u32 {
-    if composition_blur_active || panel_alpha < u8::MAX {
-        // The layered finalizer promotes changed foreground pixels to alpha=255.
-        // Grayscale-AA edge pixels would therefore lose their partial coverage on
-        // translucent/frosted panels and become visible light/dark fringes.
-        NONANTIALIASED_QUALITY.0 as u32
-    } else {
-        // On an opaque panel there is no alpha-coverage mismatch, so grayscale
-        // antialiasing gives cleaner small GDI text than ClearType in this DIB path.
-        ANTIALIASED_QUALITY.0 as u32
-    }
+fn text_quality_for_layered_surface(_panel_alpha: u8, _composition_blur_active: bool) -> u32 {
+    // Always rasterize taskbar glyphs with grayscale antialiasing. Translucent
+    // surfaces repair glyph coverage into premultiplied alpha after GDI painting.
+    ANTIALIASED_QUALITY.0 as u32
 }
 
 fn widget_text_quality() -> u32 {
@@ -2357,6 +2350,25 @@ fn render_layered() {
             &surface_style,
         );
 
+        if composition_blur_active || background.a < u8::MAX {
+            repair_translucent_taskbar_text(
+                mem_dc,
+                pixel_data,
+                width,
+                height,
+                &surface_style,
+                &style,
+                &bg_color,
+                language,
+                strings,
+                &codex_session_text,
+                &codex_weekly_text,
+                show_session_window,
+                show_weekly_window,
+                last_poll_ok,
+            );
+        }
+
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
             cx: width,
@@ -2483,13 +2495,339 @@ fn finalize_layered_bitmap(
             };
 
             // Foreground content is kept opaque. Panel pixels retain the
-            // configured RGBA alpha in the normal layered renderer.
+            // configured RGBA alpha in the normal layered renderer. Text on a
+            // translucent surface is repaired afterward from a grayscale mask.
             if pixels[idx] != panel_pixels[idx] {
                 pixels[idx] = (pixels[idx] & 0x00FFFFFF) | 0xFF000000;
             } else {
                 pixels[idx] = premultiplied_pixel(panel_color);
             }
         }
+    }
+}
+
+fn composite_premultiplied_text(dst: u32, color: Color, coverage: u8) -> u32 {
+    let src_alpha = (coverage as u32 * color.a as u32 + 127) / 255;
+    if src_alpha == 0 {
+        return dst;
+    }
+
+    let inv = 255 - src_alpha;
+    let dst_alpha = (dst >> 24) & 0xFF;
+    let dst_r = (dst >> 16) & 0xFF;
+    let dst_g = (dst >> 8) & 0xFF;
+    let dst_b = dst & 0xFF;
+
+    let out_alpha = src_alpha + (dst_alpha * inv + 127) / 255;
+    let out_r = (color.r as u32 * src_alpha + dst_r * inv + 127) / 255;
+    let out_g = (color.g as u32 * src_alpha + dst_g * inv + 127) / 255;
+    let out_b = (color.b as u32 * src_alpha + dst_b * inv + 127) / 255;
+
+    (out_alpha << 24) | (out_r << 16) | (out_g << 8) | out_b
+}
+
+fn restore_panel_rect(
+    pixels: &mut [u32],
+    width: i32,
+    height: i32,
+    style: &ThemeStyle,
+    rect: RECT,
+) {
+    let left = rect.left.clamp(0, width);
+    let top = rect.top.clamp(0, height);
+    let right = rect.right.clamp(left, width);
+    let bottom = rect.bottom.clamp(top, height);
+
+    for y in top..bottom {
+        for x in left..right {
+            let idx = (y * width + x) as usize;
+            pixels[idx] = panel_color_at(style, width, height, x, y)
+                .map(premultiplied_pixel)
+                .unwrap_or(0);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_layered_antialiased_text(
+    reference_dc: HDC,
+    pixels: &mut [u32],
+    surface_width: i32,
+    surface_height: i32,
+    surface_style: &ThemeStyle,
+    rect: RECT,
+    text: &str,
+    font_height: i32,
+    font_weight: i32,
+    color: Color,
+) {
+    let mask_width = rect.right - rect.left;
+    let mask_height = rect.bottom - rect.top;
+    if text.is_empty() || mask_width <= 0 || mask_height <= 0 {
+        return;
+    }
+
+    restore_panel_rect(pixels, surface_width, surface_height, surface_style, rect);
+
+    let mask_dc = CreateCompatibleDC(reference_dc);
+    if mask_dc.0.is_null() {
+        return;
+    }
+
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: mask_width,
+            biHeight: -mask_height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut mask_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mask_bitmap =
+        CreateDIBSection(mask_dc, &bmi, DIB_RGB_COLORS, &mut mask_bits, None, 0).unwrap_or_default();
+    if mask_bitmap.is_invalid() || mask_bits.is_null() {
+        let _ = DeleteDC(mask_dc);
+        return;
+    }
+
+    let old_bitmap = SelectObject(mask_dc, mask_bitmap);
+    let mask_len = (mask_width * mask_height) as usize;
+    let mask_pixels = std::slice::from_raw_parts_mut(mask_bits as *mut u32, mask_len);
+    mask_pixels.fill(0);
+
+    let font_name = native_interop::wide_str(fonts::taskbar_widget_face());
+    let font = CreateFontW(
+        font_height,
+        0,
+        0,
+        0,
+        font_weight,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+        PCWSTR::from_raw(font_name.as_ptr()),
+    );
+    let old_font = SelectObject(mask_dc, font);
+    let _ = SetBkMode(mask_dc, TRANSPARENT);
+    let _ = SetTextColor(mask_dc, COLORREF(0x00FFFFFF));
+
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut mask_rect = RECT {
+        left: 0,
+        top: 0,
+        right: mask_width,
+        bottom: mask_height,
+    };
+    let _ = DrawTextW(
+        mask_dc,
+        &mut wide,
+        &mut mask_rect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    for mask_y in 0..mask_height {
+        let dst_y = rect.top + mask_y;
+        if dst_y < 0 || dst_y >= surface_height {
+            continue;
+        }
+        for mask_x in 0..mask_width {
+            let dst_x = rect.left + mask_x;
+            if dst_x < 0 || dst_x >= surface_width {
+                continue;
+            }
+            let mask = mask_pixels[(mask_y * mask_width + mask_x) as usize];
+            let coverage = (mask & 0xFF) as u8;
+            if coverage == 0 {
+                continue;
+            }
+            let idx = (dst_y * surface_width + dst_x) as usize;
+            pixels[idx] = composite_premultiplied_text(pixels[idx], color, coverage);
+        }
+    }
+
+    let _ = SelectObject(mask_dc, old_font);
+    let _ = DeleteObject(font);
+    let _ = SelectObject(mask_dc, old_bitmap);
+    let _ = DeleteObject(mask_bitmap);
+    let _ = DeleteDC(mask_dc);
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn repair_translucent_taskbar_text(
+    reference_dc: HDC,
+    pixels: &mut [u32],
+    width: i32,
+    height: i32,
+    surface_style: &ThemeStyle,
+    style: &ThemeStyle,
+    bg: &Color,
+    language: LanguageId,
+    strings: Strings,
+    codex_session_text: &str,
+    codex_weekly_text: &str,
+    show_session_window: bool,
+    show_weekly_window: bool,
+    last_poll_ok: bool,
+) {
+    let preset = current_appearance_preset();
+    let metrics = preset.metrics();
+    let (label_width, text_width) = usage_layout_widths(language, preset);
+    let panel_base = style
+        .color(StyleColorTarget::PanelBackground)
+        .blend_over(*bg);
+    let quota_type_color = style.color(StyleColorTarget::QuotaType).blend_over(panel_base);
+    let primary_color = if last_poll_ok {
+        style.color(StyleColorTarget::Remaining)
+    } else {
+        style.color(StyleColorTarget::Error)
+    }
+    .blend_over(panel_base);
+    let reset_color = style.color(StyleColorTarget::ResetTime).blend_over(panel_base);
+
+    let (small_taskbar_mode, small_show_weekly) = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| (s.small_taskbar_mode, s.small_show_weekly))
+            .unwrap_or((false, false))
+    };
+    let effective_show_session = if small_taskbar_mode {
+        !small_show_weekly
+    } else {
+        show_session_window
+    };
+    let effective_show_weekly = if small_taskbar_mode {
+        small_show_weekly
+    } else {
+        show_weekly_window
+    };
+
+    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let row2_y = height - sc(4) - sc(SEGMENT_H);
+    let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
+    let single_row_y = (height - sc(SEGMENT_H)) / 2;
+    let row_height = sc(SEGMENT_H);
+
+    let mut repair_row = |y: i32, label: &str, value_text: &str| {
+        if preset == AppearancePreset::Minimal {
+            let primary = value_text
+                .split_once("  ")
+                .map(|(primary, _)| primary)
+                .unwrap_or(value_text);
+            draw_layered_antialiased_text(
+                reference_dc,
+                pixels,
+                width,
+                height,
+                surface_style,
+                RECT {
+                    left: content_x,
+                    top: y,
+                    right: content_x + sc(metrics.percent_width),
+                    bottom: y + row_height,
+                },
+                primary,
+                sc(metrics.value_font_height),
+                FW_SEMIBOLD.0 as i32,
+                primary_color,
+            );
+            return;
+        }
+
+        draw_layered_antialiased_text(
+            reference_dc,
+            pixels,
+            width,
+            height,
+            surface_style,
+            RECT {
+                left: content_x,
+                top: y,
+                right: content_x + sc(label_width),
+                bottom: y + row_height,
+            },
+            label,
+            sc(metrics.font_height),
+            FW_MEDIUM.0 as i32,
+            quota_type_color,
+        );
+
+        let segment_count = row_bar_segment_count(preset);
+        let progress_width =
+            segment_count * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+        let text_x = content_x
+            + sc(label_width)
+            + sc(metrics.label_bar_gap)
+            + progress_width
+            + sc(metrics.bar_percent_gap);
+        let (primary, secondary) = value_text
+            .split_once("  ")
+            .map(|(primary, secondary)| (primary, Some(secondary)))
+            .unwrap_or((value_text, None));
+
+        draw_layered_antialiased_text(
+            reference_dc,
+            pixels,
+            width,
+            height,
+            surface_style,
+            RECT {
+                left: text_x,
+                top: y,
+                right: text_x + sc(metrics.percent_width),
+                bottom: y + row_height,
+            },
+            primary,
+            sc(metrics.value_font_height),
+            FW_SEMIBOLD.0 as i32,
+            primary_color,
+        );
+
+        if let Some(secondary) = secondary {
+            let secondary_x =
+                text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
+            draw_layered_antialiased_text(
+                reference_dc,
+                pixels,
+                width,
+                height,
+                surface_style,
+                RECT {
+                    left: secondary_x,
+                    top: y,
+                    right: secondary_x + sc(text_width),
+                    bottom: y + row_height,
+                },
+                secondary,
+                sc(metrics.secondary_font_height),
+                FW_NORMAL.0 as i32,
+                reset_color,
+            );
+        }
+    };
+
+    if effective_show_session {
+        repair_row(
+            if effective_show_weekly { row1_y } else { single_row_y },
+            strings.session_window,
+            codex_session_text,
+        );
+    }
+    if effective_show_weekly {
+        repair_row(
+            if effective_show_session { row2_y } else { single_row_y },
+            strings.weekly_window,
+            codex_weekly_text,
+        );
     }
 }
 
@@ -5667,19 +6005,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layered_text_uses_safe_quality_for_surface_alpha() {
-        assert_eq!(
-            text_quality_for_layered_surface(255, false),
-            ANTIALIASED_QUALITY.0 as u32
+    fn layered_text_always_uses_grayscale_antialiasing() {
+        for (panel_alpha, composition_blur_active) in
+            [(255, false), (254, false), (255, true)]
+        {
+            assert_eq!(
+                text_quality_for_layered_surface(panel_alpha, composition_blur_active),
+                ANTIALIASED_QUALITY.0 as u32
+            );
+        }
+    }
+
+    #[test]
+    fn premultiplied_text_composition_preserves_partial_coverage() {
+        let panel = premultiplied_pixel(Color::rgba(240, 240, 240, 128));
+        let mixed = composite_premultiplied_text(
+            panel,
+            Color::rgba(32, 32, 32, 255),
+            128,
         );
-        assert_eq!(
-            text_quality_for_layered_surface(254, false),
-            NONANTIALIASED_QUALITY.0 as u32
-        );
-        assert_eq!(
-            text_quality_for_layered_surface(255, true),
-            NONANTIALIASED_QUALITY.0 as u32
-        );
+        let alpha = (mixed >> 24) & 0xFF;
+        assert!(alpha > 128 && alpha < 255);
     }
 
     #[test]
