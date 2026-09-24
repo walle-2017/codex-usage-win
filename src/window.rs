@@ -236,23 +236,8 @@ fn sc(px: i32) -> i32 {
     (px as f64 * dpi as f64 / 96.0).round() as i32
 }
 
-fn text_quality_for_layered_surface(_panel_alpha: u8, _composition_blur_active: bool) -> u32 {
-    // Always rasterize taskbar glyphs with grayscale antialiasing. Translucent
-    // surfaces repair glyph coverage into premultiplied alpha after GDI painting.
+fn gdi_text_quality() -> u32 {
     ANTIALIASED_QUALITY.0 as u32
-}
-
-fn widget_text_quality() -> u32 {
-    let state = lock_state();
-    let Some(s) = state.as_ref() else {
-        return ANTIALIASED_QUALITY.0 as u32;
-    };
-    let panel_alpha = s
-        .styles
-        .active(s.is_dark)
-        .color(StyleColorTarget::PanelBackground)
-        .a;
-    text_quality_for_layered_surface(panel_alpha, s.composition_blur_active)
 }
 
 /// Re-query the monitor DPI for our window and update the cached value.
@@ -2350,7 +2335,7 @@ fn render_layered() {
             &surface_style,
         );
 
-        repair_taskbar_text(
+        render_taskbar_text(
             pixel_data,
             width,
             height,
@@ -2491,9 +2476,9 @@ fn finalize_layered_bitmap(
                 continue;
             };
 
-            // Foreground content is kept opaque. Panel pixels retain the
-            // configured RGBA alpha in the normal layered renderer. Text on a
-            // translucent surface is repaired afterward from a grayscale mask.
+            // Foreground graphics are kept opaque. Panel pixels retain the
+            // configured RGBA alpha; the GDI text prepass is replaced afterward
+            // by the final DirectWrite coverage render.
             if pixels[idx] != panel_pixels[idx] {
                 pixels[idx] = (pixels[idx] & 0x00FFFFFF) | 0xFF000000;
             } else {
@@ -2523,7 +2508,7 @@ fn composite_premultiplied_text(dst: u32, color: Color, coverage: u8) -> u32 {
     (out_alpha << 24) | (out_r << 16) | (out_g << 8) | out_b
 }
 
-fn restore_panel_rect(
+fn restore_text_background_rect(
     pixels: &mut [u32],
     width: i32,
     height: i32,
@@ -2546,7 +2531,7 @@ fn restore_panel_rect(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn draw_layered_antialiased_text(
+unsafe fn draw_directwrite_text(
     pixels: &mut [u32],
     surface_width: i32,
     surface_height: i32,
@@ -2563,7 +2548,9 @@ unsafe fn draw_layered_antialiased_text(
         return;
     }
 
-    restore_panel_rect(pixels, surface_width, surface_height, surface_style, rect);
+    // Remove the provisional GDI glyphs in this text rectangle before
+    // compositing the final DirectWrite grayscale coverage.
+    restore_text_background_rect(pixels, surface_width, surface_height, surface_style, rect);
 
     let Some(mask) = native_interop::directwrite_text_mask(
         text,
@@ -2597,7 +2584,7 @@ unsafe fn draw_layered_antialiased_text(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn repair_taskbar_text(
+unsafe fn render_taskbar_text(
     pixels: &mut [u32],
     width: i32,
     height: i32,
@@ -2651,13 +2638,13 @@ unsafe fn repair_taskbar_text(
     let single_row_y = (height - sc(SEGMENT_H)) / 2;
     let row_height = sc(SEGMENT_H);
 
-    let mut repair_row = |y: i32, label: &str, value_text: &str| {
+    let mut render_row = |y: i32, label: &str, value_text: &str| {
         if preset == AppearancePreset::Minimal {
             let primary = value_text
                 .split_once("  ")
                 .map(|(primary, _)| primary)
                 .unwrap_or(value_text);
-            draw_layered_antialiased_text(
+            draw_directwrite_text(
                 pixels,
                 width,
                 height,
@@ -2676,7 +2663,7 @@ unsafe fn repair_taskbar_text(
             return;
         }
 
-        draw_layered_antialiased_text(
+        draw_directwrite_text(
             pixels,
             width,
             height,
@@ -2706,7 +2693,7 @@ unsafe fn repair_taskbar_text(
             .map(|(primary, secondary)| (primary, Some(secondary)))
             .unwrap_or((value_text, None));
 
-        draw_layered_antialiased_text(
+        draw_directwrite_text(
             pixels,
             width,
             height,
@@ -2726,7 +2713,7 @@ unsafe fn repair_taskbar_text(
         if let Some(secondary) = secondary {
             let secondary_x =
                 text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
-            draw_layered_antialiased_text(
+            draw_directwrite_text(
                 pixels,
                 width,
                 height,
@@ -2746,14 +2733,14 @@ unsafe fn repair_taskbar_text(
     };
 
     if effective_show_session {
-        repair_row(
+        render_row(
             if effective_show_weekly { row1_y } else { single_row_y },
             strings.session_window,
             codex_session_text,
         );
     }
     if effective_show_weekly {
-        repair_row(
+        render_row(
             if effective_show_session { row2_y } else { single_row_y },
             strings.weekly_window,
             codex_weekly_text,
@@ -2859,7 +2846,7 @@ fn paint_content(
             DEFAULT_CHARSET.0 as u32,
             OUT_TT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
-            widget_text_quality(),
+            gdi_text_quality(),
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
@@ -5803,7 +5790,7 @@ fn draw_usage_value_text(
             DEFAULT_CHARSET.0 as u32,
             OUT_TT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
-            widget_text_quality(),
+            gdi_text_quality(),
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
@@ -5836,7 +5823,7 @@ fn draw_usage_value_text(
                 DEFAULT_CHARSET.0 as u32,
                 OUT_TT_PRECIS.0 as u32,
                 CLIP_DEFAULT_PRECIS.0 as u32,
-                widget_text_quality(),
+                gdi_text_quality(),
                 (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
                 PCWSTR::from_raw(font_name.as_ptr()),
             );
@@ -5933,18 +5920,6 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn layered_text_always_uses_grayscale_antialiasing() {
-        for (panel_alpha, composition_blur_active) in
-            [(255, false), (254, false), (255, true)]
-        {
-            assert_eq!(
-                text_quality_for_layered_surface(panel_alpha, composition_blur_active),
-                ANTIALIASED_QUALITY.0 as u32
-            );
-        }
-    }
 
     #[test]
     fn premultiplied_text_composition_preserves_partial_coverage() {
