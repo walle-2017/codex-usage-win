@@ -236,11 +236,17 @@ fn sc(px: i32) -> i32 {
     (px as f64 * dpi as f64 / 96.0).round() as i32
 }
 
-fn text_quality_for_layered_surface(_panel_alpha: u8, _composition_blur_active: bool) -> u32 {
-    // The taskbar widget is rendered into a 32-bit DIB and then submitted through
-    // UpdateLayeredWindow. Use grayscale antialiasing so glyph coverage is stored
-    // uniformly per pixel instead of relying on ClearType RGB subpixel samples.
-    ANTIALIASED_QUALITY.0 as u32
+fn text_quality_for_layered_surface(panel_alpha: u8, composition_blur_active: bool) -> u32 {
+    if composition_blur_active || panel_alpha < u8::MAX {
+        // The layered finalizer promotes changed foreground pixels to alpha=255.
+        // Grayscale-AA edge pixels would therefore lose their partial coverage on
+        // translucent/frosted panels and become visible light/dark fringes.
+        NONANTIALIASED_QUALITY.0 as u32
+    } else {
+        // On an opaque panel there is no alpha-coverage mismatch, so grayscale
+        // antialiasing gives cleaner small GDI text than ClearType in this DIB path.
+        ANTIALIASED_QUALITY.0 as u32
+    }
 }
 
 fn widget_text_quality() -> u32 {
@@ -5661,15 +5667,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layered_text_uses_grayscale_antialiasing() {
-        for (panel_alpha, composition_blur_active) in
-            [(255, false), (254, false), (255, true)]
-        {
-            assert_eq!(
-                text_quality_for_layered_surface(panel_alpha, composition_blur_active),
-                ANTIALIASED_QUALITY.0 as u32
-            );
-        }
+    fn layered_text_uses_safe_quality_for_surface_alpha() {
+        assert_eq!(
+            text_quality_for_layered_surface(255, false),
+            ANTIALIASED_QUALITY.0 as u32
+        );
+        assert_eq!(
+            text_quality_for_layered_surface(254, false),
+            NONANTIALIASED_QUALITY.0 as u32
+        );
+        assert_eq!(
+            text_quality_for_layered_surface(255, true),
+            NONANTIALIASED_QUALITY.0 as u32
+        );
     }
 
     #[test]
