@@ -521,9 +521,10 @@ if ($fonts -notmatch 'AddFontMemResourceEx' -or
     $fonts -notmatch '3 \* 1024 \* 1024') {
     throw 'Portable build must privately register compact Inter/Noto Sans SC/JetBrains Mono assets and enforce the font-size budget.'
 }
-if ($styleWindow -notmatch 'fonts::ui_face' -or
-    $styleWindow -notmatch 'fonts::mono_face') {
-    throw 'Settings and JSON editors must use the bundled UI/mono font selection.'
+if ($styleWindow -notmatch 'FontRole::Ui' -or
+    $styleWindow -notmatch 'FontRole::Mono' -or
+    $fonts -notmatch 'pub enum FontRole') {
+    throw 'Settings and JSON editors must use the centralized semantic UI/mono font roles.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
