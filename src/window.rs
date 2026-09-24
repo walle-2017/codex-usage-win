@@ -1295,8 +1295,6 @@ fn set_startup_enabled(enable: bool) {
 const SEGMENT_W: i32 = 10;
 const SEGMENT_H: i32 = 13;
 const SEGMENT_GAP: i32 = 1;
-const TASKBAR_SESSION_LABEL: &str = "5h";
-const TASKBAR_WEEKLY_LABEL: &str = "7d";
 
 const DRAG_HANDLE_HIT_W: i32 = 12;
 const DRAG_HANDLE_VISUAL_INSET_X: i32 = 7;
@@ -2673,7 +2671,7 @@ unsafe fn repair_translucent_taskbar_text(
     style: &ThemeStyle,
     bg: &Color,
     language: LanguageId,
-    _strings: Strings,
+    strings: Strings,
     codex_session_text: &str,
     codex_weekly_text: &str,
     show_session_window: bool,
@@ -2820,14 +2818,14 @@ unsafe fn repair_translucent_taskbar_text(
     if effective_show_session {
         repair_row(
             if effective_show_weekly { row1_y } else { single_row_y },
-            TASKBAR_SESSION_LABEL,
+            strings.session_window,
             codex_session_text,
         );
     }
     if effective_show_weekly {
         repair_row(
             if effective_show_session { row2_y } else { single_row_y },
-            TASKBAR_WEEKLY_LABEL,
+            strings.weekly_window,
             codex_weekly_text,
         );
     }
@@ -2844,7 +2842,7 @@ fn paint_content(
     _is_dark: bool,
     bg: &Color,
     language: LanguageId,
-    _strings: Strings,
+    strings: Strings,
     codex_session_pct: f64,
     codex_session_text: &str,
     codex_weekly_pct: f64,
@@ -2965,7 +2963,7 @@ fn paint_content(
                     &quota_type_color,
                     &primary_color,
                     &reset_color,
-                    TASKBAR_SESSION_LABEL,
+                    strings.session_window,
                     codex_session_pct,
                     codex_session_text,
                     &track,
@@ -2982,7 +2980,7 @@ fn paint_content(
                     &quota_type_color,
                     &primary_color,
                     &reset_color,
-                    TASKBAR_WEEKLY_LABEL,
+                    strings.weekly_window,
                     codex_weekly_pct,
                     codex_weekly_text,
                     &track,
