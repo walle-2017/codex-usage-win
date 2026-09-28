@@ -741,15 +741,27 @@ fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
 
 fn section_rect(hwnd: HWND, section: Section) -> RECT {
     let (top, bottom) = match section {
-        Section::General => (76, 116),
-        Section::Preset => (188, 228),
-        Section::Panel => (232, 272),
-        Section::Text => (276, 316),
-        Section::Progress => (320, 360),
-        Section::Interaction => (364, 404),
-        Section::Json => (486, 526),
+        Section::General => (28, 68),
+        Section::Preset => (132, 172),
+        Section::Panel => (176, 216),
+        Section::Text => (220, 260),
+        Section::Progress => (264, 304),
+        Section::Interaction => (308, 348),
+        Section::Json => (416, 456),
     };
     rect(hwnd, 20, top, 166, bottom)
+}
+
+fn navigation_text_inset(section: Section) -> i32 {
+    match section {
+        Section::General => 14,
+        Section::Preset
+        | Section::Panel
+        | Section::Text
+        | Section::Progress
+        | Section::Interaction
+        | Section::Json => 24,
+    }
 }
 
 fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
@@ -3170,15 +3182,6 @@ unsafe fn paint(hwnd: HWND) {
 
     let old_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
     let _ = SetBkMode(hdc, TRANSPARENT);
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-
-    draw_text(
-        hdc,
-        snapshot.language.strings().settings,
-        rect(hwnd, 20, 16, 160, 46),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -3187,7 +3190,7 @@ unsafe fn paint(hwnd: HWND) {
         } else {
             "Appearance"
         },
-        rect(hwnd, 20, 148, 166, 176),
+        rect(hwnd, 20, 92, 166, 120),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     draw_text(
@@ -3197,7 +3200,7 @@ unsafe fn paint(hwnd: HWND) {
         } else {
             "Advanced"
         },
-        rect(hwnd, 20, 446, 166, 474),
+        rect(hwnd, 20, 376, 166, 404),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -3367,7 +3370,7 @@ unsafe fn paint_navigation(
             hdc,
             section_label(item, snapshot.language),
             RECT {
-                left: r.left + scale(hwnd, 14),
+                left: r.left + scale(hwnd, navigation_text_inset(item)),
                 ..r
             },
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
