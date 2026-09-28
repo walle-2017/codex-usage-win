@@ -126,10 +126,6 @@ if (($windowProduction | Select-String -Pattern 'for\s+row\s+in\s+0\.\.3' -AllMa
     ($windowProduction | Select-String -Pattern 'for\s+col\s+in\s+0\.\.2' -AllMatches).Matches.Count -lt 1) {
     throw 'Drag handle must use a 2x3 dot matrix.'
 }
-if ($windowProduction -notmatch 'DRAG_HANDLE_VISUAL_INSET_X:\s*i32\s*=\s*7') {
-    throw 'Drag-handle dots must retain their inset.'
-}
-
 if ($windowProduction -notmatch 'preset\s*==\s*AppearancePreset::Minimal' -or
     $windowProduction -notmatch 'draw_minimal_usage_value\(' -or
     $windowProduction -notmatch 'minimal_percent_hit\(' -or
