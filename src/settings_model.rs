@@ -190,6 +190,8 @@ impl EditableSettings {
 
         format!(
 r#"{{
+  // {jsonc_notice}
+
   // {general_group}
   "general": {{
     // {refresh_desc}
@@ -246,6 +248,11 @@ r#"{{
   "schema_version": {schema}
 }}
 "#,
+            jsonc_notice = localized(
+                zh,
+                "注释仅用于说明，不属于配置数据；应用、保存和导出时不会写入配置",
+                "Comments are documentation only and are not configuration data; they are omitted when applying, saving, or exporting",
+            ),
             general_group = localized(zh, "常规设置", "General settings"),
             refresh_desc = localized(zh, "自动刷新额度数据的时间间隔", "Automatic usage refresh interval"),
             refresh_options = localized(zh, "可选：1m | 5m | 15m | 1h", "Options: 1m | 5m | 15m | 1h"),
@@ -542,6 +549,7 @@ mod tests {
     #[test]
     fn generated_jsonc_contains_comments_for_options() {
         let text = sample().to_jsonc(LanguageId::SimplifiedChinese);
+        assert!(text.contains("// 注释仅用于说明，不属于配置数据；应用、保存和导出时不会写入配置"));
         assert!(text.contains("// 可选：1m | 5m | 15m | 1h"));
         assert!(text.contains("// 格式：#RRGGBB 或 #RRGGBBAA"));
         assert!(text.contains("// 范围：0–100"));
