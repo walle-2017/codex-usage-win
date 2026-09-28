@@ -510,10 +510,21 @@ if ($styleWindow -notmatch 'read_large_edit_text_raw' -or
     $styleWindow -notmatch 'EM_GETSCROLLPOS_MSG' -or
     $styleWindow -notmatch 'EM_SETSCROLLPOS_MSG' -or
     $styleWindow -notmatch 'previous_event_mask' -or
-    $styleWindow -notmatch 'syntax_highlight_json_editor\(edit, &windows_text, is_dark\)' -or
+    $styleWindow -notmatch 'syntax_highlight_json_editor\(edit, &normalized, is_dark\)' -or
+    $styleWindow -notmatch 'normalize_to_lf\(&read_large_edit_text_raw\(edit\)\)' -or
     $styleWindow -notmatch 'InvalidateRect\(edit, None, true\)' -or
     $styleWindow -notmatch 'UpdateWindow\(edit\)') {
-    throw 'JSON RichEdit live highlighting must preserve CRLF offsets, selection/scroll state, suppress formatting notifications, and fully repaint after edits.'
+    throw 'JSON RichEdit live highlighting must use RichEdit logical newline offsets, preserve selection/scroll state, suppress formatting notifications, and fully repaint after edits.'
+}
+if ($styleWindow -notmatch '有未保存更改 · 配置有效' -or
+    $styleWindow -notmatch 'Unsaved changes · Configuration is valid' -or
+    $styleWindow -notmatch 'if action == JsonAction::Apply && !json_dirty' -or
+    $styleWindow -notmatch 'let apply_background = if dirty') {
+    throw 'JSON editor must show an explicit unsaved state and disable Apply while clean.'
+}
+if ($styleWindow -notmatch 'codex-usage-win-config-\{:\\04\}' -and
+    $styleWindow -notmatch 'codex-usage-win-config-') {
+    throw 'JSON export must provide a timestamped default filename.'
 }
 if ($styleWindow -notmatch 'GetOpenFileNameW' -or
     $styleWindow -notmatch 'GetSaveFileNameW' -or
