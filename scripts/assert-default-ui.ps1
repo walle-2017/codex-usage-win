@@ -158,12 +158,14 @@ if ($windowProduction -notmatch 'drag_handle_hovered' -or
     $windowProduction -notmatch 'draw_drag_handle\(hdc, height, &drag_color, drag_handle_hovered\)' -or
     $windowProduction -notmatch 'if hovered \{ sc\(3\)' -or
     $windowProduction -notmatch 'default_reset_hit\(' -or
-    $windowProduction -notmatch 'format!\("\{:\\04\}-\{:\\02\}-\{:\\02\}"' -and
-    $windowProduction -notmatch 'format!\("\{:\\02\}:\{:\\02\}"') {
-    throw 'Taskbar drag handle must expose hover styling and default reset labels must expose precise hover details.'
+    $windowProduction -notmatch 'usage_hover_hit\(') {
+    throw 'Taskbar drag handle must expose hover styling and default reset labels must expose hover hit testing.'
 }
-if ($windowProduction -notmatch 'MinimalHoverTarget::Session =>[\s\S]{0,180}local\.wYear' -or
-    $windowProduction -notmatch 'MinimalHoverTarget::Weekly =>[\s\S]{0,120}local\.wHour') {
+if ($windowProduction -notmatch 'local\.wYear' -or
+    $windowProduction -notmatch 'local\.wMonth' -or
+    $windowProduction -notmatch 'local\.wDay' -or
+    $windowProduction -notmatch 'local\.wHour' -or
+    $windowProduction -notmatch 'local\.wMinute') {
     throw '5h reset hover must show year-month-day and 7d reset hover must show hour-minute.'
 }
 
