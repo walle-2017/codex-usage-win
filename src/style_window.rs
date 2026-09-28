@@ -15,6 +15,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::AppearancePreset;
@@ -174,6 +175,7 @@ enum HitTarget {
     Alert(u8),
     Startup,
     Json(JsonAction),
+    JsonStatusPath,
     LanguageToggle,
     LanguageOption(usize),
     Reset,
@@ -220,6 +222,7 @@ struct PanelState {
     language_popup_open: bool,
     json_dirty: bool,
     json_status: String,
+    json_status_path: Option<PathBuf>,
     edit_brush: isize,
     font: isize,
     json_font: isize,
@@ -589,6 +592,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 language_popup_open: false,
                 json_dirty: false,
                 json_status: String::new(),
+                json_status_path: None,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
                 json_font: json_font.0 as isize,
@@ -1279,12 +1283,12 @@ fn read_large_edit_text(edit: HWND) -> String {
 
 fn json_token_color(kind: JsonTokenKind, is_dark: bool) -> Color {
     match (is_dark, kind) {
-        (true, JsonTokenKind::Comment) => Color::from_hex("#9A9A9AFF"),
+        (true, JsonTokenKind::Comment) => Color::from_hex("#777777FF"),
         (true, JsonTokenKind::Key) => Color::from_hex("#9CDCFEFF"),
         (true, JsonTokenKind::String) => Color::from_hex("#CE9178FF"),
         (true, JsonTokenKind::Number) => Color::from_hex("#B5CEA8FF"),
         (true, JsonTokenKind::Keyword) => Color::from_hex("#C586C0FF"),
-        (false, JsonTokenKind::Comment) => Color::from_hex("#7A7A7AFF"),
+        (false, JsonTokenKind::Comment) => Color::from_hex("#999999FF"),
         (false, JsonTokenKind::Key) => Color::from_hex("#0451A5FF"),
         (false, JsonTokenKind::String) => Color::from_hex("#A31515FF"),
         (false, JsonTokenKind::Number) => Color::from_hex("#098658FF"),
@@ -1531,6 +1535,7 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
         };
         s.syncing_json_edit = true;
         s.json_status = status;
+        s.json_status_path = None;
         s.json_dirty = dirty;
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
@@ -1578,9 +1583,9 @@ fn reload_json_editor_from_snapshot() {
     };
     let text = settings.to_jsonc(language);
     let status = if language == LanguageId::SimplifiedChinese {
-        "✓ 已从当前应用设置重新载入".to_string()
+        "✓ 已重新载入".to_string()
     } else {
-        "✓ Reloaded from current application settings".to_string()
+        "✓ Reloaded".to_string()
     };
     write_json_editor(&text, status, false);
 }
@@ -1689,10 +1694,48 @@ fn set_json_status(status: String) {
             return;
         };
         s.json_status = status;
+        s.json_status_path = None;
         s.hwnd.to_hwnd()
     };
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn set_json_status_with_path(status: String, path: PathBuf) {
+    let hwnd = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.json_status = status;
+        s.json_status_path = Some(path);
+        s.hwnd.to_hwnd()
+    };
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn open_json_status_path() {
+    let path = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().and_then(|s| s.json_status_path.clone())
+    };
+    let Some(path) = path else {
+        return;
+    };
+    let operation = native_interop::wide_str("open");
+    let path_wide = native_interop::wide_str(&path.to_string_lossy());
+    unsafe {
+        let _ = ShellExecuteW(
+            HWND::default(),
+            PCWSTR::from_raw(operation.as_ptr()),
+            PCWSTR::from_raw(path_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -1705,8 +1748,8 @@ fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: La
     }
 }
 
-fn update_json_validation_status(mark_dirty: bool) {
-    let (edit, syncing, language, hwnd, is_dark, was_dirty) = {
+fn update_json_validation_status(_mark_dirty: bool) {
+    let (edit, syncing, language, hwnd, is_dark, applied_settings) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
@@ -1717,7 +1760,7 @@ fn update_json_validation_status(mark_dirty: bool) {
             s.snapshot.language,
             s.hwnd.to_hwnd(),
             s.snapshot.is_dark,
-            s.json_dirty,
+            s.snapshot.editable_settings.clone(),
         )
     };
     if syncing {
@@ -1727,36 +1770,26 @@ fn update_json_validation_status(mark_dirty: bool) {
     let raw_text = read_large_edit_text_raw(edit);
     let text = normalize_to_lf(&raw_text);
     syntax_highlight_json_editor(edit, &text, is_dark);
-    let dirty = was_dirty || mark_dirty;
-    let status = match parse_jsonc(&text) {
-        Ok(_) => {
-            if language == LanguageId::SimplifiedChinese {
-                if dirty {
-                    "● 有未保存更改 · 配置有效".to_string()
-                } else {
-                    "✓ 配置有效".to_string()
-                }
-            } else if dirty {
-                "● Unsaved changes · Configuration is valid".to_string()
-            } else {
-                "✓ Configuration is valid".to_string()
-            }
-        }
-        Err(error) => {
-            let detail = friendly_json_error(&error, language);
-            if language == LanguageId::SimplifiedChinese {
-                format!("× 配置存在错误 · 尚未保存\n{detail}")
-            } else {
-                format!("× Configuration has errors · Unsaved\n{detail}")
-            }
-        }
+
+    let parsed = parse_jsonc(&text);
+    let dirty = match &parsed {
+        Ok(settings) => settings != &applied_settings,
+        Err(_) => true,
     };
 
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
-            s.json_status = status;
             s.json_dirty = dirty;
+            if let Err(error) = parsed {
+                let detail = friendly_json_error(&error, language);
+                s.json_status = if language == LanguageId::SimplifiedChinese {
+                    format!("× 配置存在错误\n{detail}")
+                } else {
+                    format!("× Configuration has errors\n{detail}")
+                };
+                s.json_status_path = None;
+            }
         }
     }
     unsafe {
@@ -1775,13 +1808,19 @@ fn format_json_editor() {
     let raw = read_large_edit_text(edit);
     match parse_jsonc(&raw) {
         Ok(settings) => {
+            let dirty = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .is_some_and(|s| settings != s.snapshot.editable_settings)
+            };
             let text = settings.to_jsonc(language);
             let status = if language == LanguageId::SimplifiedChinese {
-                "● 已格式化，尚未保存；已恢复完整官方注释".to_string()
+                "✓ 已格式化".to_string()
             } else {
-                "● Formatted but not saved; restored all official comments".to_string()
+                "✓ Formatted".to_string()
             };
-            write_json_editor(&text, status, true);
+            write_json_editor(&text, status, dirty);
         }
         Err(error) => {
             set_json_status(json_action_error(
@@ -1874,18 +1913,32 @@ fn import_json_file(hwnd: HWND) {
 
     match parse_jsonc(&text) {
         Ok(settings) => {
+            let dirty = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .is_some_and(|s| settings != s.snapshot.editable_settings)
+            };
             let standard = settings.to_jsonc(language);
             let status = if language == LanguageId::SimplifiedChinese {
-                format!("● 已导入并校验，尚未保存：{}", path.display())
+                "✓ 成功导入".to_string()
             } else {
-                format!("● Imported and validated, not saved yet: {}", path.display())
+                "✓ Imported successfully".to_string()
             };
-            write_json_editor(&standard, status, true);
+            write_json_editor(&standard, status, dirty);
+            set_json_status_with_path(
+                if language == LanguageId::SimplifiedChinese {
+                    "✓ 成功导入".to_string()
+                } else {
+                    "✓ Imported successfully".to_string()
+                },
+                path,
+            );
         }
         Err(error) => {
             let status = json_action_error(
-                "导入文件存在错误，尚未保存；可直接在编辑器中修复",
-                "Imported file has errors and is unsaved; edit it directly below",
+                "导入文件存在错误，可直接在编辑器中修复",
+                "Imported file has errors; edit it directly below",
                 &error,
                 language,
             );
@@ -1944,11 +1997,14 @@ fn export_json_file(hwnd: HWND) {
     };
     match fs::write(&path, json) {
         Ok(()) => {
-            set_json_status(if language == LanguageId::SimplifiedChinese {
-                format!("✓ 已导出纯 JSON：{}", path.display())
-            } else {
-                format!("✓ Exported plain JSON: {}", path.display())
-            });
+            set_json_status_with_path(
+                if language == LanguageId::SimplifiedChinese {
+                    "✓ 成功导出".to_string()
+                } else {
+                    "✓ Exported successfully".to_string()
+                },
+                path,
+            );
         }
         Err(error) => set_json_status(if language == LanguageId::SimplifiedChinese {
             format!("× 无法写入导出文件\n{}：{error}", path.display())
@@ -1986,6 +2042,14 @@ fn apply_json_editor() {
             .unwrap_or_else(|e| e.into_inner());
         *pending = Some(settings.clone());
     }
+    send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
+    let (settings, language) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.snapshot.editable_settings.clone(), s.snapshot.language)
+    };
     let standard = settings.to_jsonc(language);
     let status = if language == LanguageId::SimplifiedChinese {
         "✓ 已保存，并从当前应用设置重新载入".to_string()
@@ -1993,7 +2057,6 @@ fn apply_json_editor() {
         "✓ Saved and reloaded from current application settings".to_string()
     };
     write_json_editor(&standard, status, false);
-    send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
 }
 
 fn hex_layout_snapshot() -> Option<([SendHwnd; HEX_EDIT_COUNT], Section, Option<StyleColorTarget>)> {
@@ -2388,11 +2451,36 @@ fn update_blur_from_numeric_edit() {
     }
 }
 
+fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
+    let edit_rect = json_edit_rect(hwnd);
+    let prefix_width = if language == LanguageId::SimplifiedChinese {
+        scale(hwnd, 96)
+    } else {
+        scale(hwnd, 150)
+    };
+    RECT {
+        left: scale(hwnd, 200) + prefix_width,
+        top: edit_rect.bottom + scale(hwnd, 8),
+        right: {
+            let mut client = RECT::default();
+            unsafe { let _ = GetClientRect(hwnd, &mut client); }
+            client.right - scale(hwnd, 24)
+        },
+        bottom: edit_rect.bottom + scale(hwnd, 34),
+    }
+}
+
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
-    let (section, language_popup_open, json_dirty) = {
+    let (section, language_popup_open, json_dirty, json_status_path, language) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
-        (s.section, s.language_popup_open, s.json_dirty)
+        (
+            s.section,
+            s.language_popup_open,
+            s.json_dirty,
+            s.json_status_path.is_some(),
+            s.snapshot.language,
+        )
     };
 
     if section == Section::General && language_popup_open {
@@ -2474,6 +2562,9 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
     }
 
     if section == Section::Json {
+        if json_status_path && pt_in_rect(json_status_path_rect(hwnd, language), x, y) {
+            return Some(HitTarget::JsonStatusPath);
+        }
         for action in [
             JsonAction::Reload,
             JsonAction::Format,
@@ -2583,6 +2674,7 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             };
             send_parent(WM_SETTINGS_STARTUP_CHANGE, usize::from(enabled), 0);
         }
+        HitTarget::JsonStatusPath => open_json_status_path(),
         HitTarget::Json(action) => match action {
             JsonAction::Reload => reload_json_editor_from_snapshot(),
             JsonAction::Format => format_json_editor(),
@@ -3243,6 +3335,7 @@ unsafe fn paint(hwnd: HWND) {
         focused_hex_edit,
         invalid_hex_edits,
         json_status,
+        json_status_path,
         json_dirty,
         font,
     ) = {
@@ -3262,6 +3355,7 @@ unsafe fn paint(hwnd: HWND) {
             s.focused_hex_edit,
             s.invalid_hex_edits,
             s.json_status.clone(),
+            s.json_status_path.clone(),
             s.json_dirty,
             s.font,
         )
@@ -3396,6 +3490,7 @@ unsafe fn paint(hwnd: HWND) {
             hwnd,
             &snapshot,
             &json_status,
+            json_status_path.as_deref(),
             json_dirty,
             hovered,
             pressed,
@@ -3881,6 +3976,7 @@ unsafe fn paint_json_page(
     hwnd: HWND,
     snapshot: &StyleWindowSnapshot,
     status: &str,
+    status_path: Option<&std::path::Path>,
     dirty: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
@@ -3934,28 +4030,65 @@ unsafe fn paint_json_page(
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
     let edit_rect = json_edit_rect(hwnd);
-    let _ = SetTextColor(
-        hdc,
-        COLORREF(if status.starts_with('×') {
-            Color::from_hex("#D95C5CFF")
-        } else if dirty {
-            Color::from_hex("#D69E2EFF")
-        } else {
-            secondary
-        }
-        .to_colorref()),
-    );
+    let success = !status.starts_with('×');
+    let status_color = if success {
+        Color::from_hex("#55B879FF")
+    } else {
+        Color::from_hex("#D95C5CFF")
+    };
+    let _ = SetTextColor(hdc, COLORREF(status_color.to_colorref()));
+
+    let status_top = edit_rect.bottom + scale(hwnd, 8);
+    let prefix_width = if zh { scale(hwnd, 96) } else { scale(hwnd, 150) };
     draw_text(
         hdc,
         status,
         RECT {
             left: scale(hwnd, 200),
-            top: edit_rect.bottom + scale(hwnd, 8),
-            right: scale(hwnd, 630),
-            bottom: client.bottom - scale(hwnd, 18),
+            top: status_top,
+            right: if status_path.is_some() {
+                scale(hwnd, 200) + prefix_width
+            } else {
+                scale(hwnd, 760)
+            },
+            bottom: status_top + scale(hwnd, 26),
         },
-        DT_LEFT | DT_WORDBREAK,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
+    if let Some(path) = status_path {
+        let path_text = path.to_string_lossy();
+        let path_rect = RECT {
+            left: scale(hwnd, 200) + prefix_width,
+            top: status_top,
+            right: client.right - scale(hwnd, 24),
+            bottom: status_top + scale(hwnd, 26),
+        };
+        let _ = SetTextColor(hdc, COLORREF(status_color.to_colorref()));
+        draw_text(hdc, &path_text, path_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        // Underline the clickable path area.
+        let y = path_rect.bottom - scale(hwnd, 4);
+        let pen = CreatePen(PS_SOLID, 1, COLORREF(status_color.to_colorref()));
+        let old_pen = SelectObject(hdc, pen);
+        let _ = MoveToEx(hdc, path_rect.left, y, None);
+        let _ = LineTo(hdc, path_rect.right, y);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(pen);
+    }
+
+    if dirty {
+        let _ = SetTextColor(hdc, COLORREF(Color::from_hex("#D69E2EFF").to_colorref()));
+        draw_text(
+            hdc,
+            if zh { "● 有未保存更改" } else { "● Unsaved changes" },
+            RECT {
+                left: scale(hwnd, 200),
+                top: status_top + scale(hwnd, 28),
+                right: scale(hwnd, 630),
+                bottom: status_top + scale(hwnd, 54),
+            },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
 
     let apply = JsonAction::Apply;
     let apply_background = if dirty {
@@ -3986,7 +4119,7 @@ unsafe fn paint_json_page(
         } else {
             secondary
         },
-        if zh { "应用更改" } else { "Apply changes" },
+        if zh { "应用" } else { "Apply" },
     );
 }
 
