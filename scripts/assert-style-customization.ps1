@@ -519,7 +519,7 @@ if ($styleWindow -notmatch 'read_large_edit_text_raw' -or
 if ($styleWindow -notmatch '● 有未保存更改' -or
     $styleWindow -notmatch '● Unsaved changes' -or
     $styleWindow -notmatch 'settings != &applied_settings' -or
-    $styleWindow -notmatch 'if action == JsonAction::Apply && !json_dirty' -or
+    $styleWindow -notmatch 'action == JsonAction::Apply && !json_dirty' -or
     $styleWindow -notmatch 'let apply_background = if dirty') {
     throw 'JSON editor must derive dirty state from parsed settings, show it on a separate line, and disable Apply while clean.'
 }
