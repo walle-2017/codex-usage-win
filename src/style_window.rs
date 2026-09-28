@@ -3625,11 +3625,14 @@ unsafe fn paint_general_page(
     draw_rounded_outline_rect(
         hdc,
         language_button,
-        subtle_control_border(language_background),
+        if popup_open {
+            accent
+        } else {
+            subtle_control_border(language_background)
+        },
         scale(hwnd, 8),
         1,
     );
-    draw_outline_rect(hdc, language_button, if popup_open { accent } else { secondary });
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
@@ -4655,6 +4658,17 @@ fn subtle_control_border(background: Color) -> Color {
 }
 
 unsafe fn fill_rounded_rect(hdc: HDC, rect: RECT, color: Color, radius: i32) {
+    if native_interop::draw_antialiased_rounded_rect(
+        hdc,
+        rect,
+        radius.max(1) as f32,
+        Some(color),
+        None,
+    ) {
+        return;
+    }
+
+    // Conservative fallback for systems where Direct2D DC rendering is unavailable.
     let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
     let pen = CreatePen(PS_SOLID, 1, COLORREF(color.to_colorref()));
     let old_brush = SelectObject(hdc, brush);
@@ -4682,6 +4696,17 @@ unsafe fn draw_rounded_outline_rect(
     radius: i32,
     width: i32,
 ) {
+    if native_interop::draw_antialiased_rounded_rect(
+        hdc,
+        rect,
+        radius.max(1) as f32,
+        None,
+        Some((color, width.max(1) as f32)),
+    ) {
+        return;
+    }
+
+    // Conservative fallback for systems where Direct2D DC rendering is unavailable.
     let pen = CreatePen(PS_SOLID, width.max(1), COLORREF(color.to_colorref()));
     let old_pen = SelectObject(hdc, pen);
     let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
@@ -4728,25 +4753,25 @@ unsafe fn draw_switch(hdc: HDC, hit_rect: RECT, enabled: bool, track_color: Colo
     } else {
         track.left + 2
     };
-    let knob_brush = CreateSolidBrush(COLORREF(Color::from_hex("#FFFFFFFF").to_colorref()));
-    let knob_pen = CreatePen(
-        PS_SOLID,
-        1,
-        COLORREF(Color::from_hex("#E7ECF2FF").to_colorref()),
-    );
-    let old_brush = SelectObject(hdc, knob_brush);
-    let old_pen = SelectObject(hdc, knob_pen);
-    let _ = Ellipse(
+    let knob_rect = RECT {
+        left: knob_left,
+        top: knob_top,
+        right: knob_left + knob_size,
+        bottom: knob_top + knob_size,
+    };
+    fill_rounded_rect(
         hdc,
-        knob_left,
-        knob_top,
-        knob_left + knob_size,
-        knob_top + knob_size,
+        knob_rect,
+        Color::from_hex("#FFFFFFFF"),
+        knob_size / 2,
     );
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    let _ = DeleteObject(knob_pen);
-    let _ = DeleteObject(knob_brush);
+    draw_rounded_outline_rect(
+        hdc,
+        knob_rect,
+        Color::from_hex("#E7ECF2FF"),
+        knob_size / 2,
+        1,
+    );
 }
 
 unsafe fn draw_outline_rect(hdc: HDC, rect: RECT, color: Color) {
