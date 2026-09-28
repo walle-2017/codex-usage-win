@@ -173,7 +173,6 @@ pub struct Strings {
     pub fifteen_minutes: &'static str,
     pub one_hour: &'static str,
     pub codex_model: &'static str,
-    pub settings: &'static str,
     pub start_with_windows: &'static str,
     pub reset_position: &'static str,
     pub language: &'static str,
