@@ -69,7 +69,7 @@ const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
-const JSON_ACTION_DELAY_MS: u32 = 500;
+const JSON_ACTION_DELAY_MS: u32 = 200;
 
 #[repr(C)]
 #[derive(Default)]
