@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, FILETIME, HWND, LPARAM, RECT, SYSTEMTIME};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromWindow, HDC, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -51,6 +51,25 @@ unsafe extern "C" {
         height: i32,
         coverage: *mut u8,
         coverage_len: usize,
+    ) -> i32;
+    fn codex_draw_rounded_rect(
+        hdc_raw: isize,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        radius: f32,
+        fill_enabled: i32,
+        fill_r: u8,
+        fill_g: u8,
+        fill_b: u8,
+        fill_a: u8,
+        stroke_enabled: i32,
+        stroke_r: u8,
+        stroke_g: u8,
+        stroke_b: u8,
+        stroke_a: u8,
+        stroke_width: f32,
     ) -> i32;
 }
 
@@ -404,6 +423,42 @@ pub fn directwrite_text_mask(
     };
     (ok != 0).then_some(coverage)
 }
+
+pub fn draw_antialiased_rounded_rect(
+    hdc: HDC,
+    rect: RECT,
+    radius: f32,
+    fill: Option<Color>,
+    stroke: Option<(Color, f32)>,
+) -> bool {
+    if hdc.0.is_null() || rect.right <= rect.left || rect.bottom <= rect.top || radius <= 0.0 {
+        return false;
+    }
+    let fill_color = fill.unwrap_or(Color::rgba(0, 0, 0, 0));
+    let (stroke_color, stroke_width) = stroke.unwrap_or((Color::rgba(0, 0, 0, 0), 0.0));
+    unsafe {
+        codex_draw_rounded_rect(
+            hdc.0 as isize,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius,
+            i32::from(fill.is_some()),
+            fill_color.r,
+            fill_color.g,
+            fill_color.b,
+            fill_color.a,
+            i32::from(stroke.is_some()),
+            stroke_color.r,
+            stroke_color.g,
+            stroke_color.b,
+            stroke_color.a,
+            stroke_width.max(0.0),
+        ) != 0
+    }
+}
+
 
 /// Move the window
 pub fn move_window(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
