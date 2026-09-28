@@ -739,6 +739,57 @@ fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 }
 
+const SETTINGS_CONTENT_LEFT: i32 = 200;
+const SETTINGS_CONTENT_RIGHT: i32 = 940;
+const SETTINGS_CARD_RADIUS: i32 = 10;
+const SETTINGS_CARD_INSET_X: i32 = 18;
+const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
+const SETTINGS_CHOICE_LEFT: i32 = 360;
+const SETTINGS_CHOICE_WIDTH: i32 = 130;
+const SETTINGS_CHOICE_GAP: i32 = 10;
+
+fn settings_page_title_rect(hwnd: HWND) -> RECT {
+    rect(
+        hwnd,
+        SETTINGS_CONTENT_LEFT,
+        18,
+        SETTINGS_CONTENT_RIGHT,
+        46,
+    )
+}
+
+fn settings_card_rect(hwnd: HWND, top: i32, bottom: i32) -> RECT {
+    rect(
+        hwnd,
+        SETTINGS_CONTENT_LEFT,
+        top,
+        SETTINGS_CONTENT_RIGHT,
+        bottom,
+    )
+}
+
+fn settings_card_label_rect(hwnd: HWND, top: i32, bottom: i32) -> RECT {
+    rect(
+        hwnd,
+        SETTINGS_CONTENT_LEFT + SETTINGS_CARD_INSET_X,
+        top,
+        SETTINGS_CHOICE_LABEL_RIGHT,
+        bottom,
+    )
+}
+
+fn settings_choice_rect(hwnd: HWND, top: i32, bottom: i32, index: i32) -> RECT {
+    let left = SETTINGS_CHOICE_LEFT
+        + index * (SETTINGS_CHOICE_WIDTH + SETTINGS_CHOICE_GAP);
+    rect(
+        hwnd,
+        left,
+        top,
+        left + SETTINGS_CHOICE_WIDTH,
+        bottom,
+    )
+}
+
 fn section_rect(hwnd: HWND, section: Section) -> RECT {
     let (top, bottom) = match section {
         Section::General => (28, 68),
@@ -936,7 +987,7 @@ fn custom_preset_card_rect(hwnd: HWND) -> RECT {
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 660, 370, 920, 406)
+    rect(hwnd, 660, 414, 920, 450)
 }
 
 fn language_option_count() -> usize {
@@ -1015,16 +1066,16 @@ fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
         900_000 => 2,
         _ => 3,
     };
-    rect(hwnd, 360 + index * 140, 30, 490 + index * 140, 64)
+    settings_choice_rect(hwnd, 68, 102, index)
 }
 
 fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
     rect(
         hwnd,
         812,
-        if weekly { 166 } else { 126 },
+        if weekly { 202 } else { 162 },
         920,
-        if weekly { 198 } else { 158 },
+        if weekly { 234 } else { 194 },
     )
 }
 
@@ -1035,11 +1086,11 @@ fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
         20 => 2,
         _ => 3,
     };
-    rect(hwnd, 360 + index * 140, 226, 490 + index * 140, 260)
+    settings_choice_rect(hwnd, 268, 302, index)
 }
 
 fn general_startup_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 812, 326, 920, 358)
+    rect(hwnd, 812, 370, 920, 402)
 }
 
 fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
@@ -3414,21 +3465,30 @@ unsafe fn paint_general_page(
         state.as_ref().map(|s| s.language_popup_open).unwrap_or(false)
     };
 
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh { "常规" } else { "General" },
+        settings_page_title_rect(hwnd),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
     for r in [
-        rect(hwnd, 200, 18, 940, 76),
-        rect(hwnd, 200, 92, 940, 206),
-        rect(hwnd, 200, 222, 940, 268),
-        rect(hwnd, 200, 284, 940, 420),
+        settings_card_rect(hwnd, 58, 112),
+        settings_card_rect(hwnd, 128, 242),
+        settings_card_rect(hwnd, 258, 312),
+        settings_card_rect(hwnd, 328, 464),
     ] {
-        fill(hdc, r, card);
+        fill_rounded_rect(hdc, r, card, scale(hwnd, SETTINGS_CARD_RADIUS));
     }
 
-    // Refresh frequency: label and choices share one compact row.
+    // Refresh frequency and quota alerts intentionally share identical card
+    // padding, label width, option width and option gaps.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         strings.update_frequency,
-        rect(hwnd, 218, 30, 338, 64),
+        settings_card_label_rect(hwnd, 68, 102),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (interval, label) in [
@@ -3462,25 +3522,24 @@ unsafe fn paint_general_page(
         );
     }
 
-    // Usage display remains a two-row switch group with explicit row spacing.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         if zh { "显示用量" } else { "Usage display" },
-        rect(hwnd, 218, 100, 500, 124),
+        rect(hwnd, 218, 138, 500, 162),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
         if zh { "5 小时额度" } else { "5-hour quota" },
-        rect(hwnd, 238, 126, 650, 158),
+        rect(hwnd, 238, 162, 650, 194),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     draw_text(
         hdc,
         if zh { "每周额度" } else { "Weekly quota" },
-        rect(hwnd, 238, 166, 650, 198),
+        rect(hwnd, 238, 202, 650, 234),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (target, enabled, weekly) in [
@@ -3508,12 +3567,11 @@ unsafe fn paint_general_page(
         );
     }
 
-    // Quota alert: label and choices share one compact row.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         if zh { "额度提醒" } else { "Quota alerts" },
-        rect(hwnd, 218, 226, 338, 260),
+        settings_card_label_rect(hwnd, 268, 302),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (threshold, zh_label, en_label) in [
@@ -3547,19 +3605,18 @@ unsafe fn paint_general_page(
         );
     }
 
-    // Application: title plus two independent rows with a visible gap.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         if zh { "应用" } else { "Application" },
-        rect(hwnd, 218, 292, 500, 316),
+        rect(hwnd, 218, 338, 500, 362),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
         strings.start_with_windows,
-        rect(hwnd, 238, 326, 650, 358),
+        rect(hwnd, 238, 370, 650, 402),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let startup = general.start_with_windows;
@@ -3586,7 +3643,7 @@ unsafe fn paint_general_page(
     draw_text(
         hdc,
         strings.language,
-        rect(hwnd, 238, 370, 600, 406),
+        rect(hwnd, 238, 414, 600, 450),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -3737,7 +3794,12 @@ unsafe fn paint_json_page(
 ) {
     let zh = snapshot.language == LanguageId::SimplifiedChinese;
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(hdc, if zh { "JSON 配置" } else { "JSON configuration" }, rect(hwnd, 200, 18, 940, 48), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(
+        hdc,
+        if zh { "JSON 配置" } else { "JSON configuration" },
+        settings_page_title_rect(hwnd),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -3857,15 +3919,15 @@ unsafe fn paint_appearance_page(
     draw_text(
         hdc,
         if zh { "外观" } else { "Appearance" },
-        rect(hwnd, 200, 18, 500, 46),
+        settings_page_title_rect(hwnd),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
     fill_rounded_rect(
         hdc,
-        rect(hwnd, 200, 58, 940, 164),
+        settings_card_rect(hwnd, 58, 164),
         card,
-        scale(hwnd, 10),
+        scale(hwnd, SETTINGS_CARD_RADIUS),
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
@@ -3998,7 +4060,7 @@ unsafe fn paint_appearance_page(
         let r = row_rect(hwnd, index);
         let selected = row == editor;
         let target = HitTarget::Row(row);
-        fill(
+        fill_rounded_rect(
             hdc,
             r,
             button_background(
@@ -4015,6 +4077,7 @@ unsafe fn paint_appearance_page(
                     selected_pressed: card_pressed,
                 },
             ),
+            scale(hwnd, 8),
         );
         let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
         draw_text(
@@ -4088,7 +4151,12 @@ unsafe fn paint_appearance_page(
     }
 
     if matches!(editor, EditorSelection::Color(_)) {
-        fill(hdc, editor_box_rect(hwnd, section), card);
+        fill_rounded_rect(
+            hdc,
+            editor_box_rect(hwnd, section),
+            card,
+            scale(hwnd, SETTINGS_CARD_RADIUS),
+        );
         paint_numeric_edit_frames(
             hdc,
             hwnd,
@@ -4230,11 +4298,12 @@ unsafe fn paint_style_preview_card(
     accent: Color,
     primary: Color,
 ) {
-    fill(hdc, r, surface);
-    draw_outline_rect_width(
+    fill_rounded_rect(hdc, r, surface, scale(hwnd, SETTINGS_CARD_RADIUS));
+    draw_rounded_outline_rect(
         hdc,
         r,
         if selected { accent } else { border },
+        scale(hwnd, SETTINGS_CARD_RADIUS),
         if selected { 2 } else { 1 },
     );
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
