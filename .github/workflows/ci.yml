@@ -6,6 +6,7 @@ on:
       - main
       - feature/v1.0.5-style-settings-panel-v1
       - feature/v1.0.5-unified-settings
+      - feature/v1.0.5-settings-controls-fluent
   pull_request:
     branches:
       - main
