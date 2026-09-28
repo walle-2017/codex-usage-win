@@ -68,6 +68,8 @@ const EM_SETSCROLLPOS_MSG: u32 = WM_USER + 222;
 const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
+const JSON_ACTION_TIMER_ID: usize = 0x4A53;
+const JSON_ACTION_DELAY_MS: u32 = 500;
 
 #[repr(C)]
 #[derive(Default)]
@@ -223,6 +225,7 @@ struct PanelState {
     json_dirty: bool,
     json_status: String,
     json_status_path: Option<PathBuf>,
+    pending_json_action: Option<JsonAction>,
     edit_brush: isize,
     font: isize,
     json_font: isize,
@@ -593,6 +596,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_dirty: false,
                 json_status: String::new(),
                 json_status_path: None,
+                pending_json_action: None,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
                 json_font: json_font.0 as isize,
@@ -1739,6 +1743,64 @@ fn open_json_status_path() {
     }
 }
 
+fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'static str {
+    let zh = language == LanguageId::SimplifiedChinese;
+    match action {
+        JsonAction::Reload => if zh { "◌ 载入中" } else { "◌ Reloading" },
+        JsonAction::Format => if zh { "◌ 格式化中" } else { "◌ Formatting" },
+        JsonAction::Import => if zh { "◌ 导入中" } else { "◌ Importing" },
+        JsonAction::Export => if zh { "◌ 导出中" } else { "◌ Exporting" },
+        JsonAction::Apply => if zh { "◌ 应用中" } else { "◌ Applying" },
+    }
+}
+
+fn begin_json_action(hwnd: HWND, action: JsonAction) {
+    if action == JsonAction::Apply {
+        apply_json_editor();
+        return;
+    }
+
+    let language = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        if s.pending_json_action.is_some() {
+            return;
+        }
+        s.pending_json_action = Some(action);
+        s.json_status = json_action_running_text(action, s.snapshot.language).to_string();
+        s.json_status_path = None;
+        s.snapshot.language
+    };
+    let _ = language;
+    unsafe {
+        let _ = SetTimer(hwnd, JSON_ACTION_TIMER_ID, JSON_ACTION_DELAY_MS, None);
+        let _ = InvalidateRect(hwnd, None, false);
+        let _ = UpdateWindow(hwnd);
+    }
+}
+
+fn finish_pending_json_action(hwnd: HWND) {
+    let action = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_mut().and_then(|s| s.pending_json_action.take())
+    };
+    let Some(action) = action else {
+        return;
+    };
+    unsafe {
+        let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
+    }
+    match action {
+        JsonAction::Reload => reload_json_editor_from_snapshot(),
+        JsonAction::Format => format_json_editor(),
+        JsonAction::Import => import_json_file(hwnd),
+        JsonAction::Export => export_json_file(hwnd),
+        JsonAction::Apply => apply_json_editor(),
+    }
+}
+
 fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: LanguageId) -> String {
     let detail = friendly_json_error(error, language);
     if language == LanguageId::SimplifiedChinese {
@@ -2451,6 +2513,32 @@ fn update_blur_from_numeric_edit() {
     }
 }
 
+fn text_width_px(hwnd: HWND, text: &str) -> i32 {
+    let font = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.font).unwrap_or(0)
+    };
+    unsafe {
+        let hdc = GetDC(hwnd);
+        if hdc.0.is_null() {
+            return 0;
+        }
+        let old_font = if font != 0 {
+            Some(SelectObject(hdc, HGDIOBJ(font as *mut _)))
+        } else {
+            None
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let mut size = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+        if let Some(old_font) = old_font {
+            SelectObject(hdc, old_font);
+        }
+        let _ = ReleaseDC(hwnd, hdc);
+        size.cx
+    }
+}
+
 fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
     let edit_rect = json_edit_rect(hwnd);
     let prefix_width = if language == LanguageId::SimplifiedChinese {
@@ -2458,20 +2546,28 @@ fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
     } else {
         scale(hwnd, 150)
     };
+    let path_text = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .as_ref()
+            .and_then(|s| s.json_status_path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let left = scale(hwnd, 200) + prefix_width;
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let width = text_width_px(hwnd, &path_text).max(0);
     RECT {
-        left: scale(hwnd, 200) + prefix_width,
+        left,
         top: edit_rect.bottom + scale(hwnd, 8),
-        right: {
-            let mut client = RECT::default();
-            unsafe { let _ = GetClientRect(hwnd, &mut client); }
-            client.right - scale(hwnd, 24)
-        },
+        right: (left + width).min(client.right - scale(hwnd, 24)),
         bottom: edit_rect.bottom + scale(hwnd, 34),
     }
 }
 
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
-    let (section, language_popup_open, json_dirty, json_status_path, language) = {
+    let (section, language_popup_open, json_dirty, json_status_path, language, json_action_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
         (
@@ -2480,6 +2576,7 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
             s.json_dirty,
             s.json_status_path.is_some(),
             s.snapshot.language,
+            s.pending_json_action.is_some(),
         )
     };
 
@@ -2572,7 +2669,7 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
             JsonAction::Export,
             JsonAction::Apply,
         ] {
-            if action == JsonAction::Apply && !json_dirty {
+            if json_action_pending || (action == JsonAction::Apply && !json_dirty) {
                 continue;
             }
             if pt_in_rect(json_action_rect(hwnd, action), x, y) {
@@ -2675,21 +2772,19 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             send_parent(WM_SETTINGS_STARTUP_CHANGE, usize::from(enabled), 0);
         }
         HitTarget::JsonStatusPath => open_json_status_path(),
-        HitTarget::Json(action) => match action {
-            JsonAction::Reload => reload_json_editor_from_snapshot(),
-            JsonAction::Format => format_json_editor(),
-            JsonAction::Import => import_json_file(hwnd),
-            JsonAction::Export => export_json_file(hwnd),
-            JsonAction::Apply => {
+        HitTarget::Json(action) => {
+            if action == JsonAction::Apply {
                 let dirty = STATE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .as_ref()
                     .is_some_and(|s| s.json_dirty);
                 if dirty {
-                    apply_json_editor();
+                    begin_json_action(hwnd, action);
                 }
-            },
+            } else {
+                begin_json_action(hwnd, action);
+            }
         },
         HitTarget::LanguageToggle => {
             let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -2920,6 +3015,13 @@ unsafe extern "system" fn wnd_proc(
         WM_PAINT => {
             paint(hwnd);
             LRESULT(0)
+        }
+        WM_TIMER => {
+            if wparam.0 == JSON_ACTION_TIMER_ID {
+                finish_pending_json_action(hwnd);
+                return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_SETCURSOR => {
             let cursor_hwnd = HWND(wparam.0 as *mut _);
@@ -3280,6 +3382,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_CLOSE => LRESULT(0),
         WM_DESTROY => {
+            let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.take().map(|s| (s.font, s.json_font, s.edit_brush))
@@ -4030,8 +4133,11 @@ unsafe fn paint_json_page(
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
     let edit_rect = json_edit_rect(hwnd);
-    let success = !status.starts_with('×');
-    let status_color = if success {
+    let running = status.starts_with('◌');
+    let success = !status.starts_with('×') && !running;
+    let status_color = if running {
+        Color::from_hex("#8FA8C7FF")
+    } else if success {
         Color::from_hex("#55B879FF")
     } else {
         Color::from_hex("#D95C5CFF")
@@ -4057,10 +4163,12 @@ unsafe fn paint_json_page(
     );
     if let Some(path) = status_path {
         let path_text = path.to_string_lossy();
+        let path_left = scale(hwnd, 200) + prefix_width;
+        let path_width = text_width_px(hwnd, &path_text).max(0);
         let path_rect = RECT {
-            left: scale(hwnd, 200) + prefix_width,
+            left: path_left,
             top: status_top,
-            right: client.right - scale(hwnd, 24),
+            right: (path_left + path_width).min(client.right - scale(hwnd, 24)),
             bottom: status_top + scale(hwnd, 26),
         };
         let _ = SetTextColor(hdc, COLORREF(status_color.to_colorref()));
