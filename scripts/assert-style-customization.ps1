@@ -553,6 +553,13 @@ if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'Section::Json => \(416, 456\)') {
     throw 'Settings sidebar must remain a compact grouped navigation without the redundant Settings heading.'
 }
+if ($styleWindow -match 'Manage refresh, display, alerts, and application behavior' -or
+    $styleWindow -notmatch '360 \+ index \* 140, 30' -or
+    $styleWindow -notmatch '360 \+ index \* 140, 226' -or
+    $styleWindow -notmatch 'rect\(hwnd, 812, 326, 920, 358\)' -or
+    $styleWindow -notmatch 'rect\(hwnd, 660, 370, 920, 406\)') {
+    throw 'General settings must keep the compact single-line refresh/alert rows and spaced application rows.'
+}
 if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
     throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
 }
