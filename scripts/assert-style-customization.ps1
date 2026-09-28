@@ -211,8 +211,13 @@ if ($popupMenu -notmatch 'WS_POPUP' -or
     $popupMenu -notmatch 'CS_DROPSHADOW' -or
     $popupMenu -notmatch 'DWMWA_WINDOW_CORNER_PREFERENCE' -or
     $popupMenu -notmatch 'ITEM_RADIUS' -or
-    $popupMenu -notmatch 'PopupAction::Submenu') {
-    throw 'Custom popup menu must provide popup-window shadow, rounded corners, hover rows, and a real custom submenu.'
+    $popupMenu -notmatch 'PopupAction::Submenu' -or
+    $popupMenu -notmatch 'menu_width\(' -or
+    $popupMenu -notmatch 'DT_CALCRECT' -or
+    $popupMenu -notmatch 'MENU_MIN_WIDTH' -or
+    $popupMenu -match 'ROOT_WIDTH' -or
+    $popupMenu -match 'SUBMENU_WIDTH') {
+    throw 'Custom popup menu must provide native popup styling and content-adaptive root/submenu width.'
 }
 if ($windowProduction -notmatch 'PopupItem::command\(settings_text, IDM_STYLE_SETTINGS\)' -or
     $windowProduction -match 'settings_menu') {
@@ -514,12 +519,13 @@ if ($windowProduction -notmatch 'theme::is_dark_mode\(\)' -or
     $popupMenu -match 'AppendMenuW') {
     throw 'Custom tray popup must follow Windows Dark/Light, draw its own single submenu arrow, and avoid native menu arrows.'
 }
-if ($fonts -notmatch 'AddFontMemResourceEx' -or
-    $fonts -notmatch 'Inter Variable' -or
-    $fonts -notmatch 'Noto Sans SC' -or
+if ($fonts -notmatch 'Segoe UI' -or
+    $fonts -notmatch 'Microsoft YaHei UI' -or
     $fonts -notmatch 'JetBrains Mono' -or
-    $fonts -notmatch '3 \* 1024 \* 1024') {
-    throw 'Portable build must privately register compact Inter/Noto Sans SC/JetBrains Mono assets and enforce the font-size budget.'
+    $fonts -notmatch 'FontRole::Ui \| FontRole::Taskbar' -or
+    $fonts -match 'Inter Variable' -or
+    $fonts -match 'Noto Sans SC') {
+    throw 'UI and taskbar must share the Windows-native font stack, with only JetBrains Mono embedded for monospaced text.'
 }
 if ($styleWindow -notmatch 'FontRole::Ui' -or
     $styleWindow -notmatch 'FontRole::Mono' -or

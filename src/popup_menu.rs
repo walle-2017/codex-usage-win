@@ -14,12 +14,15 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::native_interop::{self, Color};
 
 const WINDOW_CLASS: &str = "CodexUsagePopupMenuV1";
-const ROOT_WIDTH: i32 = 300;
-const SUBMENU_WIDTH: i32 = 238;
+const MENU_MIN_WIDTH: i32 = 168;
+const MENU_MAX_WIDTH: i32 = 360;
 const OUTER_PADDING: i32 = 8;
 const ITEM_HEIGHT: i32 = 40;
 const SEPARATOR_HEIGHT: i32 = 14;
 const ITEM_RADIUS: i32 = 6;
+const ITEM_TEXT_LEFT_INSET: i32 = 14;
+const ITEM_TEXT_RIGHT_INSET: i32 = 14;
+const SUBMENU_TEXT_RIGHT_INSET: i32 = 40;
 const SUBMENU_GAP: i32 = 2;
 const SHADOW_CLEARANCE: i32 = 6;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
@@ -224,11 +227,10 @@ unsafe fn apply_rounded_corners(hwnd: HWND) {
     );
 }
 
-unsafe fn create_font(hwnd: HWND, face: &str) -> isize {
-    let dpi = GetDpiForWindow(hwnd).max(96);
+unsafe fn create_font_for_dpi(dpi: u32, face: &str) -> isize {
     let face = native_interop::wide_str(face);
     let font = CreateFontW(
-        -scale_for_dpi(14, dpi),
+        -scale_for_dpi(14, dpi.max(96)),
         0,
         0,
         0,
@@ -244,6 +246,63 @@ unsafe fn create_font(hwnd: HWND, face: &str) -> isize {
         PCWSTR::from_raw(face.as_ptr()),
     );
     font.0 as isize
+}
+
+unsafe fn create_font(hwnd: HWND, face: &str) -> isize {
+    create_font_for_dpi(GetDpiForWindow(hwnd).max(96), face)
+}
+
+fn item_text_right_inset(item: &PopupItem) -> i32 {
+    if matches!(item.action, PopupAction::Submenu(_)) {
+        SUBMENU_TEXT_RIGHT_INSET
+    } else {
+        ITEM_TEXT_RIGHT_INSET
+    }
+}
+
+unsafe fn menu_width(items: &[PopupItem], font_face: &str, dpi: u32) -> i32 {
+    let min_width = scale_for_dpi(MENU_MIN_WIDTH, dpi);
+    let max_width = scale_for_dpi(MENU_MAX_WIDTH, dpi);
+    let hdc = CreateCompatibleDC(None);
+    if hdc.0.is_null() {
+        return min_width;
+    }
+
+    let font = create_font_for_dpi(dpi, font_face);
+    let old_font = if font != 0 {
+        SelectObject(hdc, HGDIOBJ(font as *mut _))
+    } else {
+        HGDIOBJ::default()
+    };
+
+    let outer = scale_for_dpi(OUTER_PADDING, dpi) * 2;
+    let left = scale_for_dpi(ITEM_TEXT_LEFT_INSET, dpi);
+    let mut width = min_width;
+
+    for item in items {
+        if matches!(item.action, PopupAction::Separator) || item.text.is_empty() {
+            continue;
+        }
+
+        let mut text: Vec<u16> = item.text.encode_utf16().collect();
+        let mut rect = RECT::default();
+        let _ = DrawTextW(
+            hdc,
+            &mut text,
+            &mut rect,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let text_width = (rect.right - rect.left).max(0);
+        let right = scale_for_dpi(item_text_right_inset(item), dpi);
+        width = width.max(outer + left + text_width + right);
+    }
+
+    if font != 0 {
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(HGDIOBJ(font as *mut _));
+    }
+    let _ = DeleteDC(hdc);
+    width.clamp(min_width, max_width)
 }
 
 unsafe fn set_state(hwnd: HWND, state: *mut PopupState) {
@@ -379,7 +438,7 @@ unsafe fn open_submenu(hwnd: HWND, index: usize) {
     let mut parent_rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut parent_rect);
 
-    let width = scale_for_dpi(SUBMENU_WIDTH, dpi);
+    let width = menu_width(&items, &state.font_face, dpi);
     let height = menu_height(&items, dpi);
     let work = inset_work_area(menu_work_area(row_origin), dpi);
     let position = submenu_position(parent_rect, row_origin.y, width, height, work, dpi);
@@ -501,8 +560,7 @@ unsafe fn create_window(
 ) -> HWND {
     register_window_class();
 
-    let logical_width = if is_root { ROOT_WIDTH } else { SUBMENU_WIDTH };
-    let width = scale_for_dpi(logical_width, dpi);
+    let width = menu_width(&items, &font_face, dpi);
     let height = menu_height(&items, dpi);
     let x = position.x;
     let y = position.y;
@@ -580,7 +638,8 @@ pub fn show(
     unsafe {
         close();
         let dpi = dpi_for_point(anchor, command_target);
-        let width = scale_for_dpi(ROOT_WIDTH, dpi);
+        let font_face = font_face.into();
+        let width = menu_width(&items, &font_face, dpi);
         let height = menu_height(&items, dpi);
         let work = inset_work_area(menu_work_area(anchor), dpi);
         let position = root_position(anchor, width, height, work);
@@ -589,7 +648,7 @@ pub fn show(
             HWND::default(),
             items,
             dark,
-            font_face.into(),
+            font_face,
             true,
             position,
             dpi,
@@ -691,9 +750,9 @@ unsafe fn paint(hwnd: HWND, state: &PopupState) {
         let mut text = native_interop::wide_str(&item.text);
         let text_len = text.len().saturating_sub(1);
         let mut text_rect = RECT {
-            left: row.left + scale_for_dpi(14, dpi),
+            left: row.left + scale_for_dpi(ITEM_TEXT_LEFT_INSET, dpi),
             top: row.top,
-            right: row.right - scale_for_dpi(40, dpi),
+            right: row.right - scale_for_dpi(item_text_right_inset(item), dpi),
             bottom: row.bottom,
         };
         let _ = DrawTextW(
@@ -880,6 +939,18 @@ mod positioning_tests {
             right,
             bottom,
         }
+    }
+
+    #[test]
+    fn command_items_do_not_reserve_submenu_arrow_space() {
+        let command = PopupItem::command("Settings", 1);
+        let submenu = PopupItem::submenu("Version", vec![]);
+        assert_eq!(item_text_right_inset(&command), ITEM_TEXT_RIGHT_INSET);
+        assert_eq!(
+            item_text_right_inset(&submenu),
+            SUBMENU_TEXT_RIGHT_INSET
+        );
+        assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH);
     }
 
     #[test]
