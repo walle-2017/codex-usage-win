@@ -537,6 +537,12 @@ if ($styleWindow -notmatch 'SWP_SHOWWINDOW' -or
     $styleWindow -notmatch 'IsWindowVisible\(json_edit\)') {
     throw 'JSON editor visibility must follow the active settings section atomically and be covered by a UI regression test.'
 }
+if ($styleWindow -notmatch 'fill_rounded_rect' -or
+    $styleWindow -notmatch 'draw_rounded_outline_rect' -or
+    $styleWindow -notmatch 'draw_switch' -or
+    $styleWindow -notmatch 'RoundRect') {
+    throw 'Settings controls must keep the shared Fluent-lite rounded control primitives and switch rendering.'
+}
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 
