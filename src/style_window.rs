@@ -1052,7 +1052,7 @@ fn json_edit_rect(hwnd: HWND) -> RECT {
     unsafe { let _ = GetClientRect(hwnd, &mut client); }
     RECT {
         left: scale(hwnd, 200),
-        top: scale(hwnd, 142),
+        top: scale(hwnd, 108),
         right: client.right - scale(hwnd, 24),
         bottom: client.bottom - scale(hwnd, 140),
     }
@@ -1060,10 +1060,10 @@ fn json_edit_rect(hwnd: HWND) -> RECT {
 
 fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
     match action {
-        JsonAction::Reload => rect(hwnd, 200, 92, 306, 128),
-        JsonAction::Format => rect(hwnd, 318, 92, 424, 128),
-        JsonAction::Import => rect(hwnd, 700, 92, 808, 128),
-        JsonAction::Export => rect(hwnd, 818, 92, 926, 128),
+        JsonAction::Reload => rect(hwnd, 200, 58, 306, 94),
+        JsonAction::Format => rect(hwnd, 318, 58, 424, 94),
+        JsonAction::Import => rect(hwnd, 700, 58, 808, 94),
+        JsonAction::Export => rect(hwnd, 818, 58, 926, 94),
         JsonAction::Apply => {
             let mut client = RECT::default();
             unsafe { let _ = GetClientRect(hwnd, &mut client); }
@@ -3818,18 +3818,6 @@ unsafe fn paint_json_page(
         settings_page_title_rect(hwnd),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh {
-            "编辑公开设置；注释仅用于说明，应用、保存和导出时不会写入配置"
-        } else {
-            "Edit public settings; comments are documentation only and are omitted when applying or exporting"
-        },
-        rect(hwnd, 200, 48, 940, 78),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
     for (action, zh_label, en_label) in [
         (JsonAction::Reload, "重新载入", "Reload"),
         (JsonAction::Format, "格式化", "Format"),
