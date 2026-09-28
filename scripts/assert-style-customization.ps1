@@ -532,6 +532,11 @@ if ($styleWindow -notmatch 'FontRole::Ui' -or
     $fonts -notmatch 'pub enum FontRole') {
     throw 'Settings and JSON editors must use the centralized semantic UI/mono font roles.'
 }
+if ($styleWindow -notmatch 'SWP_SHOWWINDOW' -or
+    $styleWindow -notmatch 'SWP_HIDEWINDOW' -or
+    $styleWindow -notmatch 'IsWindowVisible\(json_edit\)') {
+    throw 'JSON editor visibility must follow the active settings section atomically and be covered by a UI regression test.'
+}
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 

@@ -1145,6 +1145,11 @@ fn layout_settings_children(hwnd: HWND) {
         }
 
         let json_rect = json_edit_rect(hwnd);
+        let visibility = if section == Section::Json {
+            SWP_SHOWWINDOW
+        } else {
+            SWP_HIDEWINDOW
+        };
         let _ = SetWindowPos(
             json_edit.to_hwnd(),
             HWND::default(),
@@ -1152,11 +1157,7 @@ fn layout_settings_children(hwnd: HWND) {
             json_rect.top,
             (json_rect.right - json_rect.left).max(1),
             (json_rect.bottom - json_rect.top).max(1),
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-        let _ = ShowWindow(
-            json_edit.to_hwnd(),
-            if section == Section::Json { SW_SHOW } else { SW_HIDE },
+            SWP_NOZORDER | SWP_NOACTIVATE | visibility,
         );
     }
 }
@@ -1415,21 +1416,23 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
             s.syncing_json_edit = false;
         }
     }
+    layout_settings_children(hwnd);
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
 }
 
 fn refresh_json_editor_theme() {
-    let (edit, is_dark) = {
+    let (edit, hwnd, is_dark) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
         };
-        (s.json_edit.to_hwnd(), s.snapshot.is_dark)
+        (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
     let text = read_large_edit_text(edit);
     syntax_highlight_json_editor(edit, &text, is_dark);
+    layout_settings_children(hwnd);
 }
 
 fn reload_json_editor_from_snapshot() {
@@ -4728,6 +4731,21 @@ mod ui_smoke_tests {
 
             let _ = UpdateWindow(hwnd);
             assert!(!hwnd.0.is_null(), "style settings HWND must remain valid");
+
+            let json_edit = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().unwrap().json_edit.to_hwnd()
+            };
+            set_section(Section::Json);
+            assert!(
+                IsWindowVisible(json_edit).as_bool(),
+                "JSON editor must be visible on the JSON settings page"
+            );
+            set_section(Section::Preset);
+            assert!(
+                !IsWindowVisible(json_edit).as_bool(),
+                "JSON editor must be hidden immediately after leaving the JSON settings page"
+            );
 
             set_section(Section::Panel);
             let hex_edit = {
