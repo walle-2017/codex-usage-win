@@ -535,6 +535,18 @@ if ($styleWindow -notmatch '✓ 已重新载入' -or
     $styleWindow -notmatch 'if zh \{ "应用" \} else \{ "Apply" \}') {
     throw 'JSON action feedback, clickable file paths, Apply label, save confirmation, and subdued comment colors must remain stable.'
 }
+if ($styleWindow -notmatch 'JSON_ACTION_DELAY_MS: u32 = 500' -or
+    $styleWindow -notmatch '◌ 载入中' -or
+    $styleWindow -notmatch '◌ 格式化中' -or
+    $styleWindow -notmatch '◌ 导入中' -or
+    $styleWindow -notmatch '◌ 导出中' -or
+    $styleWindow -notmatch 'SetTimer\(hwnd, JSON_ACTION_TIMER_ID, JSON_ACTION_DELAY_MS' -or
+    $styleWindow -notmatch 'pending_json_action' -or
+    $styleWindow -notmatch 'json_action_pending' -or
+    $styleWindow -notmatch 'GetTextExtentPoint32W' -or
+    $styleWindow -notmatch 'path_left \+ path_width') {
+    throw 'JSON actions must expose a 500ms running state and file-link underline/hit area must match the rendered path width.'
+}
 if ($styleWindow -notmatch 'codex-usage-win-config-\{:\\04\}' -and
     $styleWindow -notmatch 'codex-usage-win-config-') {
     throw 'JSON export must provide a timestamped default filename.'
