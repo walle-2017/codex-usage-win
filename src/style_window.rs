@@ -61,6 +61,8 @@ const EM_SETEVENTMASK_MSG: u32 = WM_USER + 69;
 const EM_EXGETSEL_MSG: u32 = WM_USER + 52;
 const EM_EXSETSEL_MSG: u32 = WM_USER + 55;
 const EM_LINEINDEX_MSG: u32 = 0x00BB;
+const EM_GETSCROLLPOS_MSG: u32 = WM_USER + 221;
+const EM_SETSCROLLPOS_MSG: u32 = WM_USER + 222;
 const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
@@ -1258,7 +1260,7 @@ fn to_windows_newlines(text: &str) -> String {
     normalize_to_lf(text).replace('\n', "\r\n")
 }
 
-fn read_large_edit_text(edit: HWND) -> String {
+fn read_large_edit_text_raw(edit: HWND) -> String {
     unsafe {
         let len = GetWindowTextLengthW(edit);
         if len <= 0 {
@@ -1266,8 +1268,12 @@ fn read_large_edit_text(edit: HWND) -> String {
         }
         let mut buffer = vec![0u16; len as usize + 1];
         let copied = GetWindowTextW(edit, &mut buffer) as usize;
-        normalize_to_lf(&String::from_utf16_lossy(&buffer[..copied]))
+        String::from_utf16_lossy(&buffer[..copied])
     }
+}
+
+fn read_large_edit_text(edit: HWND) -> String {
+    normalize_to_lf(&read_large_edit_text_raw(edit))
 }
 
 fn json_token_color(kind: JsonTokenKind, is_dark: bool) -> Color {
@@ -1446,12 +1452,30 @@ unsafe fn rich_set_selected_color(edit: HWND, color: Color) {
 
 fn syntax_highlight_json_editor(edit: HWND, text: &str, is_dark: bool) {
     unsafe {
-        let mut previous = RichCharRange::default();
+        let mut previous_selection = RichCharRange::default();
         let _ = SendMessageW(
             edit,
             EM_EXGETSEL_MSG,
             WPARAM(0),
-            LPARAM((&mut previous as *mut RichCharRange) as isize),
+            LPARAM((&mut previous_selection as *mut RichCharRange) as isize),
+        );
+
+        let mut previous_scroll = POINT::default();
+        let _ = SendMessageW(
+            edit,
+            EM_GETSCROLLPOS_MSG,
+            WPARAM(0),
+            LPARAM((&mut previous_scroll as *mut POINT) as isize),
+        );
+
+        // Formatting changes the RichEdit selection repeatedly. Suspend change
+        // notifications and painting so this cannot re-enter EN_CHANGE or expose
+        // intermediate selection/scroll states while the user is typing.
+        let previous_event_mask = SendMessageW(
+            edit,
+            EM_SETEVENTMASK_MSG,
+            WPARAM(0),
+            LPARAM(0),
         );
         let _ = SendMessageW(edit, WM_SETREDRAW, WPARAM(0), LPARAM(0));
 
@@ -1473,10 +1497,28 @@ fn syntax_highlight_json_editor(edit: HWND, text: &str, is_dark: bool) {
             edit,
             EM_EXSETSEL_MSG,
             WPARAM(0),
-            LPARAM((&mut previous as *mut RichCharRange) as isize),
+            LPARAM((&mut previous_selection as *mut RichCharRange) as isize),
+        );
+        // Restoring the selection may scroll the caret into view, so restore
+        // the viewport after the selection and before repainting.
+        let _ = SendMessageW(
+            edit,
+            EM_SETSCROLLPOS_MSG,
+            WPARAM(0),
+            LPARAM((&previous_scroll as *const POINT) as isize),
+        );
+        let _ = SendMessageW(
+            edit,
+            EM_SETEVENTMASK_MSG,
+            WPARAM(0),
+            LPARAM(previous_event_mask.0),
         );
         let _ = SendMessageW(edit, WM_SETREDRAW, WPARAM(1), LPARAM(0));
-        let _ = InvalidateRect(edit, None, false);
+
+        // Erase stale line pixels before repainting. A non-erasing invalidate can
+        // leave duplicated/offset glyph fragments after an insertion shifts rows.
+        let _ = InvalidateRect(edit, None, true);
+        let _ = UpdateWindow(edit);
     }
 }
 
@@ -1495,7 +1537,9 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
     let normalized = normalize_to_lf(text);
     let windows_text = to_windows_newlines(&normalized);
     set_edit_text_string(edit, &windows_text);
-    syntax_highlight_json_editor(edit, &normalized, is_dark);
+    // RichEdit selection offsets are based on its CRLF text. Highlight against
+    // that exact representation rather than LF-normalized parsing text.
+    syntax_highlight_json_editor(edit, &windows_text, is_dark);
 
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1517,7 +1561,7 @@ fn refresh_json_editor_theme() {
         };
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
-    let text = read_large_edit_text(edit);
+    let text = read_large_edit_text_raw(edit);
     syntax_highlight_json_editor(edit, &text, is_dark);
     layout_settings_children(hwnd);
 }
@@ -1677,8 +1721,9 @@ fn update_json_validation_status(mark_dirty: bool) {
         return;
     }
 
-    let text = read_large_edit_text(edit);
-    syntax_highlight_json_editor(edit, &text, is_dark);
+    let raw_text = read_large_edit_text_raw(edit);
+    syntax_highlight_json_editor(edit, &raw_text, is_dark);
+    let text = normalize_to_lf(&raw_text);
     let status = match parse_jsonc(&text) {
         Ok(_) => {
             if language == LanguageId::SimplifiedChinese {
