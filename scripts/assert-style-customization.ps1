@@ -500,6 +500,12 @@ if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'to_jsonc') {
     throw 'Advanced JSONC settings must use a strict public schema, safe comment parsing, and business validation.'
 }
+if ($styleWindow -match '编辑公开设置；注释仅用于说明' -or
+    $styleWindow -match 'comments are documentation only and are omitted when applying or exporting' -or
+    $styleWindow -notmatch 'top: scale\(hwnd, 108\)' -or
+    $settingsModel -notmatch '注释仅用于说明，不属于配置数据；应用、保存和导出时不会写入配置') {
+    throw 'JSON documentation notice must live inside generated JSONC, not as a separate page subtitle.'
+}
 if ($styleWindow -notmatch 'GetOpenFileNameW' -or
     $styleWindow -notmatch 'GetSaveFileNameW' -or
     $styleWindow -notmatch 'RICHEDIT50W' -or
