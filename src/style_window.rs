@@ -1279,12 +1279,12 @@ fn read_large_edit_text(edit: HWND) -> String {
 
 fn json_token_color(kind: JsonTokenKind, is_dark: bool) -> Color {
     match (is_dark, kind) {
-        (true, JsonTokenKind::Comment) => Color::from_hex("#6A9955FF"),
+        (true, JsonTokenKind::Comment) => Color::from_hex("#9A9A9AFF"),
         (true, JsonTokenKind::Key) => Color::from_hex("#9CDCFEFF"),
         (true, JsonTokenKind::String) => Color::from_hex("#CE9178FF"),
         (true, JsonTokenKind::Number) => Color::from_hex("#B5CEA8FF"),
         (true, JsonTokenKind::Keyword) => Color::from_hex("#C586C0FF"),
-        (false, JsonTokenKind::Comment) => Color::from_hex("#008000FF"),
+        (false, JsonTokenKind::Comment) => Color::from_hex("#7A7A7AFF"),
         (false, JsonTokenKind::Key) => Color::from_hex("#0451A5FF"),
         (false, JsonTokenKind::String) => Color::from_hex("#A31515FF"),
         (false, JsonTokenKind::Number) => Color::from_hex("#098658FF"),
@@ -1988,9 +1988,9 @@ fn apply_json_editor() {
     }
     let standard = settings.to_jsonc(language);
     let status = if language == LanguageId::SimplifiedChinese {
-        "✓ 已保存并应用".to_string()
+        "✓ 已保存，并从当前应用设置重新载入".to_string()
     } else {
-        "✓ Saved and applied".to_string()
+        "✓ Saved and reloaded from current application settings".to_string()
     };
     write_json_editor(&standard, status, false);
     send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
