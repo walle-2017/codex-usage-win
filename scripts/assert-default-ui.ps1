@@ -154,4 +154,17 @@ if ($windowProduction -notmatch 'TrackMouseEvent' -or
     throw 'Minimal percentage hover must clear when the pointer leaves the widget.'
 }
 
+if ($windowProduction -notmatch 'drag_handle_hovered' -or
+    $windowProduction -notmatch 'draw_drag_handle\(hdc, height, &drag_color, drag_handle_hovered\)' -or
+    $windowProduction -notmatch 'if hovered \{ sc\(3\)' -or
+    $windowProduction -notmatch 'default_reset_hit\(' -or
+    $windowProduction -notmatch 'format!\("\{:\\04\}-\{:\\02\}-\{:\\02\}"' -and
+    $windowProduction -notmatch 'format!\("\{:\\02\}:\{:\\02\}"') {
+    throw 'Taskbar drag handle must expose hover styling and default reset labels must expose precise hover details.'
+}
+if ($windowProduction -notmatch 'MinimalHoverTarget::Session =>[\s\S]{0,180}local\.wYear' -or
+    $windowProduction -notmatch 'MinimalHoverTarget::Weekly =>[\s\S]{0,120}local\.wHour') {
+    throw '5h reset hover must show year-month-day and 7d reset hover must show hour-minute.'
+}
+
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
