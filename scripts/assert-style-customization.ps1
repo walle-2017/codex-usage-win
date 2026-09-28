@@ -535,7 +535,7 @@ if ($styleWindow -notmatch '✓ 已重新载入' -or
     $styleWindow -notmatch 'if zh \{ "应用" \} else \{ "Apply" \}') {
     throw 'JSON action feedback, clickable file paths, Apply label, save confirmation, and subdued comment colors must remain stable.'
 }
-if ($styleWindow -notmatch 'JSON_ACTION_DELAY_MS: u32 = 500' -or
+if ($styleWindow -notmatch 'JSON_ACTION_DELAY_MS: u32 = 200' -or
     $styleWindow -notmatch '◌ 载入中' -or
     $styleWindow -notmatch '◌ 格式化中' -or
     $styleWindow -notmatch '◌ 导入中' -or
@@ -545,7 +545,7 @@ if ($styleWindow -notmatch 'JSON_ACTION_DELAY_MS: u32 = 500' -or
     $styleWindow -notmatch 'json_action_pending' -or
     $styleWindow -notmatch 'GetTextExtentPoint32W' -or
     $styleWindow -notmatch 'path_left \+ path_width') {
-    throw 'JSON actions must expose a 500ms running state and file-link underline/hit area must match the rendered path width.'
+    throw 'JSON actions must expose a 200ms running state and file-link underline/hit area must match the rendered path width.'
 }
 if ($styleWindow -notmatch 'codex-usage-win-config-\{:\\04\}' -and
     $styleWindow -notmatch 'codex-usage-win-config-') {
