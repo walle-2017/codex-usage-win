@@ -516,17 +516,24 @@ if ($styleWindow -notmatch 'read_large_edit_text_raw' -or
     $styleWindow -notmatch 'UpdateWindow\(edit\)') {
     throw 'JSON RichEdit live highlighting must use RichEdit logical newline offsets, preserve selection/scroll state, suppress formatting notifications, and fully repaint after edits.'
 }
-if ($styleWindow -notmatch '有未保存更改 · 配置有效' -or
-    $styleWindow -notmatch 'Unsaved changes · Configuration is valid' -or
+if ($styleWindow -notmatch '● 有未保存更改' -or
+    $styleWindow -notmatch '● Unsaved changes' -or
+    $styleWindow -notmatch 'settings != &applied_settings' -or
     $styleWindow -notmatch 'if action == JsonAction::Apply && !json_dirty' -or
     $styleWindow -notmatch 'let apply_background = if dirty') {
-    throw 'JSON editor must show an explicit unsaved state and disable Apply while clean.'
+    throw 'JSON editor must derive dirty state from parsed settings, show it on a separate line, and disable Apply while clean.'
 }
-if ($styleWindow -notmatch '已保存，并从当前应用设置重新载入' -or
-    $styleWindow -notmatch 'Saved and reloaded from current application settings' -or
-    $styleWindow -notmatch 'Comment\) => Color::from_hex\("#9A9A9AFF"\)' -or
-    $styleWindow -notmatch 'Comment\) => Color::from_hex\("#7A7A7AFF"\)') {
-    throw 'JSON save confirmation must mention reload and JSONC comments must use subdued gray highlighting.'
+if ($styleWindow -notmatch '✓ 已重新载入' -or
+    $styleWindow -notmatch '✓ 已格式化' -or
+    $styleWindow -notmatch '✓ 成功导入' -or
+    $styleWindow -notmatch '✓ 成功导出' -or
+    $styleWindow -notmatch '已保存，并从当前应用设置重新载入' -or
+    $styleWindow -notmatch 'JsonStatusPath' -or
+    $styleWindow -notmatch 'ShellExecuteW' -or
+    $styleWindow -notmatch 'Comment\) => Color::from_hex\("#777777FF"\)' -or
+    $styleWindow -notmatch 'Comment\) => Color::from_hex\("#999999FF"\)' -or
+    $styleWindow -notmatch 'if zh \{ "应用" \} else \{ "Apply" \}') {
+    throw 'JSON action feedback, clickable file paths, Apply label, save confirmation, and subdued comment colors must remain stable.'
 }
 if ($styleWindow -notmatch 'codex-usage-win-config-\{:\\04\}' -and
     $styleWindow -notmatch 'codex-usage-win-config-') {
