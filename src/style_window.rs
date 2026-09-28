@@ -747,6 +747,9 @@ const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
 const SETTINGS_CHOICE_LEFT: i32 = 360;
 const SETTINGS_CHOICE_WIDTH: i32 = 130;
 const SETTINGS_CHOICE_GAP: i32 = 10;
+const SETTINGS_EDITOR_HEIGHT: i32 = 164;
+const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
+const SETTINGS_FOOTER_GAP: i32 = 12;
 
 fn settings_page_title_rect(hwnd: HWND) -> RECT {
     rect(
@@ -905,11 +908,14 @@ fn editor_top(section: Section) -> i32 {
 
 fn editor_box_rect(hwnd: HWND, section: Section) -> RECT {
     let top = editor_top(section);
-    rect(hwnd, 200, top, 940, top + 208)
+    let mut editor = settings_card_rect(hwnd, top, top + SETTINGS_EDITOR_HEIGHT);
+    let safe_bottom = close_rect(hwnd).top - scale(hwnd, SETTINGS_FOOTER_GAP);
+    editor.bottom = editor.bottom.min(safe_bottom);
+    editor
 }
 
 fn color_slider_track_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
-    let top = editor_top(section) + 47 + channel_index as i32 * 40;
+    let top = editor_top(section) + 42 + channel_index as i32 * SETTINGS_EDITOR_CHANNEL_GAP;
     rect(hwnd, 330, top, 790, top + 4)
 }
 
@@ -978,8 +984,8 @@ fn hex_edit_rect(hwnd: HWND, row_index: usize) -> RECT {
 }
 
 fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
-    let top = editor_top(section) + 34 + channel_index as i32 * 40;
-    rect(hwnd, 812, top, 920, top + 28)
+    let top = editor_top(section) + 29 + channel_index as i32 * SETTINGS_EDITOR_CHANNEL_GAP;
+    rect(hwnd, 812, top, 920, top + 26)
 }
 
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
@@ -4538,11 +4544,12 @@ unsafe fn paint_editor(
         } else {
             "Color channels"
         },
-        rect(hwnd, 218, editor_top + 6, 420, editor_top + 32),
+        rect(hwnd, 218, editor_top + 4, 420, editor_top + 28),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (index, (label, value)) in ["R", "G", "B", "A"].iter().zip(values).enumerate() {
-        let center = editor_top + 49 + index as i32 * 40;
+        let center =
+            editor_top + 44 + index as i32 * SETTINGS_EDITOR_CHANNEL_GAP;
         draw_text(
             hdc,
             label,
