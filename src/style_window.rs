@@ -944,8 +944,8 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
 }
 
 fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    // Match the RGBA numeric inputs: same right column and overall width.
-    rect(hwnd, 812, 324, 920, 352)
+    // Match the #RRGGBBAA color inputs: same width and right alignment.
+    rect(hwnd, 778, 324, 928, 352)
 }
 
 fn blur_edit_rect(hwnd: HWND) -> RECT {
