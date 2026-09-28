@@ -75,6 +75,7 @@ struct AppState {
     small_taskbar_mode: bool,
     small_show_weekly: bool,
     minimal_hover_target: Option<MinimalHoverTarget>,
+    drag_handle_hovered: bool,
 
     codex_session_percent: f64,
     codex_session_text: String,
@@ -1562,6 +1563,7 @@ pub fn run() {
                 small_taskbar_mode: false,
                 small_show_weekly: false,
                 minimal_hover_target: None,
+                drag_handle_hovered: false,
                 codex_session_percent: 0.0,
                 codex_session_text: "--".to_string(),
                 codex_weekly_percent: 0.0,
@@ -2792,12 +2794,12 @@ fn paint_content(
             .blend_over(panel_base);
         let drag_color = style.color(StyleColorTarget::DragHandle).blend_over(panel_base);
 
-        let (small_taskbar_mode, small_show_weekly) = {
+        let (small_taskbar_mode, small_show_weekly, drag_handle_hovered) = {
             let state = lock_state();
             state
                 .as_ref()
-                .map(|s| (s.small_taskbar_mode, s.small_show_weekly))
-                .unwrap_or((false, false))
+                .map(|s| (s.small_taskbar_mode, s.small_show_weekly, s.drag_handle_hovered))
+                .unwrap_or((false, false, false))
         };
         let effective_show_session = if small_taskbar_mode {
             !small_show_weekly
@@ -2825,7 +2827,7 @@ fn paint_content(
             draw_panel(hdc, width, height, &border, &panel_base);
         }
 
-        draw_drag_handle(hdc, height, &drag_color);
+        draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
 
         let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
         let row2_y = height - sc(4) - sc(SEGMENT_H);
@@ -3502,15 +3504,28 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
             poller::UsageWindowKind::Weekly,
         ),
     };
-    let reset = appearance::taskbar_value_text(
-        AppearancePreset::Default,
-        s.language,
-        section,
-        window,
-    )
-    .secondary
-    .unwrap_or_else(|| "--".to_string());
-    Some(format!("{label} · {reset}"))
+
+    if s.appearance_preset == AppearancePreset::Minimal {
+        let reset = appearance::taskbar_value_text(
+            AppearancePreset::Default,
+            s.language,
+            section,
+            window,
+        )
+        .secondary
+        .unwrap_or_else(|| "--".to_string());
+        return Some(format!("{label} · {reset}"));
+    }
+
+    let local = native_interop::system_time_to_local(section.resets_at?)?;
+    Some(match target {
+        MinimalHoverTarget::Session => {
+            format!("{:04}-{:02}-{:02}", local.wYear, local.wMonth, local.wDay)
+        }
+        MinimalHoverTarget::Weekly => {
+            format!("{:02}:{:02}", local.wHour, local.wMinute)
+        }
+    })
 }
 
 fn hide_minimal_usage_tooltip() {
@@ -3644,8 +3659,87 @@ fn minimal_percent_hit(
     None
 }
 
+fn default_reset_hit(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    let (preset, small_taskbar_mode, small_show_weekly, show_session, show_weekly) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        (
+            s.appearance_preset,
+            s.small_taskbar_mode,
+            s.small_show_weekly,
+            s.show_session_window,
+            s.show_weekly_window,
+        )
+    };
+    if preset != AppearancePreset::Default {
+        return None;
+    }
+
+    let effective_show_session = if small_taskbar_mode {
+        !small_show_weekly
+    } else {
+        show_session
+    };
+    let effective_show_weekly = if small_taskbar_mode {
+        small_show_weekly
+    } else {
+        show_weekly
+    };
+
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    let height = client.bottom - client.top;
+    let metrics = preset.metrics();
+    let (label_width, reset_width) = usage_layout_widths(LanguageId::English, preset);
+    let segment_count = row_bar_segment_count(preset);
+    let progress_width =
+        segment_count * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let bar_x = content_x + sc(label_width) + sc(metrics.label_bar_gap);
+    let text_x = bar_x + progress_width + sc(metrics.bar_percent_gap);
+    let reset_x = text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
+    let row2_y = height - sc(4) - sc(SEGMENT_H);
+    let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
+    let single_row_y = (height - sc(SEGMENT_H)) / 2;
+
+    let make_rect = |top: i32| RECT {
+        left: reset_x - sc(2),
+        top: top - sc(2),
+        right: reset_x + sc(reset_width) + sc(2),
+        bottom: top + sc(SEGMENT_H) + sc(2),
+    };
+
+    if effective_show_session {
+        let rect = make_rect(if effective_show_weekly { row1_y } else { single_row_y });
+        if point_in_rect(rect, x, y) {
+            return Some((MinimalHoverTarget::Session, rect));
+        }
+    }
+    if effective_show_weekly {
+        let rect = make_rect(if effective_show_session { row2_y } else { single_row_y });
+        if point_in_rect(rect, x, y) {
+            return Some((MinimalHoverTarget::Weekly, rect));
+        }
+    }
+    None
+}
+
+fn usage_hover_hit(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    minimal_percent_hit(hwnd, x, y).or_else(|| default_reset_hit(hwnd, x, y))
+}
+
 fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
-    let hit = minimal_percent_hit(hwnd, x, y);
+    let hit = usage_hover_hit(hwnd, x, y);
     let target = hit.map(|(target, _)| target);
     let changed = {
         let mut state = lock_state();
@@ -3840,6 +3934,7 @@ unsafe extern "system" fn wnd_proc(
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 s.dragging = true;
+                s.drag_handle_hovered = true;
                 s.drag_anchor_logical_x = anchor_logical_x;
             }
             {
@@ -3859,7 +3954,21 @@ unsafe extern "system" fn wnd_proc(
             } else {
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let drag_hovered = is_drag_handle_point(client_x, client_y);
+                let drag_hover_changed = {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        let changed = s.drag_handle_hovered != drag_hovered;
+                        s.drag_handle_hovered = drag_hovered;
+                        changed
+                    } else {
+                        false
+                    }
+                };
                 update_minimal_hover(hwnd, client_x, client_y);
+                if drag_hover_changed {
+                    render_layered();
+                }
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                     dwFlags: TME_LEAVE,
@@ -4022,9 +4131,11 @@ unsafe extern "system" fn wnd_proc(
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
                     s.minimal_hover_target = None;
+                    s.drag_handle_hovered = false;
                 }
             }
             hide_minimal_usage_tooltip();
+            render_layered();
             LRESULT(0)
         }
         WM_CANCELMODE => {
@@ -5878,13 +5989,25 @@ fn draw_panel(hdc: HDC, width: i32, height: i32, border: &Color, fill: &Color) {
     }
 }
 
-fn draw_drag_handle(hdc: HDC, height: i32, color: &Color) {
-    let dot = sc(2).max(1);
+fn draw_drag_handle(hdc: HDC, height: i32, color: &Color, hovered: bool) {
+    let dot = if hovered { sc(3).max(2) } else { sc(2).max(1) };
     let gap_x = sc(1).max(1);
-    let gap_y = sc(2).max(1);
+    let gap_y = if hovered { sc(1).max(1) } else { sc(2).max(1) };
+    let matrix_w = dot * 2 + gap_x;
     let matrix_h = dot * 3 + gap_y * 2;
-    let origin_x = sc(DRAG_HANDLE_VISUAL_INSET_X);
+    let hit_center_x = sc(DRAG_HANDLE_HIT_W) / 2;
+    let origin_x = hit_center_x - matrix_w / 2;
     let origin_y = (height - matrix_h) / 2;
+    let hover_color = if hovered {
+        Color::rgba(
+            color.r.saturating_add(36),
+            color.g.saturating_add(36),
+            color.b.saturating_add(36),
+            color.a,
+        )
+    } else {
+        *color
+    };
 
     for row in 0..3 {
         for col in 0..2 {
@@ -5896,7 +6019,7 @@ fn draw_drag_handle(hdc: HDC, height: i32, color: &Color) {
                 right: left + dot,
                 bottom: top + dot,
             };
-            draw_rounded_rect(hdc, &rect, color, sc(1).max(1));
+            draw_rounded_rect(hdc, &rect, &hover_color, sc(1).max(1));
         }
     }
 }
