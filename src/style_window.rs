@@ -6,6 +6,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
+use windows::Win32::System::Time::GetLocalTime;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST,
@@ -1537,9 +1538,10 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
     let normalized = normalize_to_lf(text);
     let windows_text = to_windows_newlines(&normalized);
     set_edit_text_string(edit, &windows_text);
-    // RichEdit selection offsets are based on its CRLF text. Highlight against
-    // that exact representation rather than LF-normalized parsing text.
-    syntax_highlight_json_editor(edit, &windows_text, is_dark);
+    // RichEdit exposes CRLF through WM_GETTEXT, but its selection character
+    // positions count each paragraph break as one character. Highlight against
+    // LF-normalized text so token offsets match EM_EXSETSEL coordinates.
+    syntax_highlight_json_editor(edit, &normalized, is_dark);
 
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1561,7 +1563,7 @@ fn refresh_json_editor_theme() {
         };
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
-    let text = read_large_edit_text_raw(edit);
+    let text = normalize_to_lf(&read_large_edit_text_raw(edit));
     syntax_highlight_json_editor(edit, &text, is_dark);
     layout_settings_children(hwnd);
 }
@@ -1704,7 +1706,7 @@ fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: La
 }
 
 fn update_json_validation_status(mark_dirty: bool) {
-    let (edit, syncing, language, hwnd, is_dark) = {
+    let (edit, syncing, language, hwnd, is_dark, was_dirty) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
@@ -1715,6 +1717,7 @@ fn update_json_validation_status(mark_dirty: bool) {
             s.snapshot.language,
             s.hwnd.to_hwnd(),
             s.snapshot.is_dark,
+            s.json_dirty,
         )
     };
     if syncing {
@@ -1722,12 +1725,19 @@ fn update_json_validation_status(mark_dirty: bool) {
     }
 
     let raw_text = read_large_edit_text_raw(edit);
-    syntax_highlight_json_editor(edit, &raw_text, is_dark);
     let text = normalize_to_lf(&raw_text);
+    syntax_highlight_json_editor(edit, &text, is_dark);
+    let dirty = was_dirty || mark_dirty;
     let status = match parse_jsonc(&text) {
         Ok(_) => {
             if language == LanguageId::SimplifiedChinese {
-                "✓ 配置有效".to_string()
+                if dirty {
+                    "● 有未保存更改 · 配置有效".to_string()
+                } else {
+                    "✓ 配置有效".to_string()
+                }
+            } else if dirty {
+                "● Unsaved changes · Configuration is valid".to_string()
             } else {
                 "✓ Configuration is valid".to_string()
             }
@@ -1735,9 +1745,9 @@ fn update_json_validation_status(mark_dirty: bool) {
         Err(error) => {
             let detail = friendly_json_error(&error, language);
             if language == LanguageId::SimplifiedChinese {
-                format!("× 配置存在错误\n{detail}")
+                format!("× 配置存在错误 · 尚未保存\n{detail}")
             } else {
-                format!("× Configuration has errors\n{detail}")
+                format!("× Configuration has errors · Unsaved\n{detail}")
             }
         }
     };
@@ -1746,9 +1756,7 @@ fn update_json_validation_status(mark_dirty: bool) {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
             s.json_status = status;
-            if mark_dirty {
-                s.json_dirty = true;
-            }
+            s.json_dirty = dirty;
         }
     }
     unsafe {
@@ -1769,9 +1777,9 @@ fn format_json_editor() {
         Ok(settings) => {
             let text = settings.to_jsonc(language);
             let status = if language == LanguageId::SimplifiedChinese {
-                "✓ 已格式化，并恢复完整官方注释".to_string()
+                "● 已格式化，尚未保存；已恢复完整官方注释".to_string()
             } else {
-                "✓ Formatted and restored all official comments".to_string()
+                "● Formatted but not saved; restored all official comments".to_string()
             };
             write_json_editor(&text, status, true);
         }
@@ -1787,8 +1795,22 @@ fn format_json_editor() {
     }
 }
 
-fn file_dialog(hwnd: HWND, save: bool) -> Option<PathBuf> {
+fn export_default_filename() -> String {
+    let mut time = SYSTEMTIME::default();
+    unsafe { GetLocalTime(&mut time); }
+    format!(
+        "codex-usage-win-config-{:04}{:02}{:02}-{:02}{:02}{:02}.json",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
+fn file_dialog(hwnd: HWND, save: bool, default_name: Option<&str>) -> Option<PathBuf> {
     let mut buffer = vec![0u16; 4096];
+    if let Some(name) = default_name {
+        let encoded: Vec<u16> = name.encode_utf16().collect();
+        let copy_len = encoded.len().min(buffer.len().saturating_sub(1));
+        buffer[..copy_len].copy_from_slice(&encoded[..copy_len]);
+    }
     let filter: Vec<u16> =
         "JSON/JSONC (*.json;*.jsonc)\0*.json;*.jsonc\0JSON (*.json)\0*.json\0All files (*.*)\0*.*\0\0"
             .encode_utf16()
@@ -1822,7 +1844,7 @@ fn file_dialog(hwnd: HWND, save: bool) -> Option<PathBuf> {
 
 
 fn import_json_file(hwnd: HWND) {
-    let Some(path) = file_dialog(hwnd, false) else {
+    let Some(path) = file_dialog(hwnd, false, None) else {
         return;
     };
     let text = match fs::read_to_string(&path) {
@@ -1855,16 +1877,16 @@ fn import_json_file(hwnd: HWND) {
         Ok(settings) => {
             let standard = settings.to_jsonc(language);
             let status = if language == LanguageId::SimplifiedChinese {
-                format!("✓ 已导入并校验：{}", path.display())
+                format!("● 已导入并校验，尚未保存：{}", path.display())
             } else {
-                format!("✓ Imported and validated: {}", path.display())
+                format!("● Imported and validated, not saved yet: {}", path.display())
             };
             write_json_editor(&standard, status, true);
         }
         Err(error) => {
             let status = json_action_error(
-                "导入文件存在错误，可直接在编辑器中修复",
-                "Imported file has errors; edit it directly below",
+                "导入文件存在错误，尚未保存；可直接在编辑器中修复",
+                "Imported file has errors and is unsaved; edit it directly below",
                 &error,
                 language,
             );
@@ -1903,7 +1925,8 @@ fn export_json_file(hwnd: HWND) {
         }
     };
 
-    let Some(mut path) = file_dialog(hwnd, true) else {
+    let default_name = export_default_filename();
+    let Some(mut path) = file_dialog(hwnd, true, Some(&default_name)) else {
         return;
     };
     if path.extension().is_none() {
@@ -1966,9 +1989,9 @@ fn apply_json_editor() {
     }
     let standard = settings.to_jsonc(language);
     let status = if language == LanguageId::SimplifiedChinese {
-        "✓ 配置有效，已提交应用".to_string()
+        "✓ 已保存并应用".to_string()
     } else {
-        "✓ Configuration is valid and has been submitted".to_string()
+        "✓ Saved and applied".to_string()
     };
     write_json_editor(&standard, status, false);
     send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
@@ -2367,10 +2390,10 @@ fn update_blur_from_numeric_edit() {
 }
 
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
-    let (section, language_popup_open) = {
+    let (section, language_popup_open, json_dirty) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
-        (s.section, s.language_popup_open)
+        (s.section, s.language_popup_open, s.json_dirty)
     };
 
     if section == Section::General && language_popup_open {
@@ -2459,6 +2482,9 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
             JsonAction::Export,
             JsonAction::Apply,
         ] {
+            if action == JsonAction::Apply && !json_dirty {
+                continue;
+            }
             if pt_in_rect(json_action_rect(hwnd, action), x, y) {
                 return Some(HitTarget::Json(action));
             }
@@ -2563,7 +2589,16 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             JsonAction::Format => format_json_editor(),
             JsonAction::Import => import_json_file(hwnd),
             JsonAction::Export => export_json_file(hwnd),
-            JsonAction::Apply => apply_json_editor(),
+            JsonAction::Apply => {
+                let dirty = STATE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .is_some_and(|s| s.json_dirty);
+                if dirty {
+                    apply_json_editor();
+                }
+            },
         },
         HitTarget::LanguageToggle => {
             let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3209,6 +3244,7 @@ unsafe fn paint(hwnd: HWND) {
         focused_hex_edit,
         invalid_hex_edits,
         json_status,
+        json_dirty,
         font,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3227,6 +3263,7 @@ unsafe fn paint(hwnd: HWND) {
             s.focused_hex_edit,
             s.invalid_hex_edits,
             s.json_status.clone(),
+            s.json_dirty,
             s.font,
         )
     };
@@ -3360,6 +3397,7 @@ unsafe fn paint(hwnd: HWND) {
             hwnd,
             &snapshot,
             &json_status,
+            json_dirty,
             hovered,
             pressed,
             card,
@@ -3844,6 +3882,7 @@ unsafe fn paint_json_page(
     hwnd: HWND,
     snapshot: &StyleWindowSnapshot,
     status: &str,
+    dirty: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     card: Color,
@@ -3900,6 +3939,8 @@ unsafe fn paint_json_page(
         hdc,
         COLORREF(if status.starts_with('×') {
             Color::from_hex("#D95C5CFF")
+        } else if dirty {
+            Color::from_hex("#D69E2EFF")
         } else {
             secondary
         }
@@ -3918,10 +3959,7 @@ unsafe fn paint_json_page(
     );
 
     let apply = JsonAction::Apply;
-    draw_segment(
-        hdc,
-        json_action_rect(hwnd, apply),
-        true,
+    let apply_background = if dirty {
         button_background(
             HitTarget::Json(apply),
             true,
@@ -3935,8 +3973,20 @@ unsafe fn paint_json_page(
                 selected_hover: accent_hover,
                 selected_pressed: accent_pressed,
             },
-        ),
-        Color::from_hex("#FFFFFFFF"),
+        )
+    } else {
+        card_pressed
+    };
+    draw_segment(
+        hdc,
+        json_action_rect(hwnd, apply),
+        dirty,
+        apply_background,
+        if dirty {
+            Color::from_hex("#FFFFFFFF")
+        } else {
+            secondary
+        },
         if zh { "应用更改" } else { "Apply changes" },
     );
 }
