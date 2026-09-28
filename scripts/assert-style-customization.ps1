@@ -571,6 +571,12 @@ if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
     $styleWindow -notmatch 'editor\.bottom = editor\.bottom\.min\(safe_bottom\)') {
     throw 'Appearance editors must reserve a bottom safety gap above the Close button and use compact shared channel spacing.'
 }
+if ($styleWindow -notmatch 'rect\(hwnd, 812, 324, 920, 352\)' -or
+    $styleWindow -notmatch 'blur_suffix_rect' -or
+    $styleWindow -notmatch 'right: frame\.right - scale\(hwnd, 28\)' -or
+    $styleWindow -match 'rect\(hwnd, 860, 324, 886, 352\)') {
+    throw 'Frosted-strength input must match RGBA input width and keep percent as an internal fixed suffix.'
+}
 if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
     throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
 }
