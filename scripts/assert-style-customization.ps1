@@ -522,6 +522,12 @@ if ($styleWindow -notmatch '有未保存更改 · 配置有效' -or
     $styleWindow -notmatch 'let apply_background = if dirty') {
     throw 'JSON editor must show an explicit unsaved state and disable Apply while clean.'
 }
+if ($styleWindow -notmatch '已保存，并从当前应用设置重新载入' -or
+    $styleWindow -notmatch 'Saved and reloaded from current application settings' -or
+    $styleWindow -notmatch 'Comment\) => Color::from_hex\("#9A9A9AFF"\)' -or
+    $styleWindow -notmatch 'Comment\) => Color::from_hex\("#7A7A7AFF"\)') {
+    throw 'JSON save confirmation must mention reload and JSONC comments must use subdued gray highlighting.'
+}
 if ($styleWindow -notmatch 'codex-usage-win-config-\{:\\04\}' -and
     $styleWindow -notmatch 'codex-usage-win-config-') {
     throw 'JSON export must provide a timestamped default filename.'
