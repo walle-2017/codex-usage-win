@@ -3495,7 +3495,7 @@ unsafe fn paint_general_page(
         (HitTarget::UsageSession, general.show_usage.session_5h, false),
         (HitTarget::UsageWeekly, general.show_usage.weekly, true),
     ] {
-        draw_segment(
+        draw_switch(
             hdc,
             general_usage_rect(hwnd, weekly),
             enabled,
@@ -3513,14 +3513,6 @@ unsafe fn paint_general_page(
                     selected_pressed: accent_pressed,
                 },
             ),
-            if enabled { Color::from_hex("#FFFFFFFF") } else { primary },
-            if enabled {
-                if zh { "开启" } else { "On" }
-            } else if zh {
-                "关闭"
-            } else {
-                "Off"
-            },
         );
     }
 
@@ -3577,7 +3569,7 @@ unsafe fn paint_general_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let startup = general.start_with_windows;
-    draw_segment(
+    draw_switch(
         hdc,
         general_startup_rect(hwnd),
         startup,
@@ -3595,14 +3587,6 @@ unsafe fn paint_general_page(
                 selected_pressed: accent_pressed,
             },
         ),
-        if startup { Color::from_hex("#FFFFFFFF") } else { primary },
-        if startup {
-            if zh { "开启" } else { "On" }
-        } else if zh {
-            "关闭"
-        } else {
-            "Off"
-        },
     );
 
     draw_text(
@@ -3623,23 +3607,27 @@ unsafe fn paint_general_page(
     };
     let language_target = HitTarget::LanguageToggle;
     let language_button = language_button_rect(hwnd);
-    fill(
+    let language_background = button_background(
+        language_target,
+        false,
+        hovered,
+        pressed,
+        ButtonPalette {
+            normal: card_hover,
+            hover: card_pressed,
+            pressed: card_pressed,
+            selected: card_hover,
+            selected_hover: card_pressed,
+            selected_pressed: card_pressed,
+        },
+    );
+    fill_rounded_rect(hdc, language_button, language_background, scale(hwnd, 8));
+    draw_rounded_outline_rect(
         hdc,
         language_button,
-        button_background(
-            language_target,
-            false,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: card_hover,
-                selected_hover: card_pressed,
-                selected_pressed: card_pressed,
-            },
-        ),
+        subtle_control_border(language_background),
+        scale(hwnd, 8),
+        1,
     );
     draw_outline_rect(hdc, language_button, if popup_open { accent } else { secondary });
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
@@ -3876,7 +3864,12 @@ unsafe fn paint_appearance_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
-    fill(hdc, rect(hwnd, 200, 58, 940, 164), card);
+    fill_rounded_rect(
+        hdc,
+        rect(hwnd, 200, 58, 940, 164),
+        card,
+        scale(hwnd, 10),
+    );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -4383,8 +4376,8 @@ unsafe fn paint_hex_edit_frames(
             continue;
         };
         let frame = hex_edit_frame_rect(hwnd, row_index);
-        fill(hdc, frame, background);
-        draw_outline_rect(
+        fill_rounded_rect(hdc, frame, background, scale(hwnd, 6));
+        draw_rounded_outline_rect(
             hdc,
             frame,
             if invalid[index] {
@@ -4394,6 +4387,8 @@ unsafe fn paint_hex_edit_frames(
             } else {
                 border
             },
+            scale(hwnd, 6),
+            1,
         );
     }
 }
@@ -4415,11 +4410,13 @@ unsafe fn paint_numeric_edit_frames(
 
     for index in 0..4 {
         let frame = numeric_edit_frame_rect(hwnd, section, index);
-        fill(hdc, frame, background);
-        draw_outline_rect(
+        fill_rounded_rect(hdc, frame, background, scale(hwnd, 6));
+        draw_rounded_outline_rect(
             hdc,
             frame,
             if focused == Some(index) { accent } else { border },
+            scale(hwnd, 6),
+            1,
         );
     }
 }
@@ -4438,8 +4435,14 @@ unsafe fn paint_blur_edit_frame(
         Color::from_hex("#EEF3F8FF")
     };
     let frame = blur_edit_frame_rect(hwnd);
-    fill(hdc, frame, background);
-    draw_outline_rect(hdc, frame, if focused { accent } else { border });
+    fill_rounded_rect(hdc, frame, background, scale(hwnd, 6));
+    draw_rounded_outline_rect(
+        hdc,
+        frame,
+        if focused { accent } else { border },
+        scale(hwnd, 6),
+        1,
+    );
 }
 
 unsafe fn paint_editor(
@@ -4627,22 +4630,123 @@ unsafe fn draw_segment(
     foreground: Color,
     text: &str,
 ) {
-    fill(hdc, rect, background);
-    if selected {
-        let border = CreatePen(
-            PS_SOLID,
-            1,
-            COLORREF(Color::from_hex("#76A7FFFF").to_colorref()),
-        );
-        let old_pen = SelectObject(hdc, border);
-        let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let _ = Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
-        let _ = DeleteObject(border);
-    }
+    let height = (rect.bottom - rect.top).max(1);
+    let radius = (height / 4).clamp(5, 10);
+    fill_rounded_rect(hdc, rect, background, radius);
+
+    let border = if selected {
+        Color::from_hex("#76A7FFFF")
+    } else {
+        subtle_control_border(background)
+    };
+    draw_rounded_outline_rect(hdc, rect, border, radius, 1);
+
     let _ = SetTextColor(hdc, COLORREF(foreground.to_colorref()));
     draw_text(hdc, text, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+fn subtle_control_border(background: Color) -> Color {
+    let brightness = background.r as u16 + background.g as u16 + background.b as u16;
+    if brightness < 384 {
+        Color::from_hex("#4B5360FF")
+    } else {
+        Color::from_hex("#B8C3CFFF")
+    }
+}
+
+unsafe fn fill_rounded_rect(hdc: HDC, rect: RECT, color: Color, radius: i32) {
+    let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(color.to_colorref()));
+    let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, pen);
+    let diameter = (radius.max(1) * 2).max(2);
+    let _ = RoundRect(
+        hdc,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        diameter,
+        diameter,
+    );
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(pen);
+    let _ = DeleteObject(brush);
+}
+
+unsafe fn draw_rounded_outline_rect(
+    hdc: HDC,
+    rect: RECT,
+    color: Color,
+    radius: i32,
+    width: i32,
+) {
+    let pen = CreatePen(PS_SOLID, width.max(1), COLORREF(color.to_colorref()));
+    let old_pen = SelectObject(hdc, pen);
+    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    let diameter = (radius.max(1) * 2).max(2);
+    let _ = RoundRect(
+        hdc,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        diameter,
+        diameter,
+    );
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    let _ = DeleteObject(pen);
+}
+
+unsafe fn draw_switch(hdc: HDC, hit_rect: RECT, enabled: bool, track_color: Color) {
+    let hit_width = (hit_rect.right - hit_rect.left).max(1);
+    let hit_height = (hit_rect.bottom - hit_rect.top).max(1);
+    let track_height = (hit_height * 11 / 16).max(12);
+    let track_width = (track_height * 20 / 11).min(hit_width);
+    let track = RECT {
+        left: hit_rect.right - track_width,
+        top: hit_rect.top + (hit_height - track_height) / 2,
+        right: hit_rect.right,
+        bottom: hit_rect.top + (hit_height - track_height) / 2 + track_height,
+    };
+
+    fill_rounded_rect(hdc, track, track_color, track_height / 2);
+    draw_rounded_outline_rect(
+        hdc,
+        track,
+        subtle_control_border(track_color),
+        track_height / 2,
+        1,
+    );
+
+    let knob_size = (track_height - 4).max(8);
+    let knob_top = track.top + (track_height - knob_size) / 2;
+    let knob_left = if enabled {
+        track.right - knob_size - 2
+    } else {
+        track.left + 2
+    };
+    let knob_brush = CreateSolidBrush(COLORREF(Color::from_hex("#FFFFFFFF").to_colorref()));
+    let knob_pen = CreatePen(
+        PS_SOLID,
+        1,
+        COLORREF(Color::from_hex("#E7ECF2FF").to_colorref()),
+    );
+    let old_brush = SelectObject(hdc, knob_brush);
+    let old_pen = SelectObject(hdc, knob_pen);
+    let _ = Ellipse(
+        hdc,
+        knob_left,
+        knob_top,
+        knob_left + knob_size,
+        knob_top + knob_size,
+    );
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(knob_pen);
+    let _ = DeleteObject(knob_brush);
 }
 
 unsafe fn draw_outline_rect(hdc: HDC, rect: RECT, color: Color) {
