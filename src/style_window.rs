@@ -1796,8 +1796,7 @@ fn format_json_editor() {
 }
 
 fn export_default_filename() -> String {
-    let mut time = SYSTEMTIME::default();
-    unsafe { GetLocalTime(&mut time); }
+    let time = unsafe { GetLocalTime() };
     format!(
         "codex-usage-win-config-{:04}{:02}{:02}-{:02}{:02}{:02}.json",
         time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
