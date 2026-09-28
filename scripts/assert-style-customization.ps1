@@ -506,6 +506,15 @@ if ($styleWindow -match '编辑公开设置；注释仅用于说明' -or
     $settingsModel -notmatch '注释仅用于说明，不属于配置数据；应用、保存和导出时不会写入配置') {
     throw 'JSON documentation notice must live inside generated JSONC, not as a separate page subtitle.'
 }
+if ($styleWindow -notmatch 'read_large_edit_text_raw' -or
+    $styleWindow -notmatch 'EM_GETSCROLLPOS_MSG' -or
+    $styleWindow -notmatch 'EM_SETSCROLLPOS_MSG' -or
+    $styleWindow -notmatch 'previous_event_mask' -or
+    $styleWindow -notmatch 'syntax_highlight_json_editor\(edit, &windows_text, is_dark\)' -or
+    $styleWindow -notmatch 'InvalidateRect\(edit, None, true\)' -or
+    $styleWindow -notmatch 'UpdateWindow\(edit\)') {
+    throw 'JSON RichEdit live highlighting must preserve CRLF offsets, selection/scroll state, suppress formatting notifications, and fully repaint after edits.'
+}
 if ($styleWindow -notmatch 'GetOpenFileNameW' -or
     $styleWindow -notmatch 'GetSaveFileNameW' -or
     $styleWindow -notmatch 'RICHEDIT50W' -or
