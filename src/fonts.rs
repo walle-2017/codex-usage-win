@@ -86,9 +86,12 @@ fn system_ui_face() -> &'static str {
     })
 }
 
+pub fn init() -> bool {
+    *MONO_INITIALIZED.get_or_init(|| register_font(JETBRAINS_MONO_FONT))
+}
+
 fn mono_role_face() -> &'static str {
-    let initialized = *MONO_INITIALIZED.get_or_init(|| register_font(JETBRAINS_MONO_FONT));
-    if initialized {
+    if init() {
         JETBRAINS_MONO_FACE
     } else {
         MONO_FALLBACK_FACE
