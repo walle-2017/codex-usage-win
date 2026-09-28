@@ -547,6 +547,12 @@ if ($styleWindow -notmatch 'fill_rounded_rect' -or
     $controlPrimitives -notmatch 'DrawRoundedRectangle') {
     throw 'Settings controls must keep the shared Direct2D-antialiased Fluent-lite control primitives.'
 }
+if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
+    $styleWindow -notmatch 'navigation_text_inset' -or
+    $styleWindow -notmatch 'Section::General => \(28, 68\)' -or
+    $styleWindow -notmatch 'Section::Json => \(416, 456\)') {
+    throw 'Settings sidebar must remain a compact grouped navigation without the redundant Settings heading.'
+}
 if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
     throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
 }
