@@ -564,6 +564,13 @@ if ($styleWindow -match 'Manage refresh, display, alerts, and application behavi
     $styleWindow -notmatch 'settings_card_rect\(hwnd, 328, 464\)') {
     throw 'Settings pages must keep the shared right-pane layout baseline, restored General title, and matched refresh/alert padding.'
 }
+if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
+    $styleWindow -notmatch 'SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30' -or
+    $styleWindow -notmatch 'SETTINGS_FOOTER_GAP: i32 = 12' -or
+    $styleWindow -notmatch 'close_rect\(hwnd\)\.top - scale\(hwnd, SETTINGS_FOOTER_GAP\)' -or
+    $styleWindow -notmatch 'editor\.bottom = editor\.bottom\.min\(safe_bottom\)') {
+    throw 'Appearance editors must reserve a bottom safety gap above the Close button and use compact shared channel spacing.'
+}
 if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
     throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
 }
