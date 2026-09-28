@@ -936,7 +936,7 @@ fn custom_preset_card_rect(hwnd: HWND) -> RECT {
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 660, 492, 920, 528)
+    rect(hwnd, 660, 370, 920, 406)
 }
 
 fn language_option_count() -> usize {
@@ -949,7 +949,7 @@ fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
     let total_h = row_h * language_option_count() as i32;
     let bottom = button.top - scale(hwnd, 6);
     RECT {
-        left: scale(hwnd, 610),
+        left: button.left,
         top: bottom - total_h + row_h * index as i32,
         right: button.right,
         bottom: bottom - total_h + row_h * (index as i32 + 1),
@@ -1015,11 +1015,17 @@ fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
         900_000 => 2,
         _ => 3,
     };
-    rect(hwnd, 222 + index * 158, 140, 366 + index * 158, 176)
+    rect(hwnd, 360 + index * 140, 30, 490 + index * 140, 64)
 }
 
 fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
-    rect(hwnd, 812, if weekly { 286 } else { 246 }, 920, if weekly { 318 } else { 278 })
+    rect(
+        hwnd,
+        812,
+        if weekly { 166 } else { 126 },
+        920,
+        if weekly { 198 } else { 158 },
+    )
 }
 
 fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
@@ -1029,11 +1035,11 @@ fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
         20 => 2,
         _ => 3,
     };
-    rect(hwnd, 222 + index * 158, 382, 366 + index * 158, 418)
+    rect(hwnd, 360 + index * 140, 226, 490 + index * 140, 260)
 }
 
 fn general_startup_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 812, 464, 920, 496)
+    rect(hwnd, 812, 326, 920, 358)
 }
 
 fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
@@ -3408,39 +3414,21 @@ unsafe fn paint_general_page(
         state.as_ref().map(|s| s.language_popup_open).unwrap_or(false)
     };
 
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh { "常规" } else { "General" },
-        rect(hwnd, 200, 18, 940, 46),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh {
-            "管理刷新、显示、提醒和应用行为"
-        } else {
-            "Manage refresh, display, alerts, and application behavior"
-        },
-        rect(hwnd, 200, 48, 940, 76),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
     for r in [
-        rect(hwnd, 200, 92, 940, 190),
-        rect(hwnd, 200, 206, 940, 326),
-        rect(hwnd, 200, 342, 940, 430),
-        rect(hwnd, 200, 446, 940, 548),
+        rect(hwnd, 200, 18, 940, 76),
+        rect(hwnd, 200, 92, 940, 206),
+        rect(hwnd, 200, 222, 940, 268),
+        rect(hwnd, 200, 284, 940, 420),
     ] {
         fill(hdc, r, card);
     }
 
+    // Refresh frequency: label and choices share one compact row.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         strings.update_frequency,
-        rect(hwnd, 218, 100, 500, 130),
+        rect(hwnd, 218, 30, 338, 64),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (interval, label) in [
@@ -3474,24 +3462,25 @@ unsafe fn paint_general_page(
         );
     }
 
+    // Usage display remains a two-row switch group with explicit row spacing.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         if zh { "显示用量" } else { "Usage display" },
-        rect(hwnd, 218, 214, 500, 240),
+        rect(hwnd, 218, 100, 500, 124),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
         if zh { "5 小时额度" } else { "5-hour quota" },
-        rect(hwnd, 238, 246, 650, 278),
+        rect(hwnd, 238, 126, 650, 158),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     draw_text(
         hdc,
         if zh { "每周额度" } else { "Weekly quota" },
-        rect(hwnd, 238, 286, 650, 318),
+        rect(hwnd, 238, 166, 650, 198),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (target, enabled, weekly) in [
@@ -3519,11 +3508,12 @@ unsafe fn paint_general_page(
         );
     }
 
+    // Quota alert: label and choices share one compact row.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         if zh { "额度提醒" } else { "Quota alerts" },
-        rect(hwnd, 218, 350, 500, 378),
+        rect(hwnd, 218, 226, 338, 260),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     for (threshold, zh_label, en_label) in [
@@ -3557,18 +3547,19 @@ unsafe fn paint_general_page(
         );
     }
 
+    // Application: title plus two independent rows with a visible gap.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         if zh { "应用" } else { "Application" },
-        rect(hwnd, 218, 452, 500, 478),
+        rect(hwnd, 218, 292, 500, 316),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
         strings.start_with_windows,
-        rect(hwnd, 238, 464, 650, 496),
+        rect(hwnd, 238, 326, 650, 358),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let startup = general.start_with_windows;
@@ -3595,7 +3586,7 @@ unsafe fn paint_general_page(
     draw_text(
         hdc,
         strings.language,
-        rect(hwnd, 238, 500, 600, 532),
+        rect(hwnd, 238, 370, 600, 406),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
