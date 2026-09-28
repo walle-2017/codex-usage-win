@@ -4,6 +4,7 @@ $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
+$controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
@@ -540,8 +541,14 @@ if ($styleWindow -notmatch 'SWP_SHOWWINDOW' -or
 if ($styleWindow -notmatch 'fill_rounded_rect' -or
     $styleWindow -notmatch 'draw_rounded_outline_rect' -or
     $styleWindow -notmatch 'draw_switch' -or
-    $styleWindow -notmatch 'RoundRect') {
-    throw 'Settings controls must keep the shared Fluent-lite rounded control primitives and switch rendering.'
+    $native -notmatch 'draw_antialiased_rounded_rect' -or
+    $controlPrimitives -notmatch 'D2D1_ANTIALIAS_MODE_PER_PRIMITIVE' -or
+    $controlPrimitives -notmatch 'FillRoundedRectangle' -or
+    $controlPrimitives -notmatch 'DrawRoundedRectangle') {
+    throw 'Settings controls must keep the shared Direct2D-antialiased Fluent-lite control primitives.'
+}
+if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
+    throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
