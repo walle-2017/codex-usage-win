@@ -944,7 +944,8 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
 }
 
 fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 790, 324, 850, 352)
+    // Match the RGBA numeric inputs: same right column and overall width.
+    rect(hwnd, 812, 324, 920, 352)
 }
 
 fn blur_edit_rect(hwnd: HWND) -> RECT {
@@ -952,8 +953,19 @@ fn blur_edit_rect(hwnd: HWND) -> RECT {
     RECT {
         left: frame.left + scale(hwnd, 3),
         top: frame.top + scale(hwnd, 3),
-        right: frame.right - scale(hwnd, 3),
+        // Reserve the right side for the fixed '%' suffix drawn by the parent.
+        right: frame.right - scale(hwnd, 28),
         bottom: frame.bottom - scale(hwnd, 3),
+    }
+}
+
+fn blur_suffix_rect(hwnd: HWND) -> RECT {
+    let frame = blur_edit_frame_rect(hwnd);
+    RECT {
+        left: frame.right - scale(hwnd, 28),
+        top: frame.top,
+        right: frame.right - scale(hwnd, 8),
+        bottom: frame.bottom,
     }
 }
 
@@ -4121,13 +4133,6 @@ unsafe fn paint_appearance_page(
                     track_background,
                     accent,
                 );
-                let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-                draw_text(
-                    hdc,
-                    "%",
-                    rect(hwnd, 860, 324, 886, 352),
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                );
             }
         }
     }
@@ -4153,6 +4158,7 @@ unsafe fn paint_appearance_page(
             focused_blur_edit,
             track_background,
             accent,
+            secondary,
         );
     }
 
@@ -4500,6 +4506,7 @@ unsafe fn paint_blur_edit_frame(
     focused: bool,
     border: Color,
     accent: Color,
+    suffix_color: Color,
 ) {
     let background = if is_dark {
         Color::from_hex("#20242AFF")
@@ -4514,6 +4521,14 @@ unsafe fn paint_blur_edit_frame(
         if focused { accent } else { border },
         scale(hwnd, 6),
         1,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(suffix_color.to_colorref()));
+    draw_text(
+        hdc,
+        "%",
+        blur_suffix_rect(hwnd),
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
 }
 
