@@ -111,11 +111,14 @@ if ($styleWindow -notmatch 'HitTarget' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
-if ($styleWindow -notmatch 'WS_SYSMENU' -or
+if ($styleWindow -notmatch 'WINDOW_EX_STYLE\(0\)' -or
+    $styleWindow -match 'WS_EX_TOOLWINDOW' -or
+    $styleWindow -match 'WS_MAXIMIZEBOX' -or
+    $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU' -or
     $styleWindow -notmatch 'WM_CLOSE\s*=>\s*\{' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
-    throw 'Style panel must expose the native title-bar close button and save before closing.'
+    throw 'Style panel must use the standard Windows caption close button, not the compact ToolWindow caption.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'ES_NUMBER' -or
@@ -696,11 +699,12 @@ if ($styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must use the native titlebar close button and save before closing.'
 }
-if ($styleWindow -notmatch 'let right = client\.right - scale\(hwnd, 24\)' -or
-    $styleWindow -notmatch 'let width = scale\(hwnd, 108\)' -or
-    $styleWindow -notmatch 'let height = scale\(hwnd, 36\)' -or
-    $styleWindow -notmatch 'let bottom = client\.bottom - scale\(hwnd, 24\)') {
-    throw 'JSON Apply must be a compact button aligned to the content bottom-right corner.'
+if ($styleWindow -notmatch 'let edit = json_edit_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'let button_width = scale\(hwnd, 108\)' -or
+    $styleWindow -notmatch 'JsonAction::Export\s*=>\s*RECT\s*\{[\s\S]{0,180}right:\s*edit\.right' -or
+    $styleWindow -notmatch 'JsonAction::Import\s*=>\s*RECT\s*\{[\s\S]{0,220}right:\s*edit\.right - button_width - button_gap' -or
+    $styleWindow -notmatch 'JsonAction::Apply\s*=>[\s\S]{0,260}let right = edit\.right') {
+    throw 'JSON Import, Export, and Apply must share the JSON editor right edge and compact button width.'
 }
 if ($styleWindow -notmatch 'rect\(hwnd, 778, 324, 928, 352\)' -or
     $styleWindow -notmatch 'blur_suffix_rect' -or
