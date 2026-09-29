@@ -28,17 +28,6 @@ use crate::style::{
     FROSTED_STRENGTH_MAX,
 };
 
-#[link(name = "user32")]
-unsafe extern "system" {
-    #[link_name = "ShowScrollBar"]
-    fn show_scroll_bar_native(hwnd: HWND, bar: i32, show: BOOL) -> BOOL;
-}
-
-unsafe fn hide_json_native_scrollbars(hwnd: HWND) {
-    let _ = show_scroll_bar_native(hwnd, SB_VERT.0, BOOL(0));
-    let _ = show_scroll_bar_native(hwnd, SB_HORZ.0, BOOL(0));
-}
-
 // Keep this block well away from updater.rs (WM_APP + 21..23).
 pub const WM_STYLE_COLOR_PREVIEW: u32 = WM_APP + 120;
 pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 121;
@@ -76,7 +65,10 @@ const EM_SETCHARFORMAT_MSG: u32 = WM_USER + 68;
 const EM_SETEVENTMASK_MSG: u32 = WM_USER + 69;
 const EM_EXGETSEL_MSG: u32 = WM_USER + 52;
 const EM_EXSETSEL_MSG: u32 = WM_USER + 55;
+const EM_GETLINECOUNT_MSG: u32 = 0x00BA;
+const EM_LINESCROLL_MSG: u32 = 0x00B6;
 const EM_LINEINDEX_MSG: u32 = 0x00BB;
+const EM_GETFIRSTVISIBLELINE_MSG: u32 = 0x00CE;
 const EM_GETSCROLLPOS_MSG: u32 = WM_USER + 221;
 const EM_SETSCROLLPOS_MSG: u32 = WM_USER + 222;
 const SCF_SELECTION_FLAG: usize = 0x0001;
@@ -696,7 +688,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             PCWSTR::from_raw(empty.as_ptr()),
             WINDOW_STYLE(
                 WS_CHILD.0
-                    | WS_VSCROLL.0
                     | ES_MULTILINE as u32
                     | ES_AUTOVSCROLL as u32
                     | ES_AUTOHSCROLL as u32
@@ -721,7 +712,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             }
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
-        hide_json_native_scrollbars(json_edit);
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
         let _ = SendMessageW(
             json_edit,
@@ -1041,28 +1031,6 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
 }
 
-fn corner_choice_rect(hwnd: HWND, rounded: bool) -> RECT {
-    let right = scale(hwnd, 940);
-    let width = scale(hwnd, 94);
-    let gap = scale(hwnd, 10);
-    let top = scale(hwnd, 180);
-    let bottom = scale(hwnd, 212);
-    if rounded {
-        RECT {
-            left: right - width,
-            top,
-            right,
-            bottom,
-        }
-    } else {
-        RECT {
-            left: right - width * 2 - gap,
-            top,
-            right: right - width - gap,
-            bottom,
-        }
-    }
-}
 
 fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     let index = match preset {
@@ -1511,18 +1479,21 @@ fn is_appearance_section(section: Section) -> bool {
     )
 }
 
-fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, Section, bool, bool)> {
+fn editor_layout_snapshot(
+) -> Option<([SendHwnd; 4], SendHwnd, SendHwnd, Section, bool, bool, bool)> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let s = state.as_ref()?;
     Some((
         s.numeric_edits,
         s.blur_edit,
+        s.corner_edit,
         s.section,
         matches!(
             s.section,
             Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
         ) && matches!(s.editor, EditorSelection::Color(_)),
         matches!(s.section, Section::Panel | Section::Tooltip),
+        matches!(s.section, Section::Panel | Section::Tooltip | Section::Progress),
     ))
 }
 
@@ -1530,16 +1501,19 @@ fn release_editor_focus_before_layout(
     hwnd: HWND,
     numeric_edits: &[SendHwnd; 4],
     blur_edit: SendHwnd,
+    corner_edit: SendHwnd,
     show_color: bool,
     show_blur: bool,
+    show_corner: bool,
 ) {
     unsafe {
         let focused = GetFocus();
         let hiding_focused_color =
             !show_color && numeric_edits.iter().any(|edit| edit.to_hwnd() == focused);
         let hiding_focused_blur = !show_blur && blur_edit.to_hwnd() == focused;
+        let hiding_focused_corner = !show_corner && corner_edit.to_hwnd() == focused;
 
-        if hiding_focused_color || hiding_focused_blur {
+        if hiding_focused_color || hiding_focused_blur || hiding_focused_corner {
             // SetFocus synchronously sends EN_KILLFOCUS to the old EDIT control.
             // This must run with STATE unlocked or WM_COMMAND would re-enter
             // STATE.lock() on the same UI thread and deadlock.
@@ -1552,7 +1526,9 @@ fn layout_numeric_edits(hwnd: HWND) {
     // Copy every HWND and visibility decision while STATE is locked, then release
     // the mutex before calling Win32. ShowWindow/SetFocus can synchronously send
     // WM_COMMAND focus notifications back into this window procedure.
-    let Some((numeric_edits, blur_edit, section, show_color, show_blur)) = editor_layout_snapshot() else {
+    let Some((numeric_edits, blur_edit, corner_edit, section, show_color, show_blur, show_corner)) =
+        editor_layout_snapshot()
+    else {
         return;
     };
 
@@ -1560,8 +1536,10 @@ fn layout_numeric_edits(hwnd: HWND) {
         hwnd,
         &numeric_edits,
         blur_edit,
+        corner_edit,
         show_color,
         show_blur,
+        show_corner,
     );
 
     unsafe {
@@ -1582,7 +1560,7 @@ fn layout_numeric_edits(hwnd: HWND) {
             );
         }
 
-        let blur_rect = blur_edit_rect(hwnd);
+        let blur_rect = blur_edit_rect(hwnd, section);
         let _ = SetWindowPos(
             blur_edit.to_hwnd(),
             HWND::default(),
@@ -1595,6 +1573,21 @@ fn layout_numeric_edits(hwnd: HWND) {
         let _ = ShowWindow(
             blur_edit.to_hwnd(),
             if show_blur { SW_SHOW } else { SW_HIDE },
+        );
+
+        let corner_rect = corner_edit_rect(hwnd);
+        let _ = SetWindowPos(
+            corner_edit.to_hwnd(),
+            HWND::default(),
+            corner_rect.left,
+            corner_rect.top,
+            corner_rect.right - corner_rect.left,
+            corner_rect.bottom - corner_rect.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(
+            corner_edit.to_hwnd(),
+            if show_corner { SW_SHOW } else { SW_HIDE },
         );
     }
 }
@@ -1626,7 +1619,6 @@ fn layout_settings_children(hwnd: HWND) {
             (json_rect.bottom - json_rect.top).max(1),
             SWP_NOZORDER | SWP_NOACTIVATE | visibility,
         );
-        hide_json_native_scrollbars(json_edit.to_hwnd());
         if visible {
             let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
         } else {
@@ -3420,6 +3412,7 @@ fn set_section(section: Section) {
         } else {
             s.focused_numeric_edit = None;
             s.focused_blur_edit = false;
+            s.focused_corner_edit = false;
             s.focused_hex_edit = None;
         }
         s.dragging_slider = None;
@@ -3441,6 +3434,7 @@ fn set_section(section: Section) {
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
+    sync_corner_edit();
     redraw_settings_window(hwnd);
 }
 
@@ -3459,6 +3453,7 @@ fn select_editor(editor: EditorSelection) {
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
+    sync_corner_edit();
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
@@ -3483,7 +3478,7 @@ fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
         (s.section, s.editor)
     };
 
-    if matches!(section, Section::Panel | Section::Tooltip) && pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
+    if matches!(section, Section::Panel | Section::Tooltip) && pt_in_rect(blur_slider_hit_rect(hwnd, section), x, y) {
         return Some(SliderKind::Blur);
     }
 
@@ -3558,7 +3553,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
             }
             (_, SliderKind::Blur) if matches!(s.section, Section::Panel | Section::Tooltip) => {
                 let value = slider_value_from_x(
-                    blur_slider_track_rect(hwnd),
+                    blur_slider_track_rect(hwnd, s.section),
                     x,
                     FROSTED_STRENGTH_MAX,
                 );
@@ -5321,7 +5316,7 @@ unsafe fn paint_appearance_page(
                 draw_slider(
                     hdc,
                     hwnd,
-                    blur_slider_track_rect(hwnd),
+                    blur_slider_track_rect(hwnd, s.section),
                     value,
                     FROSTED_STRENGTH_MAX,
                     track_background,
