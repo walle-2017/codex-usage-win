@@ -4731,6 +4731,33 @@ unsafe fn paint_style_preview_card(
         DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
     );
 
+    let tooltip_preview = RECT {
+        left: preview.right - scale(hwnd, 76),
+        top: preview.top + scale(hwnd, 6),
+        right: preview.right - scale(hwnd, 8),
+        bottom: preview.top + scale(hwnd, 30),
+    };
+    fill(
+        hdc,
+        tooltip_preview,
+        style.color(StyleColorTarget::TooltipBackground),
+    );
+    draw_outline_rect(
+        hdc,
+        tooltip_preview,
+        style.color(StyleColorTarget::TooltipBorder),
+    );
+    let _ = SetTextColor(
+        hdc,
+        COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()),
+    );
+    draw_text(
+        hdc,
+        "21:30",
+        tooltip_preview,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+
     let progress = RECT {
         left: text_left,
         top: preview.top + scale(hwnd, 65),
