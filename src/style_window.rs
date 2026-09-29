@@ -15,7 +15,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
-use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, ExtractIconExW, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::AppearancePreset;
@@ -76,7 +78,12 @@ const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
+const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
+const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
 const JSON_ACTION_DELAY_MS: u32 = 200;
+const JSON_VALIDATION_DELAY_MS: u32 = 90;
+const JSON_WHEEL_DELTA: i32 = 120;
+const JSON_WHEEL_LINES_PER_NOTCH: i32 = 3;
 
 #[repr(C)]
 #[derive(Default)]
@@ -712,6 +719,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             }
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
+        let _ = SetWindowSubclass(
+            json_edit,
+            Some(json_edit_subclass_proc),
+            JSON_EDIT_SUBCLASS_ID,
+            0,
+        );
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
         let _ = SendMessageW(
             json_edit,
@@ -1376,6 +1389,59 @@ fn json_scroll_thumb_hit_rect(hwnd: HWND) -> Option<RECT> {
         right: thumb.right + scale(hwnd, 4),
         bottom: thumb.bottom + scale(hwnd, 3),
     })
+}
+
+fn json_editor_active() -> bool {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state
+        .as_ref()
+        .is_some_and(|s| s.section == Section::Json && s.pending_discard_action.is_none())
+}
+
+fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
+    if lines == 0 {
+        return;
+    }
+    unsafe {
+        let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
+        let _ = InvalidateRect(panel, Some(&json_scrollbar_track_rect(panel)), false);
+    }
+}
+
+unsafe extern "system" fn json_edit_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    _ref_data: usize,
+) -> LRESULT {
+    if msg == WM_MOUSEWHEEL {
+        let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+        if delta != 0 {
+            let notches = ((delta.abs() + JSON_WHEEL_DELTA - 1) / JSON_WHEEL_DELTA).max(1);
+            let lines = if delta > 0 {
+                -JSON_WHEEL_LINES_PER_NOTCH * notches
+            } else {
+                JSON_WHEEL_LINES_PER_NOTCH * notches
+            };
+            let panel = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.hwnd.to_hwnd())
+            };
+            if let Some(panel) = panel {
+                scroll_json_editor_lines(hwnd, panel, lines);
+            } else {
+                let _ = SendMessageW(hwnd, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
+            }
+            return LRESULT(0);
+        }
+    }
+
+    if msg == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(hwnd, Some(json_edit_subclass_proc), JSON_EDIT_SUBCLASS_ID);
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 fn update_json_scroll_drag(hwnd: HWND, y: i32) {
@@ -2192,24 +2258,58 @@ fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: La
     }
 }
 
-fn update_json_validation_status(_mark_dirty: bool) {
-    let (edit, syncing, language, hwnd, is_dark, applied_settings) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_ref() else {
+fn schedule_json_validation(hwnd: HWND) {
+    let should_schedule = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
             return;
         };
+        if s.syncing_json_edit {
+            false
+        } else {
+            // Mark dirty immediately so closing the window before the debounce
+            // fires still triggers the unsaved-changes confirmation.
+            s.json_dirty = true;
+            true
+        }
+    };
+    if !should_schedule {
+        return;
+    }
+
+    unsafe {
+        let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
+        let _ = SetTimer(
+            hwnd,
+            JSON_VALIDATION_TIMER_ID,
+            JSON_VALIDATION_DELAY_MS,
+            None,
+        );
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn update_json_validation_status(_mark_dirty: bool) {
+    let (edit, language, hwnd, is_dark, applied_settings) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        if s.syncing_json_edit {
+            return;
+        }
+        // RichEdit formatting changes selection and character formats. Mark the
+        // editor as syncing before doing that work so any nested notifications
+        // cannot re-enter validation while the control is mid-update.
+        s.syncing_json_edit = true;
         (
             s.json_edit.to_hwnd(),
-            s.syncing_json_edit,
             s.snapshot.language,
             s.hwnd.to_hwnd(),
             s.snapshot.is_dark,
             s.snapshot.editable_settings.clone(),
         )
     };
-    if syncing {
-        return;
-    }
 
     let raw_text = read_large_edit_text_raw(edit);
     let text = normalize_to_lf(&raw_text);
@@ -2224,6 +2324,7 @@ fn update_json_validation_status(_mark_dirty: bool) {
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
+            s.syncing_json_edit = false;
             s.json_dirty = dirty;
             match parsed {
                 Err(error) => {
@@ -3596,6 +3697,11 @@ unsafe extern "system" fn wnd_proc(
                 finish_pending_json_action(hwnd);
                 return LRESULT(0);
             }
+            if wparam.0 == JSON_VALIDATION_TIMER_ID {
+                let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
+                update_json_validation_status(false);
+                return LRESULT(0);
+            }
             if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
                 let section = {
                     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3656,8 +3762,9 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let (x, y) = point_from_lparam(lparam);
 
-            let json_scroll_hit = json_scroll_thumb_hit_rect(hwnd)
-                .is_some_and(|r| pt_in_rect(r, x, y));
+            let json_scroll_hit = json_editor_active()
+                && json_scroll_thumb_hit_rect(hwnd)
+                    .is_some_and(|r| pt_in_rect(r, x, y));
             if json_scroll_hit {
                 let thumb = json_scroll_thumb_rect(hwnd).unwrap_or_default();
                 {
@@ -3672,6 +3779,29 @@ unsafe extern "system" fn wnd_proc(
                 let _ = SetCapture(hwnd);
                 let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
                 return LRESULT(0);
+            }
+
+            if json_editor_active() {
+                let track = json_scrollbar_track_rect(hwnd);
+                if pt_in_rect(track, x, y) {
+                    if let (Some(thumb), Some((edit, _, visible_lines, _))) =
+                        (json_scroll_thumb_rect(hwnd), json_scroll_line_metrics())
+                    {
+                        let direction = if y < thumb.top {
+                            -1
+                        } else if y >= thumb.bottom {
+                            1
+                        } else {
+                            0
+                        };
+                        if direction != 0 {
+                            let page_lines = visible_lines.saturating_sub(1).max(1);
+                            let _ = SetFocus(edit);
+                            scroll_json_editor_lines(edit, hwnd, direction * page_lines);
+                            return LRESULT(0);
+                        }
+                    }
+                }
             }
 
             let popup_open = {
@@ -3878,7 +4008,7 @@ unsafe extern "system" fn wnd_proc(
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
 
             if control_id == ID_EDIT_JSON && notification == EN_CHANGE_CODE {
-                update_json_validation_status(true);
+                schedule_json_validation(hwnd);
                 return LRESULT(0);
             }
             if let Some(target) = target_from_hex_control_id(control_id) {
@@ -4105,6 +4235,7 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
+            let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.take().map(|s| (s.font, s.json_font, s.edit_brush))
