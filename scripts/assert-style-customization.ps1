@@ -111,14 +111,15 @@ if ($styleWindow -notmatch 'HitTarget' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
-if ($styleWindow -notmatch 'WINDOW_EX_STYLE\(0\)' -or
+if ($styleWindow -notmatch 'WS_EX_APPWINDOW' -or
     $styleWindow -match 'WS_EX_TOOLWINDOW' -or
     $styleWindow -match 'WS_MAXIMIZEBOX' -or
-    $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU' -or
+    $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU\s*\|\s*WS_MINIMIZEBOX' -or
+    $styleWindow -notmatch 'WINDOW_HEIGHT,\s*HWND::default\(\)' -or
     $styleWindow -notmatch 'WM_CLOSE\s*=>\s*\{' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
-    throw 'Style panel must use the standard Windows caption close button, not the compact ToolWindow caption.'
+    throw 'Settings must be an ownerless taskbar window with minimize support and a standard caption close button.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'ES_NUMBER' -or
@@ -252,8 +253,15 @@ if ($styleWindow -notmatch 'WM_APP \+ 120' -or
 if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -notmatch 'pub\s+light:\s+ThemeStyle') {
     throw 'Dark and light theme styles must be stored separately.'
 }
-if ($styleProduction -match '(?i)rounded') {
-    throw 'v1.0.5 style settings must not expose rounded panel/progress options.'
+if ($styleProduction -notmatch 'panel_rounded:\s*bool' -or
+    $styleProduction -notmatch 'tooltip_rounded:\s*bool' -or
+    $styleProduction -notmatch 'progress_rounded:\s*bool' -or
+    $styleWindow -notmatch 'HitTarget::CornerShape' -or
+    $styleWindow -notmatch 'WM_STYLE_CORNER_PREVIEW' -or
+    $windowProduction -notmatch 'style\.panel_rounded' -or
+    $windowProduction -notmatch 'style\.tooltip_rounded' -or
+    $windowProduction -notmatch 'progress_rounded') {
+    throw 'Panel, tooltip, and progress styles must expose persisted square/rounded shape controls.'
 }
 if ($styleProduction -notmatch 'panel_frosted_strength:\s*u8' -or
     $styleProduction -notmatch 'FROSTED_STRENGTH_MAX:\s*u8\s*=\s*100') {
@@ -725,20 +733,49 @@ if ($styleWindow -notmatch 'load_embedded_app_icons\(' -or
     $styleWindow -notmatch 'ICON_SMALL') {
     throw 'Settings window must bind the embedded executable icon to its standard caption.'
 }
-if ($styleWindow -notmatch 'SetWindowTheme\(' -or
-    $styleWindow -notmatch 'DarkMode_Explorer' -or
-    $styleWindow -notmatch '"Explorer"' -or
-    $styleWindow -notmatch 'apply_json_editor_theme\(json_edit, snapshot\.is_dark\)' -or
-    $styleWindow -notmatch 'apply_json_editor_theme\(edit, is_dark\)') {
-    throw 'JSON RichEdit scrollbar/theme must follow the active light/dark settings theme.'
+if ($styleWindow -notmatch 'ShowScrollBar\(json_edit(?:\.to_hwnd\(\))?, SB_VERT, false\)' -or
+    $styleWindow -notmatch 'json_scroll_thumb_rect\(' -or
+    $styleWindow -notmatch 'GetScrollInfo\(' -or
+    $styleWindow -notmatch 'SB_THUMBTRACK' -or
+    $styleWindow -notmatch 'json_scroll_hovered' -or
+    $styleWindow -notmatch '#555B64FF' -or
+    $styleWindow -notmatch '#777E88FF' -or
+    $styleWindow -match 'DarkMode_Explorer' -or
+    $styleWindow -match 'SetWindowTheme\(') {
+    throw 'JSON editor must hide native scrollbars and render only a minimal custom hover-aware scroll thumb.'
 }
-if ($styleWindow -notmatch 'confirm_discard_json_changes\(' -or
-    $styleWindow -notmatch 'MB_YESNO\s*\|\s*MB_ICONWARNING\s*\|\s*MB_DEFBUTTON2' -or
-    $styleWindow -notmatch 'current_section == Section::Json' -or
-    $styleWindow -notmatch 'section != Section::Json' -or
-    $styleWindow -notmatch 'WM_CLOSE\s*=>\s*\{[\s\S]{0,180}confirm_discard_json_changes\(hwnd\)') {
-    throw 'Unsaved JSON changes must require confirmation before leaving JSON or closing settings.'
+if ($styleWindow -notmatch 'PendingDiscardAction' -or
+    $styleWindow -notmatch 'paint_discard_dialog\(' -or
+    $styleWindow -notmatch 'HitTarget::DiscardChanges' -or
+    $styleWindow -notmatch 'HitTarget::KeepEditing' -or
+    $styleWindow -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::SwitchSection\(section\)\)' -or
+    $styleWindow -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Close\)' -or
+    $styleWindow -match 'MessageBoxW\(' -or
+    $styleWindow -match 'MB_YESNO') {
+    throw 'Unsaved JSON changes must use the settings-styled in-window modal for page switches and closing.'
 }
+if ($styleWindow -notmatch 'redraw_settings_window\(' -or
+    $styleWindow -notmatch 'RDW_INVALIDATE\s*\|\s*RDW_ERASE\s*\|\s*RDW_ALLCHILDREN\s*\|\s*RDW_UPDATENOW' -or
+    $styleWindow -notmatch 'fill_rounded_rect\(hdc, r, section_bg' -or
+    $styleWindow -notmatch 'fill_rounded_rect\([\s\S]{0,260}r\.right - scale\(hwnd, 202\)' -or
+    $styleWindow -notmatch 'draw_rounded_outline_rect\([\s\S]{0,220}first\.left') {
+    throw 'Settings page switching must fully redraw and settings UI blocks must use rounded navigation, swatches, and popups.'
+}
+if ($styleWindow -notmatch 'if style\.panel_rounded' -or
+    $styleWindow -notmatch 'if style\.tooltip_rounded' -or
+    $styleWindow -notmatch 'if style\.progress_rounded' -or
+    $styleWindow -notmatch 'fill\(hdc, preview, style\.color\(StyleColorTarget::PanelBackground\)\)') {
+    throw 'Preset component previews must render their actual square/rounded component shape instead of forcing settings-panel rounding.'
+}
+if ($settingsModel -notmatch 'panel_rounded:\s*bool' -or
+    $settingsModel -notmatch 'tooltip_rounded:\s*bool' -or
+    $settingsModel -notmatch 'progress_rounded:\s*bool' -or
+    $settingsModel -notmatch '"panel_rounded"' -or
+    $settingsModel -notmatch '"tooltip_rounded"' -or
+    $settingsModel -notmatch '"progress_rounded"') {
+    throw 'Corner shape settings must round-trip through editable JSON/JSONC settings.'
+}
+
 $drawSliderBlock = [regex]::Match(
     $styleWindow,
     '(?s)unsafe\s+fn\s+draw_slider\s*\(.*?\n\}'
