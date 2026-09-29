@@ -3119,13 +3119,6 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Layout(preset));
             }
         }
-        if matches!(section, Section::Panel | Section::Tooltip | Section::Progress) {
-            for rounded in [false, true] {
-                if pt_in_rect(corner_choice_rect(hwnd, rounded), x, y) {
-                    return Some(HitTarget::CornerShape(rounded));
-                }
-            }
-        }
         if section == Section::Preset {
             for preset in ThemePreset::ALL {
                 if pt_in_rect(preset_card_rect(hwnd, preset), x, y) {
@@ -3274,35 +3267,6 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 value
             };
             send_parent(WM_SETTINGS_STARTUP_CHANGE, usize::from(enabled), 0);
-        }
-        HitTarget::CornerShape(rounded) => {
-            let section = {
-                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(s) = state.as_mut() else {
-                    return;
-                };
-                match s.section {
-                    Section::Panel => s.snapshot.active_style.panel_rounded = rounded,
-                    Section::Tooltip => s.snapshot.active_style.tooltip_rounded = rounded,
-                    Section::Progress => s.snapshot.active_style.progress_rounded = rounded,
-                    _ => return,
-                }
-                let section = s.section;
-                sync_active_style_into_editable(s);
-                section
-            };
-            let section_code = match section {
-                Section::Panel => 0usize,
-                Section::Tooltip => 1,
-                Section::Progress => 2,
-                _ => return,
-            };
-            send_parent(
-                WM_STYLE_CORNER_PREVIEW,
-                section_code | (usize::from(rounded) << 8),
-                0,
-            );
-            send_parent(WM_STYLE_SAVE, 0, 0);
         }
         HitTarget::DiscardChanges => {
             let action = {
@@ -3575,7 +3539,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
             }
             (_, SliderKind::Blur) if matches!(s.section, Section::Panel | Section::Tooltip) => {
                 let value = slider_value_from_x(
-                    blur_slider_track_rect(hwnd, s.section),
+                    blur_slider_track_rect(hwnd, section),
                     x,
                     FROSTED_STRENGTH_MAX,
                 );
@@ -4172,7 +4136,6 @@ unsafe fn paint_discard_dialog(
     card: Color,
     card_hover: Color,
     card_pressed: Color,
-    accent: Color,
     primary: Color,
     secondary: Color,
 ) {
@@ -4239,47 +4202,37 @@ unsafe fn paint_discard_dialog(
             hovered,
             pressed,
             ButtonPalette {
-                normal: if snapshot.is_dark {
-                    Color::from_hex("#5A2A2EFF")
-                } else {
-                    Color::from_hex("#F4D7DAFF")
-                },
-                hover: Color::from_hex("#C93C49FF"),
-                pressed: Color::from_hex("#A92E39FF"),
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
                 selected: card,
                 selected_hover: card_hover,
                 selected_pressed: card_pressed,
             },
         ),
-        if hovered == Some(HitTarget::DiscardChanges)
-            || pressed == Some(HitTarget::DiscardChanges)
-        {
-            Color::from_hex("#FFFFFFFF")
-        } else {
-            primary
-        },
-        if zh { "放弃更改" } else { "Discard" },
+        primary,
+        if zh { "放弃" } else { "Discard" },
     );
     draw_segment(
         hdc,
         discard_dialog_button_rect(hwnd, false),
-        true,
+        false,
         button_background(
             HitTarget::KeepEditing,
-            true,
+            false,
             hovered,
             pressed,
             ButtonPalette {
-                normal: accent,
-                hover: Color::from_hex("#629CFFFF"),
-                pressed: Color::from_hex("#3678E6FF"),
-                selected: accent,
-                selected_hover: Color::from_hex("#629CFFFF"),
-                selected_pressed: Color::from_hex("#3678E6FF"),
+                normal: card_hover,
+                hover: card_pressed,
+                pressed: card_pressed,
+                selected: card_hover,
+                selected_hover: card_pressed,
+                selected_pressed: card_pressed,
             },
         ),
-        Color::from_hex("#FFFFFFFF"),
-        if zh { "继续编辑" } else { "Keep editing" },
+        primary,
+        if zh { "继续" } else { "Continue" },
     );
     let _ = background;
 }
@@ -4315,6 +4268,7 @@ unsafe fn paint(hwnd: HWND) {
         pressed,
         focused_numeric_edit,
         focused_blur_edit,
+        focused_corner_edit,
         focused_hex_edit,
         invalid_hex_edits,
         json_status,
@@ -4336,6 +4290,7 @@ unsafe fn paint(hwnd: HWND) {
             s.pressed,
             s.focused_numeric_edit,
             s.focused_blur_edit,
+            s.focused_corner_edit,
             s.focused_hex_edit,
             s.invalid_hex_edits,
             s.json_status.clone(),
@@ -4498,6 +4453,7 @@ unsafe fn paint(hwnd: HWND) {
             pressed,
             focused_numeric_edit,
             focused_blur_edit,
+            focused_corner_edit,
             focused_hex_edit,
             &invalid_hex_edits,
             card,
@@ -4523,7 +4479,6 @@ unsafe fn paint(hwnd: HWND) {
             card,
             card_hover,
             card_pressed,
-            accent,
             primary,
             secondary,
         );
@@ -5155,6 +5110,7 @@ unsafe fn paint_appearance_page(
     pressed: Option<HitTarget>,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
+    focused_corner_edit: bool,
     focused_hex_edit: Option<StyleColorTarget>,
     invalid_hex_edits: &[bool; HEX_EDIT_COUNT],
     card: Color,
@@ -5288,42 +5244,6 @@ unsafe fn paint_appearance_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
-    if matches!(section, Section::Panel | Section::Tooltip | Section::Progress) {
-        let rounded = match section {
-            Section::Panel => snapshot.active_style.panel_rounded,
-            Section::Tooltip => snapshot.active_style.tooltip_rounded,
-            Section::Progress => snapshot.active_style.progress_rounded,
-            _ => false,
-        };
-        for (value, zh_label, en_label) in [
-            (false, "直角", "Square"),
-            (true, "圆角", "Rounded"),
-        ] {
-            let target = HitTarget::CornerShape(value);
-            let selected = rounded == value;
-            draw_segment(
-                hdc,
-                corner_choice_rect(hwnd, value),
-                selected,
-                button_background(
-                    target,
-                    selected,
-                    hovered,
-                    pressed,
-                    ButtonPalette {
-                        normal: card,
-                        hover: card_hover,
-                        pressed: card_pressed,
-                        selected: accent,
-                        selected_hover: accent_hover,
-                        selected_pressed: accent_pressed,
-                    },
-                ),
-                if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-                if zh { zh_label } else { en_label },
-            );
-        }
-    }
 
     for (index, row) in rows(section).iter().copied().enumerate() {
         let r = row_rect(hwnd, index);
@@ -5361,6 +5281,7 @@ unsafe fn paint_appearance_page(
         );
 
         match row {
+            EditorSelection::CornerRadius => {}
             EditorSelection::Color(target) => {
                 let color = snapshot.active_style.color(target);
                 fill_rounded_rect(
@@ -5384,7 +5305,7 @@ unsafe fn paint_appearance_page(
                 draw_slider(
                     hdc,
                     hwnd,
-                    blur_slider_track_rect(hwnd, s.section),
+                    blur_slider_track_rect(hwnd, section),
                     value,
                     FROSTED_STRENGTH_MAX,
                     track_background,
@@ -5407,10 +5328,23 @@ unsafe fn paint_appearance_page(
         },
     );
 
+    if matches!(section, Section::Panel | Section::Tooltip | Section::Progress) {
+        paint_corner_edit_frame(
+            hdc,
+            hwnd,
+            snapshot.is_dark,
+            focused_corner_edit,
+            track_background,
+            accent,
+            secondary,
+        );
+    }
+
     if matches!(section, Section::Panel | Section::Tooltip) {
         paint_blur_edit_frame(
             hdc,
             hwnd,
+            section,
             snapshot.is_dark,
             focused_blur_edit,
             track_background,
@@ -5837,6 +5771,7 @@ unsafe fn paint_numeric_edit_frames(
 unsafe fn paint_blur_edit_frame(
     hdc: HDC,
     hwnd: HWND,
+    section: Section,
     is_dark: bool,
     focused: bool,
     border: Color,
@@ -5848,7 +5783,7 @@ unsafe fn paint_blur_edit_frame(
     } else {
         Color::from_hex("#EEF3F8FF")
     };
-    let frame = blur_edit_frame_rect(hwnd);
+    let frame = blur_edit_frame_rect(hwnd, section);
     fill_rounded_rect(hdc, frame, background, scale(hwnd, 6));
     draw_rounded_outline_rect(
         hdc,
@@ -5862,7 +5797,40 @@ unsafe fn paint_blur_edit_frame(
     draw_text(
         hdc,
         "%",
-        blur_suffix_rect(hwnd),
+        blur_suffix_rect(hwnd, section),
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+unsafe fn paint_corner_edit_frame(
+    hdc: HDC,
+    hwnd: HWND,
+    is_dark: bool,
+    focused: bool,
+    border: Color,
+    accent: Color,
+    suffix_color: Color,
+) {
+    let background = if is_dark {
+        Color::from_hex("#20242AFF")
+    } else {
+        Color::from_hex("#EEF3F8FF")
+    };
+    let frame = corner_edit_frame_rect(hwnd);
+    fill_rounded_rect(hdc, frame, background, scale(hwnd, 6));
+    draw_rounded_outline_rect(
+        hdc,
+        frame,
+        if focused { accent } else { border },
+        scale(hwnd, 6),
+        1,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(suffix_color.to_colorref()));
+    draw_text(
+        hdc,
+        "px",
+        corner_suffix_rect(hwnd),
         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
 }
@@ -6004,6 +5972,9 @@ fn section_label(section: Section, language: LanguageId) -> &'static str {
 fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match row {
+        EditorSelection::CornerRadius => {
+            if zh { "圆角半径" } else { "Corner radius" }
+        }
         EditorSelection::Color(StyleColorTarget::PanelBackground) => {
             if zh { "背景颜色" } else { "Background" }
         }
