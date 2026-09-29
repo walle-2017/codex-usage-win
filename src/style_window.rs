@@ -182,7 +182,6 @@ enum HitTarget {
     JsonStatusPath,
     LanguageToggle,
     LanguageOption(usize),
-    Close,
 }
 
 #[derive(Clone, Copy)]
@@ -325,7 +324,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MAXIMIZEBOX,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MAXIMIZEBOX,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
@@ -866,19 +865,6 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     rect(hwnd, left, 220, left + 224, 404)
 }
 
-fn close_rect(hwnd: HWND) -> RECT {
-    let mut client = RECT::default();
-    unsafe { let _ = GetClientRect(hwnd, &mut client); }
-    let w = scale(hwnd, 36);
-    let h = scale(hwnd, 32);
-    RECT {
-        left: client.right - scale(hwnd, 12) - w,
-        top: scale(hwnd, 10),
-        right: client.right - scale(hwnd, 12),
-        bottom: scale(hwnd, 10) + h,
-    }
-}
-
 fn rows(section: Section) -> &'static [EditorSelection] {
     const PANEL: [EditorSelection; 3] = [
         EditorSelection::Color(StyleColorTarget::PanelBackground),
@@ -1092,11 +1078,15 @@ fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
         JsonAction::Apply => {
             let mut client = RECT::default();
             unsafe { let _ = GetClientRect(hwnd, &mut client); }
+            let right = client.right - scale(hwnd, 24);
+            let width = scale(hwnd, 108);
+            let height = scale(hwnd, 36);
+            let bottom = client.bottom - scale(hwnd, 24);
             RECT {
-                left: scale(hwnd, 660),
-                top: client.bottom - scale(hwnd, 60),
-                right: scale(hwnd, 800),
-                bottom: client.bottom - scale(hwnd, 20),
+                left: right - width,
+                top: bottom - height,
+                right,
+                bottom,
             }
         }
     }
@@ -2689,9 +2679,6 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         }
     }
 
-    if pt_in_rect(close_rect(hwnd), x, y) {
-        return Some(HitTarget::Close);
-    }
     None
 }
 
@@ -2813,10 +2800,6 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             }
             send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
         }
-        HitTarget::Close => unsafe {
-            send_parent(WM_STYLE_SAVE, 0, 0);
-            let _ = DestroyWindow(hwnd);
-        },
     }
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
@@ -3423,7 +3406,11 @@ unsafe extern "system" fn wnd_proc(
             info.ptMinTrackSize.y = scale(hwnd, WINDOW_MIN_HEIGHT);
             LRESULT(0)
         }
-        WM_CLOSE => LRESULT(0),
+        WM_CLOSE => {
+            send_parent(WM_STYLE_SAVE, 0, 0);
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        },
         WM_DESTROY => {
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let resources = {
@@ -3672,34 +3659,6 @@ unsafe fn paint(hwnd: HWND) {
             secondary,
         ),
     }
-
-    let close = close_rect(hwnd);
-    let close_hovered = hovered == Some(HitTarget::Close);
-    let close_pressed = pressed == Some(HitTarget::Close);
-    if close_hovered || close_pressed {
-        fill_rounded_rect(
-            hdc,
-            close,
-            if close_pressed {
-                Color::from_hex("#C50F1FFF")
-            } else {
-                Color::from_hex("#E81123FF")
-            },
-            scale(hwnd, 6),
-        );
-    }
-    let _ = SetTextColor(
-        hdc,
-        COLORREF(
-            if close_hovered || close_pressed {
-                Color::from_hex("#FFFFFFFF")
-            } else {
-                primary
-            }
-            .to_colorref(),
-        ),
-    );
-    draw_text(hdc, "×", close, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdc, old_font);
     let _ = BitBlt(screen_hdc, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
