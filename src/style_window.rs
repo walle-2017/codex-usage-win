@@ -7,7 +7,6 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, 
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::Controls::SetWindowTheme;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST,
@@ -71,6 +70,7 @@ const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
+const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
 const JSON_ACTION_DELAY_MS: u32 = 200;
 
 #[repr(C)]
@@ -238,6 +238,9 @@ struct PanelState {
     json_status_path: Option<PathBuf>,
     pending_json_action: Option<JsonAction>,
     pending_discard_action: Option<PendingDiscardAction>,
+    json_scroll_hovered: bool,
+    json_scroll_dragging: bool,
+    json_scroll_drag_offset: i32,
     edit_brush: isize,
     font: isize,
     json_font: isize,
@@ -328,22 +331,6 @@ fn load_embedded_app_icons() -> (HICON, HICON) {
     }
 }
 
-fn apply_json_editor_theme(edit: HWND, is_dark: bool) {
-    let theme = native_interop::wide_str(if is_dark {
-        "DarkMode_Explorer"
-    } else {
-        "Explorer"
-    });
-    unsafe {
-        let _ = SetWindowTheme(edit, PCWSTR::from_raw(theme.as_ptr()), PCWSTR::null());
-        let _ = RedrawWindow(
-            edit,
-            None,
-            HRGN::default(),
-            RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW,
-        );
-    }
-}
 
 fn discard_dialog_rect(hwnd: HWND) -> RECT {
     let mut client = RECT::default();
@@ -648,13 +635,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let rich_edit_class = native_interop::wide_str(RICH_EDIT_CLASS);
         let json_edit = match CreateWindowExW(
-            WS_EX_CLIENTEDGE,
+            WINDOW_EX_STYLE(0),
             PCWSTR::from_raw(rich_edit_class.as_ptr()),
             PCWSTR::from_raw(empty.as_ptr()),
             WINDOW_STYLE(
                 WS_CHILD.0
                     | WS_VSCROLL.0
-                    | WS_HSCROLL.0
                     | ES_MULTILINE as u32
                     | ES_AUTOVSCROLL as u32
                     | ES_AUTOHSCROLL as u32
@@ -679,7 +665,8 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             }
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
-        apply_json_editor_theme(json_edit, snapshot.is_dark);
+        let _ = ShowScrollBar(json_edit, SB_VERT, false);
+        let _ = ShowScrollBar(json_edit, SB_HORZ, false);
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
         let _ = SendMessageW(
             json_edit,
@@ -738,6 +725,9 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_status_path: None,
                 pending_json_action: None,
                 pending_discard_action: None,
+                json_scroll_hovered: false,
+                json_scroll_dragging: false,
+                json_scroll_drag_offset: 0,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
                 json_font: json_font.0 as isize,
@@ -1231,6 +1221,104 @@ fn json_edit_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn json_edit_text_rect(hwnd: HWND) -> RECT {
+    let outer = json_edit_rect(hwnd);
+    RECT {
+        left: outer.left + scale(hwnd, 2),
+        top: outer.top + scale(hwnd, 2),
+        right: outer.right - scale(hwnd, 16),
+        bottom: outer.bottom - scale(hwnd, 2),
+    }
+}
+
+fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
+    let outer = json_edit_rect(hwnd);
+    RECT {
+        left: outer.right - scale(hwnd, 12),
+        top: outer.top + scale(hwnd, 8),
+        right: outer.right - scale(hwnd, 4),
+        bottom: outer.bottom - scale(hwnd, 8),
+    }
+}
+
+fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
+    let edit = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref()?.json_edit.to_hwnd()
+    };
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+        ..Default::default()
+    };
+    unsafe {
+        if !GetScrollInfo(edit, SB_VERT, &mut info).as_bool() {
+            return None;
+        }
+    }
+    let total = (info.nMax - info.nMin + 1).max(1) as i64;
+    let page = i64::from(info.nPage.max(1));
+    if page >= total {
+        return None;
+    }
+    let track = json_scrollbar_track_rect(hwnd);
+    let track_h = (track.bottom - track.top).max(1);
+    let thumb_h = ((i64::from(track_h) * page / total) as i32)
+        .max(scale(hwnd, 28))
+        .min(track_h);
+    let max_pos = (info.nMax - info.nPage as i32 + 1).max(info.nMin);
+    let pos_range = (max_pos - info.nMin).max(1);
+    let available = (track_h - thumb_h).max(0);
+    let offset = available * (info.nPos - info.nMin).clamp(0, pos_range) / pos_range;
+    Some(RECT {
+        left: track.left + scale(hwnd, 1),
+        top: track.top + offset,
+        right: track.right - scale(hwnd, 1),
+        bottom: track.top + offset + thumb_h,
+    })
+}
+
+fn json_scroll_thumb_hit_rect(hwnd: HWND) -> Option<RECT> {
+    let thumb = json_scroll_thumb_rect(hwnd)?;
+    Some(RECT {
+        left: thumb.left - scale(hwnd, 4),
+        top: thumb.top - scale(hwnd, 3),
+        right: thumb.right + scale(hwnd, 4),
+        bottom: thumb.bottom + scale(hwnd, 3),
+    })
+}
+
+fn update_json_scroll_drag(hwnd: HWND, y: i32) {
+    let (edit, drag_offset) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else { return; };
+        (s.json_edit.to_hwnd(), s.json_scroll_drag_offset)
+    };
+    let Some(thumb) = json_scroll_thumb_rect(hwnd) else { return; };
+    let track = json_scrollbar_track_rect(hwnd);
+    let thumb_h = thumb.bottom - thumb.top;
+    let available = (track.bottom - track.top - thumb_h).max(1);
+    let top = (y - drag_offset).clamp(track.top, track.bottom - thumb_h);
+
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+        ..Default::default()
+    };
+    unsafe {
+        if !GetScrollInfo(edit, SB_VERT, &mut info).as_bool() {
+            return;
+        }
+        let max_pos = (info.nMax - info.nPage as i32 + 1).max(info.nMin);
+        let pos_range = (max_pos - info.nMin).max(1);
+        let pos = info.nMin + (top - track.top) * pos_range / available;
+        let packed = (SB_THUMBTRACK as usize & 0xFFFF)
+            | (((pos as usize) & 0xFFFF) << 16);
+        let _ = SendMessageW(edit, WM_VSCROLL, WPARAM(packed), LPARAM(0));
+        let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+    }
+}
+
 fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
     let edit = json_edit_rect(hwnd);
     let button_width = scale(hwnd, 108);
@@ -1421,12 +1509,9 @@ fn layout_settings_children(hwnd: HWND) {
             let _ = SetFocus(hwnd);
         }
 
-        let json_rect = json_edit_rect(hwnd);
-        let visibility = if section == Section::Json && !discard_pending {
-            SWP_SHOWWINDOW
-        } else {
-            SWP_HIDEWINDOW
-        };
+        let json_rect = json_edit_text_rect(hwnd);
+        let visible = section == Section::Json && !discard_pending;
+        let visibility = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
         let _ = SetWindowPos(
             json_edit.to_hwnd(),
             HWND::default(),
@@ -1436,6 +1521,13 @@ fn layout_settings_children(hwnd: HWND) {
             (json_rect.bottom - json_rect.top).max(1),
             SWP_NOZORDER | SWP_NOACTIVATE | visibility,
         );
+        let _ = ShowScrollBar(json_edit.to_hwnd(), SB_VERT, false);
+        let _ = ShowScrollBar(json_edit.to_hwnd(), SB_HORZ, false);
+        if visible {
+            let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
+        } else {
+            let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
+        }
     }
 }
 
@@ -1751,7 +1843,6 @@ fn refresh_json_editor_theme() {
         };
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
-    apply_json_editor_theme(edit, is_dark);
     let text = normalize_to_lf(&read_large_edit_text_raw(edit));
     syntax_highlight_json_editor(edit, &text, is_dark);
     layout_settings_children(hwnd);
@@ -3319,6 +3410,20 @@ unsafe extern "system" fn wnd_proc(
                 finish_pending_json_action(hwnd);
                 return LRESULT(0);
             }
+            if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
+                let section = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.as_ref().map(|s| s.section)
+                };
+                if section == Some(Section::Json) {
+                    let _ = InvalidateRect(
+                        hwnd,
+                        Some(&json_scrollbar_track_rect(hwnd)),
+                        false,
+                    );
+                }
+                return LRESULT(0);
+            }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_SETCURSOR => {
@@ -3346,7 +3451,11 @@ unsafe extern "system" fn wnd_proc(
             let _ = GetCursorPos(&mut point);
             let _ = ScreenToClient(hwnd, &mut point);
 
-            let cursor_id = if slider_kind_at(hwnd, point.x, point.y).is_some() {
+            let cursor_id = if json_scroll_thumb_hit_rect(hwnd)
+                .is_some_and(|r| pt_in_rect(r, point.x, point.y))
+            {
+                IDC_HAND
+            } else if slider_kind_at(hwnd, point.x, point.y).is_some() {
                 IDC_SIZEWE
             } else if hit_target_at(hwnd, point.x, point.y).is_some() {
                 IDC_HAND
@@ -3359,6 +3468,24 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_LBUTTONDOWN => {
             let (x, y) = point_from_lparam(lparam);
+
+            let json_scroll_hit = json_scroll_thumb_hit_rect(hwnd)
+                .is_some_and(|r| pt_in_rect(r, x, y));
+            if json_scroll_hit {
+                let thumb = json_scroll_thumb_rect(hwnd).unwrap_or_default();
+                {
+                    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(s) = state.as_mut() {
+                        s.json_scroll_dragging = true;
+                        s.json_scroll_hovered = true;
+                        s.json_scroll_drag_offset = (y - thumb.top).clamp(0, thumb.bottom - thumb.top);
+                        s.pressed = None;
+                    }
+                }
+                let _ = SetCapture(hwnd);
+                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                return LRESULT(0);
+            }
 
             let popup_open = {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3421,7 +3548,29 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            let (x, _) = point_from_lparam(lparam);
+            let (x, y) = point_from_lparam(lparam);
+            let (scroll_dragging, old_scroll_hover) = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .map(|s| (s.json_scroll_dragging, s.json_scroll_hovered))
+                    .unwrap_or((false, false))
+            };
+            if scroll_dragging {
+                update_json_scroll_drag(hwnd, y);
+                return LRESULT(0);
+            }
+            let scroll_hover = json_scroll_thumb_hit_rect(hwnd)
+                .is_some_and(|r| pt_in_rect(r, x, y));
+            if scroll_hover != old_scroll_hover {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.json_scroll_hovered = scroll_hover;
+                }
+                drop(state);
+                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+            }
+
             let kind = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
@@ -3467,8 +3616,9 @@ unsafe extern "system" fn wnd_proc(
                     return LRESULT(0);
                 };
                 s.tracking_mouse_leave = false;
-                let changed = s.hovered.is_some();
+                let changed = s.hovered.is_some() || s.json_scroll_hovered;
                 s.hovered = None;
+                s.json_scroll_hovered = false;
                 changed
             };
             if changed {
@@ -3478,6 +3628,22 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_LBUTTONUP => {
             let (x, y) = point_from_lparam(lparam);
+            let was_scroll_dragging = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return LRESULT(0);
+                };
+                let value = s.json_scroll_dragging;
+                s.json_scroll_dragging = false;
+                value
+            };
+            if was_scroll_dragging {
+                let _ = ReleaseCapture();
+                update_json_scroll_drag(hwnd, y);
+                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                return LRESULT(0);
+            }
+
             let (was_dragging, pressed) = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
@@ -3505,7 +3671,10 @@ unsafe extern "system" fn wnd_proc(
                     return LRESULT(0);
                 };
                 (
-                    s.dragging_slider.take().is_some(),
+                    {
+                        s.json_scroll_dragging = false;
+                        s.dragging_slider.take().is_some()
+                    },
                     s.pressed.take().is_some(),
                 )
             };
@@ -3703,6 +3872,7 @@ unsafe extern "system" fn wnd_proc(
         },
         WM_DESTROY => {
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
+            let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.take().map(|s| (s.font, s.json_font, s.edit_brush))
@@ -4572,6 +4742,41 @@ unsafe fn paint_json_page(
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
     let edit_rect = json_edit_rect(hwnd);
+    let editor_background = json_editor_background(snapshot.is_dark);
+    fill_rounded_rect(hdc, edit_rect, editor_background, scale(hwnd, 7));
+    draw_rounded_outline_rect(
+        hdc,
+        edit_rect,
+        if snapshot.is_dark {
+            Color::from_hex("#59606AFF")
+        } else {
+            Color::from_hex("#AEB9C5FF")
+        },
+        scale(hwnd, 7),
+        1,
+    );
+    let scroll_hovered = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.json_scroll_hovered).unwrap_or(false)
+    };
+    if let Some(thumb) = json_scroll_thumb_rect(hwnd) {
+        fill_rounded_rect(
+            hdc,
+            thumb,
+            if scroll_hovered {
+                if snapshot.is_dark {
+                    Color::from_hex("#777E88FF")
+                } else {
+                    Color::from_hex("#666D76FF")
+                }
+            } else if snapshot.is_dark {
+                Color::from_hex("#555B64FF")
+            } else {
+                Color::from_hex("#747B84FF")
+            },
+            ((thumb.right - thumb.left) / 2).max(1),
+        );
+    }
     let running = status.starts_with('◌');
     let success = !status.starts_with('×') && !running;
     let status_color = if running {
