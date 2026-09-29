@@ -178,4 +178,15 @@ if ($windowProduction -notmatch 'GetCursorPos\(&mut cursor\)' -or
     throw 'Reset hover tooltip must use cursor-relative offsets and remain visible on the current monitor.'
 }
 
+if ($windowProduction -notmatch 'state\.as_ref\(\)\.map\(\|s\| s\.is_dark\)' -or
+    $windowProduction -notmatch '#30343CFF' -or
+    $windowProduction -notmatch '#626A76FF' -or
+    $windowProduction -notmatch '#F4F6F8FF' -or
+    $windowProduction -notmatch '#F7F8FAFF' -or
+    $windowProduction -notmatch '#B8BEC8FF' -or
+    $windowProduction -notmatch '#20242AFF' -or
+    $windowProduction -notmatch 'SetTextColor\(hdc, COLORREF\(text_color\.to_colorref\(\)\)\)') {
+    throw 'Reset hover tooltip must adapt its background, border, and text colors to light/dark theme.'
+}
+
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
