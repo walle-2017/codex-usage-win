@@ -716,6 +716,39 @@ if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
     throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
 }
 
+
+if ($styleWindow -notmatch 'load_embedded_app_icons\(' -or
+    $styleWindow -notmatch 'hIcon:\s*large_icon' -or
+    $styleWindow -notmatch 'hIconSm:\s*small_icon' -or
+    $styleWindow -notmatch 'WM_SETICON' -or
+    $styleWindow -notmatch 'ICON_BIG' -or
+    $styleWindow -notmatch 'ICON_SMALL') {
+    throw 'Settings window must bind the embedded executable icon to its standard caption.'
+}
+if ($styleWindow -notmatch 'SetWindowTheme\(' -or
+    $styleWindow -notmatch 'DarkMode_Explorer' -or
+    $styleWindow -notmatch '"Explorer"' -or
+    $styleWindow -notmatch 'apply_json_editor_theme\(json_edit, snapshot\.is_dark\)' -or
+    $styleWindow -notmatch 'apply_json_editor_theme\(edit, is_dark\)') {
+    throw 'JSON RichEdit scrollbar/theme must follow the active light/dark settings theme.'
+}
+if ($styleWindow -notmatch 'confirm_discard_json_changes\(' -or
+    $styleWindow -notmatch 'MB_YESNO\s*\|\s*MB_ICONWARNING\s*\|\s*MB_DEFBUTTON2' -or
+    $styleWindow -notmatch 'current_section == Section::Json' -or
+    $styleWindow -notmatch 'section != Section::Json' -or
+    $styleWindow -notmatch 'WM_CLOSE\s*=>\s*\{[\s\S]{0,180}confirm_discard_json_changes\(hwnd\)') {
+    throw 'Unsaved JSON changes must require confirmation before leaving JSON or closing settings.'
+}
+$drawSliderBlock = [regex]::Match(
+    $styleWindow,
+    '(?s)unsafe\s+fn\s+draw_slider\s*\(.*?\n\}'
+).Value
+if ($drawSliderBlock -match 'Ellipse\(' -or
+    $drawSliderBlock -notmatch 'fill_rounded_rect\(hdc, track' -or
+    $drawSliderBlock -notmatch 'fill_rounded_rect\(hdc, thumb, accent, radius\)') {
+    throw 'Settings sliders must use anti-aliased rounded primitives instead of GDI Ellipse thumbs.'
+}
+
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 
 
