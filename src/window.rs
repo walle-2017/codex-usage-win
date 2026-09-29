@@ -206,6 +206,9 @@ static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
+static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
+static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
+static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -3365,14 +3368,74 @@ unsafe extern "system" fn on_tray_location_changed(
     }
 }
 
-unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32) {
+fn tooltip_blur_hwnd() -> Option<HWND> {
+    TOOLTIP_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.to_hwnd())
+}
+
+fn tooltip_blur_context() -> Option<usize> {
+    *TOOLTIP_BLUR_CONTEXT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn destroy_tooltip_blur_backdrop() {
+    if let Some(context) = TOOLTIP_BLUR_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        native_interop::destroy_composition_blur(context);
+    }
+    *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Some(hwnd) = TOOLTIP_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner()).take().map(|h| h.to_hwnd()) {
+        unsafe { let _ = DestroyWindow(hwnd); }
+    }
+}
+
+fn hide_tooltip_blur_backdrop() {
+    if let Some(hwnd) = tooltip_blur_hwnd() {
+        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+    }
+}
+
+fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, height: i32) -> Option<HWND> {
+    let params = BlurBackdropParams { blur_bits: blur_amount.to_bits(), tint };
+    if let (Some(hwnd), Some(context)) = (tooltip_blur_hwnd(), tooltip_blur_context()) {
+        let unchanged = *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) == Some(params);
+        if unchanged || (native_interop::set_composition_blur_amount(context, blur_amount)
+            && native_interop::set_composition_blur_tint(context, tint)) {
+            let _ = native_interop::set_composition_blur_bounds(context, width, height);
+            *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) = Some(params);
+            return Some(hwnd);
+        }
+        destroy_tooltip_blur_backdrop();
+    }
+
+    register_blur_backdrop_class();
+    unsafe {
+        let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
+        let title = native_interop::wide_str("");
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP,
+            0, 0, width.max(1), height.max(1),
+            HWND::default(), HMENU::default(), GetModuleHandleW(PCWSTR::null()).ok()?, None,
+        ).ok()?;
+        let context = native_interop::create_composition_blur(hwnd, blur_amount, tint)?;
+        let _ = native_interop::set_composition_blur_bounds(context, width, height);
+        let owner = { let state = lock_state(); state.as_ref().and_then(|s| s.taskbar_hwnd) };
+        native_interop::set_popup_owner(hwnd, owner);
+        *TOOLTIP_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner()) = Some(SendHwnd::from_hwnd(hwnd));
+        *TOOLTIP_BLUR_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(context);
+        *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) = Some(params);
+        Some(hwnd)
+    }
+}
+
+unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
     let (mut background_color, border_color, text_color) = {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             let style = s.styles.active(s.is_dark);
             (
-                style.color(StyleColorTarget::PanelBackground),
-                style.color(StyleColorTarget::PanelBorder),
+                style.color(StyleColorTarget::TooltipBackground),
+                style.color(StyleColorTarget::TooltipBorder),
                 style.color(StyleColorTarget::ResetTime),
             )
         } else {
@@ -3383,7 +3446,9 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32) {
             )
         }
     };
-    background_color.a = background_color.a.max(200);
+    if frosted_active {
+        background_color.a = MIN_INTERACTIVE_ALPHA;
+    }
 
     let text = MINIMAL_TOOLTIP_TEXT
         .lock()
@@ -3611,6 +3676,7 @@ fn hide_minimal_usage_tooltip() {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
+    hide_tooltip_blur_backdrop();
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
@@ -3670,6 +3736,29 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
         x = x.clamp(monitor_rect.left + margin, max_x);
         y = y.clamp(monitor_rect.top + margin, max_y);
 
+        let (tooltip_frosted_strength, tooltip_background) = {
+            let state = lock_state();
+            state.as_ref().map(|s| {
+                let style = s.styles.active(s.is_dark);
+                (style.tooltip_frosted_strength(), style.color(StyleColorTarget::TooltipBackground))
+            }).unwrap_or((0, Color::from_hex("#30343CFF")))
+        };
+        let frosted_active = if tooltip_frosted_strength > 0 {
+            if let Some(backdrop) = ensure_tooltip_blur_backdrop(
+                blur_amount_for_strength(tooltip_frosted_strength),
+                tooltip_background,
+                width,
+                height,
+            ) {
+                let _ = SetWindowPos(backdrop, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                true
+            } else {
+                false
+            }
+        } else {
+            hide_tooltip_blur_backdrop();
+            false
+        };
         let _ = SetWindowPos(
             tooltip,
             HWND_TOPMOST,
@@ -3679,7 +3768,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
-        render_minimal_tooltip_layered(tooltip, width, height);
+        render_minimal_tooltip_layered(tooltip, width, height, frosted_active);
     }
 }
 
@@ -4532,6 +4621,7 @@ unsafe extern "system" fn wnd_proc(
                 }
                 2 => {
                     destroy_blur_backdrop();
+            destroy_tooltip_blur_backdrop();
                     let hook = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| s.win_event_hook)
@@ -4793,6 +4883,16 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        _ if msg == style_window::WM_STYLE_TOOLTIP_BLUR_PREVIEW => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.styles.active_mut(s.is_dark).set_tooltip_frosted_strength(wparam.0 as u8);
+                }
+            }
+            save_state_settings();
+            LRESULT(0)
+        }
         _ if msg == style_window::WM_STYLE_BLUR_PREVIEW => {
             {
                 let mut state = lock_state();
@@ -4859,6 +4959,18 @@ unsafe extern "system" fn wnd_proc(
             }
             save_state_settings();
             render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_TOOLTIP_RESET => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.styles.active_mut(s.is_dark).reset_tooltip_override();
+                }
+            }
+            save_state_settings();
+            hide_minimal_usage_tooltip();
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
@@ -4995,6 +5107,8 @@ fn style_color_target_label(target: StyleColorTarget, language: LanguageId) -> &
     match target {
         StyleColorTarget::PanelBackground => if zh { "背景颜色" } else { "Background color" },
         StyleColorTarget::PanelBorder => if zh { "边框颜色" } else { "Border color" },
+        StyleColorTarget::TooltipBackground => if zh { "浮框背景颜色" } else { "Tooltip background" },
+        StyleColorTarget::TooltipBorder => if zh { "浮框边框颜色" } else { "Tooltip border" },
         StyleColorTarget::QuotaType => if zh { "额度类型" } else { "Quota type" },
         StyleColorTarget::Remaining => if zh { "剩余额度" } else { "Remaining quota" },
         StyleColorTarget::ResetTime => if zh { "重置时间" } else { "Reset time" },
