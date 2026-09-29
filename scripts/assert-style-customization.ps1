@@ -254,15 +254,19 @@ if ($styleWindow -notmatch 'WM_APP \+ 120' -or
 if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -notmatch 'pub\s+light:\s+ThemeStyle') {
     throw 'Dark and light theme styles must be stored separately.'
 }
-if ($styleProduction -notmatch 'panel_rounded:\s*bool' -or
-    $styleProduction -notmatch 'tooltip_rounded:\s*bool' -or
-    $styleProduction -notmatch 'progress_rounded:\s*bool' -or
-    $styleWindow -notmatch 'HitTarget::CornerShape' -or
+if ($styleProduction -notmatch 'CORNER_RADIUS_MAX:\s*u8\s*=\s*24' -or
+    $styleProduction -notmatch 'panel_corner_radius:\s*u8' -or
+    $styleProduction -notmatch 'tooltip_corner_radius:\s*u8' -or
+    $styleProduction -notmatch 'progress_corner_radius:\s*u8' -or
+    $styleWindow -notmatch 'ID_EDIT_CORNER' -or
+    $styleWindow -notmatch 'EditorSelection::CornerRadius' -or
+    $styleWindow -notmatch 'update_corner_from_numeric_edit\(' -or
+    $styleWindow -notmatch 'raw_value\.min\(u16::from\(CORNER_RADIUS_MAX\)\)' -or
     $styleWindow -notmatch 'WM_STYLE_CORNER_PREVIEW' -or
-    $windowProduction -notmatch 'style\.panel_rounded' -or
-    $windowProduction -notmatch 'style\.tooltip_rounded' -or
-    $windowProduction -notmatch 'progress_rounded') {
-    throw 'Panel, tooltip, and progress styles must expose persisted square/rounded shape controls.'
+    $windowProduction -notmatch 'panel_corner_radius' -or
+    $windowProduction -notmatch 'tooltip_corner_radius' -or
+    $windowProduction -notmatch 'progress_corner_radius') {
+    throw 'Panel, tooltip, and progress must expose a bounded 0-24 numeric corner-radius setting.'
 }
 if ($styleProduction -notmatch 'panel_frosted_strength:\s*u8' -or
     $styleProduction -notmatch 'FROSTED_STRENGTH_MAX:\s*u8\s*=\s*100') {
@@ -715,11 +719,12 @@ if ($styleWindow -notmatch 'let edit = json_edit_rect\(hwnd\)' -or
     $styleWindow -notmatch 'JsonAction::Apply\s*=>[\s\S]{0,260}let right = edit\.right') {
     throw 'JSON Import, Export, and Apply must share the JSON editor right edge and compact button width.'
 }
-if ($styleWindow -notmatch 'rect\(hwnd, 778, 324, 928, 352\)' -or
-    $styleWindow -notmatch 'blur_suffix_rect' -or
-    $styleWindow -notmatch 'right: frame\.right - scale\(hwnd, 28\)' -or
-    $styleWindow -match 'rect\(hwnd, 860, 324, 886, 352\)') {
-    throw 'Frosted-strength input must match RGBA input width and keep percent as an internal fixed suffix.'
+if ($styleWindow -notmatch 'blur_row_index\(' -or
+    $styleWindow -notmatch 'inline_numeric_frame_rect\(' -or
+    $styleWindow -notmatch 'blur_edit_frame_rect\(hwnd, section\)' -or
+    $styleWindow -notmatch 'blur_suffix_rect\(hwnd, section\)' -or
+    $styleWindow -notmatch 'right: frame\.right - scale\(hwnd, 28\)') {
+    throw 'Frosted-strength input must follow its actual settings row and keep percent as an internal fixed suffix.'
 }
 if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
     throw 'Language selector must use one rounded outline rather than stacking a square outline over it.'
@@ -734,17 +739,20 @@ if ($styleWindow -notmatch 'load_embedded_app_icons\(' -or
     $styleWindow -notmatch 'ICON_SMALL') {
     throw 'Settings window must bind the embedded executable icon to its standard caption.'
 }
-if ($styleWindow -notmatch 'link_name\s*=\s*"ShowScrollBar"' -or
-    $styleWindow -notmatch 'hide_json_native_scrollbars\(' -or
+if ($styleWindow -match 'WS_VSCROLL' -or
+    $styleWindow -match 'ShowScrollBar' -or
+    $styleWindow -notmatch 'EM_GETLINECOUNT_MSG' -or
+    $styleWindow -notmatch 'EM_GETFIRSTVISIBLELINE_MSG' -or
+    $styleWindow -notmatch 'EM_LINESCROLL_MSG' -or
+    $styleWindow -notmatch 'json_scroll_line_metrics\(' -or
     $styleWindow -notmatch 'json_scroll_thumb_rect\(' -or
-    $styleWindow -notmatch 'GetScrollInfo\(' -or
-    $styleWindow -notmatch 'SB_THUMBTRACK' -or
+    $styleWindow -notmatch 'first_visible\.clamp\(' -or
     $styleWindow -notmatch 'json_scroll_hovered' -or
     $styleWindow -notmatch '#555B64FF' -or
     $styleWindow -notmatch '#777E88FF' -or
     $styleWindow -match 'DarkMode_Explorer' -or
     $styleWindow -match 'SetWindowTheme\(') {
-    throw 'JSON editor must hide native scrollbars and render only a minimal custom hover-aware scroll thumb.'
+    throw 'JSON editor must have no native scrollbar and its single custom thumb must follow the RichEdit visible line.'
 }
 if ($styleWindow -notmatch 'PendingDiscardAction' -or
     $styleWindow -notmatch 'paint_discard_dialog\(' -or
@@ -752,9 +760,12 @@ if ($styleWindow -notmatch 'PendingDiscardAction' -or
     $styleWindow -notmatch 'HitTarget::KeepEditing' -or
     $styleWindow -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::SwitchSection\(section\)\)' -or
     $styleWindow -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Close\)' -or
+    $styleWindow -notmatch 'if zh \{ "放弃" \} else \{ "Discard" \}' -or
+    $styleWindow -notmatch 'if zh \{ "继续" \} else \{ "Continue" \}' -or
+    $styleWindow -match '#C93C49FF' -or
     $styleWindow -match 'MessageBoxW\(' -or
     $styleWindow -match 'MB_YESNO') {
-    throw 'Unsaved JSON changes must use the settings-styled in-window modal for page switches and closing.'
+    throw 'Unsaved JSON changes must use a subdued settings-styled modal with short Discard/Continue actions.'
 }
 if ($styleWindow -notmatch 'redraw_settings_window\(' -or
     $styleWindow -notmatch 'RDW_INVALIDATE\s*\|\s*RDW_ERASE\s*\|\s*RDW_ALLCHILDREN\s*\|\s*RDW_UPDATENOW' -or
@@ -763,19 +774,29 @@ if ($styleWindow -notmatch 'redraw_settings_window\(' -or
     $styleWindow -notmatch 'draw_rounded_outline_rect\([\s\S]{0,220}first\.left') {
     throw 'Settings page switching must fully redraw and settings UI blocks must use rounded navigation, swatches, and popups.'
 }
-if ($styleWindow -notmatch 'if style\.panel_rounded' -or
-    $styleWindow -notmatch 'if style\.tooltip_rounded' -or
-    $styleWindow -notmatch 'if style\.progress_rounded' -or
+if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
+    $styleWindow -notmatch 'i32::from\(style\.tooltip_corner_radius\)' -or
+    $styleWindow -notmatch 'i32::from\(style\.progress_corner_radius\)' -or
+    $styleWindow -notmatch 'if panel_radius > 0' -or
+    $styleWindow -notmatch 'if tooltip_radius > 0' -or
+    $styleWindow -notmatch 'if progress_radius > 0' -or
     $styleWindow -notmatch 'fill\(hdc, preview, style\.color\(StyleColorTarget::PanelBackground\)\)') {
-    throw 'Preset component previews must render their actual square/rounded component shape instead of forcing settings-panel rounding.'
+    throw 'Preset component previews must render the exact configured numeric component radii, including 0 as square.'
 }
-if ($settingsModel -notmatch 'panel_rounded:\s*bool' -or
-    $settingsModel -notmatch 'tooltip_rounded:\s*bool' -or
-    $settingsModel -notmatch 'progress_rounded:\s*bool' -or
-    $settingsModel -notmatch '\\\"panel_rounded\\\"' -or
-    $settingsModel -notmatch '\\\"tooltip_rounded\\\"' -or
-    $settingsModel -notmatch '\\\"progress_rounded\\\"') {
-    throw 'Corner shape settings must round-trip through editable JSON/JSONC settings.'
+if ($settingsModel -notmatch 'panel_corner_radius:\s*u8' -or
+    $settingsModel -notmatch 'tooltip_corner_radius:\s*u8' -or
+    $settingsModel -notmatch 'progress_corner_radius:\s*u8' -or
+    $settingsModel -notmatch 'panel_corner_radius' -or
+    $settingsModel -notmatch 'tooltip_corner_radius' -or
+    $settingsModel -notmatch 'progress_corner_radius' -or
+    $settingsModel -notmatch 'allowed range is 0-\{CORNER_RADIUS_MAX\}') {
+    throw 'Numeric corner radii must round-trip through editable JSON/JSONC settings and reject values above the bound.'
+}
+
+if ($styleWindow -notmatch "if s\.json_status\.starts_with\('×'\)" -or
+    $styleWindow -notmatch 's\.json_status\.clear\(\)' -or
+    $styleWindow -notmatch 's\.json_status_path = None') {
+    throw 'JSON syntax/configuration errors must clear immediately after the edited JSON becomes valid.'
 }
 
 $drawSliderBlock = [regex]::Match(
