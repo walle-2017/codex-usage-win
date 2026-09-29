@@ -182,8 +182,12 @@ if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)' -or
     $windowProduction -notmatch 'StyleColorTarget::PanelBackground' -or
     $windowProduction -notmatch 'StyleColorTarget::PanelBorder' -or
     $windowProduction -notmatch 'StyleColorTarget::ResetTime' -or
-    $windowProduction -notmatch 'SetTextColor\(hdc, COLORREF\(text_color\.to_colorref\(\)\)\)') {
-    throw 'Reset hover tooltip must reuse the taskbar component panel background, border, and reset-time colors.'
+    $windowProduction -notmatch 'background_color\.a\s*=\s*background_color\.a\.max\(200\)' -or
+    $windowProduction -notmatch 'premultiplied_pixel\(color\)' -or
+    $windowProduction -notmatch 'composite_premultiplied_text' -or
+    $windowProduction -notmatch 'WS_EX_LAYERED' -or
+    $windowProduction -notmatch 'UpdateLayeredWindow\(') {
+    throw 'Reset hover tooltip must preserve component RGBA, clamp background alpha to 200+, and render with per-pixel alpha.'
 }
 
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
