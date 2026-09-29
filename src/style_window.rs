@@ -2871,8 +2871,14 @@ fn set_section(section: Section) {
         }
         if let Some(editor) = rows(section).first().copied() {
             s.editor = editor;
+        } else {
+            s.focused_numeric_edit = None;
+            s.focused_blur_edit = false;
+            s.focused_hex_edit = None;
         }
         s.dragging_slider = None;
+        s.pressed = None;
+        s.hovered = None;
         s.hwnd.to_hwnd()
     };
     layout_numeric_edits(hwnd);
@@ -2927,6 +2933,13 @@ fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
 
     if matches!(section, Section::Panel | Section::Tooltip) && pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
         return Some(SliderKind::Blur);
+    }
+
+    if !matches!(
+        section,
+        Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
+    ) {
+        return None;
     }
 
     let EditorSelection::Color(_) = editor else {
