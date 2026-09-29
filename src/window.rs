@@ -3383,7 +3383,7 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
             let (background_color, border_color, text_color) = {
                 let state = lock_state();
                 if let Some(s) = state.as_ref() {
-                    let style = s.styles.for_theme(s.is_dark);
+                    let style = s.styles.active(s.is_dark);
                     (
                         style.color(StyleColorTarget::PanelBackground),
                         style.color(StyleColorTarget::PanelBorder),
