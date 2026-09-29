@@ -51,11 +51,15 @@ pub struct EditableThemeStyle {
     pub panel_border: String,
     pub frosted_strength: u8,
     #[serde(default)]
+    pub panel_rounded: bool,
+    #[serde(default)]
     pub tooltip_background: Option<String>,
     #[serde(default)]
     pub tooltip_border: Option<String>,
     #[serde(default)]
     pub tooltip_frosted_strength: Option<u8>,
+    #[serde(default)]
+    pub tooltip_rounded: bool,
     pub quota_type: String,
     pub remaining: String,
     pub reset_time: String,
@@ -64,6 +68,8 @@ pub struct EditableThemeStyle {
     pub progress_medium: String,
     pub progress_low: String,
     pub progress_consumed: String,
+    #[serde(default)]
+    pub progress_rounded: bool,
     pub drag_handle: String,
 }
 
@@ -73,9 +79,11 @@ impl EditableThemeStyle {
             panel_background: style.panel_background.clone(),
             panel_border: style.panel_border.clone(),
             frosted_strength: style.panel_frosted_strength,
+            panel_rounded: style.panel_rounded,
             tooltip_background: style.tooltip_background.clone(),
             tooltip_border: style.tooltip_border.clone(),
             tooltip_frosted_strength: style.tooltip_frosted_strength,
+            tooltip_rounded: style.tooltip_rounded,
             quota_type: style.quota_type.clone(),
             remaining: style.remaining.clone(),
             reset_time: style.reset_time.clone(),
@@ -84,6 +92,7 @@ impl EditableThemeStyle {
             progress_medium: style.progress_medium.clone(),
             progress_low: style.progress_low.clone(),
             progress_consumed: style.progress_consumed.clone(),
+            progress_rounded: style.progress_rounded,
             drag_handle: style.drag_handle.clone(),
         }
     }
@@ -102,6 +111,7 @@ impl EditableThemeStyle {
             panel_background: normalize_hex(&self.panel_background, &format!("{path}.panel_background"))?,
             panel_border: normalize_hex(&self.panel_border, &format!("{path}.panel_border"))?,
             frosted_strength: self.frosted_strength,
+            panel_rounded: self.panel_rounded,
             tooltip_background: if tooltip_custom {
                 Some(normalize_hex(
                     self.tooltip_background.as_deref().unwrap_or(&self.panel_background),
@@ -123,6 +133,7 @@ impl EditableThemeStyle {
             } else {
                 None
             },
+            tooltip_rounded: self.tooltip_rounded,
             quota_type: normalize_hex(&self.quota_type, &format!("{path}.quota_type"))?,
             remaining: normalize_hex(&self.remaining, &format!("{path}.remaining"))?,
             reset_time: normalize_hex(&self.reset_time, &format!("{path}.reset_time"))?,
@@ -134,6 +145,7 @@ impl EditableThemeStyle {
                 &self.progress_consumed,
                 &format!("{path}.progress_consumed"),
             )?,
+            progress_rounded: self.progress_rounded,
             drag_handle: normalize_hex(&self.drag_handle, &format!("{path}.drag_handle"))?,
         })
     }
@@ -144,9 +156,11 @@ impl EditableThemeStyle {
             panel_border: self.panel_border.clone(),
             panel_blur_radius: 0,
             panel_frosted_strength: self.frosted_strength,
+            panel_rounded: self.panel_rounded,
             tooltip_background: self.tooltip_background.clone(),
             tooltip_border: self.tooltip_border.clone(),
             tooltip_frosted_strength: self.tooltip_frosted_strength,
+            tooltip_rounded: self.tooltip_rounded,
             quota_type: self.quota_type.clone(),
             remaining: self.remaining.clone(),
             reset_time: self.reset_time.clone(),
@@ -155,6 +169,7 @@ impl EditableThemeStyle {
             progress_medium: self.progress_medium.clone(),
             progress_low: self.progress_low.clone(),
             progress_consumed: self.progress_consumed.clone(),
+            progress_rounded: self.progress_rounded,
             drag_handle: self.drag_handle.clone(),
         }
     }
@@ -393,6 +408,9 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
         style.frosted_strength
     ));
     lines.push(String::new());
+    lines.push(format!("{pad}// {}", localized(zh, "面板圆角", "Rounded panel")));
+    lines.push(format!("{pad}\"panel_rounded\": {},", style.panel_rounded));
+    lines.push(String::new());
 
     lines.push(format!("{pad}// {}", localized(zh, "浮框样式；null 表示继承面板", "Tooltip style; null means inherit from panel")));
     for (comment_zh, comment_en, key, value) in [
@@ -412,6 +430,9 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
         style.tooltip_frosted_strength.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string())
     ));
     lines.push(String::new());
+    lines.push(format!("{pad}// {}", localized(zh, "浮框圆角", "Rounded tooltip")));
+    lines.push(format!("{pad}\"tooltip_rounded\": {},", style.tooltip_rounded));
+    lines.push(String::new());
 
     for (comment_zh, comment_en, key, value, comma) in [
         ("额度类型文字颜色", "Quota-type text color", "quota_type", style.quota_type.as_str(), true),
@@ -422,7 +443,7 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
         ("中等额度颜色", "Medium-quota color", "progress_medium", style.progress_medium.as_str(), true),
         ("低额度颜色", "Low-quota color", "progress_low", style.progress_low.as_str(), true),
         ("已消耗部分颜色", "Consumed-progress color", "progress_consumed", style.progress_consumed.as_str(), true),
-        ("拖拽点颜色", "Drag-handle color", "drag_handle", style.drag_handle.as_str(), false),
+        ("拖拽点颜色", "Drag-handle color", "drag_handle", style.drag_handle.as_str(), true),
     ] {
         push_color_jsonc(
             &mut lines,
@@ -434,6 +455,10 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
             comma,
         );
     }
+
+    lines.push(format!("{pad}// {}", localized(zh, "进度条圆角", "Rounded progress bar")));
+    lines.push(format!("{pad}\"progress_rounded\": {}", style.progress_rounded));
+    lines.push(String::new());
 
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
