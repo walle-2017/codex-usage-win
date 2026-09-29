@@ -293,10 +293,12 @@ impl ThemeStyle {
             StyleColorTarget::PanelBackground => &mut self.panel_background,
             StyleColorTarget::PanelBorder => &mut self.panel_border,
             StyleColorTarget::TooltipBackground => {
+                self.ensure_tooltip_override();
                 self.tooltip_background = Some(color.to_hex_rgba());
                 return;
             }
             StyleColorTarget::TooltipBorder => {
+                self.ensure_tooltip_override();
                 self.tooltip_border = Some(color.to_hex_rgba());
                 return;
             }
@@ -316,14 +318,20 @@ impl ThemeStyle {
         self.tooltip_frosted_strength.unwrap_or(self.panel_frosted_strength)
     }
 
-    pub fn set_tooltip_frosted_strength(&mut self, strength: u8) {
-        self.tooltip_frosted_strength = Some(strength.min(FROSTED_STRENGTH_MAX));
+    fn ensure_tooltip_override(&mut self) {
+        if self.tooltip_background.is_none()
+            && self.tooltip_border.is_none()
+            && self.tooltip_frosted_strength.is_none()
+        {
+            self.tooltip_background = Some(self.panel_background.clone());
+            self.tooltip_border = Some(self.panel_border.clone());
+            self.tooltip_frosted_strength = Some(self.panel_frosted_strength);
+        }
     }
 
-    pub fn tooltip_is_custom(&self) -> bool {
-        self.tooltip_background.is_some()
-            || self.tooltip_border.is_some()
-            || self.tooltip_frosted_strength.is_some()
+    pub fn set_tooltip_frosted_strength(&mut self, strength: u8) {
+        self.ensure_tooltip_override();
+        self.tooltip_frosted_strength = Some(strength.min(FROSTED_STRENGTH_MAX));
     }
 
     pub fn reset_tooltip_override(&mut self) {
