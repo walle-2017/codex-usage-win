@@ -3541,7 +3541,7 @@ fn hide_minimal_usage_tooltip() {
     }
 }
 
-fn show_minimal_usage_tooltip(owner: HWND, target: MinimalHoverTarget, hit_rect: RECT) {
+fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(text) = minimal_hover_text(target) else {
         hide_minimal_usage_tooltip();
         return;
@@ -3560,20 +3560,39 @@ fn show_minimal_usage_tooltip(owner: HWND, target: MinimalHoverTarget, hit_rect:
     unsafe {
         let width = sc(112);
         let height = sc(28);
-        let mut owner_rect = RECT::default();
-        let _ = GetWindowRect(owner, &mut owner_rect);
-        let mut anchor = POINT {
-            x: (hit_rect.left + hit_rect.right) / 2,
-            y: hit_rect.top,
-        };
-        let _ = ClientToScreen(owner, &mut anchor);
+        let gap = sc(10);
+        let margin = sc(4);
+        let mut cursor = POINT::default();
+        if GetCursorPos(&mut cursor).is_err() {
+            return;
+        }
 
-        let y = if owner_rect.top >= height + sc(6) {
-            owner_rect.top - height - sc(6)
-        } else {
-            owner_rect.bottom + sc(6)
+        let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
         };
-        let x = anchor.x - width / 2;
+        let work = if GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+            monitor_info.rcWork
+        } else {
+            RECT {
+                left: cursor.x - width,
+                top: cursor.y - height,
+                right: cursor.x + width,
+                bottom: cursor.y + height,
+            }
+        };
+
+        let mut x = cursor.x + gap;
+        let mut y = cursor.y - height - gap;
+        if y < work.top + margin {
+            y = cursor.y + gap;
+        }
+
+        let max_x = (work.right - width - margin).max(work.left + margin);
+        let max_y = (work.bottom - height - margin).max(work.top + margin);
+        x = x.clamp(work.left + margin, max_x);
+        y = y.clamp(work.top + margin, max_y);
 
         let _ = SetWindowPos(
             tooltip,
@@ -3740,24 +3759,16 @@ fn usage_hover_hit(
 fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
     let hit = usage_hover_hit(hwnd, x, y);
     let target = hit.map(|(target, _)| target);
-    let changed = {
+    {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else {
             return;
         };
-        if s.minimal_hover_target == target {
-            false
-        } else {
-            s.minimal_hover_target = target;
-            true
-        }
-    };
-
-    if !changed {
-        return;
+        s.minimal_hover_target = target;
     }
-    if let Some((target, rect)) = hit {
-        show_minimal_usage_tooltip(hwnd, target, rect);
+
+    if let Some((target, _)) = hit {
+        show_minimal_usage_tooltip(target);
     } else {
         hide_minimal_usage_tooltip();
     }
