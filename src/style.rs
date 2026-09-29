@@ -3,7 +3,27 @@ use serde::{Deserialize, Serialize};
 use crate::native_interop::Color;
 
 pub const FROSTED_STRENGTH_MAX: u8 = 100;
+pub const CORNER_RADIUS_MAX: u8 = 24;
+const LEGACY_ROUNDED_RADIUS: u8 = 8;
 const LEGACY_FROSTED_STRENGTH_SENTINEL: u8 = u8::MAX;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CornerRadiusValue {
+    Radius(u8),
+    LegacyRounded(bool),
+}
+
+fn deserialize_corner_radius<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match CornerRadiusValue::deserialize(deserializer)? {
+        CornerRadiusValue::Radius(value) => value,
+        CornerRadiusValue::LegacyRounded(true) => LEGACY_ROUNDED_RADIUS,
+        CornerRadiusValue::LegacyRounded(false) => 0,
+    })
+}
 
 fn missing_frosted_strength() -> u8 {
     LEGACY_FROSTED_STRENGTH_SENTINEL
@@ -66,16 +86,16 @@ pub struct ThemeStyle {
     /// Visual Acrylic intensity: 0 = off, 1..=100 = increasingly frosted.
     #[serde(default = "missing_frosted_strength")]
     pub panel_frosted_strength: u8,
-    #[serde(default)]
-    pub panel_rounded: bool,
+    #[serde(default, alias = "panel_rounded", deserialize_with = "deserialize_corner_radius")]
+    pub panel_corner_radius: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip_background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip_border: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip_frosted_strength: Option<u8>,
-    #[serde(default)]
-    pub tooltip_rounded: bool,
+    #[serde(default, alias = "tooltip_rounded", deserialize_with = "deserialize_corner_radius")]
+    pub tooltip_corner_radius: u8,
     pub quota_type: String,
     pub remaining: String,
     pub reset_time: String,
@@ -84,8 +104,8 @@ pub struct ThemeStyle {
     pub progress_medium: String,
     pub progress_low: String,
     pub progress_consumed: String,
-    #[serde(default)]
-    pub progress_rounded: bool,
+    #[serde(default, alias = "progress_rounded", deserialize_with = "deserialize_corner_radius")]
+    pub progress_corner_radius: u8,
     pub drag_handle: String,
 }
 
@@ -102,11 +122,11 @@ impl ThemeStyle {
             panel_border: "#343B43FF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
-            panel_rounded: false,
+            panel_corner_radius: 0,
             tooltip_background: Some("#242A31FF".into()),
             tooltip_border: Some("#343B43FF".into()),
             tooltip_frosted_strength: Some(0),
-            tooltip_rounded: false,
+            tooltip_corner_radius: 0,
             quota_type: "#A0A0A0FF".into(),
             remaining: "#FFFFFFFF".into(),
             reset_time: "#92979DFF".into(),
@@ -115,7 +135,7 @@ impl ThemeStyle {
             progress_medium: "#E6B84AFF".into(),
             progress_low: "#D95C5CFF".into(),
             progress_consumed: "#363A3FFF".into(),
-            progress_rounded: false,
+            progress_corner_radius: 0,
             drag_handle: "#69727CFF".into(),
         }
     }
@@ -126,11 +146,11 @@ impl ThemeStyle {
             panel_border: "#D4D9DFFF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
-            panel_rounded: false,
+            panel_corner_radius: 0,
             tooltip_background: Some("#EEF1F4FF".into()),
             tooltip_border: Some("#D4D9DFFF".into()),
             tooltip_frosted_strength: Some(0),
-            tooltip_rounded: false,
+            tooltip_corner_radius: 0,
             quota_type: "#404040FF".into(),
             remaining: "#202020FF".into(),
             reset_time: "#666666FF".into(),
@@ -139,7 +159,7 @@ impl ThemeStyle {
             progress_medium: "#E6B84AFF".into(),
             progress_low: "#D95C5CFF".into(),
             progress_consumed: "#AAAAAAFF".into(),
-            progress_rounded: false,
+            progress_corner_radius: 0,
             drag_handle: "#8A929AFF".into(),
         }
     }
@@ -153,11 +173,11 @@ impl ThemeStyle {
                 panel_border: "#294252FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_rounded: false,
+                panel_corner_radius: 0,
                 tooltip_background: Some("#0F1B24FF".into()),
                 tooltip_border: Some("#294252FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_rounded: false,
+                tooltip_corner_radius: 0,
                 quota_type: "#8CA7B8FF".into(),
                 remaining: "#EAF7FFFF".into(),
                 reset_time: "#7192A8FF".into(),
@@ -166,7 +186,7 @@ impl ThemeStyle {
                 progress_medium: "#E3B65BFF".into(),
                 progress_low: "#F06A6AFF".into(),
                 progress_consumed: "#263B49FF".into(),
-                progress_rounded: false,
+                progress_corner_radius: 0,
                 drag_handle: "#648397FF".into(),
             },
             (false, ThemePreset::Ocean) => Self {
@@ -174,11 +194,11 @@ impl ThemeStyle {
                 panel_border: "#CFDCE4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_rounded: false,
+                panel_corner_radius: 0,
                 tooltip_background: Some("#F3F7FAFF".into()),
                 tooltip_border: Some("#CFDCE4FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_rounded: false,
+                tooltip_corner_radius: 0,
                 quota_type: "#49616FFF".into(),
                 remaining: "#1F3440FF".into(),
                 reset_time: "#5E7480FF".into(),
@@ -187,7 +207,7 @@ impl ThemeStyle {
                 progress_medium: "#B07A2AFF".into(),
                 progress_low: "#C55353FF".into(),
                 progress_consumed: "#CAD7DEFF".into(),
-                progress_rounded: false,
+                progress_corner_radius: 0,
                 drag_handle: "#78909CFF".into(),
             },
             (true, ThemePreset::Forest) => Self {
@@ -195,11 +215,11 @@ impl ThemeStyle {
                 panel_border: "#2B4038FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_rounded: false,
+                panel_corner_radius: 0,
                 tooltip_background: Some("#14211DFF".into()),
                 tooltip_border: Some("#2B4038FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_rounded: false,
+                tooltip_corner_radius: 0,
                 quota_type: "#9AB3A8FF".into(),
                 remaining: "#F0FAF5FF".into(),
                 reset_time: "#7F9C8FFF".into(),
@@ -208,7 +228,7 @@ impl ThemeStyle {
                 progress_medium: "#D9B45BFF".into(),
                 progress_low: "#E96B5DFF".into(),
                 progress_consumed: "#2B3E37FF".into(),
-                progress_rounded: false,
+                progress_corner_radius: 0,
                 drag_handle: "#6A887BFF".into(),
             },
             (false, ThemePreset::Forest) => Self {
@@ -216,11 +236,11 @@ impl ThemeStyle {
                 panel_border: "#DED4C4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_rounded: false,
+                panel_corner_radius: 0,
                 tooltip_background: Some("#F8F4ECFF".into()),
                 tooltip_border: Some("#DED4C4FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_rounded: false,
+                tooltip_corner_radius: 0,
                 quota_type: "#665A48FF".into(),
                 remaining: "#2E2922FF".into(),
                 reset_time: "#756A59FF".into(),
@@ -229,7 +249,7 @@ impl ThemeStyle {
                 progress_medium: "#B27924FF".into(),
                 progress_low: "#C65349FF".into(),
                 progress_consumed: "#D8CCBAFF".into(),
-                progress_rounded: false,
+                progress_corner_radius: 0,
                 drag_handle: "#958775FF".into(),
             },
         }
@@ -255,6 +275,9 @@ impl ThemeStyle {
         if let Some(value) = self.tooltip_frosted_strength.as_mut() {
             *value = (*value).min(FROSTED_STRENGTH_MAX);
         }
+        self.panel_corner_radius = self.panel_corner_radius.min(CORNER_RADIUS_MAX);
+        self.tooltip_corner_radius = self.tooltip_corner_radius.min(CORNER_RADIUS_MAX);
+        self.progress_corner_radius = self.progress_corner_radius.min(CORNER_RADIUS_MAX);
         self.quota_type = normalize_color(&self.quota_type, &fallback.quota_type);
         self.remaining = normalize_color(&self.remaining, &fallback.remaining);
         self.reset_time = normalize_color(&self.reset_time, &fallback.reset_time);
