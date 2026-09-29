@@ -622,7 +622,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let (hwnd, json_dirty) = {
+    let (hwnd, section, json_dirty) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
@@ -640,15 +640,17 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
             s.edit_brush = brush.0 as isize;
         }
-        (s.hwnd.to_hwnd(), s.json_dirty)
+        (s.hwnd.to_hwnd(), s.section, s.json_dirty)
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
     layout_settings_children(hwnd);
-    if !json_dirty {
-        reload_json_editor_from_snapshot();
-    } else {
-        refresh_json_editor_theme();
+    if section == Section::Json {
+        if !json_dirty {
+            reload_json_editor_from_snapshot();
+        } else {
+            refresh_json_editor_theme();
+        }
     }
     sync_hex_edits();
     sync_numeric_edits();
@@ -2860,7 +2862,7 @@ fn button_background(
 }
 
 fn set_section(section: Section) {
-    let hwnd = {
+    let (hwnd, json_dirty) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
@@ -2879,11 +2881,19 @@ fn set_section(section: Section) {
         s.dragging_slider = None;
         s.pressed = None;
         s.hovered = None;
-        s.hwnd.to_hwnd()
+        (s.hwnd.to_hwnd(), s.json_dirty)
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
-    layout_settings_children(hwnd);
+    if section == Section::Json {
+        if json_dirty {
+            refresh_json_editor_theme();
+        } else {
+            reload_json_editor_from_snapshot();
+        }
+    } else {
+        layout_settings_children(hwnd);
+    }
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
