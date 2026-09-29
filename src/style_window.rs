@@ -3539,7 +3539,7 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
             }
             (_, SliderKind::Blur) if matches!(s.section, Section::Panel | Section::Tooltip) => {
                 let value = slider_value_from_x(
-                    blur_slider_track_rect(hwnd, section),
+                    blur_slider_track_rect(hwnd, s.section),
                     x,
                     FROSTED_STRENGTH_MAX,
                 );
