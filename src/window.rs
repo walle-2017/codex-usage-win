@@ -3380,22 +3380,22 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
 
-            let is_dark = {
+            let (background_color, border_color, text_color) = {
                 let state = lock_state();
-                state.as_ref().map(|s| s.is_dark).unwrap_or(true)
-            };
-            let (background_color, border_color, text_color) = if is_dark {
-                (
-                    Color::from_hex("#30343CFF"),
-                    Color::from_hex("#626A76FF"),
-                    Color::from_hex("#F4F6F8FF"),
-                )
-            } else {
-                (
-                    Color::from_hex("#F7F8FAFF"),
-                    Color::from_hex("#B8BEC8FF"),
-                    Color::from_hex("#20242AFF"),
-                )
+                if let Some(s) = state.as_ref() {
+                    let style = s.styles.for_theme(s.is_dark);
+                    (
+                        style.color(StyleColorTarget::PanelBackground),
+                        style.color(StyleColorTarget::PanelBorder),
+                        style.color(StyleColorTarget::ResetTime),
+                    )
+                } else {
+                    (
+                        Color::from_hex("#30343CFF"),
+                        Color::from_hex("#626A76FF"),
+                        Color::from_hex("#F4F6F8FF"),
+                    )
+                }
             };
 
             let background = CreateSolidBrush(COLORREF(background_color.to_colorref()));
