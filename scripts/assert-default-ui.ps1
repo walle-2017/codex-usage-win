@@ -187,8 +187,10 @@ if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)' -or
     $windowProduction -notmatch 'WS_EX_LAYERED' -or
     $windowProduction -notmatch 'UpdateLayeredWindow\(' -or
     $windowProduction -notmatch 'tooltip_frosted_strength\(\)' -or
-    $windowProduction -notmatch 'tooltip_rounded' -or
-    $windowProduction -notmatch 'point_in_rounded_box\(') {
+    $windowProduction -notmatch 'tooltip_corner_radius' -or
+    $windowProduction -notmatch 'point_in_rounded_box\(' -or
+    $windowProduction -notmatch 'measure_minimal_tooltip_width\(' -or
+    $windowProduction -notmatch 'let mut width = measured_width') {
     throw 'Reset hover tooltip must render independent RGBA/frosted/corner style with per-pixel alpha.'
 }
 if ($windowProduction -match 'background_color\.a\s*=\s*background_color\.a\.max\(200\)') {
