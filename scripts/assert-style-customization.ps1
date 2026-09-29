@@ -615,6 +615,13 @@ if ($styleWindow -notmatch 'fill_rounded_rect' -or
     $controlPrimitives -notmatch 'DrawRoundedRectangle') {
     throw 'Settings controls must keep the shared Direct2D-antialiased Fluent-lite control primitives.'
 }
+$paintNavigationBlock = [regex]::Match(
+    $styleWindow,
+    '(?s)unsafe\s+fn\s+paint_navigation\s*\(.*?\n\}'
+).Value
+if ($paintNavigationBlock -notmatch 'Section::Tooltip') {
+    throw 'Settings sidebar must paint the Tooltip navigation entry as well as hit-test it.'
+}
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
     $styleWindow -notmatch 'Section::General => \(28, 68\)' -or
