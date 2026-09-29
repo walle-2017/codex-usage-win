@@ -629,6 +629,24 @@ if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'Section::Json => \(456, 496\)') {
     throw 'Settings sidebar must remain a compact grouped navigation without the redundant Settings heading.'
 }
+if ($styleWindow -notmatch '!matches!\(\s*section,\s*Section::Panel\s*\|\s*Section::Tooltip\s*\|\s*Section::Text\s*\|\s*Section::Progress\s*\|\s*Section::Interaction\s*\)' -or
+    $styleWindow -notmatch 'Section::Preset\s*=>\s*&\[\]' -or
+    $styleWindow -notmatch 's\.focused_numeric_edit\s*=\s*None' -or
+    $styleWindow -notmatch 's\.focused_blur_edit\s*=\s*false' -or
+    $styleWindow -notmatch 's\.focused_hex_edit\s*=\s*None' -or
+    $styleWindow -notmatch 's\.pressed\s*=\s*None' -or
+    $styleWindow -notmatch 's\.hovered\s*=\s*None') {
+    throw 'Editorless settings pages must not inherit color-slider hit testing or stale editor interaction state.'
+}
+$presetHitBlock = [regex]::Match(
+    $styleWindow,
+    '(?s)if\s+section\s*==\s*Section::Preset\s*\{.*?HitTarget::Preset\(preset\).*?\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($presetHitBlock) -or
+    $styleWindow -notmatch 'preset_card_rect\(hwnd, preset\)' -or
+    $styleWindow -notmatch 'ThemePreset::ALL') {
+    throw 'Preset page must keep dedicated hit targets for all three preset cards.'
+}
 if ($styleWindow -match 'Manage refresh, display, alerts, and application behavior' -or
     $styleWindow -notmatch 'settings_page_title_rect' -or
     $styleWindow -notmatch 'settings_card_rect' -or
