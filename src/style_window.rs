@@ -2954,7 +2954,7 @@ fn slider_value_from_x(track: RECT, x: i32, max: u8) -> u8 {
 
 fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
     let mut color_update: Option<(StyleColorTarget, Color)> = None;
-    let mut blur_update: Option<u8> = None;
+    let mut blur_update: Option<(Section, u8)> = None;
 
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
