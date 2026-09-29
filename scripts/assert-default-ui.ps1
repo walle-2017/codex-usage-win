@@ -165,4 +165,13 @@ if ($windowProduction -notmatch 'local\.wYear' -or
     throw '5h reset hover must show year-month-day and 7d reset hover must show hour-minute.'
 }
 
+if ($windowProduction -notmatch 'GetCursorPos\(&mut cursor\)' -or
+    $windowProduction -notmatch 'MonitorFromPoint\(cursor, MONITOR_DEFAULTTONEAREST\)' -or
+    $windowProduction -notmatch 'GetMonitorInfoW\(monitor, &mut monitor_info\)' -or
+    $windowProduction -notmatch 'x = x\.clamp\(' -or
+    $windowProduction -notmatch 'y = y\.clamp\(' -or
+    $windowProduction -notmatch 'show_minimal_usage_tooltip\(target\)') {
+    throw 'Reset hover tooltip must follow the pointer and stay clamped to the current monitor work area.'
+}
+
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
