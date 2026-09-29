@@ -5,8 +5,9 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::Controls::SetWindowTheme;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST,
@@ -15,7 +16,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::AppearancePreset;
@@ -292,6 +293,82 @@ const COLOR_TARGETS: [StyleColorTarget; HEX_EDIT_COUNT] = [
     StyleColorTarget::TooltipBorder,
 ];
 
+fn load_embedded_app_icons() -> (HICON, HICON) {
+    unsafe {
+        let mut exe_buf = [0u16; 260];
+        let len = GetModuleFileNameW(None, &mut exe_buf) as usize;
+        if len == 0 {
+            return (HICON::default(), HICON::default());
+        }
+        let mut large_icon = HICON::default();
+        let mut small_icon = HICON::default();
+        let extracted = ExtractIconExW(
+            PCWSTR::from_raw(exe_buf.as_ptr()),
+            0,
+            Some(&mut large_icon),
+            Some(&mut small_icon),
+            1,
+        );
+        if extracted == 0 {
+            (HICON::default(), HICON::default())
+        } else {
+            (large_icon, small_icon)
+        }
+    }
+}
+
+fn apply_json_editor_theme(edit: HWND, is_dark: bool) {
+    let theme = native_interop::wide_str(if is_dark {
+        "DarkMode_Explorer"
+    } else {
+        "Explorer"
+    });
+    unsafe {
+        let _ = SetWindowTheme(edit, PCWSTR::from_raw(theme.as_ptr()), PCWSTR::null());
+        let _ = RedrawWindow(
+            edit,
+            None,
+            HRGN::default(),
+            RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW,
+        );
+    }
+}
+
+fn confirm_discard_json_changes(hwnd: HWND) -> bool {
+    let (dirty, language) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return true;
+        };
+        (s.json_dirty, s.snapshot.language)
+    };
+    if !dirty {
+        return true;
+    }
+
+    let (message, title) = if language == LanguageId::SimplifiedChinese {
+        (
+            "JSON 配置有未保存的更改。\n\n是否放弃这些更改并继续？",
+            "未保存的 JSON 配置",
+        )
+    } else {
+        (
+            "The JSON configuration has unsaved changes.\n\nDiscard them and continue?",
+            "Unsaved JSON configuration",
+        )
+    };
+    let message = native_interop::wide_str(message);
+    let title = native_interop::wide_str(title);
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR::from_raw(message.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        ) == IDYES
+    }
+}
+
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,10 +385,13 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 
     unsafe {
         let class_name = native_interop::wide_str(WINDOW_CLASS);
+        let (large_icon, small_icon) = load_embedded_app_icons();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wnd_proc),
             hInstance: GetModuleHandleW(PCWSTR::null()).unwrap().into(),
+            hIcon: large_icon,
+            hIconSm: small_icon,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hbrBackground: HBRUSH(std::ptr::null_mut()),
             lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
@@ -337,6 +417,23 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             Ok(hwnd) => hwnd,
             Err(_) => return,
         };
+
+        if !large_icon.is_invalid() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                WPARAM(ICON_BIG as usize),
+                LPARAM(large_icon.0 as isize),
+            );
+        }
+        if !small_icon.is_invalid() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                WPARAM(ICON_SMALL as usize),
+                LPARAM(small_icon.0 as isize),
+            );
+        }
 
         let dpi = GetDpiForWindow(hwnd).max(96);
         let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
@@ -542,6 +639,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             }
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
+        apply_json_editor_theme(json_edit, snapshot.is_dark);
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
         let _ = SendMessageW(
             json_edit,
@@ -1589,6 +1687,7 @@ fn refresh_json_editor_theme() {
         };
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
+    apply_json_editor_theme(edit, is_dark);
     let text = normalize_to_lf(&read_large_edit_text_raw(edit));
     syntax_highlight_json_editor(edit, &text, is_dark);
     layout_settings_children(hwnd);
@@ -2846,11 +2945,31 @@ fn button_background(
 }
 
 fn set_section(section: Section) {
+    let (current_section, dirty, hwnd) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.section, s.json_dirty, s.hwnd.to_hwnd())
+    };
+    if current_section == Section::Json
+        && section != Section::Json
+        && dirty
+        && !confirm_discard_json_changes(hwnd)
+    {
+        return;
+    }
+
     let (hwnd, json_dirty) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
+        if current_section == Section::Json && section != Section::Json && dirty {
+            s.json_dirty = false;
+            s.json_status.clear();
+            s.json_status_path = None;
+        }
         s.section = section;
         if section != Section::General {
             s.language_popup_open = false;
@@ -3420,6 +3539,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
+            if !confirm_discard_json_changes(hwnd) {
+                return LRESULT(0);
+            }
             send_parent(WM_STYLE_SAVE, 0, 0);
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -4943,7 +5065,8 @@ unsafe fn draw_slider(
     track_background: Color,
     accent: Color,
 ) {
-    fill(hdc, track, track_background);
+    let track_height = (track.bottom - track.top).max(1);
+    fill_rounded_rect(hdc, track, track_background, (track_height / 2).max(1));
 
     let width = (track.right - track.left).max(1);
     let thumb_x = track.left + width * i32::from(value) / i32::from(max.max(1));
@@ -4952,24 +5075,18 @@ unsafe fn draw_slider(
         ..track
     };
     if filled.right > filled.left {
-        fill(hdc, filled, accent);
+        fill_rounded_rect(hdc, filled, accent, (track_height / 2).max(1));
     }
 
     let radius = scale(hwnd, 6);
-    let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-    let old_brush = SelectObject(hdc, brush);
-    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
     let center_y = (track.top + track.bottom) / 2;
-    let _ = Ellipse(
-        hdc,
-        thumb_x - radius,
-        center_y - radius,
-        thumb_x + radius,
-        center_y + radius,
-    );
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    let _ = DeleteObject(brush);
+    let thumb = RECT {
+        left: thumb_x - radius,
+        top: center_y - radius,
+        right: thumb_x + radius,
+        bottom: center_y + radius,
+    };
+    fill_rounded_rect(hdc, thumb, accent, radius);
 }
 
 fn section_label(section: Section, language: LanguageId) -> &'static str {
