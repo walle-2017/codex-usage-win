@@ -50,6 +50,12 @@ pub struct EditableThemeStyle {
     pub panel_background: String,
     pub panel_border: String,
     pub frosted_strength: u8,
+    #[serde(default)]
+    pub tooltip_background: Option<String>,
+    #[serde(default)]
+    pub tooltip_border: Option<String>,
+    #[serde(default)]
+    pub tooltip_frosted_strength: Option<u8>,
     pub quota_type: String,
     pub remaining: String,
     pub reset_time: String,
@@ -67,6 +73,9 @@ impl EditableThemeStyle {
             panel_background: style.panel_background.clone(),
             panel_border: style.panel_border.clone(),
             frosted_strength: style.panel_frosted_strength,
+            tooltip_background: style.tooltip_background.clone(),
+            tooltip_border: style.tooltip_border.clone(),
+            tooltip_frosted_strength: style.tooltip_frosted_strength,
             quota_type: style.quota_type.clone(),
             remaining: style.remaining.clone(),
             reset_time: style.reset_time.clone(),
@@ -83,10 +92,16 @@ impl EditableThemeStyle {
         if self.frosted_strength > 100 {
             return Err(format!("{path}.frosted_strength: allowed range is 0-100"));
         }
+        if self.tooltip_frosted_strength.is_some_and(|value| value > 100) {
+            return Err(format!("{path}.tooltip_frosted_strength: allowed range is 0-100"));
+        }
         Ok(Self {
             panel_background: normalize_hex(&self.panel_background, &format!("{path}.panel_background"))?,
             panel_border: normalize_hex(&self.panel_border, &format!("{path}.panel_border"))?,
             frosted_strength: self.frosted_strength,
+            tooltip_background: self.tooltip_background.as_deref().map(|value| normalize_hex(value, &format!("{path}.tooltip_background"))).transpose()?,
+            tooltip_border: self.tooltip_border.as_deref().map(|value| normalize_hex(value, &format!("{path}.tooltip_border"))).transpose()?,
+            tooltip_frosted_strength: self.tooltip_frosted_strength,
             quota_type: normalize_hex(&self.quota_type, &format!("{path}.quota_type"))?,
             remaining: normalize_hex(&self.remaining, &format!("{path}.remaining"))?,
             reset_time: normalize_hex(&self.reset_time, &format!("{path}.reset_time"))?,
@@ -108,6 +123,9 @@ impl EditableThemeStyle {
             panel_border: self.panel_border.clone(),
             panel_blur_radius: 0,
             panel_frosted_strength: self.frosted_strength,
+            tooltip_background: self.tooltip_background.clone(),
+            tooltip_border: self.tooltip_border.clone(),
+            tooltip_frosted_strength: self.tooltip_frosted_strength,
             quota_type: self.quota_type.clone(),
             remaining: self.remaining.clone(),
             reset_time: self.reset_time.clone(),
@@ -352,6 +370,25 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
     lines.push(format!(
         "{pad}\"frosted_strength\": {},",
         style.frosted_strength
+    ));
+    lines.push(String::new());
+
+    lines.push(format!("{pad}// {}", localized(zh, "浮框样式；null 表示继承面板", "Tooltip style; null means inherit from panel")));
+    for (comment_zh, comment_en, key, value) in [
+        ("浮框背景颜色", "Tooltip background color", "tooltip_background", style.tooltip_background.as_deref()),
+        ("浮框边框颜色", "Tooltip border color", "tooltip_border", style.tooltip_border.as_deref()),
+    ] {
+        lines.push(format!("{pad}// {}", localized(zh, comment_zh, comment_en)));
+        lines.push(format!("{pad}// {}", localized(zh, "格式：#RRGGBB / #RRGGBBAA / null", "Format: #RRGGBB / #RRGGBBAA / null")));
+        let value = value.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "\"?\"".into())).unwrap_or_else(|| "null".to_string());
+        lines.push(format!("{pad}\"{key}\": {value},"));
+        lines.push(String::new());
+    }
+    lines.push(format!("{pad}// {}", localized(zh, "浮框磨砂强度；null 表示继承面板", "Tooltip frosted intensity; null means inherit from panel")));
+    lines.push(format!("{pad}// {}", localized(zh, "范围：0–100 / null", "Range: 0–100 / null")));
+    lines.push(format!(
+        "{pad}\"tooltip_frosted_strength\": {},",
+        style.tooltip_frosted_strength.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string())
     ));
     lines.push(String::new());
 
