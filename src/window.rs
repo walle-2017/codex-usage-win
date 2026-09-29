@@ -3583,30 +3583,13 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             }
         };
 
-        let taskbar_rect = {
-            let state = lock_state();
-            state
-                .as_ref()
-                .and_then(|s| s.taskbar_hwnd)
-                .and_then(native_interop::get_taskbar_rect)
-        };
-
         let mut x = cursor.x + gap;
+        let mut y = cursor.y - height - gap;
+
         if x + width + margin > monitor_rect.right {
             x = cursor.x - width - gap;
         }
-
-        let mut y = cursor.y - height - gap;
-        if let Some(taskbar) = taskbar_rect {
-            let taskbar_height = taskbar.bottom - taskbar.top;
-            if taskbar_height >= height + margin * 2 {
-                y = taskbar.top + (taskbar_height - height) / 2;
-                let taskbar_max_x = (taskbar.right - width - margin).max(taskbar.left + margin);
-                x = x.clamp(taskbar.left + margin, taskbar_max_x);
-            } else if y < monitor_rect.top + margin {
-                y = cursor.y + gap;
-            }
-        } else if y < monitor_rect.top + margin {
+        if y < monitor_rect.top + margin {
             y = cursor.y + gap;
         }
 
