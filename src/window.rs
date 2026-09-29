@@ -4959,6 +4959,25 @@ unsafe extern "system" fn wnd_proc(
             save_state_settings();
             LRESULT(0)
         }
+        _ if msg == style_window::WM_STYLE_CORNER_PREVIEW => {
+            let section_code = wparam.0 & 0xFF;
+            let rounded = (wparam.0 & 0x100) != 0;
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    let style = s.styles.active_mut(s.is_dark);
+                    match section_code {
+                        0 => style.panel_rounded = rounded,
+                        1 => style.tooltip_rounded = rounded,
+                        2 => style.progress_rounded = rounded,
+                        _ => return LRESULT(0),
+                    }
+                }
+            }
+            hide_minimal_usage_tooltip();
+            render_layered();
+            LRESULT(0)
+        }
         _ if msg == style_window::WM_STYLE_BLUR_PREVIEW => {
             {
                 let mut state = lock_state();
