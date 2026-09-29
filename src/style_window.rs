@@ -27,6 +27,17 @@ use crate::style::{
     StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
 
+#[link(name = "user32")]
+unsafe extern "system" {
+    #[link_name = "ShowScrollBar"]
+    fn show_scroll_bar_native(hwnd: HWND, bar: i32, show: BOOL) -> BOOL;
+}
+
+unsafe fn hide_json_native_scrollbars(hwnd: HWND) {
+    let _ = show_scroll_bar_native(hwnd, SB_VERT.0, BOOL(0));
+    let _ = show_scroll_bar_native(hwnd, SB_HORZ.0, BOOL(0));
+}
+
 // Keep this block well away from updater.rs (WM_APP + 21..23).
 pub const WM_STYLE_COLOR_PREVIEW: u32 = WM_APP + 120;
 pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 121;
@@ -665,8 +676,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             }
         };
         let _ = SendMessageW(json_edit, WM_SETFONT, WPARAM(json_font.0 as usize), LPARAM(1));
-        let _ = ShowScrollBar(json_edit, SB_VERT, false);
-        let _ = ShowScrollBar(json_edit, SB_HORZ, false);
+        hide_json_native_scrollbars(json_edit);
         let _ = SendMessageW(json_edit, EM_SETLIMITTEXT_MSG, WPARAM(JSON_EDIT_LIMIT), LPARAM(0));
         let _ = SendMessageW(
             json_edit,
@@ -1249,7 +1259,7 @@ fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
         ..Default::default()
     };
     unsafe {
-        if !GetScrollInfo(edit, SB_VERT, &mut info).as_bool() {
+        if GetScrollInfo(edit, SB_VERT, &mut info).is_err() {
             return None;
         }
     }
@@ -1303,13 +1313,13 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
         ..Default::default()
     };
     unsafe {
-        if !GetScrollInfo(edit, SB_VERT, &mut info).as_bool() {
+        if GetScrollInfo(edit, SB_VERT, &mut info).is_err() {
             return;
         }
         let max_pos = (info.nMax - info.nPage as i32 + 1).max(info.nMin);
         let pos_range = (max_pos - info.nMin).max(1);
         let pos = info.nMin + (top - track.top) * pos_range / available;
-        let packed = (SB_THUMBTRACK as usize & 0xFFFF)
+        let packed = (SB_THUMBTRACK.0 as usize & 0xFFFF)
             | (((pos as usize) & 0xFFFF) << 16);
         let _ = SendMessageW(edit, WM_VSCROLL, WPARAM(packed), LPARAM(0));
         let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
@@ -1518,8 +1528,7 @@ fn layout_settings_children(hwnd: HWND) {
             (json_rect.bottom - json_rect.top).max(1),
             SWP_NOZORDER | SWP_NOACTIVATE | visibility,
         );
-        let _ = ShowScrollBar(json_edit.to_hwnd(), SB_VERT, false);
-        let _ = ShowScrollBar(json_edit.to_hwnd(), SB_HORZ, false);
+        hide_json_native_scrollbars(json_edit.to_hwnd());
         if visible {
             let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
         } else {
