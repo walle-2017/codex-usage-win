@@ -168,13 +168,14 @@ if ($windowProduction -notmatch 'local\.wYear' -or
 if ($windowProduction -notmatch 'GetCursorPos\(&mut cursor\)' -or
     $windowProduction -notmatch 'MonitorFromPoint\(cursor, MONITOR_DEFAULTTONEAREST\)' -or
     $windowProduction -notmatch 'GetMonitorInfoW\(monitor, &mut monitor_info\)' -or
-    $windowProduction -notmatch 'native_interop::get_taskbar_rect' -or
-    $windowProduction -notmatch 'taskbar_height\s*>=\s*height\s*\+\s*margin\s*\*\s*2' -or
-    $windowProduction -notmatch 'taskbar\.top\s*\+\s*\(taskbar_height\s*-\s*height\)\s*/\s*2' -or
+    $windowProduction -notmatch 'cursor\.x\s*\+\s*gap' -or
+    $windowProduction -notmatch 'cursor\.y\s*-\s*height\s*-\s*gap' -or
+    $windowProduction -notmatch 'cursor\.x\s*-\s*width\s*-\s*gap' -or
+    $windowProduction -notmatch 'cursor\.y\s*\+\s*gap' -or
     $windowProduction -notmatch 'x = x\.clamp\(' -or
     $windowProduction -notmatch 'y = y\.clamp\(' -or
     $windowProduction -notmatch 'show_minimal_usage_tooltip\(target\)') {
-    throw 'Reset hover tooltip must follow the pointer, prefer the taskbar interior, and remain screen-visible.'
+    throw 'Reset hover tooltip must use cursor-relative offsets and remain visible on the current monitor.'
 }
 
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
