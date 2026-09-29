@@ -2,9 +2,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::localization::{LanguageId, LanguageId as L};
 use crate::native_interop::Color;
-use crate::style::ThemeStyle;
+use crate::style::{ThemeStyle, CORNER_RADIUS_MAX};
 
 pub const EDITABLE_SETTINGS_SCHEMA_VERSION: u32 = 1;
+
+const LEGACY_ROUNDED_RADIUS: u8 = 8;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CornerRadiusValue {
+    Radius(u8),
+    LegacyRounded(bool),
+}
+
+fn deserialize_corner_radius<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match CornerRadiusValue::deserialize(deserializer)? {
+        CornerRadiusValue::Radius(value) => value,
+        CornerRadiusValue::LegacyRounded(true) => LEGACY_ROUNDED_RADIUS,
+        CornerRadiusValue::LegacyRounded(false) => 0,
+    })
+}
 
 fn localized<'a>(zh: bool, zh_text: &'a str, en_text: &'a str) -> &'a str {
     if zh { zh_text } else { en_text }
@@ -50,16 +70,16 @@ pub struct EditableThemeStyle {
     pub panel_background: String,
     pub panel_border: String,
     pub frosted_strength: u8,
-    #[serde(default)]
-    pub panel_rounded: bool,
+    #[serde(default, alias = "panel_rounded", deserialize_with = "deserialize_corner_radius")]
+    pub panel_corner_radius: u8,
     #[serde(default)]
     pub tooltip_background: Option<String>,
     #[serde(default)]
     pub tooltip_border: Option<String>,
     #[serde(default)]
     pub tooltip_frosted_strength: Option<u8>,
-    #[serde(default)]
-    pub tooltip_rounded: bool,
+    #[serde(default, alias = "tooltip_rounded", deserialize_with = "deserialize_corner_radius")]
+    pub tooltip_corner_radius: u8,
     pub quota_type: String,
     pub remaining: String,
     pub reset_time: String,
@@ -68,8 +88,8 @@ pub struct EditableThemeStyle {
     pub progress_medium: String,
     pub progress_low: String,
     pub progress_consumed: String,
-    #[serde(default)]
-    pub progress_rounded: bool,
+    #[serde(default, alias = "progress_rounded", deserialize_with = "deserialize_corner_radius")]
+    pub progress_corner_radius: u8,
     pub drag_handle: String,
 }
 
@@ -79,11 +99,11 @@ impl EditableThemeStyle {
             panel_background: style.panel_background.clone(),
             panel_border: style.panel_border.clone(),
             frosted_strength: style.panel_frosted_strength,
-            panel_rounded: style.panel_rounded,
+            panel_corner_radius: style.panel_corner_radius,
             tooltip_background: style.tooltip_background.clone(),
             tooltip_border: style.tooltip_border.clone(),
             tooltip_frosted_strength: style.tooltip_frosted_strength,
-            tooltip_rounded: style.tooltip_rounded,
+            tooltip_corner_radius: style.tooltip_corner_radius,
             quota_type: style.quota_type.clone(),
             remaining: style.remaining.clone(),
             reset_time: style.reset_time.clone(),
@@ -92,7 +112,7 @@ impl EditableThemeStyle {
             progress_medium: style.progress_medium.clone(),
             progress_low: style.progress_low.clone(),
             progress_consumed: style.progress_consumed.clone(),
-            progress_rounded: style.progress_rounded,
+            progress_corner_radius: style.progress_corner_radius,
             drag_handle: style.drag_handle.clone(),
         }
     }
@@ -104,6 +124,21 @@ impl EditableThemeStyle {
         if self.tooltip_frosted_strength.is_some_and(|value| value > 100) {
             return Err(format!("{path}.tooltip_frosted_strength: allowed range is 0-100"));
         }
+        if self.panel_corner_radius > CORNER_RADIUS_MAX {
+            return Err(format!(
+                "{path}.panel_corner_radius: allowed range is 0-{CORNER_RADIUS_MAX}"
+            ));
+        }
+        if self.tooltip_corner_radius > CORNER_RADIUS_MAX {
+            return Err(format!(
+                "{path}.tooltip_corner_radius: allowed range is 0-{CORNER_RADIUS_MAX}"
+            ));
+        }
+        if self.progress_corner_radius > CORNER_RADIUS_MAX {
+            return Err(format!(
+                "{path}.progress_corner_radius: allowed range is 0-{CORNER_RADIUS_MAX}"
+            ));
+        }
         let tooltip_custom = self.tooltip_background.is_some()
             || self.tooltip_border.is_some()
             || self.tooltip_frosted_strength.is_some();
@@ -111,7 +146,7 @@ impl EditableThemeStyle {
             panel_background: normalize_hex(&self.panel_background, &format!("{path}.panel_background"))?,
             panel_border: normalize_hex(&self.panel_border, &format!("{path}.panel_border"))?,
             frosted_strength: self.frosted_strength,
-            panel_rounded: self.panel_rounded,
+            panel_corner_radius: self.panel_corner_radius,
             tooltip_background: if tooltip_custom {
                 Some(normalize_hex(
                     self.tooltip_background.as_deref().unwrap_or(&self.panel_background),
@@ -133,7 +168,7 @@ impl EditableThemeStyle {
             } else {
                 None
             },
-            tooltip_rounded: self.tooltip_rounded,
+            tooltip_corner_radius: self.tooltip_corner_radius,
             quota_type: normalize_hex(&self.quota_type, &format!("{path}.quota_type"))?,
             remaining: normalize_hex(&self.remaining, &format!("{path}.remaining"))?,
             reset_time: normalize_hex(&self.reset_time, &format!("{path}.reset_time"))?,
@@ -145,7 +180,7 @@ impl EditableThemeStyle {
                 &self.progress_consumed,
                 &format!("{path}.progress_consumed"),
             )?,
-            progress_rounded: self.progress_rounded,
+            progress_corner_radius: self.progress_corner_radius,
             drag_handle: normalize_hex(&self.drag_handle, &format!("{path}.drag_handle"))?,
         })
     }
@@ -156,11 +191,11 @@ impl EditableThemeStyle {
             panel_border: self.panel_border.clone(),
             panel_blur_radius: 0,
             panel_frosted_strength: self.frosted_strength,
-            panel_rounded: self.panel_rounded,
+            panel_corner_radius: self.panel_corner_radius,
             tooltip_background: self.tooltip_background.clone(),
             tooltip_border: self.tooltip_border.clone(),
             tooltip_frosted_strength: self.tooltip_frosted_strength,
-            tooltip_rounded: self.tooltip_rounded,
+            tooltip_corner_radius: self.tooltip_corner_radius,
             quota_type: self.quota_type.clone(),
             remaining: self.remaining.clone(),
             reset_time: self.reset_time.clone(),
@@ -169,7 +204,7 @@ impl EditableThemeStyle {
             progress_medium: self.progress_medium.clone(),
             progress_low: self.progress_low.clone(),
             progress_consumed: self.progress_consumed.clone(),
-            progress_rounded: self.progress_rounded,
+            progress_corner_radius: self.progress_corner_radius,
             drag_handle: self.drag_handle.clone(),
         }
     }
@@ -408,8 +443,9 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
         style.frosted_strength
     ));
     lines.push(String::new());
-    lines.push(format!("{pad}// {}", localized(zh, "面板圆角", "Rounded panel")));
-    lines.push(format!("{pad}\"panel_rounded\": {},", style.panel_rounded));
+    lines.push(format!("{pad}// {}", localized(zh, "面板圆角半径；0 为直角", "Panel corner radius; 0 means square")));
+    lines.push(format!("{pad}// {}", localized(zh, "范围：0–24", "Range: 0–24")));
+    lines.push(format!("{pad}\"panel_corner_radius\": {},", style.panel_corner_radius));
     lines.push(String::new());
 
     lines.push(format!("{pad}// {}", localized(zh, "浮框样式；null 表示继承面板", "Tooltip style; null means inherit from panel")));
@@ -430,8 +466,9 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
         style.tooltip_frosted_strength.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string())
     ));
     lines.push(String::new());
-    lines.push(format!("{pad}// {}", localized(zh, "浮框圆角", "Rounded tooltip")));
-    lines.push(format!("{pad}\"tooltip_rounded\": {},", style.tooltip_rounded));
+    lines.push(format!("{pad}// {}", localized(zh, "浮框圆角半径；0 为直角", "Tooltip corner radius; 0 means square")));
+    lines.push(format!("{pad}// {}", localized(zh, "范围：0–24", "Range: 0–24")));
+    lines.push(format!("{pad}\"tooltip_corner_radius\": {},", style.tooltip_corner_radius));
     lines.push(String::new());
 
     for (comment_zh, comment_en, key, value, comma) in [
@@ -456,8 +493,9 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
         );
     }
 
-    lines.push(format!("{pad}// {}", localized(zh, "进度条圆角", "Rounded progress bar")));
-    lines.push(format!("{pad}\"progress_rounded\": {}", style.progress_rounded));
+    lines.push(format!("{pad}// {}", localized(zh, "进度条圆角半径；0 为直角", "Progress-bar corner radius; 0 means square")));
+    lines.push(format!("{pad}// {}", localized(zh, "范围：0–24", "Range: 0–24")));
+    lines.push(format!("{pad}\"progress_corner_radius\": {}", style.progress_corner_radius));
     lines.push(String::new());
 
     while lines.last().is_some_and(|line| line.is_empty()) {
