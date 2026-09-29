@@ -688,13 +688,17 @@ if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
     $styleWindow -notmatch 'editor\.bottom = editor\.bottom\.min\(safe_bottom\)') {
     throw 'Appearance editors must keep compact shared channel spacing and a bottom safety margin.'
 }
-if ($styleWindow -notmatch 'fn close_rect\(hwnd: HWND\)' -or
-    $styleWindow -notmatch 'top: scale\(hwnd, 10\)' -or
-    $styleWindow -notmatch 'draw_text\(hdc, "×", close' -or
-    $styleWindow -notmatch '#E81123FF' -or
-    $styleWindow -notmatch '#C50F1FFF' -or
-    $styleWindow -notmatch 'hovered == Some\(HitTarget::Close\)') {
-    throw 'Settings must use a top-right X close button with red hover/pressed background.'
+if ($styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU' -or
+    $styleWindow -notmatch 'WM_CLOSE\s*=>\s*\{' -or
+    $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
+    throw 'Settings must use the native titlebar close button and save before closing.'
+}
+if ($styleWindow -notmatch 'let right = client\.right - scale\(hwnd, 24\)' -or
+    $styleWindow -notmatch 'let width = scale\(hwnd, 108\)' -or
+    $styleWindow -notmatch 'let height = scale\(hwnd, 36\)' -or
+    $styleWindow -notmatch 'let bottom = client\.bottom - scale\(hwnd, 24\)') {
+    throw 'JSON Apply must be a compact button aligned to the content bottom-right corner.'
 }
 if ($styleWindow -notmatch 'rect\(hwnd, 778, 324, 928, 352\)' -or
     $styleWindow -notmatch 'blur_suffix_rect' -or
