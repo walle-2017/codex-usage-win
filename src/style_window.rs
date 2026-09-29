@@ -24,7 +24,8 @@ use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
 use crate::settings_model::{parse_jsonc, EditableSettings, EditableThemeStyle};
 use crate::style::{
-    StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
+    StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, CORNER_RADIUS_MAX,
+    FROSTED_STRENGTH_MAX,
 };
 
 #[link(name = "user32")]
@@ -64,6 +65,7 @@ const ID_EDIT_G: u16 = 301;
 const ID_EDIT_B: u16 = 302;
 const ID_EDIT_A: u16 = 303;
 const ID_EDIT_BLUR: u16 = 304;
+const ID_EDIT_CORNER: u16 = 305;
 const ID_EDIT_HEX_BASE: u16 = 320;
 const HEX_EDIT_COUNT: usize = 13;
 const ID_EDIT_JSON: u16 = 400;
@@ -156,6 +158,7 @@ enum Section {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditorSelection {
+    CornerRadius,
     Color(StyleColorTarget),
     Blur,
     TooltipBlur,
@@ -199,7 +202,6 @@ enum HitTarget {
     Startup,
     Json(JsonAction),
     JsonStatusPath,
-    CornerShape(bool),
     DiscardChanges,
     KeepEditing,
     LanguageToggle,
@@ -233,14 +235,17 @@ struct PanelState {
     tracking_mouse_leave: bool,
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
+    corner_edit: SendHwnd,
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     json_edit: SendHwnd,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
+    focused_corner_edit: bool,
     focused_hex_edit: Option<StyleColorTarget>,
     invalid_hex_edits: [bool; HEX_EDIT_COUNT],
     syncing_numeric_edits: bool,
     syncing_blur_edit: bool,
+    syncing_corner_edit: bool,
     syncing_hex_edits: bool,
     syncing_json_edit: bool,
     language_popup_open: bool,
@@ -608,6 +613,46 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WPARAM(3),
             LPARAM(0),
         );
+
+        let corner_edit = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(edit_class.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WINDOW_STYLE(
+                WS_CHILD.0
+                    | ES_NUMBER as u32
+                    | ES_CENTER as u32
+                    | ES_AUTOHSCROLL as u32,
+            ),
+            0,
+            0,
+            s(54),
+            s(22),
+            hwnd,
+            HMENU(ID_EDIT_CORNER as usize as *mut _),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(edit) => edit,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                return;
+            }
+        };
+        let _ = SendMessageW(
+            corner_edit,
+            WM_SETFONT,
+            WPARAM(font.0 as usize),
+            LPARAM(1),
+        );
+        let _ = SendMessageW(
+            corner_edit,
+            EM_SETLIMITTEXT_MSG,
+            WPARAM(2),
+            LPARAM(0),
+        );
+
         let mut hex_edits_raw = [HWND::default(); HEX_EDIT_COUNT];
         for (index, slot) in hex_edits_raw.iter_mut().enumerate() {
             let edit = match CreateWindowExW(
@@ -719,14 +764,17 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 tracking_mouse_leave: false,
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
+                corner_edit: SendHwnd::from_hwnd(corner_edit),
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
+                focused_corner_edit: false,
                 focused_hex_edit: None,
                 invalid_hex_edits: [false; HEX_EDIT_COUNT],
                 syncing_numeric_edits: false,
                 syncing_blur_edit: false,
+                syncing_corner_edit: false,
                 syncing_hex_edits: false,
                 syncing_json_edit: false,
                 language_popup_open: false,
@@ -750,6 +798,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         sync_hex_edits();
         sync_numeric_edits();
         sync_blur_edit();
+        sync_corner_edit();
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
     }
@@ -789,6 +838,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
+    sync_corner_edit();
     redraw_settings_window(hwnd);
 }
 
