@@ -33,7 +33,6 @@ pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 121;
 pub const WM_STYLE_SAVE: u32 = WM_APP + 122;
 pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
-pub const WM_STYLE_RESET_CURRENT: u32 = WM_APP + 125;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
 pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
@@ -42,7 +41,6 @@ pub const WM_SETTINGS_STARTUP_CHANGE: u32 = WM_APP + 130;
 pub const WM_SETTINGS_LANGUAGE_CHANGE: u32 = WM_APP + 131;
 pub const WM_SETTINGS_JSON_APPLY: u32 = WM_APP + 132;
 pub const WM_STYLE_TOOLTIP_BLUR_PREVIEW: u32 = WM_APP + 133;
-pub const WM_STYLE_TOOLTIP_RESET: u32 = WM_APP + 134;
 
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const WINDOW_WIDTH: i32 = 980;
@@ -184,8 +182,6 @@ enum HitTarget {
     JsonStatusPath,
     LanguageToggle,
     LanguageOption(usize),
-    Reset,
-    ResetTooltip,
     Close,
 }
 
@@ -773,7 +769,6 @@ const SETTINGS_CHOICE_WIDTH: i32 = 130;
 const SETTINGS_CHOICE_GAP: i32 = 10;
 const SETTINGS_EDITOR_HEIGHT: i32 = 164;
 const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
-const SETTINGS_FOOTER_GAP: i32 = 12;
 
 fn settings_page_title_rect(hwnd: HWND) -> RECT {
     rect(
@@ -871,20 +866,16 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     rect(hwnd, left, 220, left + 224, 404)
 }
 
-fn reset_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 700, 116, 924, 150)
-}
-
 fn close_rect(hwnd: HWND) -> RECT {
     let mut client = RECT::default();
     unsafe { let _ = GetClientRect(hwnd, &mut client); }
-    let w = scale(hwnd, 96);
-    let h = scale(hwnd, 40);
+    let w = scale(hwnd, 36);
+    let h = scale(hwnd, 32);
     RECT {
-        left: client.right - scale(hwnd, 24) - w,
-        top: client.bottom - scale(hwnd, 20) - h,
-        right: client.right - scale(hwnd, 24),
-        bottom: client.bottom - scale(hwnd, 20),
+        left: client.right - scale(hwnd, 12) - w,
+        top: scale(hwnd, 10),
+        right: client.right - scale(hwnd, 12),
+        bottom: scale(hwnd, 10) + h,
     }
 }
 
@@ -941,7 +932,9 @@ fn editor_top(section: Section) -> i32 {
 fn editor_box_rect(hwnd: HWND, section: Section) -> RECT {
     let top = editor_top(section);
     let mut editor = settings_card_rect(hwnd, top, top + SETTINGS_EDITOR_HEIGHT);
-    let safe_bottom = close_rect(hwnd).top - scale(hwnd, SETTINGS_FOOTER_GAP);
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let safe_bottom = client.bottom - scale(hwnd, 24);
     editor.bottom = editor.bottom.min(safe_bottom);
     editor
 }
@@ -2649,9 +2642,6 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Row(editor));
             }
         }
-        if pt_in_rect(reset_rect(hwnd), x, y) {
-            return Some(HitTarget::Reset);
-        }
     }
 
     if section == Section::General {
@@ -2823,8 +2813,6 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             }
             send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
         }
-        HitTarget::Reset => send_parent(WM_STYLE_RESET_CURRENT, 0, 0),
-        HitTarget::ResetTooltip => send_parent(WM_STYLE_TOOLTIP_RESET, 0, 0),
         HitTarget::Close => unsafe {
             send_parent(WM_STYLE_SAVE, 0, 0);
             let _ = DestroyWindow(hwnd);
@@ -3685,31 +3673,33 @@ unsafe fn paint(hwnd: HWND) {
         ),
     }
 
-    draw_segment(
-        hdc,
-        close_rect(hwnd),
-        true,
-        button_background(
-            HitTarget::Close,
-            true,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: accent,
-                hover: accent_hover,
-                pressed: accent_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
+    let close = close_rect(hwnd);
+    let close_hovered = hovered == Some(HitTarget::Close);
+    let close_pressed = pressed == Some(HitTarget::Close);
+    if close_hovered || close_pressed {
+        fill_rounded_rect(
+            hdc,
+            close,
+            if close_pressed {
+                Color::from_hex("#C50F1FFF")
+            } else {
+                Color::from_hex("#E81123FF")
             },
+            scale(hwnd, 6),
+        );
+    }
+    let _ = SetTextColor(
+        hdc,
+        COLORREF(
+            if close_hovered || close_pressed {
+                Color::from_hex("#FFFFFFFF")
+            } else {
+                primary
+            }
+            .to_colorref(),
         ),
-        Color::from_hex("#FFFFFFFF"),
-        if snapshot.language == LanguageId::SimplifiedChinese {
-            "关闭"
-        } else {
-            "Close"
-        },
     );
+    draw_text(hdc, "×", close, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdc, old_font);
     let _ = BitBlt(screen_hdc, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
@@ -4403,30 +4393,6 @@ unsafe fn paint_appearance_page(
             },
         );
     }
-
-    draw_segment(
-        hdc,
-        reset_rect(hwnd),
-        false,
-        button_background(
-            if section == Section::Tooltip { HitTarget::ResetTooltip } else { HitTarget::Reset },
-            false,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: card_hover,
-                selected_hover: card_pressed,
-                selected_pressed: card_pressed,
-            },
-        ),
-        primary,
-        if section == Section::Tooltip {
-            if zh { "恢复继承面板样式" } else { "Inherit panel style" }
-        } else if zh { "恢复当前主题默认" } else { "Reset current theme" },
-    );
 
     if section == Section::Preset {
         paint_preset_gallery(
