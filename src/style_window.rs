@@ -6295,14 +6295,18 @@ mod ui_smoke_tests {
                 assert_eq!(s.snapshot.active_style.panel_background, "#12345678");
             }
 
-            let (_, _, _, show_rgba, show_blur) = editor_layout_snapshot().unwrap();
+            let (_, _, _, _, show_rgba, show_blur, show_corner) =
+                editor_layout_snapshot().unwrap();
             assert!(show_rgba);
             assert!(show_blur);
+            assert!(show_corner);
 
             select_editor(EditorSelection::Blur);
-            let (_, _, _, show_rgba, show_blur) = editor_layout_snapshot().unwrap();
+            let (_, _, _, _, show_rgba, show_blur, show_corner) =
+                editor_layout_snapshot().unwrap();
             assert!(!show_rgba, "blur selection must clear the lower RGBA editor");
             assert!(show_blur, "blur control must remain visible inline");
+            assert!(show_corner, "corner radius input must remain visible inline");
 
             let _ = DestroyWindow(hwnd);
 
