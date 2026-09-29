@@ -96,9 +96,9 @@ impl ThemeStyle {
             panel_border: "#343B43FF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
-            tooltip_background: None,
-            tooltip_border: None,
-            tooltip_frosted_strength: None,
+            tooltip_background: Some("#242A31FF".into()),
+            tooltip_border: Some("#343B43FF".into()),
+            tooltip_frosted_strength: Some(0),
             quota_type: "#A0A0A0FF".into(),
             remaining: "#FFFFFFFF".into(),
             reset_time: "#92979DFF".into(),
@@ -117,9 +117,9 @@ impl ThemeStyle {
             panel_border: "#D4D9DFFF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
-            tooltip_background: None,
-            tooltip_border: None,
-            tooltip_frosted_strength: None,
+            tooltip_background: Some("#EEF1F4FF".into()),
+            tooltip_border: Some("#D4D9DFFF".into()),
+            tooltip_frosted_strength: Some(0),
             quota_type: "#404040FF".into(),
             remaining: "#202020FF".into(),
             reset_time: "#666666FF".into(),
@@ -141,9 +141,9 @@ impl ThemeStyle {
                 panel_border: "#294252FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                tooltip_background: None,
-                tooltip_border: None,
-                tooltip_frosted_strength: None,
+                tooltip_background: Some("#0F1B24FF".into()),
+                tooltip_border: Some("#294252FF".into()),
+                tooltip_frosted_strength: Some(0),
                 quota_type: "#8CA7B8FF".into(),
                 remaining: "#EAF7FFFF".into(),
                 reset_time: "#7192A8FF".into(),
@@ -159,9 +159,9 @@ impl ThemeStyle {
                 panel_border: "#CFDCE4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                tooltip_background: None,
-                tooltip_border: None,
-                tooltip_frosted_strength: None,
+                tooltip_background: Some("#F3F7FAFF".into()),
+                tooltip_border: Some("#CFDCE4FF".into()),
+                tooltip_frosted_strength: Some(0),
                 quota_type: "#49616FFF".into(),
                 remaining: "#1F3440FF".into(),
                 reset_time: "#5E7480FF".into(),
@@ -177,9 +177,9 @@ impl ThemeStyle {
                 panel_border: "#2B4038FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                tooltip_background: None,
-                tooltip_border: None,
-                tooltip_frosted_strength: None,
+                tooltip_background: Some("#14211DFF".into()),
+                tooltip_border: Some("#2B4038FF".into()),
+                tooltip_frosted_strength: Some(0),
                 quota_type: "#9AB3A8FF".into(),
                 remaining: "#F0FAF5FF".into(),
                 reset_time: "#7F9C8FFF".into(),
@@ -195,9 +195,9 @@ impl ThemeStyle {
                 panel_border: "#DED4C4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                tooltip_background: None,
-                tooltip_border: None,
-                tooltip_frosted_strength: None,
+                tooltip_background: Some("#F8F4ECFF".into()),
+                tooltip_border: Some("#DED4C4FF".into()),
+                tooltip_frosted_strength: Some(0),
                 quota_type: "#665A48FF".into(),
                 remaining: "#2E2922FF".into(),
                 reset_time: "#756A59FF".into(),
@@ -212,22 +212,11 @@ impl ThemeStyle {
     }
 
     pub fn apply_preset(&mut self, is_dark: bool, preset: ThemePreset) {
-        let frosted_strength = self.panel_frosted_strength;
-        let tooltip_background = self.tooltip_background.clone();
-        let tooltip_border = self.tooltip_border.clone();
-        let tooltip_frosted_strength = self.tooltip_frosted_strength;
-        let mut replacement = Self::preset(is_dark, preset);
-        replacement.panel_frosted_strength = frosted_strength;
-        replacement.tooltip_background = tooltip_background;
-        replacement.tooltip_border = tooltip_border;
-        replacement.tooltip_frosted_strength = tooltip_frosted_strength;
-        *self = replacement;
+        *self = Self::preset(is_dark, preset);
     }
 
     pub fn matches_preset(&self, is_dark: bool, preset: ThemePreset) -> bool {
-        let mut expected = Self::preset(is_dark, preset);
-        expected.panel_frosted_strength = self.panel_frosted_strength;
-        self == &expected
+        self == &Self::preset(is_dark, preset)
     }
 
     pub fn normalize(&mut self, fallback: &Self) {
