@@ -629,14 +629,24 @@ if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'Section::Json => \(456, 496\)') {
     throw 'Settings sidebar must remain a compact grouped navigation without the redundant Settings heading.'
 }
-if ($styleWindow -notmatch '!matches!\(\s*section,\s*Section::Panel\s*\|\s*Section::Tooltip\s*\|\s*Section::Text\s*\|\s*Section::Progress\s*\|\s*Section::Interaction\s*\)' -or
-    $styleWindow -notmatch 'Section::Preset\s*=>\s*&\[\]' -or
+$sliderKindBlock = [regex]::Match(
+    $styleWindow,
+    '(?s)fn\s+slider_kind_at\s*\(.*?\n\}'
+).Value
+if ($sliderKindBlock -notmatch 'Section::Panel\s*\|\s*Section::Tooltip\s*\|\s*Section::Text\s*\|\s*Section::Progress\s*\|\s*Section::Interaction' -or
+    $sliderKindBlock -notmatch 'return None;' -or
+    $styleWindow -notmatch 'Section::General\s*\|\s*Section::Preset\s*\|\s*Section::Json\s*=>\s*&\[\]' -or
     $styleWindow -notmatch 's\.focused_numeric_edit\s*=\s*None' -or
     $styleWindow -notmatch 's\.focused_blur_edit\s*=\s*false' -or
     $styleWindow -notmatch 's\.focused_hex_edit\s*=\s*None' -or
     $styleWindow -notmatch 's\.pressed\s*=\s*None' -or
     $styleWindow -notmatch 's\.hovered\s*=\s*None') {
     throw 'Editorless settings pages must not inherit color-slider hit testing or stale editor interaction state.'
+}
+if ($styleWindow -notmatch 'if section == Section::Json' -or
+    $styleWindow -notmatch 'reload_json_editor_from_snapshot\(\)' -or
+    $styleWindow -notmatch 'refresh_json_editor_theme\(\)') {
+    throw 'JSON editor must only refresh on the JSON section and remain untouched while preset/theme pages synchronize.'
 }
 $presetHitBlock = [regex]::Match(
     $styleWindow,
