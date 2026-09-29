@@ -182,15 +182,17 @@ if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)' -or
     $windowProduction -notmatch 'StyleColorTarget::TooltipBackground' -or
     $windowProduction -notmatch 'StyleColorTarget::TooltipBorder' -or
     $windowProduction -notmatch 'StyleColorTarget::ResetTime' -or
-    $windowProduction -notmatch 'premultiplied_pixel\(color\)' -or
+    $windowProduction -notmatch 'premultiplied_pixel\(' -or
     $windowProduction -notmatch 'composite_premultiplied_text' -or
     $windowProduction -notmatch 'WS_EX_LAYERED' -or
     $windowProduction -notmatch 'UpdateLayeredWindow\(' -or
-    $windowProduction -notmatch 'tooltip_frosted_strength\(\)') {
-    throw 'Reset hover tooltip must render independent tooltip RGBA/frosted style with per-pixel alpha.'
+    $windowProduction -notmatch 'tooltip_frosted_strength\(\)' -or
+    $windowProduction -notmatch 'tooltip_rounded' -or
+    $windowProduction -notmatch 'point_in_rounded_box\(') {
+    throw 'Reset hover tooltip must render independent RGBA/frosted/corner style with per-pixel alpha.'
 }
 if ($windowProduction -match 'background_color\.a\s*=\s*background_color\.a\.max\(200\)') {
     throw 'Independent tooltip background alpha must not have a forced minimum.'
 }
 
-Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
+Write-Host 'PASS: default/minimal layout and configurable themed taskbar UI contract is satisfied.'
