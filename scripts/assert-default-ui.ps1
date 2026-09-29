@@ -178,7 +178,7 @@ if ($windowProduction -notmatch 'GetCursorPos\(&mut cursor\)' -or
     throw 'Reset hover tooltip must use cursor-relative offsets and remain visible on the current monitor.'
 }
 
-if ($windowProduction -notmatch 's\.styles\.for_theme\(s\.is_dark\)' -or
+if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)' -or
     $windowProduction -notmatch 'StyleColorTarget::PanelBackground' -or
     $windowProduction -notmatch 'StyleColorTarget::PanelBorder' -or
     $windowProduction -notmatch 'StyleColorTarget::ResetTime' -or
