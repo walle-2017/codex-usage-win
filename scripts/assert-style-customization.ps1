@@ -771,9 +771,9 @@ if ($styleWindow -notmatch 'if style\.panel_rounded' -or
 if ($settingsModel -notmatch 'panel_rounded:\s*bool' -or
     $settingsModel -notmatch 'tooltip_rounded:\s*bool' -or
     $settingsModel -notmatch 'progress_rounded:\s*bool' -or
-    $settingsModel -notmatch '"panel_rounded"' -or
-    $settingsModel -notmatch '"tooltip_rounded"' -or
-    $settingsModel -notmatch '"progress_rounded"') {
+    $settingsModel -notmatch '\\\"panel_rounded\\\"' -or
+    $settingsModel -notmatch '\\\"tooltip_rounded\\\"' -or
+    $settingsModel -notmatch '\\\"progress_rounded\\\"') {
     throw 'Corner shape settings must round-trip through editable JSON/JSONC settings.'
 }
 
