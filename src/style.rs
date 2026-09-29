@@ -339,11 +339,6 @@ impl ThemeStyle {
         self.tooltip_frosted_strength = Some(strength.min(FROSTED_STRENGTH_MAX));
     }
 
-    pub fn reset_tooltip_override(&mut self) {
-        self.tooltip_background = None;
-        self.tooltip_border = None;
-        self.tooltip_frosted_strength = None;
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,15 +406,26 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_theme_specific_and_preserve_blur_when_applied() {
+    fn presets_restore_complete_panel_and_tooltip_style() {
         let dark_ocean = ThemeStyle::preset(true, ThemePreset::Ocean);
         let light_ocean = ThemeStyle::preset(false, ThemePreset::Ocean);
         assert_ne!(dark_ocean.panel_background, light_ocean.panel_background);
+        assert!(dark_ocean.tooltip_background.is_some());
+        assert!(dark_ocean.tooltip_border.is_some());
+        assert!(dark_ocean.tooltip_frosted_strength.is_some());
 
         let mut style = ThemeStyle::dark_default();
         style.panel_frosted_strength = 37;
+        style.set_color(
+            StyleColorTarget::TooltipBackground,
+            Color::from_hex("#01020304"),
+        );
+        style.set_tooltip_frosted_strength(61);
         style.apply_preset(true, ThemePreset::Forest);
-        assert_eq!(style.panel_frosted_strength, 37);
+
+        assert_eq!(style, ThemeStyle::preset(true, ThemePreset::Forest));
+        assert_eq!(style.panel_frosted_strength, 0);
+        assert_eq!(style.tooltip_frosted_strength(), 0);
         assert!(style.matches_preset(true, ThemePreset::Forest));
 
         style.remaining = "#FFFFFFFF".into();
