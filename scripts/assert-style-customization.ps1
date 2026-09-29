@@ -734,7 +734,8 @@ if ($styleWindow -notmatch 'load_embedded_app_icons\(' -or
     $styleWindow -notmatch 'ICON_SMALL') {
     throw 'Settings window must bind the embedded executable icon to its standard caption.'
 }
-if ($styleWindow -notmatch 'ShowScrollBar\(json_edit(?:\.to_hwnd\(\))?, SB_VERT, false\)' -or
+if ($styleWindow -notmatch 'link_name\s*=\s*"ShowScrollBar"' -or
+    $styleWindow -notmatch 'hide_json_native_scrollbars\(' -or
     $styleWindow -notmatch 'json_scroll_thumb_rect\(' -or
     $styleWindow -notmatch 'GetScrollInfo\(' -or
     $styleWindow -notmatch 'SB_THUMBTRACK' -or
