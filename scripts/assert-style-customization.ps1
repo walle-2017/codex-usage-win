@@ -78,6 +78,7 @@ if ($windowProduction -notmatch 'IDM_STYLE_SETTINGS' -or
     $styleWindow -notmatch 'Section::General' -or
     $styleWindow -notmatch 'Section::Preset' -or
     $styleWindow -notmatch 'Section::Panel' -or
+    $styleWindow -notmatch 'Section::Tooltip' -or
     $styleWindow -notmatch 'Section::Text' -or
     $styleWindow -notmatch 'Section::Progress' -or
     $styleWindow -notmatch 'Section::Interaction' -or
@@ -127,7 +128,7 @@ if ($styleWindow -notmatch 'Section::General\s*\|\s*Section::Preset\s*\|\s*Secti
     throw 'Non-color settings pages must avoid hidden EDIT synchronization and keep the Win32 open/paint/destroy smoke test.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_HEX_BASE' -or
-    $styleWindow -notmatch 'HEX_EDIT_COUNT:\s*usize\s*=\s*11' -or
+    $styleWindow -notmatch 'HEX_EDIT_COUNT:\s*usize\s*=\s*13' -or
     $styleWindow -notmatch 'sync_hex_edits\(' -or
     $styleWindow -notmatch 'update_color_from_hex_edit\(' -or
     $styleWindow -notmatch 'parse_hex_input\(' -or
@@ -146,8 +147,9 @@ if ($styleWindow -notmatch 'ID_EDIT_BLUR' -or
     $styleWindow -notmatch 'update_blur_from_numeric_edit\(' -or
     $styleWindow -notmatch 'focused_blur_edit' -or
     $styleWindow -notmatch 'blur_edit_frame_rect\(' -or
-    $styleWindow -notmatch 's\.section\s*==\s*Section::Panel') {
-    throw 'Blur intensity must use one inline 0-100 slider and numeric input in the Panel row.'
+    $styleWindow -notmatch 'Section::Panel\s*\|\s*Section::Tooltip' -or
+    $styleWindow -notmatch 'WM_STYLE_TOOLTIP_BLUR_PREVIEW') {
+    throw 'Panel and Tooltip frosted intensity must use the shared inline 0-100 slider and numeric input.'
 }
 if ($styleWindow -notmatch 'editor_layout_snapshot\(' -or
     $styleWindow -notmatch 'release_editor_focus_before_layout\(' -or
@@ -251,6 +253,20 @@ if ($styleProduction -match '(?i)rounded') {
 if ($styleProduction -notmatch 'panel_frosted_strength:\s*u8' -or
     $styleProduction -notmatch 'FROSTED_STRENGTH_MAX:\s*u8\s*=\s*100') {
     throw 'Per-theme 0-100 frosted intensity setting is missing.'
+}
+if ($styleProduction -notmatch 'tooltip_background:\s*Option<String>' -or
+    $styleProduction -notmatch 'tooltip_border:\s*Option<String>' -or
+    $styleProduction -notmatch 'tooltip_frosted_strength:\s*Option<u8>' -or
+    $styleProduction -notmatch 'StyleColorTarget::TooltipBackground' -or
+    $styleProduction -notmatch 'StyleColorTarget::TooltipBorder' -or
+    $styleProduction -notmatch 'unwrap_or\(&self\.panel_background\)' -or
+    $styleProduction -notmatch 'unwrap_or\(&self\.panel_border\)' -or
+    $styleProduction -notmatch 'reset_tooltip_override\(' -or
+    $styleWindow -notmatch '"浮框"' -or
+    $styleWindow -notmatch 'Section::Tooltip' -or
+    $styleWindow -notmatch 'EditorSelection::TooltipBlur' -or
+    $styleWindow -notmatch 'WM_STYLE_TOOLTIP_RESET') {
+    throw 'Tooltip style must inherit Panel by default and expose independent background, border, and frosted controls.'
 }
 if ($native -notmatch 'pub\s+a:\s+u8' -or $native -notmatch 'to_hex_rgba') {
     throw 'Native Color must support an alpha channel and RGBA serialization.'
@@ -602,7 +618,8 @@ if ($styleWindow -notmatch 'fill_rounded_rect' -or
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
     $styleWindow -notmatch 'Section::General => \(28, 68\)' -or
-    $styleWindow -notmatch 'Section::Json => \(416, 456\)') {
+    $styleWindow -notmatch 'Section::Tooltip => \(220, 260\)' -or
+    $styleWindow -notmatch 'Section::Json => \(456, 496\)') {
     throw 'Settings sidebar must remain a compact grouped navigation without the redundant Settings heading.'
 }
 if ($styleWindow -match 'Manage refresh, display, alerts, and application behavior' -or
