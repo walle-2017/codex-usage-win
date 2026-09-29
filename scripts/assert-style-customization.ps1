@@ -111,9 +111,11 @@ if ($styleWindow -notmatch 'HitTarget' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
-if ($styleWindow -match 'WS_SYSMENU' -or
-    $styleWindow -notmatch 'WM_CLOSE\s*=>\s*LRESULT\(0\)') {
-    throw 'Style panel must not expose a title-bar close button; only the lower Close button may close it.'
+if ($styleWindow -notmatch 'WS_SYSMENU' -or
+    $styleWindow -notmatch 'WM_CLOSE\s*=>\s*\{' -or
+    $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
+    throw 'Style panel must expose the native title-bar close button and save before closing.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'ES_NUMBER' -or
