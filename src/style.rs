@@ -42,6 +42,8 @@ impl ThemePreset {
 pub enum StyleColorTarget {
     PanelBackground,
     PanelBorder,
+    TooltipBackground,
+    TooltipBorder,
     QuotaType,
     Remaining,
     ResetTime,
@@ -64,6 +66,12 @@ pub struct ThemeStyle {
     /// Visual Acrylic intensity: 0 = off, 1..=100 = increasingly frosted.
     #[serde(default = "missing_frosted_strength")]
     pub panel_frosted_strength: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip_background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip_border: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip_frosted_strength: Option<u8>,
     pub quota_type: String,
     pub remaining: String,
     pub reset_time: String,
@@ -88,6 +96,9 @@ impl ThemeStyle {
             panel_border: "#343B43FF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
+            tooltip_background: None,
+            tooltip_border: None,
+            tooltip_frosted_strength: None,
             quota_type: "#A0A0A0FF".into(),
             remaining: "#FFFFFFFF".into(),
             reset_time: "#92979DFF".into(),
@@ -106,6 +117,9 @@ impl ThemeStyle {
             panel_border: "#D4D9DFFF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
+            tooltip_background: None,
+            tooltip_border: None,
+            tooltip_frosted_strength: None,
             quota_type: "#404040FF".into(),
             remaining: "#202020FF".into(),
             reset_time: "#666666FF".into(),
@@ -127,6 +141,9 @@ impl ThemeStyle {
                 panel_border: "#294252FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
+                tooltip_background: None,
+                tooltip_border: None,
+                tooltip_frosted_strength: None,
                 quota_type: "#8CA7B8FF".into(),
                 remaining: "#EAF7FFFF".into(),
                 reset_time: "#7192A8FF".into(),
@@ -142,6 +159,9 @@ impl ThemeStyle {
                 panel_border: "#CFDCE4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
+                tooltip_background: None,
+                tooltip_border: None,
+                tooltip_frosted_strength: None,
                 quota_type: "#49616FFF".into(),
                 remaining: "#1F3440FF".into(),
                 reset_time: "#5E7480FF".into(),
@@ -157,6 +177,9 @@ impl ThemeStyle {
                 panel_border: "#2B4038FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
+                tooltip_background: None,
+                tooltip_border: None,
+                tooltip_frosted_strength: None,
                 quota_type: "#9AB3A8FF".into(),
                 remaining: "#F0FAF5FF".into(),
                 reset_time: "#7F9C8FFF".into(),
@@ -172,6 +195,9 @@ impl ThemeStyle {
                 panel_border: "#DED4C4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
+                tooltip_background: None,
+                tooltip_border: None,
+                tooltip_frosted_strength: None,
                 quota_type: "#665A48FF".into(),
                 remaining: "#2E2922FF".into(),
                 reset_time: "#756A59FF".into(),
@@ -187,8 +213,14 @@ impl ThemeStyle {
 
     pub fn apply_preset(&mut self, is_dark: bool, preset: ThemePreset) {
         let frosted_strength = self.panel_frosted_strength;
+        let tooltip_background = self.tooltip_background.clone();
+        let tooltip_border = self.tooltip_border.clone();
+        let tooltip_frosted_strength = self.tooltip_frosted_strength;
         let mut replacement = Self::preset(is_dark, preset);
         replacement.panel_frosted_strength = frosted_strength;
+        replacement.tooltip_background = tooltip_background;
+        replacement.tooltip_border = tooltip_border;
+        replacement.tooltip_frosted_strength = tooltip_frosted_strength;
         *self = replacement;
     }
 
@@ -201,6 +233,15 @@ impl ThemeStyle {
     pub fn normalize(&mut self, fallback: &Self) {
         self.panel_background = normalize_color(&self.panel_background, &fallback.panel_background);
         self.panel_border = normalize_color(&self.panel_border, &fallback.panel_border);
+        if let Some(value) = self.tooltip_background.as_mut() {
+            *value = normalize_color(value, &self.panel_background);
+        }
+        if let Some(value) = self.tooltip_border.as_mut() {
+            *value = normalize_color(value, &self.panel_border);
+        }
+        if let Some(value) = self.tooltip_frosted_strength.as_mut() {
+            *value = (*value).min(FROSTED_STRENGTH_MAX);
+        }
         self.quota_type = normalize_color(&self.quota_type, &fallback.quota_type);
         self.remaining = normalize_color(&self.remaining, &fallback.remaining);
         self.reset_time = normalize_color(&self.reset_time, &fallback.reset_time);
@@ -232,6 +273,8 @@ impl ThemeStyle {
         let value = match target {
             StyleColorTarget::PanelBackground => &self.panel_background,
             StyleColorTarget::PanelBorder => &self.panel_border,
+            StyleColorTarget::TooltipBackground => self.tooltip_background.as_ref().unwrap_or(&self.panel_background),
+            StyleColorTarget::TooltipBorder => self.tooltip_border.as_ref().unwrap_or(&self.panel_border),
             StyleColorTarget::QuotaType => &self.quota_type,
             StyleColorTarget::Remaining => &self.remaining,
             StyleColorTarget::ResetTime => &self.reset_time,
@@ -249,6 +292,14 @@ impl ThemeStyle {
         *match target {
             StyleColorTarget::PanelBackground => &mut self.panel_background,
             StyleColorTarget::PanelBorder => &mut self.panel_border,
+            StyleColorTarget::TooltipBackground => {
+                self.tooltip_background = Some(color.to_hex_rgba());
+                return;
+            }
+            StyleColorTarget::TooltipBorder => {
+                self.tooltip_border = Some(color.to_hex_rgba());
+                return;
+            }
             StyleColorTarget::QuotaType => &mut self.quota_type,
             StyleColorTarget::Remaining => &mut self.remaining,
             StyleColorTarget::ResetTime => &mut self.reset_time,
@@ -259,6 +310,26 @@ impl ThemeStyle {
             StyleColorTarget::ProgressConsumed => &mut self.progress_consumed,
             StyleColorTarget::DragHandle => &mut self.drag_handle,
         } = color.to_hex_rgba();
+    }
+
+    pub fn tooltip_frosted_strength(&self) -> u8 {
+        self.tooltip_frosted_strength.unwrap_or(self.panel_frosted_strength)
+    }
+
+    pub fn set_tooltip_frosted_strength(&mut self, strength: u8) {
+        self.tooltip_frosted_strength = Some(strength.min(FROSTED_STRENGTH_MAX));
+    }
+
+    pub fn tooltip_is_custom(&self) -> bool {
+        self.tooltip_background.is_some()
+            || self.tooltip_border.is_some()
+            || self.tooltip_frosted_strength.is_some()
+    }
+
+    pub fn reset_tooltip_override(&mut self) {
+        self.tooltip_background = None;
+        self.tooltip_border = None;
+        self.tooltip_frosted_strength = None;
     }
 }
 
