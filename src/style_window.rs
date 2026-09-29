@@ -3716,6 +3716,7 @@ unsafe fn paint_navigation(
         Section::General,
         Section::Preset,
         Section::Panel,
+        Section::Tooltip,
         Section::Text,
         Section::Progress,
         Section::Interaction,
