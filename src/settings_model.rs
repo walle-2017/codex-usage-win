@@ -95,13 +95,34 @@ impl EditableThemeStyle {
         if self.tooltip_frosted_strength.is_some_and(|value| value > 100) {
             return Err(format!("{path}.tooltip_frosted_strength: allowed range is 0-100"));
         }
+        let tooltip_custom = self.tooltip_background.is_some()
+            || self.tooltip_border.is_some()
+            || self.tooltip_frosted_strength.is_some();
         Ok(Self {
             panel_background: normalize_hex(&self.panel_background, &format!("{path}.panel_background"))?,
             panel_border: normalize_hex(&self.panel_border, &format!("{path}.panel_border"))?,
             frosted_strength: self.frosted_strength,
-            tooltip_background: self.tooltip_background.as_deref().map(|value| normalize_hex(value, &format!("{path}.tooltip_background"))).transpose()?,
-            tooltip_border: self.tooltip_border.as_deref().map(|value| normalize_hex(value, &format!("{path}.tooltip_border"))).transpose()?,
-            tooltip_frosted_strength: self.tooltip_frosted_strength,
+            tooltip_background: if tooltip_custom {
+                Some(normalize_hex(
+                    self.tooltip_background.as_deref().unwrap_or(&self.panel_background),
+                    &format!("{path}.tooltip_background"),
+                )?)
+            } else {
+                None
+            },
+            tooltip_border: if tooltip_custom {
+                Some(normalize_hex(
+                    self.tooltip_border.as_deref().unwrap_or(&self.panel_border),
+                    &format!("{path}.tooltip_border"),
+                )?)
+            } else {
+                None
+            },
+            tooltip_frosted_strength: if tooltip_custom {
+                Some(self.tooltip_frosted_strength.unwrap_or(self.frosted_strength))
+            } else {
+                None
+            },
             quota_type: normalize_hex(&self.quota_type, &format!("{path}.quota_type"))?,
             remaining: normalize_hex(&self.remaining, &format!("{path}.remaining"))?,
             reset_time: normalize_hex(&self.reset_time, &format!("{path}.reset_time"))?,
