@@ -1493,6 +1493,7 @@ fn is_appearance_section(section: Section) -> bool {
     )
 }
 
+#[allow(clippy::type_complexity)]
 fn editor_layout_snapshot(
 ) -> Option<([SendHwnd; 4], SendHwnd, SendHwnd, Section, bool, bool, bool)> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -5774,6 +5775,7 @@ unsafe fn paint_numeric_edit_frames(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn paint_blur_edit_frame(
     hdc: HDC,
     hwnd: HWND,
