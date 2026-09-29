@@ -2411,39 +2411,90 @@ fn blend_pixel(pixel: u32, color: Color) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+fn point_in_rounded_box(
+    width: i32,
+    height: i32,
+    x: i32,
+    y: i32,
+    inset: i32,
+    radius: i32,
+) -> bool {
+    if x < inset || x >= width - inset || y < inset || y >= height - inset {
+        return false;
+    }
+    let radius = radius.max(1);
+    let left = inset;
+    let top = inset;
+    let right = width - inset - 1;
+    let bottom = height - inset - 1;
+    let cx = if x < left + radius {
+        left + radius
+    } else if x > right - radius {
+        right - radius
+    } else {
+        x
+    };
+    let cy = if y < top + radius {
+        top + radius
+    } else if y > bottom - radius {
+        bottom - radius
+    } else {
+        y
+    };
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= radius * radius
+}
+
 fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
     let outer_inset = sc(1).max(1);
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
+    let outer_radius = sc(8).max(2);
+    let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
     let border = style.color(StyleColorTarget::PanelBorder);
     let fill = style.color(StyleColorTarget::PanelBackground);
     for y in outer_inset..(height - outer_inset).max(outer_inset) {
         for x in outer_inset..(width - outer_inset).max(outer_inset) {
-            let idx = (y * width + x) as usize;
-            let color = if x >= inner_inset
-                && x < width - inner_inset
-                && y >= inner_inset
-                && y < height - inner_inset
-            {
-                fill
+            let outer_inside = !style.panel_rounded
+                || point_in_rounded_box(width, height, x, y, outer_inset, outer_radius);
+            if !outer_inside {
+                continue;
+            }
+            let inner_inside = if style.panel_rounded {
+                point_in_rounded_box(width, height, x, y, inner_inset, inner_radius)
             } else {
-                border
+                x >= inner_inset
+                    && x < width - inner_inset
+                    && y >= inner_inset
+                    && y < height - inner_inset
             };
-            pixels[idx] = blend_pixel(pixels[idx], color);
+            let idx = (y * width + x) as usize;
+            pixels[idx] = blend_pixel(pixels[idx], if inner_inside { fill } else { border });
         }
     }
 }
 
 fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -> Option<Color> {
     let outer_inset = sc(1).max(1);
-    if x < outer_inset
+    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
+    if style.panel_rounded {
+        let outer_radius = sc(8).max(2);
+        if !point_in_rounded_box(width, height, x, y, outer_inset, outer_radius) {
+            return None;
+        }
+        let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
+        if point_in_rounded_box(width, height, x, y, inner_inset, inner_radius) {
+            Some(style.color(StyleColorTarget::PanelBackground))
+        } else {
+            Some(style.color(StyleColorTarget::PanelBorder))
+        }
+    } else if x < outer_inset
         || x >= width - outer_inset
         || y < outer_inset
         || y >= height - outer_inset
     {
-        return None;
-    }
-    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    if x >= inner_inset
+        None
+    } else if x >= inner_inset
         && x < width - inner_inset
         && y >= inner_inset
         && y < height - inner_inset
@@ -2826,7 +2877,7 @@ fn paint_content(
             let _ = DeleteObject(bg_brush);
 
             let border = style.color(StyleColorTarget::PanelBorder).blend_over(*bg);
-            draw_panel(hdc, width, height, &border, &panel_base);
+            draw_panel(hdc, width, height, &border, &panel_base, style.panel_rounded);
         }
 
         draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
@@ -3429,7 +3480,7 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
 }
 
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
-    let (mut background_color, border_color, text_color) = {
+    let (mut background_color, border_color, text_color, tooltip_rounded) = {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             let style = s.styles.active(s.is_dark);
@@ -3437,12 +3488,14 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
                 style.color(StyleColorTarget::TooltipBackground),
                 style.color(StyleColorTarget::TooltipBorder),
                 style.color(StyleColorTarget::ResetTime),
+                style.tooltip_rounded,
             )
         } else {
             (
                 Color::from_hex("#30343CFF"),
                 Color::from_hex("#626A76FF"),
                 Color::from_hex("#F4F6F8FF"),
+                false,
             )
         }
     };
@@ -3481,14 +3534,27 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
     let old_bmp = SelectObject(mem_dc, dib);
     let pixel_data =
         std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
+    let outer_radius = sc(7).max(2);
+    let inner_radius = (outer_radius - 1).max(1);
     for y in 0..height {
         for x in 0..width {
-            let color = if x == 0 || y == 0 || x == width - 1 || y == height - 1 {
-                border_color
+            let idx = (y * width + x) as usize;
+            if tooltip_rounded
+                && !point_in_rounded_box(width, height, x, y, 0, outer_radius)
+            {
+                pixel_data[idx] = 0;
+                continue;
+            }
+            let inner = if tooltip_rounded {
+                point_in_rounded_box(width, height, x, y, 1, inner_radius)
             } else {
-                background_color
+                x > 0 && y > 0 && x < width - 1 && y < height - 1
             };
-            pixel_data[(y * width + x) as usize] = premultiplied_pixel(color);
+            pixel_data[idx] = premultiplied_pixel(if inner {
+                background_color
+            } else {
+                border_color
+            });
         }
     }
 
@@ -6014,9 +6080,14 @@ fn draw_usage_bar(
             right: bar_x + progress_width,
             bottom: bar_y + bar_h,
         };
-        let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
-        FillRect(hdc, &bar_rect, track_brush);
-        let _ = DeleteObject(track_brush);
+        let rounded = current_theme_style().progress_rounded;
+        if rounded {
+            draw_rounded_rect(hdc, &bar_rect, track, (bar_h / 2).max(1));
+        } else {
+            let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
+            FillRect(hdc, &bar_rect, track_brush);
+            let _ = DeleteObject(track_brush);
+        }
 
         let fill_width = (progress_width as f64 * percent_clamped / 100.0).round() as i32;
         if fill_width > 0 {
@@ -6026,9 +6097,18 @@ fn draw_usage_bar(
                 right: bar_x + fill_width,
                 bottom: bar_y + bar_h,
             };
-            let fill_brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-            FillRect(hdc, &fill_rect, fill_brush);
-            let _ = DeleteObject(fill_brush);
+            if rounded {
+                draw_rounded_rect(
+                    hdc,
+                    &fill_rect,
+                    accent,
+                    (bar_h / 2).min((fill_width / 2).max(1)).max(1),
+                );
+            } else {
+                let fill_brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
+                FillRect(hdc, &fill_rect, fill_brush);
+                let _ = DeleteObject(fill_brush);
+            }
         }
 
         let text_x = bar_x + progress_width + sc(metrics.bar_percent_gap);
@@ -6139,7 +6219,14 @@ fn draw_usage_value_text(
     }
 }
 
-fn draw_panel(hdc: HDC, width: i32, height: i32, border: &Color, fill: &Color) {
+fn draw_panel(
+    hdc: HDC,
+    width: i32,
+    height: i32,
+    border: &Color,
+    fill: &Color,
+    rounded: bool,
+) {
     let outer_inset = sc(1).max(1);
     let outer = RECT {
         left: outer_inset,
@@ -6155,13 +6242,24 @@ fn draw_panel(hdc: HDC, width: i32, height: i32, border: &Color, fill: &Color) {
         bottom: height - inner_inset,
     };
     unsafe {
-        let border_brush = CreateSolidBrush(COLORREF(border.to_colorref()));
-        FillRect(hdc, &outer, border_brush);
-        let _ = DeleteObject(border_brush);
+        if rounded {
+            let radius = sc(8).max(2);
+            draw_rounded_rect(hdc, &outer, border, radius);
+            draw_rounded_rect(
+                hdc,
+                &inner,
+                fill,
+                (radius - PANEL_BORDER_WIDTH_PX).max(1),
+            );
+        } else {
+            let border_brush = CreateSolidBrush(COLORREF(border.to_colorref()));
+            FillRect(hdc, &outer, border_brush);
+            let _ = DeleteObject(border_brush);
 
-        let fill_brush = CreateSolidBrush(COLORREF(fill.to_colorref()));
-        FillRect(hdc, &inner, fill_brush);
-        let _ = DeleteObject(fill_brush);
+            let fill_brush = CreateSolidBrush(COLORREF(fill.to_colorref()));
+            FillRect(hdc, &inner, fill_brush);
+            let _ = DeleteObject(fill_brush);
+        }
     }
 }
 
