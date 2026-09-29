@@ -4950,30 +4950,6 @@ unsafe extern "system" fn wnd_proc(
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
-        _ if msg == style_window::WM_STYLE_RESET_CURRENT => {
-            {
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    s.styles.reset_active(s.is_dark);
-                }
-            }
-            save_state_settings();
-            render_layered();
-            style_window::sync(style_settings_snapshot());
-            LRESULT(0)
-        }
-        _ if msg == style_window::WM_STYLE_TOOLTIP_RESET => {
-            {
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    s.styles.active_mut(s.is_dark).reset_tooltip_override();
-                }
-            }
-            save_state_settings();
-            hide_minimal_usage_tooltip();
-            style_window::sync(style_settings_snapshot());
-            LRESULT(0)
-        }
         _ if msg == style_window::WM_STYLE_PRESET_CHANGE => {
             let Some(preset) = ThemePreset::from_index(wparam.0) else {
                 return LRESULT(0);
@@ -4984,6 +4960,7 @@ unsafe extern "system" fn wnd_proc(
                     s.styles.active_mut(s.is_dark).apply_preset(s.is_dark, preset);
                 }
             }
+            hide_minimal_usage_tooltip();
             save_state_settings();
             render_layered();
             style_window::sync(style_settings_snapshot());
