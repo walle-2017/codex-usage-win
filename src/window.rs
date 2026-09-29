@@ -3365,6 +3365,126 @@ unsafe extern "system" fn on_tray_location_changed(
     }
 }
 
+unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32) {
+    let (mut background_color, border_color, text_color) = {
+        let state = lock_state();
+        if let Some(s) = state.as_ref() {
+            let style = s.styles.active(s.is_dark);
+            (
+                style.color(StyleColorTarget::PanelBackground),
+                style.color(StyleColorTarget::PanelBorder),
+                style.color(StyleColorTarget::ResetTime),
+            )
+        } else {
+            (
+                Color::from_hex("#30343CFF"),
+                Color::from_hex("#626A76FF"),
+                Color::from_hex("#F4F6F8FF"),
+            )
+        }
+    };
+    background_color.a = background_color.a.max(200);
+
+    let text = MINIMAL_TOOLTIP_TEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    let screen_dc = GetDC(hwnd);
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mem_dc = CreateCompatibleDC(screen_dc);
+    let dib =
+        CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
+    if dib.is_invalid() || bits.is_null() {
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(hwnd, screen_dc);
+        return;
+    }
+
+    let old_bmp = SelectObject(mem_dc, dib);
+    let pixel_data =
+        std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let color = if x == 0 || y == 0 || x == width - 1 || y == height - 1 {
+                border_color
+            } else {
+                background_color
+            };
+            pixel_data[(y * width + x) as usize] = premultiplied_pixel(color);
+        }
+    }
+
+    let text_margin = sc(8);
+    let text_rect = RECT {
+        left: text_margin,
+        top: 0,
+        right: (width - text_margin).max(text_margin),
+        bottom: height,
+    };
+    if let Some(mask) = native_interop::directwrite_text_mask(
+        &text,
+        fonts::face(fonts::FontRole::Ui, None),
+        12.0 * CURRENT_DPI.load(Ordering::Relaxed) as f32 / 96.0,
+        FW_NORMAL.0 as i32,
+        text_rect.right - text_rect.left,
+        text_rect.bottom - text_rect.top,
+    ) {
+        let mask_width = text_rect.right - text_rect.left;
+        let mask_height = text_rect.bottom - text_rect.top;
+        for mask_y in 0..mask_height {
+            for mask_x in 0..mask_width {
+                let coverage = mask[(mask_y * mask_width + mask_x) as usize];
+                if coverage == 0 {
+                    continue;
+                }
+                let x = text_rect.left + mask_x;
+                let y = text_rect.top + mask_y;
+                let idx = (y * width + x) as usize;
+                pixel_data[idx] =
+                    composite_premultiplied_text(pixel_data[idx], text_color, coverage);
+            }
+        }
+    }
+
+    let pt_src = POINT { x: 0, y: 0 };
+    let size = SIZE { cx: width, cy: height };
+    let blend = BLENDFUNCTION {
+        BlendOp: 0,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: 1,
+    };
+    let _ = UpdateLayeredWindow(
+        hwnd,
+        screen_dc,
+        None,
+        Some(&size),
+        mem_dc,
+        Some(&pt_src),
+        COLORREF(0),
+        Some(&blend),
+        ULW_ALPHA,
+    );
+
+    let _ = SelectObject(mem_dc, old_bmp);
+    let _ = DeleteObject(dib);
+    let _ = DeleteDC(mem_dc);
+    ReleaseDC(hwnd, screen_dc);
+}
+
 unsafe extern "system" fn minimal_tooltip_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -3376,73 +3496,7 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut client = RECT::default();
-            let _ = GetClientRect(hwnd, &mut client);
-
-            let (background_color, border_color, text_color) = {
-                let state = lock_state();
-                if let Some(s) = state.as_ref() {
-                    let style = s.styles.active(s.is_dark);
-                    (
-                        style.color(StyleColorTarget::PanelBackground),
-                        style.color(StyleColorTarget::PanelBorder),
-                        style.color(StyleColorTarget::ResetTime),
-                    )
-                } else {
-                    (
-                        Color::from_hex("#30343CFF"),
-                        Color::from_hex("#626A76FF"),
-                        Color::from_hex("#F4F6F8FF"),
-                    )
-                }
-            };
-
-            let background = CreateSolidBrush(COLORREF(background_color.to_colorref()));
-            let border = CreateSolidBrush(COLORREF(border_color.to_colorref()));
-            FillRect(hdc, &client, background);
-            FrameRect(hdc, &client, border);
-            let _ = DeleteObject(background);
-            let _ = DeleteObject(border);
-
-            let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
-            let font = CreateFontW(
-                sc(-12),
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET.0 as u32,
-                OUT_TT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32,
-                CLEARTYPE_QUALITY.0 as u32,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                PCWSTR::from_raw(font_name.as_ptr()),
-            );
-            let old_font = SelectObject(hdc, font);
-            let _ = SetBkMode(hdc, TRANSPARENT);
-            let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
-
-            let text = MINIMAL_TOOLTIP_TEXT
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let mut text_rect = client;
-            text_rect.left += sc(8);
-            text_rect.right -= sc(8);
-            let _ = DrawTextW(
-                hdc,
-                &mut wide,
-                &mut text_rect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-
-            let _ = SelectObject(hdc, old_font);
-            let _ = DeleteObject(font);
+            let _ = BeginPaint(hwnd, &mut ps);
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -3482,7 +3536,7 @@ fn minimal_tooltip_hwnd() -> Option<HWND> {
         let class_name = native_interop::wide_str(MINIMAL_TOOLTIP_CLASS);
         let title = native_interop::wide_str("");
         let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_POPUP,
@@ -3625,8 +3679,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
-        let _ = InvalidateRect(tooltip, None, false);
-        let _ = UpdateWindow(tooltip);
+        render_minimal_tooltip_layered(tooltip, width, height);
     }
 }
 
