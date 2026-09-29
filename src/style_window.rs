@@ -779,10 +779,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
-    unsafe {
-        let _ = InvalidateRect(hwnd, None, false);
-        let _ = UpdateWindow(hwnd);
-    }
+    redraw_settings_window(hwnd);
 }
 
 fn apply_fixed_titlebar(hwnd: HWND) {
@@ -4669,7 +4666,7 @@ unsafe fn paint_general_page(
         }
         let first = language_option_rect(hwnd, 0);
         let last = language_option_rect(hwnd, language_option_count() - 1);
-        draw_outline_rect(
+        draw_rounded_outline_rect(
             hdc,
             RECT {
                 left: first.left,
@@ -4678,6 +4675,8 @@ unsafe fn paint_general_page(
                 bottom: last.bottom,
             },
             accent,
+            scale(hwnd, 7),
+            1,
         );
     }
 }
@@ -5094,7 +5093,7 @@ unsafe fn paint_appearance_page(
         match row {
             EditorSelection::Color(target) => {
                 let color = snapshot.active_style.color(target);
-                fill(
+                fill_rounded_rect(
                     hdc,
                     RECT {
                         left: r.right - scale(hwnd, 202),
@@ -5103,6 +5102,7 @@ unsafe fn paint_appearance_page(
                         bottom: r.bottom - scale(hwnd, 10),
                     },
                     color,
+                    scale(hwnd, 4),
                 );
             }
             EditorSelection::Blur | EditorSelection::TooltipBlur => {
