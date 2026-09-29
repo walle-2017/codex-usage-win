@@ -267,6 +267,22 @@ impl ThemeStyle {
                 self.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
         }
         self.panel_blur_radius = 0;
+
+        if self.tooltip_background.is_some()
+            || self.tooltip_border.is_some()
+            || self.tooltip_frosted_strength.is_some()
+        {
+            self.ensure_tooltip_override();
+            if let Some(value) = self.tooltip_background.as_mut() {
+                *value = normalize_color(value, &self.panel_background);
+            }
+            if let Some(value) = self.tooltip_border.as_mut() {
+                *value = normalize_color(value, &self.panel_border);
+            }
+            if let Some(value) = self.tooltip_frosted_strength.as_mut() {
+                *value = (*value).min(FROSTED_STRENGTH_MAX);
+            }
+        }
     }
 
     pub fn color(&self, target: StyleColorTarget) -> Color {
