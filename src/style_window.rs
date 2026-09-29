@@ -1314,35 +1314,52 @@ fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
     }
 }
 
-fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
-    let edit = {
+fn json_scroll_line_metrics() -> Option<(HWND, i32, i32, i32)> {
+    let (edit, json_font) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref()?.json_edit.to_hwnd()
-    };
-    let mut info = SCROLLINFO {
-        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-        ..Default::default()
+        let s = state.as_ref()?;
+        (s.json_edit.to_hwnd(), s.json_font)
     };
     unsafe {
-        if GetScrollInfo(edit, SB_VERT, &mut info).is_err() {
+        let total_lines = SendMessageW(edit, EM_GETLINECOUNT_MSG, WPARAM(0), LPARAM(0)).0 as i32;
+        let first_visible =
+            SendMessageW(edit, EM_GETFIRSTVISIBLELINE_MSG, WPARAM(0), LPARAM(0)).0 as i32;
+        let mut client = RECT::default();
+        let _ = GetClientRect(edit, &mut client);
+        let hdc = GetDC(edit);
+        if hdc.0.is_null() {
             return None;
         }
+        let old_font = if json_font != 0 {
+            Some(SelectObject(hdc, HGDIOBJ(json_font as *mut _)))
+        } else {
+            None
+        };
+        let mut metrics = TEXTMETRICW::default();
+        let _ = GetTextMetricsW(hdc, &mut metrics);
+        if let Some(old_font) = old_font {
+            SelectObject(hdc, old_font);
+        }
+        let _ = ReleaseDC(edit, hdc);
+        let line_height = metrics.tmHeight.max(1);
+        let visible_lines = ((client.bottom - client.top).max(1) / line_height).max(1);
+        Some((edit, total_lines.max(1), visible_lines, first_visible.max(0)))
     }
-    let total = (info.nMax - info.nMin + 1).max(1) as i64;
-    let page = i64::from(info.nPage.max(1));
-    if page >= total {
+}
+
+fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
+    let (_, total_lines, visible_lines, first_visible) = json_scroll_line_metrics()?;
+    if visible_lines >= total_lines {
         return None;
     }
     let track = json_scrollbar_track_rect(hwnd);
     let track_h = (track.bottom - track.top).max(1);
-    let thumb_h = ((i64::from(track_h) * page / total) as i32)
+    let thumb_h = (track_h * visible_lines / total_lines)
         .max(scale(hwnd, 28))
         .min(track_h);
-    let max_pos = (info.nMax - info.nPage as i32 + 1).max(info.nMin);
-    let pos_range = (max_pos - info.nMin).max(1);
+    let max_first = (total_lines - visible_lines).max(1);
     let available = (track_h - thumb_h).max(0);
-    let offset = available * (info.nPos - info.nMin).clamp(0, pos_range) / pos_range;
+    let offset = available * first_visible.clamp(0, max_first) / max_first;
     Some(RECT {
         left: track.left + scale(hwnd, 1),
         top: track.top + offset,
@@ -1362,32 +1379,29 @@ fn json_scroll_thumb_hit_rect(hwnd: HWND) -> Option<RECT> {
 }
 
 fn update_json_scroll_drag(hwnd: HWND, y: i32) {
-    let (edit, drag_offset) = {
+    let drag_offset = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else { return; };
-        (s.json_edit.to_hwnd(), s.json_scroll_drag_offset)
+        s.json_scroll_drag_offset
+    };
+    let Some((edit, total_lines, visible_lines, first_visible)) = json_scroll_line_metrics() else {
+        return;
     };
     let Some(thumb) = json_scroll_thumb_rect(hwnd) else { return; };
     let track = json_scrollbar_track_rect(hwnd);
     let thumb_h = thumb.bottom - thumb.top;
     let available = (track.bottom - track.top - thumb_h).max(1);
     let top = (y - drag_offset).clamp(track.top, track.bottom - thumb_h);
-
-    let mut info = SCROLLINFO {
-        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-        ..Default::default()
-    };
-    unsafe {
-        if GetScrollInfo(edit, SB_VERT, &mut info).is_err() {
-            return;
+    let max_first = (total_lines - visible_lines).max(1);
+    let target_first =
+        ((top - track.top) * max_first + available / 2) / available;
+    let delta = target_first - first_visible;
+    if delta != 0 {
+        unsafe {
+            let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
         }
-        let max_pos = (info.nMax - info.nPage as i32 + 1).max(info.nMin);
-        let pos_range = (max_pos - info.nMin).max(1);
-        let pos = info.nMin + (top - track.top) * pos_range / available;
-        let packed = (SB_THUMBTRACK.0 as usize & 0xFFFF)
-            | (((pos as usize) & 0xFFFF) << 16);
-        let _ = SendMessageW(edit, WM_VSCROLL, WPARAM(packed), LPARAM(0));
+    }
+    unsafe {
         let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
     }
 }
@@ -2210,14 +2224,22 @@ fn update_json_validation_status(_mark_dirty: bool) {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
             s.json_dirty = dirty;
-            if let Err(error) = parsed {
-                let detail = friendly_json_error(&error, language);
-                s.json_status = if language == LanguageId::SimplifiedChinese {
-                    format!("× 配置存在错误\n{detail}")
-                } else {
-                    format!("× Configuration has errors\n{detail}")
-                };
-                s.json_status_path = None;
+            match parsed {
+                Err(error) => {
+                    let detail = friendly_json_error(&error, language);
+                    s.json_status = if language == LanguageId::SimplifiedChinese {
+                        format!("× 配置存在错误\n{detail}")
+                    } else {
+                        format!("× Configuration has errors\n{detail}")
+                    };
+                    s.json_status_path = None;
+                }
+                Ok(_) => {
+                    if s.json_status.starts_with('×') {
+                        s.json_status.clear();
+                        s.json_status_path = None;
+                    }
+                }
             }
         }
     }
@@ -3635,6 +3657,7 @@ unsafe extern "system" fn wnd_proc(
                             .iter()
                             .any(|edit| edit.to_hwnd() == cursor_hwnd)
                             || s.blur_edit.to_hwnd() == cursor_hwnd
+                            || s.corner_edit.to_hwnd() == cursor_hwnd
                             || s.hex_edits.iter().any(|edit| edit.to_hwnd() == cursor_hwnd)
                     }
                     None => false,
@@ -3966,6 +3989,38 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
+            if control_id == ID_EDIT_CORNER {
+                match notification {
+                    EN_CHANGE_CODE => {
+                        update_corner_from_numeric_edit();
+                        return LRESULT(0);
+                    }
+                    EN_SETFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.focused_corner_edit = true;
+                            }
+                        }
+                        select_editor(EditorSelection::CornerRadius);
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    EN_KILLFOCUS_CODE => {
+                        {
+                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = state.as_mut() {
+                                s.focused_corner_edit = false;
+                            }
+                        }
+                        sync_corner_edit();
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+                    _ => {}
+                }
+            }
+
             if control_id == ID_EDIT_BLUR {
                 match notification {
                     EN_CHANGE_CODE => {
@@ -3979,7 +4034,20 @@ unsafe extern "system" fn wnd_proc(
                                 s.focused_blur_edit = true;
                             }
                         }
-                        select_editor(EditorSelection::Blur);
+                        let editor = {
+                            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                            state
+                                .as_ref()
+                                .map(|s| {
+                                    if s.section == Section::Tooltip {
+                                        EditorSelection::TooltipBlur
+                                    } else {
+                                        EditorSelection::Blur
+                                    }
+                                })
+                                .unwrap_or(EditorSelection::Blur)
+                        };
+                        select_editor(editor);
                         let _ = InvalidateRect(hwnd, None, false);
                         return LRESULT(0);
                     }
