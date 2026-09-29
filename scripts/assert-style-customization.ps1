@@ -261,12 +261,26 @@ if ($styleProduction -notmatch 'tooltip_background:\s*Option<String>' -or
     $styleProduction -notmatch 'StyleColorTarget::TooltipBorder' -or
     $styleProduction -notmatch 'unwrap_or\(&self\.panel_background\)' -or
     $styleProduction -notmatch 'unwrap_or\(&self\.panel_border\)' -or
-    $styleProduction -notmatch 'reset_tooltip_override\(' -or
     $styleWindow -notmatch '"浮框"' -or
     $styleWindow -notmatch 'Section::Tooltip' -or
-    $styleWindow -notmatch 'EditorSelection::TooltipBlur' -or
-    $styleWindow -notmatch 'WM_STYLE_TOOLTIP_RESET') {
-    throw 'Tooltip style must inherit Panel by default and expose independent background, border, and frosted controls.'
+    $styleWindow -notmatch 'EditorSelection::TooltipBlur') {
+    throw 'Tooltip style must expose independent background, border, and frosted controls.'
+}
+if ($styleWindow -match '恢复继承面板样式' -or
+    $styleWindow -match 'Inherit panel style' -or
+    $styleWindow -match '恢复当前主题默认' -or
+    $styleWindow -match 'Reset current theme' -or
+    $styleWindow -match 'WM_STYLE_TOOLTIP_RESET' -or
+    $styleWindow -match 'WM_STYLE_RESET_CURRENT') {
+    throw 'Appearance pages must not expose reset buttons; presets are the single restore path.'
+}
+if ($styleProduction -notmatch 'tooltip_background:\s*Some\(' -or
+    $styleProduction -notmatch 'tooltip_border:\s*Some\(' -or
+    $styleProduction -notmatch 'tooltip_frosted_strength:\s*Some\(0\)' -or
+    $styleProduction -notmatch '\*self\s*=\s*Self::preset\(is_dark, preset\)' -or
+    $styleWindow -notmatch 'StyleColorTarget::TooltipBackground' -or
+    $styleWindow -notmatch 'StyleColorTarget::TooltipBorder') {
+    throw 'Built-in appearance presets must include and preview tooltip styling and restore the complete appearance.'
 }
 if ($native -notmatch 'pub\s+a:\s+u8' -or $native -notmatch 'to_hex_rgba') {
     throw 'Native Color must support an alpha channel and RGBA serialization.'
@@ -670,10 +684,17 @@ if ($styleWindow -match 'Manage refresh, display, alerts, and application behavi
 }
 if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
     $styleWindow -notmatch 'SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30' -or
-    $styleWindow -notmatch 'SETTINGS_FOOTER_GAP: i32 = 12' -or
-    $styleWindow -notmatch 'close_rect\(hwnd\)\.top - scale\(hwnd, SETTINGS_FOOTER_GAP\)' -or
+    $styleWindow -notmatch 'client\.bottom - scale\(hwnd, 24\)' -or
     $styleWindow -notmatch 'editor\.bottom = editor\.bottom\.min\(safe_bottom\)') {
-    throw 'Appearance editors must reserve a bottom safety gap above the Close button and use compact shared channel spacing.'
+    throw 'Appearance editors must keep compact shared channel spacing and a bottom safety margin.'
+}
+if ($styleWindow -notmatch 'fn close_rect\(hwnd: HWND\)' -or
+    $styleWindow -notmatch 'top: scale\(hwnd, 10\)' -or
+    $styleWindow -notmatch 'draw_text\(hdc, "×", close' -or
+    $styleWindow -notmatch '#E81123FF' -or
+    $styleWindow -notmatch '#C50F1FFF' -or
+    $styleWindow -notmatch 'hovered == Some\(HitTarget::Close\)') {
+    throw 'Settings must use a top-right X close button with red hover/pressed background.'
 }
 if ($styleWindow -notmatch 'rect\(hwnd, 778, 324, 928, 352\)' -or
     $styleWindow -notmatch 'blur_suffix_rect' -or
