@@ -2449,18 +2449,19 @@ fn point_in_rounded_box(
 fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
     let outer_inset = sc(1).max(1);
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    let outer_radius = sc(8).max(2);
+    let outer_radius = sc(i32::from(style.panel_corner_radius))
+        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
     let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
     let border = style.color(StyleColorTarget::PanelBorder);
     let fill = style.color(StyleColorTarget::PanelBackground);
     for y in outer_inset..(height - outer_inset).max(outer_inset) {
         for x in outer_inset..(width - outer_inset).max(outer_inset) {
-            let outer_inside = !style.panel_rounded
+            let outer_inside = outer_radius == 0
                 || point_in_rounded_box(width, height, x, y, outer_inset, outer_radius);
             if !outer_inside {
                 continue;
             }
-            let inner_inside = if style.panel_rounded {
+            let inner_inside = if outer_radius > 0 {
                 point_in_rounded_box(width, height, x, y, inner_inset, inner_radius)
             } else {
                 x >= inner_inset
@@ -2477,8 +2478,9 @@ fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &Theme
 fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -> Option<Color> {
     let outer_inset = sc(1).max(1);
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    if style.panel_rounded {
-        let outer_radius = sc(8).max(2);
+    let outer_radius = sc(i32::from(style.panel_corner_radius))
+        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
+    if outer_radius > 0 {
         if !point_in_rounded_box(width, height, x, y, outer_inset, outer_radius) {
             return None;
         }
@@ -2877,7 +2879,14 @@ fn paint_content(
             let _ = DeleteObject(bg_brush);
 
             let border = style.color(StyleColorTarget::PanelBorder).blend_over(*bg);
-            draw_panel(hdc, width, height, &border, &panel_base, style.panel_rounded);
+            draw_panel(
+                hdc,
+                width,
+                height,
+                &border,
+                &panel_base,
+                style.panel_corner_radius,
+            );
         }
 
         draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
@@ -3480,7 +3489,7 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
 }
 
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
-    let (mut background_color, border_color, text_color, tooltip_rounded) = {
+    let (mut background_color, border_color, text_color, tooltip_corner_radius) = {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             let style = s.styles.active(s.is_dark);
@@ -3488,14 +3497,14 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
                 style.color(StyleColorTarget::TooltipBackground),
                 style.color(StyleColorTarget::TooltipBorder),
                 style.color(StyleColorTarget::ResetTime),
-                style.tooltip_rounded,
+                style.tooltip_corner_radius,
             )
         } else {
             (
                 Color::from_hex("#30343CFF"),
                 Color::from_hex("#626A76FF"),
                 Color::from_hex("#F4F6F8FF"),
-                false,
+                0,
             )
         }
     };
@@ -3534,18 +3543,19 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
     let old_bmp = SelectObject(mem_dc, dib);
     let pixel_data =
         std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
-    let outer_radius = sc(7).max(2);
+    let outer_radius = sc(i32::from(tooltip_corner_radius))
+        .min((width.min(height) / 2).max(0));
     let inner_radius = (outer_radius - 1).max(1);
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            if tooltip_rounded
+            if outer_radius > 0
                 && !point_in_rounded_box(width, height, x, y, 0, outer_radius)
             {
                 pixel_data[idx] = 0;
                 continue;
             }
-            let inner = if tooltip_rounded {
+            let inner = if outer_radius > 0 {
                 point_in_rounded_box(width, height, x, y, 1, inner_radius)
             } else {
                 x > 0 && y > 0 && x < width - 1 && y < height - 1
@@ -3745,6 +3755,38 @@ fn hide_minimal_usage_tooltip() {
     hide_tooltip_blur_backdrop();
 }
 
+unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
+    let hdc = GetDC(HWND::default());
+    if hdc.0.is_null() {
+        return sc(48);
+    }
+    let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
+    let font = CreateFontW(
+        -sc(12),
+        0,
+        0,
+        0,
+        FW_NORMAL.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+        PCWSTR::from_raw(font_name.as_ptr()),
+    );
+    let old_font = SelectObject(hdc, font);
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let mut size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+    SelectObject(hdc, old_font);
+    let _ = DeleteObject(font);
+    let _ = ReleaseDC(HWND::default(), hdc);
+    (size.cx + sc(16)).max(sc(48))
+}
+
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(text) = minimal_hover_text(target) else {
         hide_minimal_usage_tooltip();
@@ -3753,6 +3795,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(tooltip) = minimal_tooltip_hwnd() else {
         return;
     };
+    let measured_width = unsafe { measure_minimal_tooltip_width(&text) };
 
     {
         let mut tooltip_text = MINIMAL_TOOLTIP_TEXT
@@ -3762,7 +3805,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     }
 
     unsafe {
-        let width = sc(112);
+        let mut width = measured_width;
         let height = sc(28);
         let gap = sc(10);
         let margin = sc(4);
@@ -3786,6 +3829,9 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
                 bottom: cursor.y + height,
             }
         };
+        let max_tooltip_width =
+            (monitor_rect.right - monitor_rect.left - margin * 2).max(sc(48));
+        width = width.min(max_tooltip_width);
 
         let mut x = cursor.x + gap;
         let mut y = cursor.y - height - gap;
@@ -4961,15 +5007,15 @@ unsafe extern "system" fn wnd_proc(
         }
         _ if msg == style_window::WM_STYLE_CORNER_PREVIEW => {
             let section_code = wparam.0 & 0xFF;
-            let rounded = (wparam.0 & 0x100) != 0;
+            let radius = ((wparam.0 >> 8) & 0xFF) as u8;
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
                     let style = s.styles.active_mut(s.is_dark);
                     match section_code {
-                        0 => style.panel_rounded = rounded,
-                        1 => style.tooltip_rounded = rounded,
-                        2 => style.progress_rounded = rounded,
+                        0 => style.panel_corner_radius = radius,
+                        1 => style.tooltip_corner_radius = radius,
+                        2 => style.progress_corner_radius = radius,
                         _ => return LRESULT(0),
                     }
                 }
@@ -6099,9 +6145,11 @@ fn draw_usage_bar(
             right: bar_x + progress_width,
             bottom: bar_y + bar_h,
         };
-        let rounded = current_theme_style().progress_rounded;
-        if rounded {
-            draw_rounded_rect(hdc, &bar_rect, track, (bar_h / 2).max(1));
+        let requested_radius =
+            sc(i32::from(current_theme_style().progress_corner_radius));
+        let radius = requested_radius.min(bar_h / 2).max(0);
+        if radius > 0 {
+            draw_rounded_rect(hdc, &bar_rect, track, radius);
         } else {
             let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
             FillRect(hdc, &bar_rect, track_brush);
@@ -6116,12 +6164,12 @@ fn draw_usage_bar(
                 right: bar_x + fill_width,
                 bottom: bar_y + bar_h,
             };
-            if rounded {
+            if radius > 0 {
                 draw_rounded_rect(
                     hdc,
                     &fill_rect,
                     accent,
-                    (bar_h / 2).min((fill_width / 2).max(1)).max(1),
+                    radius.min((fill_width / 2).max(1)),
                 );
             } else {
                 let fill_brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
@@ -6244,7 +6292,7 @@ fn draw_panel(
     height: i32,
     border: &Color,
     fill: &Color,
-    rounded: bool,
+    corner_radius: u8,
 ) {
     let outer_inset = sc(1).max(1);
     let outer = RECT {
@@ -6261,8 +6309,9 @@ fn draw_panel(
         bottom: height - inner_inset,
     };
     unsafe {
-        if rounded {
-            let radius = sc(8).max(2);
+        let radius = sc(i32::from(corner_radius))
+            .min(((outer.right - outer.left).min(outer.bottom - outer.top) / 2).max(0));
+        if radius > 0 {
             draw_rounded_rect(hdc, &outer, border, radius);
             draw_rounded_rect(
                 hdc,
