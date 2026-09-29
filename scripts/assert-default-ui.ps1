@@ -179,15 +179,18 @@ if ($windowProduction -notmatch 'GetCursorPos\(&mut cursor\)' -or
 }
 
 if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)' -or
-    $windowProduction -notmatch 'StyleColorTarget::PanelBackground' -or
-    $windowProduction -notmatch 'StyleColorTarget::PanelBorder' -or
+    $windowProduction -notmatch 'StyleColorTarget::TooltipBackground' -or
+    $windowProduction -notmatch 'StyleColorTarget::TooltipBorder' -or
     $windowProduction -notmatch 'StyleColorTarget::ResetTime' -or
-    $windowProduction -notmatch 'background_color\.a\s*=\s*background_color\.a\.max\(200\)' -or
     $windowProduction -notmatch 'premultiplied_pixel\(color\)' -or
     $windowProduction -notmatch 'composite_premultiplied_text' -or
     $windowProduction -notmatch 'WS_EX_LAYERED' -or
-    $windowProduction -notmatch 'UpdateLayeredWindow\(') {
-    throw 'Reset hover tooltip must preserve component RGBA, clamp background alpha to 200+, and render with per-pixel alpha.'
+    $windowProduction -notmatch 'UpdateLayeredWindow\(' -or
+    $windowProduction -notmatch 'tooltip_frosted_strength\(\)') {
+    throw 'Reset hover tooltip must render independent tooltip RGBA/frosted style with per-pixel alpha.'
+}
+if ($windowProduction -match 'background_color\.a\s*=\s*background_color\.a\.max\(200\)') {
+    throw 'Independent tooltip background alpha must not have a forced minimum.'
 }
 
 Write-Host 'PASS: default/minimal layout and square themed taskbar UI contract is satisfied.'
