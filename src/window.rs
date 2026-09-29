@@ -3380,8 +3380,26 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
 
-            let background = CreateSolidBrush(COLORREF(Color::from_hex("#30343CFF").to_colorref()));
-            let border = CreateSolidBrush(COLORREF(Color::from_hex("#626A76FF").to_colorref()));
+            let is_dark = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.is_dark).unwrap_or(true)
+            };
+            let (background_color, border_color, text_color) = if is_dark {
+                (
+                    Color::from_hex("#30343CFF"),
+                    Color::from_hex("#626A76FF"),
+                    Color::from_hex("#F4F6F8FF"),
+                )
+            } else {
+                (
+                    Color::from_hex("#F7F8FAFF"),
+                    Color::from_hex("#B8BEC8FF"),
+                    Color::from_hex("#20242AFF"),
+                )
+            };
+
+            let background = CreateSolidBrush(COLORREF(background_color.to_colorref()));
+            let border = CreateSolidBrush(COLORREF(border_color.to_colorref()));
             FillRect(hdc, &client, background);
             FrameRect(hdc, &client, border);
             let _ = DeleteObject(background);
@@ -3406,7 +3424,7 @@ unsafe extern "system" fn minimal_tooltip_wnd_proc(
             );
             let old_font = SelectObject(hdc, font);
             let _ = SetBkMode(hdc, TRANSPARENT);
-            let _ = SetTextColor(hdc, COLORREF(Color::from_hex("#F4F6F8FF").to_colorref()));
+            let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
 
             let text = MINIMAL_TOOLTIP_TEXT
                 .lock()
