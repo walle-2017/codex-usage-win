@@ -321,10 +321,10 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 
         let title = native_interop::wide_str("Codex Usage Win");
         let hwnd = match CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WINDOW_EX_STYLE(0),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MAXIMIZEBOX,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_THICKFRAME,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
@@ -1070,16 +1070,29 @@ fn json_edit_rect(hwnd: HWND) -> RECT {
 }
 
 fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
+    let edit = json_edit_rect(hwnd);
+    let button_width = scale(hwnd, 108);
+    let button_gap = scale(hwnd, 12);
     match action {
         JsonAction::Reload => rect(hwnd, 200, 58, 306, 94),
         JsonAction::Format => rect(hwnd, 318, 58, 424, 94),
-        JsonAction::Import => rect(hwnd, 700, 58, 808, 94),
-        JsonAction::Export => rect(hwnd, 818, 58, 926, 94),
+        JsonAction::Export => RECT {
+            left: edit.right - button_width,
+            top: scale(hwnd, 58),
+            right: edit.right,
+            bottom: scale(hwnd, 94),
+        },
+        JsonAction::Import => RECT {
+            left: edit.right - button_width * 2 - button_gap,
+            top: scale(hwnd, 58),
+            right: edit.right - button_width - button_gap,
+            bottom: scale(hwnd, 94),
+        },
         JsonAction::Apply => {
             let mut client = RECT::default();
             unsafe { let _ = GetClientRect(hwnd, &mut client); }
-            let right = client.right - scale(hwnd, 24);
-            let width = scale(hwnd, 108);
+            let right = edit.right;
+            let width = button_width;
             let height = scale(hwnd, 36);
             let bottom = client.bottom - scale(hwnd, 24);
             RECT {
