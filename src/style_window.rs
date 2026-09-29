@@ -42,6 +42,7 @@ pub const WM_SETTINGS_STARTUP_CHANGE: u32 = WM_APP + 130;
 pub const WM_SETTINGS_LANGUAGE_CHANGE: u32 = WM_APP + 131;
 pub const WM_SETTINGS_JSON_APPLY: u32 = WM_APP + 132;
 pub const WM_STYLE_TOOLTIP_BLUR_PREVIEW: u32 = WM_APP + 133;
+pub const WM_STYLE_CORNER_PREVIEW: u32 = WM_APP + 134;
 
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const WINDOW_WIDTH: i32 = 980;
@@ -168,6 +169,12 @@ enum JsonAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingDiscardAction {
+    SwitchSection(Section),
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitTarget {
     Theme(ThemeMode),
     Layout(AppearancePreset),
@@ -181,6 +188,9 @@ enum HitTarget {
     Startup,
     Json(JsonAction),
     JsonStatusPath,
+    CornerShape(bool),
+    DiscardChanges,
+    KeepEditing,
     LanguageToggle,
     LanguageOption(usize),
 }
@@ -227,6 +237,7 @@ struct PanelState {
     json_status: String,
     json_status_path: Option<PathBuf>,
     pending_json_action: Option<JsonAction>,
+    pending_discard_action: Option<PendingDiscardAction>,
     edit_brush: isize,
     font: isize,
     json_font: isize,
@@ -334,40 +345,69 @@ fn apply_json_editor_theme(edit: HWND, is_dark: bool) {
     }
 }
 
-fn confirm_discard_json_changes(hwnd: HWND) -> bool {
-    let (dirty, language) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_ref() else {
-            return true;
-        };
-        (s.json_dirty, s.snapshot.language)
-    };
-    if !dirty {
-        return true;
-    }
-
-    let (message, title) = if language == LanguageId::SimplifiedChinese {
-        (
-            "JSON 配置有未保存的更改。\n\n是否放弃这些更改并继续？",
-            "未保存的 JSON 配置",
-        )
-    } else {
-        (
-            "The JSON configuration has unsaved changes.\n\nDiscard them and continue?",
-            "Unsaved JSON configuration",
-        )
-    };
-    let message = native_interop::wide_str(message);
-    let title = native_interop::wide_str(title);
-    unsafe {
-        MessageBoxW(
-            hwnd,
-            PCWSTR::from_raw(message.as_ptr()),
-            PCWSTR::from_raw(title.as_ptr()),
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-        ) == IDYES
+fn discard_dialog_rect(hwnd: HWND) -> RECT {
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let width = scale(hwnd, 430);
+    let height = scale(hwnd, 184);
+    let left = (client.right - width) / 2;
+    let top = (client.bottom - height) / 2;
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
     }
 }
+
+fn discard_dialog_button_rect(hwnd: HWND, discard: bool) -> RECT {
+    let dialog = discard_dialog_rect(hwnd);
+    let width = scale(hwnd, 122);
+    let height = scale(hwnd, 36);
+    let gap = scale(hwnd, 12);
+    let bottom = dialog.bottom - scale(hwnd, 22);
+    let right = dialog.right - scale(hwnd, 22);
+    if discard {
+        RECT {
+            left: right - width * 2 - gap,
+            top: bottom - height,
+            right: right - width - gap,
+            bottom,
+        }
+    } else {
+        RECT {
+            left: right - width,
+            top: bottom - height,
+            right,
+            bottom,
+        }
+    }
+}
+
+fn request_discard_confirmation(hwnd: HWND, action: PendingDiscardAction) {
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.pending_discard_action = Some(action);
+            s.pressed = None;
+            s.hovered = None;
+        }
+    }
+    layout_settings_children(hwnd);
+    redraw_settings_window(hwnd);
+}
+
+fn redraw_settings_window(hwnd: HWND) {
+    unsafe {
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            HRGN::default(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+    }
+}
+
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
@@ -401,15 +441,15 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 
         let title = native_interop::wide_str("Codex Usage Win");
         let hwnd = match CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+            WS_EX_APPWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_THICKFRAME,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
-            parent,
+            HWND::default(),
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
             None,
@@ -697,6 +737,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_status: String::new(),
                 json_status_path: None,
                 pending_json_action: None,
+                pending_discard_action: None,
                 edit_brush: edit_brush.0 as isize,
                 font: font.0 as isize,
                 json_font: json_font.0 as isize,
@@ -951,6 +992,29 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
         AppearancePreset::Minimal => 1,
     };
     rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
+}
+
+fn corner_choice_rect(hwnd: HWND, rounded: bool) -> RECT {
+    let right = scale(hwnd, 940);
+    let width = scale(hwnd, 94);
+    let gap = scale(hwnd, 10);
+    let top = scale(hwnd, 180);
+    let bottom = scale(hwnd, 212);
+    if rounded {
+        RECT {
+            left: right - width,
+            top,
+            right,
+            bottom,
+        }
+    } else {
+        RECT {
+            left: right - width * 2 - gap,
+            top,
+            right: right - width - gap,
+            bottom,
+        }
+    }
 }
 
 fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
@@ -1344,21 +1408,21 @@ fn layout_numeric_edits(hwnd: HWND) {
 
 
 fn layout_settings_children(hwnd: HWND) {
-    let Some((json_edit, section)) = ({
+    let Some((json_edit, section, discard_pending)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| (s.json_edit, s.section))
+        state.as_ref().map(|s| (s.json_edit, s.section, s.pending_discard_action.is_some()))
     }) else {
         return;
     };
 
     unsafe {
         let focused = GetFocus();
-        if section != Section::Json && focused == json_edit.to_hwnd() {
+        if (section != Section::Json || discard_pending) && focused == json_edit.to_hwnd() {
             let _ = SetFocus(hwnd);
         }
 
         let json_rect = json_edit_rect(hwnd);
-        let visibility = if section == Section::Json {
+        let visibility = if section == Section::Json && !discard_pending {
             SWP_SHOWWINDOW
         } else {
             SWP_HIDEWINDOW
@@ -2682,6 +2746,20 @@ fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
 }
 
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
+    let discard_pending = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref()?.pending_discard_action.is_some()
+    };
+    if discard_pending {
+        if pt_in_rect(discard_dialog_button_rect(hwnd, true), x, y) {
+            return Some(HitTarget::DiscardChanges);
+        }
+        if pt_in_rect(discard_dialog_button_rect(hwnd, false), x, y) {
+            return Some(HitTarget::KeepEditing);
+        }
+        return None;
+    }
+
     let (section, language_popup_open, json_dirty, json_status_path, language, json_action_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
@@ -2730,6 +2808,13 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
             if pt_in_rect(layout_rect(hwnd, preset), x, y) {
                 return Some(HitTarget::Layout(preset));
+            }
+        }
+        if matches!(section, Section::Panel | Section::Tooltip | Section::Progress) {
+            for rounded in [false, true] {
+                if pt_in_rect(corner_choice_rect(hwnd, rounded), x, y) {
+                    return Some(HitTarget::CornerShape(rounded));
+                }
             }
         }
         if section == Section::Preset {
@@ -2881,6 +2966,67 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             };
             send_parent(WM_SETTINGS_STARTUP_CHANGE, usize::from(enabled), 0);
         }
+        HitTarget::CornerShape(rounded) => {
+            let section = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return;
+                };
+                match s.section {
+                    Section::Panel => s.snapshot.active_style.panel_rounded = rounded,
+                    Section::Tooltip => s.snapshot.active_style.tooltip_rounded = rounded,
+                    Section::Progress => s.snapshot.active_style.progress_rounded = rounded,
+                    _ => return,
+                }
+                let section = s.section;
+                sync_active_style_into_editable(s);
+                section
+            };
+            let section_code = match section {
+                Section::Panel => 0usize,
+                Section::Tooltip => 1,
+                Section::Progress => 2,
+                _ => return,
+            };
+            send_parent(
+                WM_STYLE_CORNER_PREVIEW,
+                section_code | (usize::from(rounded) << 8),
+                0,
+            );
+            send_parent(WM_STYLE_SAVE, 0, 0);
+        }
+        HitTarget::DiscardChanges => {
+            let action = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_mut() else {
+                    return;
+                };
+                s.json_dirty = false;
+                s.json_status.clear();
+                s.json_status_path = None;
+                s.pending_discard_action.take()
+            };
+            match action {
+                Some(PendingDiscardAction::SwitchSection(section)) => set_section(section),
+                Some(PendingDiscardAction::Close) => unsafe {
+                    send_parent(WM_STYLE_SAVE, 0, 0);
+                    let _ = DestroyWindow(hwnd);
+                },
+                None => {}
+            }
+        }
+        HitTarget::KeepEditing => {
+            {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.pending_discard_action = None;
+                    s.pressed = None;
+                    s.hovered = None;
+                }
+            }
+            layout_settings_children(hwnd);
+            redraw_settings_window(hwnd);
+        }
         HitTarget::JsonStatusPath => open_json_status_path(),
         HitTarget::Json(action) => {
             if action == JsonAction::Apply {
@@ -2945,18 +3091,23 @@ fn button_background(
 }
 
 fn set_section(section: Section) {
-    let (current_section, dirty, hwnd) = {
+    let (current_section, dirty, hwnd, discard_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
         };
-        (s.section, s.json_dirty, s.hwnd.to_hwnd())
+        (
+            s.section,
+            s.json_dirty,
+            s.hwnd.to_hwnd(),
+            s.pending_discard_action.is_some(),
+        )
     };
-    if current_section == Section::Json
-        && section != Section::Json
-        && dirty
-        && !confirm_discard_json_changes(hwnd)
-    {
+    if discard_pending {
+        return;
+    }
+    if current_section == Section::Json && section != Section::Json && dirty {
+        request_discard_confirmation(hwnd, PendingDiscardAction::SwitchSection(section));
         return;
     }
 
@@ -2965,11 +3116,6 @@ fn set_section(section: Section) {
         let Some(s) = state.as_mut() else {
             return;
         };
-        if current_section == Section::Json && section != Section::Json && dirty {
-            s.json_dirty = false;
-            s.json_status.clear();
-            s.json_status_path = None;
-        }
         s.section = section;
         if section != Section::General {
             s.language_popup_open = false;
@@ -3000,9 +3146,7 @@ fn set_section(section: Section) {
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
-    unsafe {
-        let _ = InvalidateRect(hwnd, None, false);
-    }
+    redraw_settings_window(hwnd);
 }
 
 fn select_editor(editor: EditorSelection) {
@@ -3524,12 +3668,12 @@ unsafe extern "system" fn wnd_proc(
             layout_numeric_edits(hwnd);
             layout_hex_edits(hwnd);
             layout_settings_children(hwnd);
-            let _ = InvalidateRect(hwnd, None, false);
+            redraw_settings_window(hwnd);
             LRESULT(0)
         }
         WM_SIZE => {
             layout_settings_children(hwnd);
-            let _ = InvalidateRect(hwnd, None, false);
+            redraw_settings_window(hwnd);
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
@@ -3539,7 +3683,18 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
-            if !confirm_discard_json_changes(hwnd) {
+            let (dirty, pending) = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .as_ref()
+                    .map(|s| (s.json_dirty, s.pending_discard_action.is_some()))
+                    .unwrap_or((false, false))
+            };
+            if pending {
+                return LRESULT(0);
+            }
+            if dirty {
+                request_discard_confirmation(hwnd, PendingDiscardAction::Close);
                 return LRESULT(0);
             }
             send_parent(WM_STYLE_SAVE, 0, 0);
@@ -3567,6 +3722,129 @@ unsafe extern "system" fn wnd_proc(
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_discard_dialog(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    background: Color,
+    card: Color,
+    card_hover: Color,
+    card_pressed: Color,
+    accent: Color,
+    primary: Color,
+    secondary: Color,
+) {
+    let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let veil = if snapshot.is_dark {
+        Color::from_hex("#17191DFF")
+    } else {
+        Color::from_hex("#DCE3EBFF")
+    };
+    fill(hdc, client, veil);
+
+    let dialog = discard_dialog_rect(hwnd);
+    fill_rounded_rect(hdc, dialog, card, scale(hwnd, 12));
+    draw_rounded_outline_rect(
+        hdc,
+        dialog,
+        if snapshot.is_dark {
+            Color::from_hex("#4B5360FF")
+        } else {
+            Color::from_hex("#B8C3CFFF")
+        },
+        scale(hwnd, 12),
+        1,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh { "未保存的 JSON 配置" } else { "Unsaved JSON configuration" },
+        RECT {
+            left: dialog.left + scale(hwnd, 24),
+            top: dialog.top + scale(hwnd, 20),
+            right: dialog.right - scale(hwnd, 24),
+            bottom: dialog.top + scale(hwnd, 52),
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        if zh {
+            "当前 JSON 配置有未保存的更改。是否放弃更改并继续？"
+        } else {
+            "The JSON configuration has unsaved changes. Discard them and continue?"
+        },
+        RECT {
+            left: dialog.left + scale(hwnd, 24),
+            top: dialog.top + scale(hwnd, 58),
+            right: dialog.right - scale(hwnd, 24),
+            bottom: dialog.top + scale(hwnd, 112),
+        },
+        DT_LEFT | DT_VCENTER | DT_WORDBREAK,
+    );
+
+    draw_segment(
+        hdc,
+        discard_dialog_button_rect(hwnd, true),
+        false,
+        button_background(
+            HitTarget::DiscardChanges,
+            false,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: if snapshot.is_dark {
+                    Color::from_hex("#5A2A2EFF")
+                } else {
+                    Color::from_hex("#F4D7DAFF")
+                },
+                hover: Color::from_hex("#C93C49FF"),
+                pressed: Color::from_hex("#A92E39FF"),
+                selected: card,
+                selected_hover: card_hover,
+                selected_pressed: card_pressed,
+            },
+        ),
+        if hovered == Some(HitTarget::DiscardChanges)
+            || pressed == Some(HitTarget::DiscardChanges)
+        {
+            Color::from_hex("#FFFFFFFF")
+        } else {
+            primary
+        },
+        if zh { "放弃更改" } else { "Discard" },
+    );
+    draw_segment(
+        hdc,
+        discard_dialog_button_rect(hwnd, false),
+        true,
+        button_background(
+            HitTarget::KeepEditing,
+            true,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: accent,
+                hover: Color::from_hex("#629CFFFF"),
+                pressed: Color::from_hex("#3678E6FF"),
+                selected: accent,
+                selected_hover: Color::from_hex("#629CFFFF"),
+                selected_pressed: Color::from_hex("#3678E6FF"),
+            },
+        ),
+        Color::from_hex("#FFFFFFFF"),
+        if zh { "继续编辑" } else { "Keep editing" },
+    );
+    let _ = background;
 }
 
 unsafe fn paint(hwnd: HWND) {
@@ -3605,6 +3883,7 @@ unsafe fn paint(hwnd: HWND) {
         json_status,
         json_status_path,
         json_dirty,
+        discard_pending,
         font,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3625,6 +3904,7 @@ unsafe fn paint(hwnd: HWND) {
             s.json_status.clone(),
             s.json_status_path.clone(),
             s.json_dirty,
+            s.pending_discard_action.is_some(),
             s.font,
         )
     };
@@ -3795,6 +4075,23 @@ unsafe fn paint(hwnd: HWND) {
         ),
     }
 
+    if discard_pending {
+        paint_discard_dialog(
+            hdc,
+            hwnd,
+            &snapshot,
+            hovered,
+            pressed,
+            background,
+            card,
+            card_hover,
+            card_pressed,
+            accent,
+            primary,
+            secondary,
+        );
+    }
+
     SelectObject(hdc, old_font);
     let _ = BitBlt(screen_hdc, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
     SelectObject(hdc, old_bitmap);
@@ -3846,15 +4143,16 @@ unsafe fn paint_navigation(
                 selected_pressed: pressed_color,
             },
         );
-        fill(hdc, r, section_bg);
+        fill_rounded_rect(hdc, r, section_bg, scale(hwnd, 7));
         if selected {
-            fill(
+            fill_rounded_rect(
                 hdc,
                 RECT {
                     right: r.left + scale(hwnd, 3),
                     ..r
                 },
                 accent,
+                scale(hwnd, 2),
             );
         }
         let _ = SetTextColor(
@@ -4151,7 +4449,7 @@ unsafe fn paint_general_page(
             let option = language_option_rect(hwnd, index);
             let selected = current_language_index == index;
             let target = HitTarget::LanguageOption(index);
-            fill(
+            fill_rounded_rect(
                 hdc,
                 option,
                 button_background(
@@ -4168,6 +4466,7 @@ unsafe fn paint_general_page(
                         selected_pressed: card_pressed,
                     },
                 ),
+                scale(hwnd, 6),
             );
             let _ = SetTextColor(
                 hdc,
@@ -4515,6 +4814,43 @@ unsafe fn paint_appearance_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
+    if matches!(section, Section::Panel | Section::Tooltip | Section::Progress) {
+        let rounded = match section {
+            Section::Panel => snapshot.active_style.panel_rounded,
+            Section::Tooltip => snapshot.active_style.tooltip_rounded,
+            Section::Progress => snapshot.active_style.progress_rounded,
+            _ => false,
+        };
+        for (value, zh_label, en_label) in [
+            (false, "直角", "Square"),
+            (true, "圆角", "Rounded"),
+        ] {
+            let target = HitTarget::CornerShape(value);
+            let selected = rounded == value;
+            draw_segment(
+                hdc,
+                corner_choice_rect(hwnd, value),
+                selected,
+                button_background(
+                    target,
+                    selected,
+                    hovered,
+                    pressed,
+                    ButtonPalette {
+                        normal: card,
+                        hover: card_hover,
+                        pressed: card_pressed,
+                        selected: accent,
+                        selected_hover: accent_hover,
+                        selected_pressed: accent_pressed,
+                    },
+                ),
+                if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+                if zh { zh_label } else { en_label },
+            );
+        }
+    }
+
     for (index, row) in rows(section).iter().copied().enumerate() {
         let r = row_rect(hwnd, index);
         let selected = row == editor;
@@ -4783,8 +5119,24 @@ unsafe fn paint_style_preview_card(
         right: r.right - scale(hwnd, 12),
         bottom: r.top + scale(hwnd, 138),
     };
-    fill(hdc, preview, style.color(StyleColorTarget::PanelBackground));
-    draw_outline_rect(hdc, preview, style.color(StyleColorTarget::PanelBorder));
+    if style.panel_rounded {
+        fill_rounded_rect(
+            hdc,
+            preview,
+            style.color(StyleColorTarget::PanelBackground),
+            scale(hwnd, 8),
+        );
+        draw_rounded_outline_rect(
+            hdc,
+            preview,
+            style.color(StyleColorTarget::PanelBorder),
+            scale(hwnd, 8),
+            1,
+        );
+    } else {
+        fill(hdc, preview, style.color(StyleColorTarget::PanelBackground));
+        draw_outline_rect(hdc, preview, style.color(StyleColorTarget::PanelBorder));
+    }
 
     let text_left = preview.left + scale(hwnd, 10);
     let text_right = preview.right - scale(hwnd, 10);
@@ -4831,16 +5183,32 @@ unsafe fn paint_style_preview_card(
         right: preview.right - scale(hwnd, 8),
         bottom: preview.top + scale(hwnd, 30),
     };
-    fill(
-        hdc,
-        tooltip_preview,
-        style.color(StyleColorTarget::TooltipBackground),
-    );
-    draw_outline_rect(
-        hdc,
-        tooltip_preview,
-        style.color(StyleColorTarget::TooltipBorder),
-    );
+    if style.tooltip_rounded {
+        fill_rounded_rect(
+            hdc,
+            tooltip_preview,
+            style.color(StyleColorTarget::TooltipBackground),
+            scale(hwnd, 5),
+        );
+        draw_rounded_outline_rect(
+            hdc,
+            tooltip_preview,
+            style.color(StyleColorTarget::TooltipBorder),
+            scale(hwnd, 5),
+            1,
+        );
+    } else {
+        fill(
+            hdc,
+            tooltip_preview,
+            style.color(StyleColorTarget::TooltipBackground),
+        );
+        draw_outline_rect(
+            hdc,
+            tooltip_preview,
+            style.color(StyleColorTarget::TooltipBorder),
+        );
+    }
     let _ = SetTextColor(
         hdc,
         COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()),
@@ -4858,15 +5226,32 @@ unsafe fn paint_style_preview_card(
         right: text_right,
         bottom: preview.top + scale(hwnd, 72),
     };
-    fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
-    fill(
-        hdc,
-        RECT {
-            right: progress.left + (progress.right - progress.left) * 72 / 100,
-            ..progress
-        },
-        style.color(StyleColorTarget::ProgressHigh),
-    );
+    let progress_fill = RECT {
+        right: progress.left + (progress.right - progress.left) * 72 / 100,
+        ..progress
+    };
+    if style.progress_rounded {
+        let radius = ((progress.bottom - progress.top) / 2).max(1);
+        fill_rounded_rect(
+            hdc,
+            progress,
+            style.color(StyleColorTarget::ProgressConsumed),
+            radius,
+        );
+        fill_rounded_rect(
+            hdc,
+            progress_fill,
+            style.color(StyleColorTarget::ProgressHigh),
+            radius.min(((progress_fill.right - progress_fill.left) / 2).max(1)),
+        );
+    } else {
+        fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
+        fill(
+            hdc,
+            progress_fill,
+            style.color(StyleColorTarget::ProgressHigh),
+        );
+    }
 
     for (index, target) in [
         StyleColorTarget::ProgressHigh,
@@ -4879,7 +5264,7 @@ unsafe fn paint_style_preview_card(
     .enumerate()
     {
         let left = r.left + scale(hwnd, 14 + index as i32 * 48);
-        fill(
+        fill_rounded_rect(
             hdc,
             RECT {
                 left,
@@ -4888,11 +5273,12 @@ unsafe fn paint_style_preview_card(
                 bottom: r.top + scale(hwnd, 172),
             },
             style.color(target),
+            scale(hwnd, 4),
         );
     }
 
     if selected {
-        fill(
+        fill_rounded_rect(
             hdc,
             RECT {
                 left: r.right - scale(hwnd, 24),
@@ -4901,6 +5287,7 @@ unsafe fn paint_style_preview_card(
                 bottom: r.top + scale(hwnd, 24),
             },
             accent,
+            scale(hwnd, 3),
         );
     }
 }
