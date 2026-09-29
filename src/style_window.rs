@@ -5528,18 +5528,20 @@ unsafe fn paint_style_preview_card(
         right: r.right - scale(hwnd, 12),
         bottom: r.top + scale(hwnd, 138),
     };
-    if style.panel_rounded {
+    let panel_radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
+    if panel_radius > 0 {
         fill_rounded_rect(
             hdc,
             preview,
             style.color(StyleColorTarget::PanelBackground),
-            scale(hwnd, 8),
+            panel_radius,
         );
         draw_rounded_outline_rect(
             hdc,
             preview,
             style.color(StyleColorTarget::PanelBorder),
-            scale(hwnd, 8),
+            panel_radius,
             1,
         );
     } else {
@@ -5592,18 +5594,21 @@ unsafe fn paint_style_preview_card(
         right: preview.right - scale(hwnd, 8),
         bottom: preview.top + scale(hwnd, 30),
     };
-    if style.tooltip_rounded {
+    let tooltip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+        .min(((tooltip_preview.right - tooltip_preview.left)
+            .min(tooltip_preview.bottom - tooltip_preview.top) / 2).max(0));
+    if tooltip_radius > 0 {
         fill_rounded_rect(
             hdc,
             tooltip_preview,
             style.color(StyleColorTarget::TooltipBackground),
-            scale(hwnd, 5),
+            tooltip_radius,
         );
         draw_rounded_outline_rect(
             hdc,
             tooltip_preview,
             style.color(StyleColorTarget::TooltipBorder),
-            scale(hwnd, 5),
+            tooltip_radius,
             1,
         );
     } else {
@@ -5639,19 +5644,20 @@ unsafe fn paint_style_preview_card(
         right: progress.left + (progress.right - progress.left) * 72 / 100,
         ..progress
     };
-    if style.progress_rounded {
-        let radius = ((progress.bottom - progress.top) / 2).max(1);
+    let progress_radius = scale(hwnd, i32::from(style.progress_corner_radius))
+        .min(((progress.bottom - progress.top) / 2).max(0));
+    if progress_radius > 0 {
         fill_rounded_rect(
             hdc,
             progress,
             style.color(StyleColorTarget::ProgressConsumed),
-            radius,
+            progress_radius,
         );
         fill_rounded_rect(
             hdc,
             progress_fill,
             style.color(StyleColorTarget::ProgressHigh),
-            radius.min(((progress_fill.right - progress_fill.left) / 2).max(1)),
+            progress_radius.min(((progress_fill.right - progress_fill.left) / 2).max(1)),
         );
     } else {
         fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
