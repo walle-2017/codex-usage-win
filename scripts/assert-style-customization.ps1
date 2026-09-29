@@ -162,6 +162,7 @@ if ($styleWindow -notmatch 'editor_layout_snapshot\(' -or
     $styleWindow -notmatch 'release_editor_focus_before_layout\(' -or
     $styleWindow -notmatch 'hiding_focused_color' -or
     $styleWindow -notmatch 'hiding_focused_blur' -or
+    $styleWindow -notmatch 'hiding_focused_corner' -or
     $styleWindow -notmatch 'SetFocus\(hwnd\)' -or
     $styleWindow -notmatch 'ShowWindow/SetFocus can synchronously send') {
     throw 'Style editor switching must release STATE before focus/visibility Win32 calls to avoid EDIT focus deadlocks.'
@@ -176,12 +177,12 @@ if ($styleWindow -match 'WINDOW_HEIGHT_BLUR' -or
     $styleWindow -match 'resize_for_editor\(' -or
     $styleWindow -match '"当前强度"' -or
     $styleWindow -match '"Current"' -or
-    $styleWindow -notmatch 'blur_slider_track_rect\(hwnd\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 396, 337, 770, 341\)' -or
-    $styleWindow -notmatch 'rect\(hwnd, 778, 324, 928, 352\)' -or
-    $styleWindow -notmatch 'blur_suffix_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'blur_slider_track_rect\(hwnd, section\)' -or
+    $styleWindow -notmatch 'blur_edit_frame_rect\(hwnd, section\)' -or
+    $styleWindow -notmatch 'inline_numeric_frame_rect\(' -or
+    $styleWindow -notmatch 'blur_suffix_rect\(hwnd, section\)' -or
     $styleWindow -notmatch 'matches!\(editor, EditorSelection::Color\(_\)\)') {
-    throw 'Blur must stay inline in its row, match RGBA input width, keep its percent suffix internal, and never render a lower secondary editor.'
+    throw 'Blur must stay inline in its actual row, share the numeric frame geometry, keep its percent suffix internal, and never render a lower secondary editor.'
 }
 if ($styleWindow -notmatch 'select_editor\(EditorSelection::Blur\)' -or
     $styleWindow -notmatch 'blur selection must clear the lower RGBA editor' -or
