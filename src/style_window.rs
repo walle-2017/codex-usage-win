@@ -41,6 +41,8 @@ pub const WM_SETTINGS_ALERT_CHANGE: u32 = WM_APP + 129;
 pub const WM_SETTINGS_STARTUP_CHANGE: u32 = WM_APP + 130;
 pub const WM_SETTINGS_LANGUAGE_CHANGE: u32 = WM_APP + 131;
 pub const WM_SETTINGS_JSON_APPLY: u32 = WM_APP + 132;
+pub const WM_STYLE_TOOLTIP_BLUR_PREVIEW: u32 = WM_APP + 133;
+pub const WM_STYLE_TOOLTIP_RESET: u32 = WM_APP + 134;
 
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const WINDOW_WIDTH: i32 = 980;
@@ -53,7 +55,7 @@ const ID_EDIT_B: u16 = 302;
 const ID_EDIT_A: u16 = 303;
 const ID_EDIT_BLUR: u16 = 304;
 const ID_EDIT_HEX_BASE: u16 = 320;
-const HEX_EDIT_COUNT: usize = 11;
+const HEX_EDIT_COUNT: usize = 13;
 const ID_EDIT_JSON: u16 = 400;
 const JSON_EDIT_LIMIT: usize = 262_144;
 const RICH_EDIT_CLASS: &str = "RICHEDIT50W";
@@ -134,6 +136,7 @@ enum Section {
     General,
     Preset,
     Panel,
+    Tooltip,
     Text,
     Progress,
     Interaction,
@@ -144,6 +147,7 @@ enum Section {
 enum EditorSelection {
     Color(StyleColorTarget),
     Blur,
+    TooltipBlur,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +185,7 @@ enum HitTarget {
     LanguageToggle,
     LanguageOption(usize),
     Reset,
+    ResetTooltip,
     Close,
 }
 
@@ -288,6 +293,8 @@ const COLOR_TARGETS: [StyleColorTarget; HEX_EDIT_COUNT] = [
     StyleColorTarget::ProgressLow,
     StyleColorTarget::ProgressConsumed,
     StyleColorTarget::DragHandle,
+    StyleColorTarget::TooltipBackground,
+    StyleColorTarget::TooltipBorder,
 ];
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
@@ -684,6 +691,8 @@ pub fn decode_color_target(value: usize) -> Option<StyleColorTarget> {
         8 => StyleColorTarget::ProgressLow,
         9 => StyleColorTarget::ProgressConsumed,
         10 => StyleColorTarget::DragHandle,
+        11 => StyleColorTarget::TooltipBackground,
+        12 => StyleColorTarget::TooltipBorder,
         _ => return None,
     })
 }
@@ -711,6 +720,8 @@ fn encode_color_target(target: StyleColorTarget) -> usize {
         StyleColorTarget::ProgressLow => 8,
         StyleColorTarget::ProgressConsumed => 9,
         StyleColorTarget::DragHandle => 10,
+        StyleColorTarget::TooltipBackground => 11,
+        StyleColorTarget::TooltipBorder => 12,
     }
 }
 
@@ -809,10 +820,11 @@ fn section_rect(hwnd: HWND, section: Section) -> RECT {
         Section::General => (28, 68),
         Section::Preset => (132, 172),
         Section::Panel => (176, 216),
-        Section::Text => (220, 260),
-        Section::Progress => (264, 304),
-        Section::Interaction => (308, 348),
-        Section::Json => (416, 456),
+        Section::Tooltip => (220, 260),
+        Section::Text => (264, 304),
+        Section::Progress => (308, 348),
+        Section::Interaction => (352, 392),
+        Section::Json => (456, 496),
     };
     rect(hwnd, 20, top, 166, bottom)
 }
@@ -822,6 +834,7 @@ fn navigation_text_inset(section: Section) -> i32 {
         Section::General => 14,
         Section::Preset
         | Section::Panel
+        | Section::Tooltip
         | Section::Text
         | Section::Progress
         | Section::Interaction
@@ -879,6 +892,11 @@ fn rows(section: Section) -> &'static [EditorSelection] {
         EditorSelection::Color(StyleColorTarget::PanelBorder),
         EditorSelection::Blur,
     ];
+    const TOOLTIP: [EditorSelection; 3] = [
+        EditorSelection::Color(StyleColorTarget::TooltipBackground),
+        EditorSelection::Color(StyleColorTarget::TooltipBorder),
+        EditorSelection::TooltipBlur,
+    ];
     const TEXT: [EditorSelection; 4] = [
         EditorSelection::Color(StyleColorTarget::QuotaType),
         EditorSelection::Color(StyleColorTarget::Remaining),
@@ -897,6 +915,7 @@ fn rows(section: Section) -> &'static [EditorSelection] {
     match section {
         Section::General | Section::Preset | Section::Json => &[],
         Section::Panel => &PANEL,
+        Section::Tooltip => &TOOLTIP,
         Section::Text => &TEXT,
         Section::Progress => &PROGRESS,
         Section::Interaction => &INTERACTION,
@@ -1135,7 +1154,7 @@ fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT
 fn is_appearance_section(section: Section) -> bool {
     matches!(
         section,
-        Section::Preset | Section::Panel | Section::Text | Section::Progress | Section::Interaction
+        Section::Preset | Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
     )
 }
 
@@ -1148,9 +1167,9 @@ fn editor_layout_snapshot() -> Option<([SendHwnd; 4], SendHwnd, Section, bool, b
         s.section,
         matches!(
             s.section,
-            Section::Panel | Section::Text | Section::Progress | Section::Interaction
+            Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
         ) && matches!(s.editor, EditorSelection::Color(_)),
-        s.section == Section::Panel,
+        matches!(s.section, Section::Panel | Section::Tooltip),
     ))
 }
 
@@ -2194,7 +2213,7 @@ fn sync_numeric_edits() {
         };
         if !matches!(
             s.section,
-            Section::Panel | Section::Text | Section::Progress | Section::Interaction
+            Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
         ) {
             return;
         }
@@ -2222,14 +2241,13 @@ fn sync_blur_edit() {
         let Some(s) = state.as_mut() else {
             return;
         };
-        if s.section != Section::Panel {
-            return;
-        }
+        let value = match s.section {
+            Section::Panel => s.snapshot.active_style.panel_frosted_strength,
+            Section::Tooltip => s.snapshot.active_style.tooltip_frosted_strength(),
+            _ => return,
+        };
         s.syncing_blur_edit = true;
-        (
-            s.blur_edit.to_hwnd(),
-            s.snapshot.active_style.panel_frosted_strength,
-        )
+        (s.blur_edit.to_hwnd(), value)
     };
     set_edit_text(edit, value);
 
@@ -2300,7 +2318,7 @@ fn sync_hex_edits() {
         };
         if !matches!(
             s.section,
-            Section::Panel | Section::Text | Section::Progress | Section::Interaction
+            Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
         ) {
             return;
         }
@@ -2595,6 +2613,7 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         Section::General,
         Section::Preset,
         Section::Panel,
+        Section::Tooltip,
         Section::Text,
         Section::Progress,
         Section::Interaction,
@@ -2803,6 +2822,7 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
             send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
         }
         HitTarget::Reset => send_parent(WM_STYLE_RESET_CURRENT, 0, 0),
+        HitTarget::ResetTooltip => send_parent(WM_STYLE_TOOLTIP_RESET, 0, 0),
         HitTarget::Close => unsafe {
             send_parent(WM_STYLE_SAVE, 0, 0);
             let _ = DestroyWindow(hwnd);
@@ -2905,7 +2925,7 @@ fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
         (s.section, s.editor)
     };
 
-    if section == Section::Panel && pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
+    if matches!(section, Section::Panel | Section::Tooltip) && pt_in_rect(blur_slider_hit_rect(hwnd), x, y) {
         return Some(SliderKind::Blur);
     }
 
@@ -2971,15 +2991,19 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
                 sync_active_style_into_editable(s);
                 color_update = Some((target, color));
             }
-            (_, SliderKind::Blur) if s.section == Section::Panel => {
+            (_, SliderKind::Blur) if matches!(s.section, Section::Panel | Section::Tooltip) => {
                 let value = slider_value_from_x(
                     blur_slider_track_rect(hwnd),
                     x,
                     FROSTED_STRENGTH_MAX,
                 );
-                s.snapshot.active_style.panel_frosted_strength = value;
+                if s.section == Section::Tooltip {
+                    s.snapshot.active_style.set_tooltip_frosted_strength(value);
+                } else {
+                    s.snapshot.active_style.panel_frosted_strength = value;
+                }
                 sync_active_style_into_editable(s);
-                blur_update = Some(value);
+                blur_update = Some((s.section, value));
             }
             _ => {}
         }
@@ -2994,9 +3018,13 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
             pack_color(color),
         );
     }
-    if let Some(value) = blur_update {
+    if let Some((section, value)) = blur_update {
         sync_blur_edit();
-        send_parent(WM_STYLE_BLUR_PREVIEW, value as usize, 0);
+        send_parent(
+            if section == Section::Tooltip { WM_STYLE_TOOLTIP_BLUR_PREVIEW } else { WM_STYLE_BLUR_PREVIEW },
+            value as usize,
+            0,
+        );
     }
 
     unsafe {
@@ -3091,7 +3119,11 @@ unsafe extern "system" fn wnd_proc(
             if let Some(kind) = slider_kind_at(hwnd, x, y) {
                 if kind == SliderKind::Blur {
                     let _ = SetFocus(hwnd);
-                    select_editor(EditorSelection::Blur);
+                    let editor = {
+                        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                        state.as_ref().map(|s| if s.section == Section::Tooltip { EditorSelection::TooltipBlur } else { EditorSelection::Blur })
+                    };
+                    if let Some(editor) = editor { select_editor(editor); }
                 }
                 {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3553,7 +3585,7 @@ unsafe fn paint(hwnd: HWND) {
         } else {
             "Advanced"
         },
-        rect(hwnd, 20, 376, 166, 404),
+        rect(hwnd, 20, 416, 166, 444),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -4353,7 +4385,7 @@ unsafe fn paint_appearance_page(
         reset_rect(hwnd),
         false,
         button_background(
-            HitTarget::Reset,
+            if section == Section::Tooltip { HitTarget::ResetTooltip } else { HitTarget::Reset },
             false,
             hovered,
             pressed,
@@ -4367,7 +4399,9 @@ unsafe fn paint_appearance_page(
             },
         ),
         primary,
-        if zh { "恢复当前主题默认" } else { "Reset current theme" },
+        if section == Section::Tooltip {
+            if zh { "恢复继承面板样式" } else { "Inherit panel style" }
+        } else if zh { "恢复当前主题默认" } else { "Reset current theme" },
     );
 
     if section == Section::Preset {
@@ -4446,12 +4480,17 @@ unsafe fn paint_appearance_page(
                     color,
                 );
             }
-            EditorSelection::Blur => {
+            EditorSelection::Blur | EditorSelection::TooltipBlur => {
+                let value = if section == Section::Tooltip {
+                    snapshot.active_style.tooltip_frosted_strength()
+                } else {
+                    snapshot.active_style.panel_frosted_strength
+                };
                 draw_slider(
                     hdc,
                     hwnd,
                     blur_slider_track_rect(hwnd),
-                    snapshot.active_style.panel_frosted_strength,
+                    value,
                     FROSTED_STRENGTH_MAX,
                     track_background,
                     accent,
@@ -4473,7 +4512,7 @@ unsafe fn paint_appearance_page(
         },
     );
 
-    if section == Section::Panel {
+    if matches!(section, Section::Panel | Section::Tooltip) {
         paint_blur_edit_frame(
             hdc,
             hwnd,
@@ -4964,6 +5003,9 @@ fn section_label(section: Section, language: LanguageId) -> &'static str {
                 "Panel"
             }
         }
+        Section::Tooltip => {
+            if zh { "浮框" } else { "Tooltip" }
+        }
         Section::Text => {
             if zh {
                 "文字"
@@ -5000,8 +5042,14 @@ fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
         EditorSelection::Color(StyleColorTarget::PanelBorder) => {
             if zh { "边框颜色" } else { "Border" }
         }
-        EditorSelection::Blur => {
+        EditorSelection::Blur | EditorSelection::TooltipBlur => {
             if zh { "磨砂强度" } else { "Frosted intensity" }
+        }
+        EditorSelection::Color(StyleColorTarget::TooltipBackground) => {
+            if zh { "背景颜色" } else { "Background" }
+        }
+        EditorSelection::Color(StyleColorTarget::TooltipBorder) => {
+            if zh { "边框颜色" } else { "Border" }
         }
         EditorSelection::Color(StyleColorTarget::QuotaType) => {
             if zh { "额度类型" } else { "Quota type" }
