@@ -1075,12 +1075,14 @@ fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
-    const PANEL: [EditorSelection; 3] = [
+    const PANEL: [EditorSelection; 4] = [
+        EditorSelection::CornerRadius,
         EditorSelection::Color(StyleColorTarget::PanelBackground),
         EditorSelection::Color(StyleColorTarget::PanelBorder),
         EditorSelection::Blur,
     ];
-    const TOOLTIP: [EditorSelection; 3] = [
+    const TOOLTIP: [EditorSelection; 4] = [
+        EditorSelection::CornerRadius,
         EditorSelection::Color(StyleColorTarget::TooltipBackground),
         EditorSelection::Color(StyleColorTarget::TooltipBorder),
         EditorSelection::TooltipBlur,
@@ -1091,7 +1093,8 @@ fn rows(section: Section) -> &'static [EditorSelection] {
         EditorSelection::Color(StyleColorTarget::ResetTime),
         EditorSelection::Color(StyleColorTarget::Error),
     ];
-    const PROGRESS: [EditorSelection; 4] = [
+    const PROGRESS: [EditorSelection; 5] = [
+        EditorSelection::CornerRadius,
         EditorSelection::Color(StyleColorTarget::ProgressHigh),
         EditorSelection::Color(StyleColorTarget::ProgressMedium),
         EditorSelection::Color(StyleColorTarget::ProgressLow),
@@ -1149,12 +1152,25 @@ fn color_slider_hit_rect(hwnd: HWND, section: Section, channel_index: usize) -> 
     }
 }
 
-fn blur_slider_track_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 396, 337, 770, 341)
+fn blur_row_index(section: Section) -> Option<usize> {
+    rows(section).iter().position(|row| {
+        matches!(row, EditorSelection::Blur | EditorSelection::TooltipBlur)
+    })
 }
 
-fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
-    let track = blur_slider_track_rect(hwnd);
+fn blur_slider_track_rect(hwnd: HWND, section: Section) -> RECT {
+    let row = row_rect(hwnd, blur_row_index(section).unwrap_or(0));
+    let center_y = (row.top + row.bottom) / 2;
+    RECT {
+        left: scale(hwnd, 396),
+        top: center_y - scale(hwnd, 2),
+        right: scale(hwnd, 770),
+        bottom: center_y + scale(hwnd, 2),
+    }
+}
+
+fn blur_slider_hit_rect(hwnd: HWND, section: Section) -> RECT {
+    let track = blur_slider_track_rect(hwnd, section);
     RECT {
         left: track.left - scale(hwnd, 8),
         top: track.top - scale(hwnd, 12),
@@ -1163,26 +1179,58 @@ fn blur_slider_hit_rect(hwnd: HWND) -> RECT {
     }
 }
 
-fn blur_edit_frame_rect(hwnd: HWND) -> RECT {
-    // Match the #RRGGBBAA color inputs: same width and right alignment.
-    rect(hwnd, 778, 324, 928, 352)
+fn inline_numeric_frame_rect(hwnd: HWND, row_index: usize) -> RECT {
+    let row = row_rect(hwnd, row_index);
+    RECT {
+        left: row.right - scale(hwnd, 162),
+        top: row.top + scale(hwnd, 6),
+        right: row.right - scale(hwnd, 12),
+        bottom: row.bottom - scale(hwnd, 6),
+    }
 }
 
-fn blur_edit_rect(hwnd: HWND) -> RECT {
-    let frame = blur_edit_frame_rect(hwnd);
+fn blur_edit_frame_rect(hwnd: HWND, section: Section) -> RECT {
+    inline_numeric_frame_rect(hwnd, blur_row_index(section).unwrap_or(0))
+}
+
+fn blur_edit_rect(hwnd: HWND, section: Section) -> RECT {
+    let frame = blur_edit_frame_rect(hwnd, section);
     RECT {
         left: frame.left + scale(hwnd, 3),
         top: frame.top + scale(hwnd, 3),
-        // Reserve the right side for the fixed '%' suffix drawn by the parent.
         right: frame.right - scale(hwnd, 28),
         bottom: frame.bottom - scale(hwnd, 3),
     }
 }
 
-fn blur_suffix_rect(hwnd: HWND) -> RECT {
-    let frame = blur_edit_frame_rect(hwnd);
+fn blur_suffix_rect(hwnd: HWND, section: Section) -> RECT {
+    let frame = blur_edit_frame_rect(hwnd, section);
     RECT {
         left: frame.right - scale(hwnd, 28),
+        top: frame.top,
+        right: frame.right - scale(hwnd, 8),
+        bottom: frame.bottom,
+    }
+}
+
+fn corner_edit_frame_rect(hwnd: HWND) -> RECT {
+    inline_numeric_frame_rect(hwnd, 0)
+}
+
+fn corner_edit_rect(hwnd: HWND) -> RECT {
+    let frame = corner_edit_frame_rect(hwnd);
+    RECT {
+        left: frame.left + scale(hwnd, 3),
+        top: frame.top + scale(hwnd, 3),
+        right: frame.right - scale(hwnd, 32),
+        bottom: frame.bottom - scale(hwnd, 3),
+    }
+}
+
+fn corner_suffix_rect(hwnd: HWND) -> RECT {
+    let frame = corner_edit_frame_rect(hwnd);
+    RECT {
+        left: frame.right - scale(hwnd, 32),
         top: frame.top,
         right: frame.right - scale(hwnd, 8),
         bottom: frame.bottom,
@@ -2565,6 +2613,29 @@ fn sync_blur_edit() {
     }
 }
 
+fn sync_corner_edit() {
+    let (edit, value) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        let value = match s.section {
+            Section::Panel => s.snapshot.active_style.panel_corner_radius,
+            Section::Tooltip => s.snapshot.active_style.tooltip_corner_radius,
+            Section::Progress => s.snapshot.active_style.progress_corner_radius,
+            _ => return,
+        };
+        s.syncing_corner_edit = true;
+        (s.corner_edit.to_hwnd(), value)
+    };
+    set_edit_text(edit, value);
+
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = state.as_mut() {
+        s.syncing_corner_edit = false;
+    }
+}
+
 fn read_edit_value(edit: HWND) -> Option<u16> {
     let mut buffer = [0u16; 4];
     let len = unsafe {
@@ -2790,12 +2861,12 @@ fn update_color_from_numeric_edit(channel_index: usize) {
 }
 
 fn update_blur_from_numeric_edit() {
-    let (edit, syncing) = {
+    let (edit, syncing, section) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
         };
-        (s.blur_edit.to_hwnd(), s.syncing_blur_edit)
+        (s.blur_edit.to_hwnd(), s.syncing_blur_edit, s.section)
     };
     if syncing {
         return;
@@ -2811,7 +2882,11 @@ fn update_blur_from_numeric_edit() {
         let Some(s) = state.as_mut() else {
             return;
         };
-        s.snapshot.active_style.panel_frosted_strength = value;
+        if section == Section::Tooltip {
+            s.snapshot.active_style.set_tooltip_frosted_strength(value);
+        } else {
+            s.snapshot.active_style.panel_frosted_strength = value;
+        }
         sync_active_style_into_editable(s);
     }
 
@@ -2828,7 +2903,80 @@ fn update_blur_from_numeric_edit() {
         }
     }
 
-    send_parent(WM_STYLE_BLUR_PREVIEW, value as usize, 0);
+    send_parent(
+        if section == Section::Tooltip {
+            WM_STYLE_TOOLTIP_BLUR_PREVIEW
+        } else {
+            WM_STYLE_BLUR_PREVIEW
+        },
+        value as usize,
+        0,
+    );
+    send_parent(WM_STYLE_SAVE, 0, 0);
+    unsafe {
+        let hwnd = {
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default()
+        };
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+fn update_corner_from_numeric_edit() {
+    let (edit, syncing, section) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (s.corner_edit.to_hwnd(), s.syncing_corner_edit, s.section)
+    };
+    if syncing {
+        return;
+    }
+
+    let Some(raw_value) = read_edit_value(edit) else {
+        return;
+    };
+    let value = raw_value.min(u16::from(CORNER_RADIUS_MAX)) as u8;
+
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        match section {
+            Section::Panel => s.snapshot.active_style.panel_corner_radius = value,
+            Section::Tooltip => s.snapshot.active_style.tooltip_corner_radius = value,
+            Section::Progress => s.snapshot.active_style.progress_corner_radius = value,
+            _ => return,
+        }
+        sync_active_style_into_editable(s);
+    }
+
+    if raw_value > u16::from(CORNER_RADIUS_MAX) {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_corner_edit = true;
+        }
+        drop(state);
+        set_edit_text(edit, value);
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.syncing_corner_edit = false;
+        }
+    }
+
+    let section_code = match section {
+        Section::Panel => 0usize,
+        Section::Tooltip => 1,
+        Section::Progress => 2,
+        _ => return,
+    };
+    send_parent(
+        WM_STYLE_CORNER_PREVIEW,
+        section_code | (usize::from(value) << 8),
+        0,
+    );
     send_parent(WM_STYLE_SAVE, 0, 0);
     unsafe {
         let hwnd = {
