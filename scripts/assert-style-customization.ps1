@@ -6,6 +6,7 @@ $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
