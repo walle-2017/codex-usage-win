@@ -26,8 +26,8 @@ use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
 use crate::settings_model::{parse_jsonc, EditableSettings, EditableThemeStyle};
 use crate::style::{
-    StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, CORNER_RADIUS_MAX,
-    FROSTED_STRENGTH_MAX,
+    panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
+    StyleColorTarget, ThemeMode, ThemePreset, ThemeStyle, FROSTED_STRENGTH_MAX,
 };
 
 // Keep this block well away from updater.rs (WM_APP + 21..23).
@@ -83,10 +83,11 @@ const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
 const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
 const JSON_ERROR_SHAKE_TIMER_ID: usize = 0x4A57;
+const SETTINGS_EDIT_SUBCLASS_ID: usize = 0x4A58;
 const JSON_ACTION_DELAY_MS: u32 = 200;
 const JSON_VALIDATION_DELAY_MS: u32 = 90;
 const JSON_ERROR_SHAKE_INTERVAL_MS: u32 = 16;
-const JSON_ERROR_SHAKE_STEPS: u8 = 18;
+const JSON_ERROR_SHAKE_STEPS: u8 = 10;
 const JSON_WHEEL_DELTA: i32 = 120;
 const JSON_WHEEL_LINES_PER_NOTCH: i32 = 3;
 
@@ -175,6 +176,13 @@ enum SliderKind {
     Blue,
     Alpha,
     Blur,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WheelNumericTarget {
+    Color(usize),
+    Blur,
+    Corner,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -584,6 +592,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 WPARAM(3),
                 LPARAM(0),
             );
+            let _ = SetWindowSubclass(
+                edit,
+                Some(settings_edit_subclass_proc),
+                SETTINGS_EDIT_SUBCLASS_ID,
+                hwnd.0 as usize,
+            );
             numeric_edits_raw[index] = edit;
         }
         let numeric_edits = numeric_edits_raw.map(SendHwnd::from_hwnd);
@@ -626,6 +640,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WPARAM(3),
             LPARAM(0),
         );
+        let _ = SetWindowSubclass(
+            blur_edit,
+            Some(settings_edit_subclass_proc),
+            SETTINGS_EDIT_SUBCLASS_ID,
+            hwnd.0 as usize,
+        );
 
         let corner_edit = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -664,6 +684,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             EM_SETLIMITTEXT_MSG,
             WPARAM(2),
             LPARAM(0),
+        );
+        let _ = SetWindowSubclass(
+            corner_edit,
+            Some(settings_edit_subclass_proc),
+            SETTINGS_EDIT_SUBCLASS_ID,
+            hwnd.0 as usize,
         );
 
         let mut hex_edits_raw = [HWND::default(); HEX_EDIT_COUNT];
@@ -1273,7 +1299,7 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
 }
 
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 438, 424, 622)
+    rect(hwnd, 200, 400, 424, 584)
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
@@ -1281,7 +1307,7 @@ fn language_button_rect(hwnd: HWND) -> RECT {
 }
 
 fn language_option_count() -> usize {
-    LanguageId::ALL.len() + 1
+    LanguageId::SELECTABLE.len()
 }
 
 fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
@@ -1309,24 +1335,18 @@ fn language_popup_rect(hwnd: HWND) -> RECT {
 }
 
 fn language_code_for_index(index: usize) -> String {
-    if index == 0 {
-        "system".to_string()
-    } else {
-        LanguageId::ALL
-            .get(index - 1)
-            .map(|language| language.code().to_string())
-            .unwrap_or_else(|| "system".to_string())
-    }
+    LanguageId::SELECTABLE
+        .get(index)
+        .map(|language| language.code().to_string())
+        .unwrap_or_else(|| LanguageId::English.code().to_string())
 }
 
-fn language_label_for_index(index: usize, ui_language: LanguageId) -> &'static str {
-    if index == 0 {
-        ui_language.strings().system_default
-    } else {
-        LanguageId::ALL
-            .get(index - 1)
-            .map(|language| language.native_name())
-            .unwrap_or(ui_language.strings().system_default)
+fn language_label_for_index(index: usize, _ui_language: LanguageId) -> &'static str {
+    match LanguageId::SELECTABLE.get(index).copied() {
+        Some(LanguageId::SimplifiedChinese) => "中文",
+        Some(LanguageId::English) => "English",
+        Some(language) => language.native_name(),
+        None => "English",
     }
 }
 
@@ -1457,6 +1477,31 @@ fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
         let _ = InvalidateRect(panel, Some(&json_scrollbar_track_rect(panel)), false);
         let _ = UpdateWindow(panel);
     }
+}
+
+unsafe extern "system" fn settings_edit_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    ref_data: usize,
+) -> LRESULT {
+    if msg == WM_MOUSEWHEEL {
+        let owner = HWND(ref_data as *mut _);
+        if !owner.0.is_null() {
+            return SendMessageW(owner, msg, wparam, lparam);
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(
+            hwnd,
+            Some(settings_edit_subclass_proc),
+            SETTINGS_EDIT_SUBCLASS_ID,
+        );
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 unsafe extern "system" fn json_edit_subclass_proc(
@@ -2584,6 +2629,20 @@ fn json_error_key(error: &str) -> Option<String> {
     None
 }
 
+fn localized_corner_range_detail(error: &str, language: LanguageId) -> Option<String> {
+    let marker = "corner_radius: allowed range is 0-";
+    let tail = error.split(marker).nth(1)?;
+    let max: String = tail.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if max.is_empty() {
+        return None;
+    }
+    Some(if language == LanguageId::SimplifiedChinese {
+        format!("值超出范围。允许范围：0–{max}。")
+    } else {
+        format!("Value is out of range. Allowed range: 0–{max}.")
+    })
+}
+
 fn friendly_json_error(error: &str, language: LanguageId) -> String {
     let location = json_error_location(error);
     let full = error;
@@ -2625,7 +2684,12 @@ fn friendly_json_error(error: &str, language: LanguageId) -> String {
         JsonErrorPhrase::GenericSyntax
     };
 
-    let localized = json_error_phrase(language, phrase);
+    let localized = if matches!(phrase, JsonErrorPhrase::CornerRange) {
+        localized_corner_range_detail(error, language)
+            .unwrap_or_else(|| json_error_phrase(language, phrase).to_string())
+    } else {
+        json_error_phrase(language, phrase).to_string()
+    };
     let detail = if let Some(key) = json_error_key(error) {
         match language {
             LanguageId::Japanese
@@ -2634,7 +2698,7 @@ fn friendly_json_error(error: &str, language: LanguageId) -> String {
             _ => format!("`{key}`: {localized}"),
         }
     } else {
-        localized.to_string()
+        localized
     };
 
     if let Some((line, column)) = location {
@@ -2779,8 +2843,8 @@ fn json_error_shake_offset(hwnd: HWND, step: u8) -> i32 {
     }
     let progress = f32::from(step.saturating_sub(1))
         / f32::from(JSON_ERROR_SHAKE_STEPS.saturating_sub(1));
-    let amplitude = scale(hwnd, 8) as f32 * (1.0 - progress);
-    let phase = progress * std::f32::consts::PI * 6.0 + std::f32::consts::FRAC_PI_2;
+    let amplitude = scale(hwnd, 4) as f32 * (1.0 - progress);
+    let phase = progress * std::f32::consts::PI * 4.0;
     (amplitude * phase.sin()).round() as i32
 }
 
@@ -3695,13 +3759,35 @@ fn update_blur_from_numeric_edit() {
     }
 }
 
+fn corner_radius_max_for_section(
+    preset: AppearancePreset,
+    section: Section,
+) -> Option<u8> {
+    match section {
+        Section::Panel => Some(panel_corner_radius_max(preset)),
+        Section::Tooltip => Some(tooltip_corner_radius_max()),
+        Section::Progress => Some(progress_corner_radius_max(preset)),
+        _ => None,
+    }
+}
+
 fn update_corner_from_numeric_edit() {
-    let (edit, syncing, section) = {
+    let (edit, syncing, section, radius_max) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
         };
-        (s.corner_edit.to_hwnd(), s.syncing_corner_edit, s.section)
+        let Some(radius_max) =
+            corner_radius_max_for_section(s.snapshot.appearance_preset, s.section)
+        else {
+            return;
+        };
+        (
+            s.corner_edit.to_hwnd(),
+            s.syncing_corner_edit,
+            s.section,
+            radius_max,
+        )
     };
     if syncing {
         return;
@@ -3710,7 +3796,7 @@ fn update_corner_from_numeric_edit() {
     let Some(raw_value) = read_edit_value(edit) else {
         return;
     };
-    let value = raw_value.min(u16::from(CORNER_RADIUS_MAX)) as u8;
+    let value = raw_value.min(u16::from(radius_max)) as u8;
 
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -3726,7 +3812,7 @@ fn update_corner_from_numeric_edit() {
         sync_active_style_into_editable(s);
     }
 
-    if raw_value > u16::from(CORNER_RADIUS_MAX) {
+    if raw_value > u16::from(radius_max) {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
             s.syncing_corner_edit = true;
@@ -4250,6 +4336,175 @@ fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
     None
 }
 
+fn wheel_numeric_target_at(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+) -> Option<WheelNumericTarget> {
+    let (section, editor) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let s = state.as_ref()?;
+        (s.section, s.editor)
+    };
+
+    if matches!(
+        section,
+        Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
+    ) && matches!(editor, EditorSelection::Color(_))
+    {
+        for index in 0..4 {
+            if pt_in_rect(numeric_edit_frame_rect(hwnd, section, index), x, y) {
+                return Some(WheelNumericTarget::Color(index));
+            }
+        }
+    }
+
+    if matches!(section, Section::Panel | Section::Tooltip)
+        && pt_in_rect(blur_edit_frame_rect(hwnd, section), x, y)
+    {
+        return Some(WheelNumericTarget::Blur);
+    }
+
+    if matches!(section, Section::Panel | Section::Tooltip | Section::Progress)
+        && pt_in_rect(corner_edit_frame_rect(hwnd), x, y)
+    {
+        return Some(WheelNumericTarget::Corner);
+    }
+
+    None
+}
+
+fn adjust_numeric_by_wheel(target: WheelNumericTarget, direction: i32) {
+    if direction == 0 {
+        return;
+    }
+    let (edit, current, max) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        match target {
+            WheelNumericTarget::Color(index) => {
+                let EditorSelection::Color(color_target) = s.editor else {
+                    return;
+                };
+                let color = s.snapshot.active_style.color(color_target);
+                let values = [color.r, color.g, color.b, color.a];
+                let Some(current) = values.get(index).copied() else {
+                    return;
+                };
+                (s.numeric_edits[index].to_hwnd(), current, u8::MAX)
+            }
+            WheelNumericTarget::Blur => {
+                let current = match s.section {
+                    Section::Panel => s.snapshot.active_style.panel_frosted_strength,
+                    Section::Tooltip => s.snapshot.active_style.tooltip_frosted_strength(),
+                    _ => return,
+                };
+                (s.blur_edit.to_hwnd(), current, FROSTED_STRENGTH_MAX)
+            }
+            WheelNumericTarget::Corner => {
+                let Some(max) =
+                    corner_radius_max_for_section(s.snapshot.appearance_preset, s.section)
+                else {
+                    return;
+                };
+                let current = match s.section {
+                    Section::Panel => s.snapshot.active_style.panel_corner_radius,
+                    Section::Tooltip => s.snapshot.active_style.tooltip_corner_radius,
+                    Section::Progress => s.snapshot.active_style.progress_corner_radius,
+                    _ => return,
+                };
+                (s.corner_edit.to_hwnd(), current, max)
+            }
+        }
+    };
+
+    let next = (i32::from(current) + direction.signum())
+        .clamp(0, i32::from(max)) as u8;
+    if next != current {
+        set_edit_text(edit, next);
+    }
+}
+
+fn adjust_slider_by_wheel(hwnd: HWND, kind: SliderKind, direction: i32) {
+    if direction == 0 {
+        return;
+    }
+    let (current, max, track) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        match kind {
+            SliderKind::Blur => {
+                let current = match s.section {
+                    Section::Panel => s.snapshot.active_style.panel_frosted_strength,
+                    Section::Tooltip => s.snapshot.active_style.tooltip_frosted_strength(),
+                    _ => return,
+                };
+                (
+                    current,
+                    FROSTED_STRENGTH_MAX,
+                    blur_slider_track_rect(hwnd, s.section),
+                )
+            }
+            SliderKind::Red | SliderKind::Green | SliderKind::Blue | SliderKind::Alpha => {
+                let EditorSelection::Color(target) = s.editor else {
+                    return;
+                };
+                let color = s.snapshot.active_style.color(target);
+                let index = match kind {
+                    SliderKind::Red => 0,
+                    SliderKind::Green => 1,
+                    SliderKind::Blue => 2,
+                    SliderKind::Alpha => 3,
+                    SliderKind::Blur => unreachable!(),
+                };
+                (
+                    [color.r, color.g, color.b, color.a][index],
+                    u8::MAX,
+                    color_slider_track_rect(hwnd, s.section, index),
+                )
+            }
+        }
+    };
+
+    let next = (i32::from(current) + direction.signum())
+        .clamp(0, i32::from(max)) as u8;
+    if next == current {
+        return;
+    }
+    let width = (track.right - track.left).max(1);
+    let denominator = i32::from(max.max(1));
+    let x = track.left + (i32::from(next) * width + denominator / 2) / denominator;
+    update_slider(hwnd, kind, x);
+    send_parent(WM_STYLE_SAVE, 0, 0);
+}
+
+fn handle_settings_mouse_wheel(hwnd: HWND, wparam: WPARAM) -> bool {
+    let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+    if delta == 0 {
+        return false;
+    }
+
+    let mut point = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+        let _ = ScreenToClient(hwnd, &mut point);
+    }
+
+    if let Some(target) = wheel_numeric_target_at(hwnd, point.x, point.y) {
+        adjust_numeric_by_wheel(target, delta);
+        return true;
+    }
+    if let Some(kind) = slider_kind_at(hwnd, point.x, point.y) {
+        adjust_slider_by_wheel(hwnd, kind, delta);
+        return true;
+    }
+    false
+}
+
 fn slider_value_from_x(track: RECT, x: i32, max: u8) -> u8 {
     let width = (track.right - track.left).max(1);
     let pos = (x.clamp(track.left, track.right) - track.left) as i64;
@@ -4378,6 +4633,13 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_MOUSEWHEEL => {
+            if handle_settings_mouse_wheel(hwnd, wparam) {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         WM_SETCURSOR => {
             let cursor_hwnd = HWND(wparam.0 as *mut _);
@@ -5480,13 +5742,13 @@ unsafe fn paint_general_page(
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
-        if zh { "5 小时额度" } else { "5-hour quota" },
+        "5H",
         rect(hwnd, 238, 162, 650, 194),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     draw_text(
         hdc,
-        if zh { "每周额度" } else { "Weekly quota" },
+        "7D",
         rect(hwnd, 238, 202, 650, 234),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
@@ -5595,15 +5857,22 @@ unsafe fn paint_general_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
-    let current_language_index = if general.language == "system" {
-        0
+    let selected_language = if general.language == "system" {
+        snapshot.language
     } else {
-        LanguageId::ALL
-            .iter()
-            .position(|language| language.code() == general.language)
-            .map(|index| index + 1)
-            .unwrap_or(0)
+        LanguageId::from_code(&general.language)
+            .map(LanguageId::ui_supported)
+            .unwrap_or(snapshot.language)
     };
+    let current_language_index = LanguageId::SELECTABLE
+        .iter()
+        .position(|language| *language == selected_language)
+        .unwrap_or_else(|| {
+            LanguageId::SELECTABLE
+                .iter()
+                .position(|language| *language == LanguageId::English)
+                .unwrap_or(0)
+        });
     let language_target = HitTarget::LanguageToggle;
     let language_button = language_button_rect(hwnd);
     let language_background = button_background(
@@ -6326,13 +6595,6 @@ unsafe fn paint_preset_gallery(
 
     if !matched {
         let zh = snapshot.language == LanguageId::SimplifiedChinese;
-        let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-        draw_text(
-            hdc,
-            if zh { "当前自定义" } else { "Current custom" },
-            rect(hwnd, 200, 400, 940, 430),
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
         paint_style_preview_card(
             hdc,
             hwnd,
@@ -6414,7 +6676,7 @@ unsafe fn paint_style_preview_card(
     let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
     draw_text(
         hdc,
-        "5h",
+        "5H",
         RECT {
             left: text_left,
             top: preview.top + scale(hwnd, 6),
