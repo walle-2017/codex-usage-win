@@ -478,7 +478,7 @@ mod tests {
     fn defaults_keep_dark_and_light_separate() {
         let styles = StyleSettings::default();
         assert_eq!(styles.dark.panel_background, "#242A31FF");
-        assert_eq!(styles.light.panel_background, "#EEF1F4FF");
+        assert_eq!(styles.light.panel_background, "#F6F8FAFF");
     }
 
     #[test]
