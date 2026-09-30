@@ -6532,12 +6532,12 @@ fn preset_label(preset: ThemePreset, is_dark: bool, language: LanguageId) -> &'s
         (false, true, ThemePreset::Classic) => "Graphite",
         (false, true, ThemePreset::Ocean) => "Deep Sea",
         (false, true, ThemePreset::Forest) => "Pine Shade",
-        (true, false, ThemePreset::Classic) => "晨霜",
-        (true, false, ThemePreset::Ocean) => "雾蓝",
-        (true, false, ThemePreset::Forest) => "暖砂",
-        (false, false, ThemePreset::Classic) => "Morning Frost",
-        (false, false, ThemePreset::Ocean) => "Mist Blue",
-        (false, false, ThemePreset::Forest) => "Warm Sand",
+        (true, false, ThemePreset::Classic) => "云瓷",
+        (true, false, ThemePreset::Ocean) => "晴湾",
+        (true, false, ThemePreset::Forest) => "麦光",
+        (false, false, ThemePreset::Classic) => "Cloud Porcelain",
+        (false, false, ThemePreset::Ocean) => "Clear Bay",
+        (false, false, ThemePreset::Forest) => "Wheat Glow",
     }
 }
 
