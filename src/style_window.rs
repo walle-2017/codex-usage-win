@@ -61,9 +61,8 @@ const ID_EDIT_CORNER: u16 = 305;
 const ID_EDIT_HEX_BASE: u16 = 320;
 const HEX_EDIT_COUNT: usize = 13;
 const ID_EDIT_JSON: u16 = 400;
-const ID_JSON_SAVE_MASK: u16 = 401;
 const JSON_EDIT_LIMIT: usize = 262_144;
-const JSON_SAVE_MASK_ALPHA: u8 = 96;
+const JSON_SAVE_MASK_ALPHA: u8 = 128;
 const RICH_EDIT_CLASS: &str = "RICHEDIT50W";
 const EM_SETBKGNDCOLOR_MSG: u32 = WM_USER + 67;
 const EM_SETCHARFORMAT_MSG: u32 = WM_USER + 68;
@@ -83,8 +82,11 @@ const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
 const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
+const JSON_ERROR_PULSE_TIMER_ID: usize = 0x4A57;
 const JSON_ACTION_DELAY_MS: u32 = 200;
 const JSON_VALIDATION_DELAY_MS: u32 = 90;
+const JSON_ERROR_PULSE_INTERVAL_MS: u32 = 30;
+const JSON_ERROR_PULSE_STEPS: u8 = 6;
 const JSON_WHEEL_DELTA: i32 = 120;
 const JSON_WHEEL_LINES_PER_NOTCH: i32 = 3;
 
@@ -262,6 +264,7 @@ struct PanelState {
     json_status: String,
     json_status_path: Option<PathBuf>,
     json_save_feedback: Option<JsonSaveFeedback>,
+    json_error_pulse_step: u8,
     pending_json_action: Option<JsonAction>,
     pending_discard_action: Option<PendingDiscardAction>,
     json_scroll_hovered: bool,
@@ -797,6 +800,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_status: String::new(),
                 json_status_path: None,
                 json_save_feedback: None,
+                json_error_pulse_step: 0,
                 pending_json_action: None,
                 pending_discard_action: None,
                 json_scroll_hovered: false,
@@ -1347,6 +1351,16 @@ fn json_edit_text_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn json_save_mask_rect(hwnd: HWND) -> RECT {
+    let outer = json_edit_rect(hwnd);
+    RECT {
+        left: outer.left + scale(hwnd, 2),
+        top: outer.top + scale(hwnd, 2),
+        right: outer.right - scale(hwnd, 2),
+        bottom: outer.bottom - scale(hwnd, 2),
+    }
+}
+
 fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
     let outer = json_edit_rect(hwnd);
     RECT {
@@ -1785,7 +1799,7 @@ fn ensure_json_save_mask(owner: HWND) -> Option<HWND> {
             1,
             1,
             owner,
-            HMENU(ID_JSON_SAVE_MASK as usize as *mut _),
+            HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
             None,
         ).ok()?;
@@ -1844,21 +1858,29 @@ fn layout_settings_children(hwnd: HWND) {
 
         let mask_hwnd = json_save_mask.to_hwnd();
         if !mask_hwnd.0.is_null() {
-            let mask_visibility = if save_mask_visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
-            let mut mask_origin = POINT {
-                x: json_rect.left,
-                y: json_rect.top,
-            };
-            let _ = ClientToScreen(hwnd, &mut mask_origin);
-            let _ = SetWindowPos(
-                mask_hwnd,
-                HWND_TOP,
-                mask_origin.x,
-                mask_origin.y,
-                (json_rect.right - json_rect.left).max(1),
-                (json_rect.bottom - json_rect.top).max(1),
-                SWP_NOACTIVATE | SWP_NOCOPYBITS | mask_visibility,
-            );
+            if save_mask_visible {
+                let mask_rect = json_save_mask_rect(hwnd);
+                let mut mask_origin = POINT {
+                    x: mask_rect.left,
+                    y: mask_rect.top,
+                };
+                let _ = ClientToScreen(hwnd, &mut mask_origin);
+                let _ = SetWindowPos(
+                    mask_hwnd,
+                    HWND_TOP,
+                    mask_origin.x,
+                    mask_origin.y,
+                    (mask_rect.right - mask_rect.left).max(1),
+                    (mask_rect.bottom - mask_rect.top).max(1),
+                    SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_SHOWWINDOW,
+                );
+                // The saving state only lasts 200 ms. Paint the layered popup
+                // synchronously so the mask is visible for that full interval.
+                let _ = InvalidateRect(mask_hwnd, None, true);
+                let _ = UpdateWindow(mask_hwnd);
+            } else {
+                let _ = ShowWindow(mask_hwnd, SW_HIDE);
+            }
         }
 
         if visible {
@@ -1868,7 +1890,6 @@ fn layout_settings_children(hwnd: HWND) {
         }
     }
 }
-
 
 fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
@@ -2364,6 +2385,99 @@ fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'stati
     }
 }
 
+fn start_json_error_pulse(hwnd: HWND) {
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.json_error_pulse_step = 1;
+    }
+    unsafe {
+        let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+        let _ = SetTimer(
+            hwnd,
+            JSON_ERROR_PULSE_TIMER_ID,
+            JSON_ERROR_PULSE_INTERVAL_MS,
+            None,
+        );
+        let _ = InvalidateRect(hwnd, None, false);
+        let _ = UpdateWindow(hwnd);
+    }
+}
+
+fn advance_json_error_pulse(hwnd: HWND) {
+    let finished = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        if s.json_error_pulse_step == 0 {
+            true
+        } else if s.json_error_pulse_step >= JSON_ERROR_PULSE_STEPS {
+            s.json_error_pulse_step = 0;
+            true
+        } else {
+            s.json_error_pulse_step += 1;
+            false
+        }
+    };
+    unsafe {
+        if finished {
+            let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+        }
+        let _ = InvalidateRect(hwnd, None, false);
+        let _ = UpdateWindow(hwnd);
+    }
+}
+
+fn show_json_apply_validation_error(
+    hwnd: HWND,
+    edit: HWND,
+    language: LanguageId,
+    error: &str,
+) {
+    let detail = friendly_json_error(error, language);
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.json_save_feedback = None;
+        s.json_status_path = None;
+        s.json_status = if language == LanguageId::SimplifiedChinese {
+            format!("× 配置存在错误\n{detail}")
+        } else {
+            format!("× Configuration has errors\n{detail}")
+        };
+    }
+    locate_json_error(edit, error);
+    start_json_error_pulse(hwnd);
+}
+
+fn begin_json_apply(hwnd: HWND) {
+    let (edit, language, already_running) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (
+            s.json_edit.to_hwnd(),
+            s.snapshot.language,
+            s.pending_json_action.is_some(),
+        )
+    };
+    if already_running {
+        return;
+    }
+
+    let raw = read_large_edit_text(edit);
+    match parse_jsonc(&raw) {
+        Ok(_) => begin_json_action(hwnd, JsonAction::Apply),
+        Err(error) => show_json_apply_validation_error(hwnd, edit, language, &error),
+    }
+}
+
 fn begin_json_action(hwnd: HWND, action: JsonAction) {
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -2376,6 +2490,7 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
         s.pending_json_action = Some(action);
         if action == JsonAction::Apply {
             s.json_save_feedback = Some(JsonSaveFeedback::Saving);
+            s.json_error_pulse_step = 0;
         } else {
             s.json_save_feedback = None;
             s.json_status = json_action_running_text(action, s.snapshot.language).to_string();
@@ -2383,6 +2498,9 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
         }
     }
     if action == JsonAction::Apply {
+        unsafe {
+            let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+        }
         let _ = ensure_json_save_mask(hwnd);
         layout_settings_children(hwnd);
     }
@@ -2459,6 +2577,7 @@ fn schedule_json_validation(hwnd: HWND) {
             // Any user edit after a successful save replaces the saved indicator
             // with the normal unsaved-changes state immediately.
             s.json_save_feedback = None;
+            s.json_error_pulse_step = 0;
             // Mark dirty immediately so closing the window before the debounce
             // fires still triggers the unsaved-changes confirmation.
             s.json_dirty = true;
@@ -2471,6 +2590,7 @@ fn schedule_json_validation(hwnd: HWND) {
 
     unsafe {
         let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
+        let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
         let _ = SetTimer(
             hwnd,
             JSON_VALIDATION_TIMER_ID,
@@ -2768,19 +2888,7 @@ fn apply_json_editor() {
     let settings = match parse_jsonc(&raw) {
         Ok(value) => value,
         Err(error) => {
-            {
-                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(s) = state.as_mut() {
-                    s.json_save_feedback = None;
-                }
-            }
-            set_json_status(json_action_error(
-                "无法应用：配置存在错误",
-                "Cannot apply: configuration has errors",
-                &error,
-                language,
-            ));
-            locate_json_error(edit, &error);
+            show_json_apply_validation_error(hwnd, edit, language, &error);
             return;
         }
     };
@@ -3615,7 +3723,7 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                     .as_ref()
                     .is_some_and(|s| s.json_dirty);
                 if dirty {
-                    begin_json_action(hwnd, action);
+                    begin_json_apply(hwnd);
                 }
             } else {
                 begin_json_action(hwnd, action);
@@ -3904,6 +4012,10 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == JSON_VALIDATION_TIMER_ID {
                 let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
                 update_json_validation_status(false);
+                return LRESULT(0);
+            }
+            if wparam.0 == JSON_ERROR_PULSE_TIMER_ID {
+                advance_json_error_pulse(hwnd);
                 return LRESULT(0);
             }
             if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
@@ -4441,6 +4553,7 @@ unsafe extern "system" fn wnd_proc(
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
+            let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.take().map(|s| (s.font, s.json_font, s.edit_brush, s.json_save_mask))
@@ -4615,6 +4728,7 @@ unsafe fn paint(hwnd: HWND) {
         json_status,
         json_status_path,
         json_save_feedback,
+        json_error_pulse_step,
         json_dirty,
         discard_pending,
         font,
@@ -4638,6 +4752,7 @@ unsafe fn paint(hwnd: HWND) {
             s.json_status.clone(),
             s.json_status_path.clone(),
             s.json_save_feedback,
+            s.json_error_pulse_step,
             s.json_dirty,
             s.pending_discard_action.is_some(),
             s.font,
@@ -4775,6 +4890,7 @@ unsafe fn paint(hwnd: HWND) {
             &json_status,
             json_status_path.as_deref(),
             json_save_feedback,
+            json_error_pulse_step,
             json_dirty,
             hovered,
             pressed,
@@ -5257,6 +5373,7 @@ unsafe fn paint_json_page(
     status: &str,
     status_path: Option<&std::path::Path>,
     save_feedback: Option<JsonSaveFeedback>,
+    error_pulse_step: u8,
     dirty: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
@@ -5373,6 +5490,50 @@ unsafe fn paint_json_page(
 
     let status_top = edit_rect.bottom + scale(hwnd, 8);
     let prefix_width = if zh { scale(hwnd, 96) } else { scale(hwnd, 150) };
+
+    // Invalid Apply keeps the configuration-validation message and briefly
+    // enlarges it before returning to the normal UI font size.
+    let pulse_percent = match error_pulse_step {
+        1 => 106,
+        2 => 112,
+        3 => 116,
+        4 => 112,
+        5 => 106,
+        _ => 100,
+    };
+    let pulse_font = if !success && pulse_percent > 100 {
+        let font_name = native_interop::wide_str(fonts::face(
+            fonts::FontRole::Ui,
+            Some(snapshot.language),
+        ));
+        let height = ((scale(hwnd, 14) * pulse_percent + 50) / 100).max(1);
+        Some(CreateFontW(
+            -height,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        ))
+    } else {
+        None
+    };
+    let old_status_font = pulse_font.as_ref().and_then(|font| {
+        if font.0.is_null() {
+            None
+        } else {
+            Some(SelectObject(hdc, HGDIOBJ(font.0)))
+        }
+    });
+
     draw_text(
         hdc,
         status,
@@ -5382,12 +5543,20 @@ unsafe fn paint_json_page(
             right: if status_path.is_some() {
                 scale(hwnd, 200) + prefix_width
             } else {
-                scale(hwnd, 760)
+                client.right - scale(hwnd, 24)
             },
             bottom: status_top + scale(hwnd, 26),
         },
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
+    if let Some(old_font) = old_status_font {
+        SelectObject(hdc, old_font);
+    }
+    if let Some(font) = pulse_font {
+        if !font.0.is_null() {
+            let _ = DeleteObject(font);
+        }
+    }
     if let Some(path) = status_path {
         let path_text = path.to_string_lossy();
         let path_left = scale(hwnd, 200) + prefix_width;
