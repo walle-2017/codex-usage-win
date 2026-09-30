@@ -60,7 +60,9 @@ const ID_EDIT_CORNER: u16 = 305;
 const ID_EDIT_HEX_BASE: u16 = 320;
 const HEX_EDIT_COUNT: usize = 13;
 const ID_EDIT_JSON: u16 = 400;
+const ID_JSON_SAVE_MASK: u16 = 401;
 const JSON_EDIT_LIMIT: usize = 262_144;
+const JSON_SAVE_MASK_ALPHA: u8 = 96;
 const RICH_EDIT_CLASS: &str = "RICHEDIT50W";
 const EM_SETBKGNDCOLOR_MSG: u32 = WM_USER + 67;
 const EM_SETCHARFORMAT_MSG: u32 = WM_USER + 68;
@@ -243,6 +245,7 @@ struct PanelState {
     corner_edit: SendHwnd,
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     json_edit: SendHwnd,
+    json_save_mask: SendHwnd,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
     focused_corner_edit: bool,
@@ -264,6 +267,7 @@ struct PanelState {
     json_scroll_dragging: bool,
     json_scroll_drag_offset: i32,
     edit_brush: isize,
+    json_mask_brush: isize,
     font: isize,
     json_font: isize,
 }
@@ -751,12 +755,48 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             LPARAM(json_background.to_colorref() as isize),
         );
 
+        let static_class = native_interop::wide_str("STATIC");
+        let json_save_mask = match CreateWindowExW(
+            WS_EX_LAYERED,
+            PCWSTR::from_raw(static_class.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WS_CHILD,
+            0,
+            0,
+            s(700),
+            s(480),
+            hwnd,
+            HMENU(ID_JSON_SAVE_MASK as usize as *mut _),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                let _ = DeleteObject(json_font);
+                return;
+            }
+        };
+        let _ = SetLayeredWindowAttributes(
+            json_save_mask,
+            COLORREF(0),
+            JSON_SAVE_MASK_ALPHA,
+            LWA_ALPHA,
+        );
+
         let edit_background = if snapshot.is_dark {
             Color::from_hex("#20242AFF")
         } else {
             Color::from_hex("#EEF3F8FF")
         };
         let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
+        let mask_background = if snapshot.is_dark {
+            Color::from_hex("#0F141AFF")
+        } else {
+            Color::from_hex("#AEB8C4FF")
+        };
+        let json_mask_brush = CreateSolidBrush(COLORREF(mask_background.to_colorref()));
 
         apply_fixed_titlebar(hwnd);
 
@@ -777,6 +817,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 corner_edit: SendHwnd::from_hwnd(corner_edit),
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
+                json_save_mask: SendHwnd::from_hwnd(json_save_mask),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
                 focused_corner_edit: false,
@@ -798,6 +839,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_scroll_dragging: false,
                 json_scroll_drag_offset: 0,
                 edit_brush: edit_brush.0 as isize,
+                json_mask_brush: json_mask_brush.0 as isize,
                 font: font.0 as isize,
                 json_font: json_font.0 as isize,
             });
@@ -833,6 +875,17 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             }
             let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
             s.edit_brush = brush.0 as isize;
+
+            if s.json_mask_brush != 0 {
+                let _ = DeleteObject(HGDIOBJ(s.json_mask_brush as *mut _));
+            }
+            let mask_background = if s.snapshot.is_dark {
+                Color::from_hex("#0F141AFF")
+            } else {
+                Color::from_hex("#AEB8C4FF")
+            };
+            let mask_brush = CreateSolidBrush(COLORREF(mask_background.to_colorref()));
+            s.json_mask_brush = mask_brush.0 as isize;
         }
         (
             s.hwnd.to_hwnd(),
@@ -1428,7 +1481,14 @@ fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
     }
     unsafe {
         let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
+        let _ = RedrawWindow(
+            edit,
+            None,
+            HRGN::default(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+        );
         let _ = InvalidateRect(panel, Some(&json_scrollbar_track_rect(panel)), false);
+        let _ = UpdateWindow(panel);
     }
 }
 
@@ -1489,10 +1549,17 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
     if delta != 0 {
         unsafe {
             let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
+            let _ = RedrawWindow(
+                edit,
+                None,
+                HRGN::default(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            );
         }
     }
     unsafe {
         let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+        let _ = UpdateWindow(hwnd);
     }
 }
 
@@ -1657,7 +1724,7 @@ fn layout_numeric_edits(hwnd: HWND) {
                 r.top,
                 r.right - r.left,
                 r.bottom - r.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
             );
             let _ = ShowWindow(
                 edit.to_hwnd(),
@@ -1673,7 +1740,7 @@ fn layout_numeric_edits(hwnd: HWND) {
             blur_rect.top,
             blur_rect.right - blur_rect.left,
             blur_rect.bottom - blur_rect.top,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
         );
         let _ = ShowWindow(
             blur_edit.to_hwnd(),
@@ -1688,7 +1755,7 @@ fn layout_numeric_edits(hwnd: HWND) {
             corner_rect.top,
             corner_rect.right - corner_rect.left,
             corner_rect.bottom - corner_rect.top,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
         );
         let _ = ShowWindow(
             corner_edit.to_hwnd(),
@@ -1699,9 +1766,19 @@ fn layout_numeric_edits(hwnd: HWND) {
 
 
 fn layout_settings_children(hwnd: HWND) {
-    let Some((json_edit, section, discard_pending)) = ({
+    let Some((json_edit, json_save_mask, section, discard_pending, save_mask_visible)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| (s.json_edit, s.section, s.pending_discard_action.is_some()))
+        state.as_ref().map(|s| {
+            (
+                s.json_edit,
+                s.json_save_mask,
+                s.section,
+                s.pending_discard_action.is_some(),
+                s.section == Section::Json
+                    && s.pending_discard_action.is_none()
+                    && s.json_save_feedback == Some(JsonSaveFeedback::Saving),
+            )
+        })
     }) else {
         return;
     };
@@ -1722,8 +1799,20 @@ fn layout_settings_children(hwnd: HWND) {
             json_rect.top,
             (json_rect.right - json_rect.left).max(1),
             (json_rect.bottom - json_rect.top).max(1),
-            SWP_NOZORDER | SWP_NOACTIVATE | visibility,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | visibility,
         );
+
+        let mask_visibility = if save_mask_visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+        let _ = SetWindowPos(
+            json_save_mask.to_hwnd(),
+            HWND_TOP,
+            json_rect.left,
+            json_rect.top,
+            (json_rect.right - json_rect.left).max(1),
+            (json_rect.bottom - json_rect.top).max(1),
+            SWP_NOACTIVATE | SWP_NOCOPYBITS | mask_visibility,
+        );
+
         if visible {
             let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
         } else {
@@ -2245,6 +2334,9 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
             s.json_status_path = None;
         }
     }
+    if action == JsonAction::Apply {
+        layout_settings_children(hwnd);
+    }
     unsafe {
         let _ = SetTimer(hwnd, JSON_ACTION_TIMER_ID, JSON_ACTION_DELAY_MS, None);
         let _ = InvalidateRect(hwnd, None, false);
@@ -2269,12 +2361,16 @@ fn finish_pending_json_action(hwnd: HWND) {
         // application state and calls style_window::sync(). That sync must update
         // the snapshot without touching/reloading the JSON RichEdit contents.
         apply_json_editor();
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = state.as_mut() {
-            if s.pending_json_action == Some(JsonAction::Apply) {
-                s.pending_json_action = None;
+        {
+            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = state.as_mut() {
+                if s.pending_json_action == Some(JsonAction::Apply) {
+                    s.pending_json_action = None;
+                }
             }
         }
+        layout_settings_children(hwnd);
+        redraw_settings_window(hwnd);
         return;
     }
 
@@ -2702,7 +2798,7 @@ fn layout_hex_edits(hwnd: HWND) {
                     r.top,
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
                 );
                 let _ = ShowWindow(edit, SW_SHOW);
             } else {
@@ -4222,6 +4318,27 @@ unsafe extern "system" fn wnd_proc(
 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_CTLCOLORSTATIC => {
+            let child = HWND(lparam.0 as *mut _);
+            let (mask, is_dark, brush) = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(s) = state.as_ref() else {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                };
+                (s.json_save_mask.to_hwnd(), s.snapshot.is_dark, s.json_mask_brush)
+            };
+            if child == mask {
+                let hdc = HDC(wparam.0 as *mut _);
+                let background = if is_dark {
+                    Color::from_hex("#0F141AFF")
+                } else {
+                    Color::from_hex("#AEB8C4FF")
+                };
+                let _ = SetBkColor(hdc, COLORREF(background.to_colorref()));
+                return LRESULT(brush);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CTLCOLOREDIT => {
             let hdc = HDC(wparam.0 as *mut _);
             let (is_dark, brush) = {
@@ -4298,9 +4415,9 @@ unsafe extern "system" fn wnd_proc(
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.take().map(|s| (s.font, s.json_font, s.edit_brush))
+                state.take().map(|s| (s.font, s.json_font, s.edit_brush, s.json_mask_brush))
             };
-            if let Some((font, json_font, edit_brush)) = resources {
+            if let Some((font, json_font, edit_brush, json_mask_brush)) = resources {
                 if font != 0 {
                     let _ = DeleteObject(HGDIOBJ(font as *mut _));
                 }
@@ -4309,6 +4426,9 @@ unsafe extern "system" fn wnd_proc(
                 }
                 if edit_brush != 0 {
                     let _ = DeleteObject(HGDIOBJ(edit_brush as *mut _));
+                }
+                if json_mask_brush != 0 {
+                    let _ = DeleteObject(HGDIOBJ(json_mask_brush as *mut _));
                 }
             }
             LRESULT(0)
