@@ -112,8 +112,7 @@ if ($styleWindow -notmatch 'HitTarget' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
-if ($styleWindow -notmatch 'WS_EX_APPWINDOW' -or
-    $styleWindow -match 'WS_EX_TOOLWINDOW' -or
+if ($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -or
     $styleWindow -match 'WS_MAXIMIZEBOX' -or
     $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU\s*\|\s*WS_MINIMIZEBOX' -or
     $styleWindow -notmatch 'WINDOW_HEIGHT,\s*HWND::default\(\)' -or
@@ -121,6 +120,12 @@ if ($styleWindow -notmatch 'WS_EX_APPWINDOW' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must be an ownerless taskbar window with minimize support and a standard caption close button.'
+}
+if ($styleWindow -notmatch 'json_save_mask' -or
+    $styleWindow -notmatch 'WS_EX_LAYERED\s*\|\s*WS_EX_TOOLWINDOW\s*\|\s*WS_EX_NOACTIVATE' -or
+    $styleWindow -notmatch 'WS_POPUP' -or
+    $styleWindow -notmatch 'JSON_SAVE_MASK_ALPHA') {
+    throw 'JSON save feedback mask must use an owned no-activate layered popup without changing the main settings window style.'
 }
 if ($styleWindow -notmatch 'ID_EDIT_R' -or
     $styleWindow -notmatch 'ES_NUMBER' -or
