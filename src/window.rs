@@ -1775,7 +1775,19 @@ fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
     let Some(context) = blur_backdrop_context() else {
         return false;
     };
-    native_interop::set_composition_blur_bounds(context, width, height)
+    let corner_radius_px = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius)) as f32)
+            .unwrap_or(0.0)
+    };
+    native_interop::set_composition_blur_bounds(
+        context,
+        width,
+        height,
+        corner_radius_px,
+    )
 }
 
 fn destroy_blur_backdrop() {
