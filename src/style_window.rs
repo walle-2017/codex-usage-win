@@ -378,7 +378,7 @@ fn discard_dialog_rect(hwnd: HWND) -> RECT {
 
 fn discard_dialog_button_rect(hwnd: HWND, discard: bool) -> RECT {
     let dialog = discard_dialog_rect(hwnd);
-    let width = scale(hwnd, 122);
+    let width = scale(hwnd, 136);
     let height = scale(hwnd, 36);
     let gap = scale(hwnd, 12);
     let bottom = dialog.bottom - scale(hwnd, 22);
@@ -4965,7 +4965,7 @@ unsafe fn paint_discard_dialog(
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
-        if zh { "未保存的 JSON 配置" } else { "Unsaved JSON configuration" },
+        if zh { "未保存的更改" } else { "Unsaved changes" },
         RECT {
             left: dialog.left + scale(hwnd, 24),
             top: dialog.top + scale(hwnd, 20),
@@ -4978,9 +4978,9 @@ unsafe fn paint_discard_dialog(
     draw_text(
         hdc,
         if zh {
-            "当前 JSON 配置有未保存的更改。是否放弃更改并继续？"
+            "当前 JSON 配置尚未保存。继续操作将丢失这些更改。"
         } else {
-            "The JSON configuration has unsaved changes. Discard them and continue?"
+            "The current JSON configuration has not been saved. Continuing will discard these changes."
         },
         RECT {
             left: dialog.left + scale(hwnd, 24),
@@ -4991,6 +4991,21 @@ unsafe fn paint_discard_dialog(
         DT_LEFT | DT_VCENTER | DT_WORDBREAK,
     );
 
+    let discard_normal = if snapshot.is_dark {
+        Color::from_hex("#8F5054FF")
+    } else {
+        Color::from_hex("#B65F63FF")
+    };
+    let discard_hover = if snapshot.is_dark {
+        Color::from_hex("#A25A5EFF")
+    } else {
+        Color::from_hex("#C56A6EFF")
+    };
+    let discard_pressed = if snapshot.is_dark {
+        Color::from_hex("#7E464AFF")
+    } else {
+        Color::from_hex("#A95357FF")
+    };
     draw_segment(
         hdc,
         discard_dialog_button_rect(hwnd, true),
@@ -5001,16 +5016,16 @@ unsafe fn paint_discard_dialog(
             hovered,
             pressed,
             ButtonPalette {
-                normal: card,
-                hover: card_hover,
-                pressed: card_pressed,
-                selected: card,
-                selected_hover: card_hover,
-                selected_pressed: card_pressed,
+                normal: discard_normal,
+                hover: discard_hover,
+                pressed: discard_pressed,
+                selected: discard_normal,
+                selected_hover: discard_hover,
+                selected_pressed: discard_pressed,
             },
         ),
-        primary,
-        if zh { "放弃" } else { "Discard" },
+        Color::from_hex("#FFF8F8FF"),
+        if zh { "丢弃更改" } else { "Discard changes" },
     );
     draw_segment(
         hdc,
@@ -5031,7 +5046,7 @@ unsafe fn paint_discard_dialog(
             },
         ),
         primary,
-        if zh { "继续" } else { "Continue" },
+        if zh { "返回编辑" } else { "Return to editing" },
     );
     let _ = background;
 }
