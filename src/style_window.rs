@@ -1299,7 +1299,9 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
 }
 
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 400, 424, 584)
+    // Keep one compact row gap below the official preset cards. Their logical
+    // bottom is 404, so 420 leaves 16 px and avoids border overlap.
+    rect(hwnd, 200, 420, 424, 604)
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
