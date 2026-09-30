@@ -2243,8 +2243,8 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
 
 fn finish_pending_json_action(hwnd: HWND) {
     let action = {
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_mut().and_then(|s| s.pending_json_action.take())
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().and_then(|s| s.pending_json_action)
     };
     let Some(action) = action else {
         return;
@@ -2252,12 +2252,33 @@ fn finish_pending_json_action(hwnd: HWND) {
     unsafe {
         let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
     }
+
+    if action == JsonAction::Apply {
+        // Keep Apply marked pending while the synchronous parent handler updates
+        // application state and calls style_window::sync(). That sync must update
+        // the snapshot without touching/reloading the JSON RichEdit contents.
+        apply_json_editor();
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            if s.pending_json_action == Some(JsonAction::Apply) {
+                s.pending_json_action = None;
+            }
+        }
+        return;
+    }
+
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.pending_json_action = None;
+        }
+    }
     match action {
         JsonAction::Reload => reload_json_editor_from_snapshot(),
         JsonAction::Format => format_json_editor(),
         JsonAction::Import => import_json_file(hwnd),
         JsonAction::Export => export_json_file(hwnd),
-        JsonAction::Apply => apply_json_editor(),
+        JsonAction::Apply => unreachable!(),
     }
 }
 
