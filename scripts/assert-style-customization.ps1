@@ -548,8 +548,9 @@ foreach ($message in @(
 if ($styleWindow -match '"当前自定义"' -or
     $styleWindow -match '"Current custom"' -or
     $styleWindow -notmatch 'paint_style_preview_card\(' -or
-    $styleWindow -notmatch 'if\s+!matched') {
-    throw 'Preset page must show the custom preview without a redundant Current custom heading.'
+    $styleWindow -notmatch 'if\s+!matched' -or
+    $styleWindow -notmatch 'rect\(hwnd, 200, 420, 424, 604\)') {
+    throw 'Preset page must show the custom preview below the preset row without a redundant Current custom heading.'
 }
 if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'strip_jsonc_comments' -or
