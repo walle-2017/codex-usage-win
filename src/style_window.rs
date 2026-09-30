@@ -1341,12 +1341,12 @@ fn language_code_for_index(index: usize) -> String {
         .unwrap_or_else(|| LanguageId::English.code().to_string())
 }
 
-fn language_label_for_index(index: usize, _ui_language: LanguageId) -> &'static str {
+fn language_label_for_index(index: usize, ui_language: LanguageId) -> &'static str {
     match LanguageId::SELECTABLE.get(index).copied() {
         Some(LanguageId::SimplifiedChinese) => "中文",
         Some(LanguageId::English) => "English",
         Some(language) => language.native_name(),
-        None => "English",
+        None => ui_language.strings().system_default,
     }
 }
 
