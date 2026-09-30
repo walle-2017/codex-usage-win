@@ -1,9 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::AppearancePreset;
 use crate::native_interop::Color;
 
 pub const FROSTED_STRENGTH_MAX: u8 = 100;
-pub const CORNER_RADIUS_MAX: u8 = 24;
+pub const TOOLTIP_HEIGHT_LOGICAL: i32 = 28;
+
+pub fn panel_corner_radius_max(preset: AppearancePreset) -> u8 {
+    (preset.metrics().widget_height.max(0) / 2)
+        .min(i32::from(u8::MAX)) as u8
+}
+
+pub fn tooltip_corner_radius_max() -> u8 {
+    (TOOLTIP_HEIGHT_LOGICAL / 2) as u8
+}
+
+pub fn progress_corner_radius_max(preset: AppearancePreset) -> u8 {
+    (preset.metrics().bar_height.max(0) / 2)
+        .min(i32::from(u8::MAX)) as u8
+}
 const LEGACY_ROUNDED_RADIUS: u8 = 8;
 const LEGACY_FROSTED_STRENGTH_SENTINEL: u8 = u8::MAX;
 
@@ -263,6 +278,15 @@ impl ThemeStyle {
         self == &Self::preset(is_dark, preset)
     }
 
+    pub fn clamp_corner_radii(&mut self, preset: AppearancePreset) {
+        self.panel_corner_radius =
+            self.panel_corner_radius.min(panel_corner_radius_max(preset));
+        self.tooltip_corner_radius =
+            self.tooltip_corner_radius.min(tooltip_corner_radius_max());
+        self.progress_corner_radius =
+            self.progress_corner_radius.min(progress_corner_radius_max(preset));
+    }
+
     pub fn normalize(&mut self, fallback: &Self) {
         self.panel_background = normalize_color(&self.panel_background, &fallback.panel_background);
         self.panel_border = normalize_color(&self.panel_border, &fallback.panel_border);
@@ -275,9 +299,6 @@ impl ThemeStyle {
         if let Some(value) = self.tooltip_frosted_strength.as_mut() {
             *value = (*value).min(FROSTED_STRENGTH_MAX);
         }
-        self.panel_corner_radius = self.panel_corner_radius.min(CORNER_RADIUS_MAX);
-        self.tooltip_corner_radius = self.tooltip_corner_radius.min(CORNER_RADIUS_MAX);
-        self.progress_corner_radius = self.progress_corner_radius.min(CORNER_RADIUS_MAX);
         self.quota_type = normalize_color(&self.quota_type, &fallback.quota_type);
         self.remaining = normalize_color(&self.remaining, &fallback.remaining);
         self.reset_time = normalize_color(&self.reset_time, &fallback.reset_time);
@@ -410,6 +431,11 @@ impl StyleSettings {
         self.light.normalize(&ThemeStyle::light_default());
     }
 
+    pub fn clamp_corner_radii(&mut self, preset: AppearancePreset) {
+        self.dark.clamp_corner_radii(preset);
+        self.light.clamp_corner_radii(preset);
+    }
+
     pub fn active(&self, is_dark: bool) -> &ThemeStyle {
         if is_dark {
             &self.dark
@@ -450,6 +476,15 @@ mod tests {
         let styles = StyleSettings::default();
         assert_eq!(styles.dark.panel_background, "#242A31FF");
         assert_eq!(styles.light.panel_background, "#EEF1F4FF");
+    }
+
+    #[test]
+    fn component_corner_radius_limits_follow_component_dimensions() {
+        assert_eq!(panel_corner_radius_max(AppearancePreset::Default), 21);
+        assert_eq!(panel_corner_radius_max(AppearancePreset::Minimal), 20);
+        assert_eq!(tooltip_corner_radius_max(), 14);
+        assert_eq!(progress_corner_radius_max(AppearancePreset::Default), 4);
+        assert_eq!(progress_corner_radius_max(AppearancePreset::Minimal), 3);
     }
 
     #[test]
