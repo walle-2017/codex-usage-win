@@ -2290,31 +2290,29 @@ fn schedule_json_validation(hwnd: HWND) {
 }
 
 fn update_json_validation_status(_mark_dirty: bool) {
-    let (edit, language, hwnd, is_dark, applied_settings) = {
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_mut() else {
+    let (edit, syncing, language, hwnd, applied_settings) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
             return;
         };
-        if s.syncing_json_edit {
-            return;
-        }
-        // RichEdit formatting changes selection and character formats. Mark the
-        // editor as syncing before doing that work so any nested notifications
-        // cannot re-enter validation while the control is mid-update.
-        s.syncing_json_edit = true;
         (
             s.json_edit.to_hwnd(),
+            s.syncing_json_edit,
             s.snapshot.language,
             s.hwnd.to_hwnd(),
-            s.snapshot.is_dark,
             s.snapshot.editable_settings.clone(),
         )
     };
+    if syncing {
+        return;
+    }
 
-    let raw_text = read_large_edit_text_raw(edit);
-    let text = normalize_to_lf(&raw_text);
-    syntax_highlight_json_editor(edit, &text, is_dark);
-
+    // Keep live validation read-only with respect to the RichEdit control.
+    // Reformatting character ranges while handling a user's edit can re-enter
+    // RichEdit internals and stall the process when an invalid document becomes
+    // valid. Full syntax highlighting is still applied on reload/format/import
+    // and when the editor theme is refreshed.
+    let text = normalize_to_lf(&read_large_edit_text_raw(edit));
     let parsed = parse_jsonc(&text);
     let dirty = match &parsed {
         Ok(settings) => settings != &applied_settings,
@@ -2324,7 +2322,6 @@ fn update_json_validation_status(_mark_dirty: bool) {
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
-            s.syncing_json_edit = false;
             s.json_dirty = dirty;
             match parsed {
                 Err(error) => {
@@ -3877,8 +3874,9 @@ unsafe extern "system" fn wnd_proc(
                 update_json_scroll_drag(hwnd, y);
                 return LRESULT(0);
             }
-            let scroll_hover = json_scroll_thumb_hit_rect(hwnd)
-                .is_some_and(|r| pt_in_rect(r, x, y));
+            let scroll_hover = json_editor_active()
+                && json_scroll_thumb_rect(hwnd).is_some()
+                && pt_in_rect(json_scrollbar_track_rect(hwnd), x, y);
             if scroll_hover != old_scroll_hover {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = state.as_mut() {
@@ -5116,6 +5114,21 @@ unsafe fn paint_json_page(
         state.as_ref().map(|s| s.json_scroll_hovered).unwrap_or(false)
     };
     if let Some(thumb) = json_scroll_thumb_rect(hwnd) {
+        if scroll_hovered {
+            let track = json_scrollbar_track_rect(hwnd);
+            fill_rounded_rect(
+                hdc,
+                track,
+                if snapshot.is_dark {
+                    // Composite equivalent of a very low-opacity light gray over
+                    // the JSON editor background; GDI brushes do not alpha blend.
+                    Color::from_hex("#303033FF")
+                } else {
+                    Color::from_hex("#F1F2F4FF")
+                },
+                ((track.right - track.left) / 2).max(1),
+            );
+        }
         fill_rounded_rect(
             hdc,
             thumb,
