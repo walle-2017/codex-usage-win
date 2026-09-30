@@ -341,11 +341,13 @@ if ($composition -notmatch 'CreateDesktopWindowTarget' -or
     throw 'Native helper must use DesktopWindowTarget + BackdropBrush + real GaussianBlurEffect.'
 }
 if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
-    $composition -notmatch 'CreateInsetClip' -or
+    $composition -notmatch 'CreateRoundedRectangleGeometry' -or
+    $composition -notmatch 'CreateGeometricClip' -or
+    $composition -notmatch 'clip_geometry\.CornerRadius' -or
     $composition -notmatch 'root\.Size\(size\)' -or
     $composition -notmatch 'blur_visual\.Size\(size\)' -or
     $composition -notmatch 'tint_visual\.Size\(size\)') {
-    throw 'Composition backdrop must use explicit size and hard clipping to prevent stale-DPI blur tails.'
+    throw 'Composition backdrop must use explicit size and rounded hard clipping to match the panel and prevent stale-DPI blur tails.'
 }
 if ($native -notmatch 'set_composition_blur_bounds' -or
     $windowProduction -notmatch 'sync_composition_blur_bounds') {
