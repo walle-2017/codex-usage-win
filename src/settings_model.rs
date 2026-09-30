@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::AppearancePreset;
 use crate::localization::{LanguageId, LanguageId as L};
 use crate::native_interop::Color;
-use crate::style::{ThemeStyle, CORNER_RADIUS_MAX};
+use crate::style::{
+    panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max, ThemeStyle,
+};
 
 pub const EDITABLE_SETTINGS_SCHEMA_VERSION: u32 = 1;
 
@@ -117,26 +120,32 @@ impl EditableThemeStyle {
         }
     }
 
-    pub fn validate_and_normalize(&self, path: &str) -> Result<Self, String> {
+    pub fn validate_and_normalize(
+        &self,
+        path: &str,
+        panel_radius_max: u8,
+        tooltip_radius_max: u8,
+        progress_radius_max: u8,
+    ) -> Result<Self, String> {
         if self.frosted_strength > 100 {
             return Err(format!("{path}.frosted_strength: allowed range is 0-100"));
         }
         if self.tooltip_frosted_strength.is_some_and(|value| value > 100) {
             return Err(format!("{path}.tooltip_frosted_strength: allowed range is 0-100"));
         }
-        if self.panel_corner_radius > CORNER_RADIUS_MAX {
+        if self.panel_corner_radius > panel_radius_max {
             return Err(format!(
-                "{path}.panel_corner_radius: allowed range is 0-{CORNER_RADIUS_MAX}"
+                "{path}.panel_corner_radius: allowed range is 0-{panel_radius_max}"
             ));
         }
-        if self.tooltip_corner_radius > CORNER_RADIUS_MAX {
+        if self.tooltip_corner_radius > tooltip_radius_max {
             return Err(format!(
-                "{path}.tooltip_corner_radius: allowed range is 0-{CORNER_RADIUS_MAX}"
+                "{path}.tooltip_corner_radius: allowed range is 0-{tooltip_radius_max}"
             ));
         }
-        if self.progress_corner_radius > CORNER_RADIUS_MAX {
+        if self.progress_corner_radius > progress_radius_max {
             return Err(format!(
-                "{path}.progress_corner_radius: allowed range is 0-{CORNER_RADIUS_MAX}"
+                "{path}.progress_corner_radius: allowed range is 0-{progress_radius_max}"
             ));
         }
         let tooltip_custom = self.tooltip_background.is_some()
@@ -238,7 +247,7 @@ impl EditableSettings {
             );
         }
         if self.general.language != "system"
-            && !LanguageId::ALL
+            && !LanguageId::SELECTABLE
                 .iter()
                 .any(|language| language.code() == self.general.language)
         {
@@ -258,10 +267,28 @@ impl EditableSettings {
             );
         }
 
+        let appearance_preset = if self.appearance.layout == "minimal" {
+            AppearancePreset::Minimal
+        } else {
+            AppearancePreset::Default
+        };
+        let panel_radius_max = panel_corner_radius_max(appearance_preset);
+        let tooltip_radius_max = tooltip_corner_radius_max();
+        let progress_radius_max = progress_corner_radius_max(appearance_preset);
+
         let mut normalized = self.clone();
-        normalized.appearance.dark = self.appearance.dark.validate_and_normalize("appearance.dark")?;
-        normalized.appearance.light =
-            self.appearance.light.validate_and_normalize("appearance.light")?;
+        normalized.appearance.dark = self.appearance.dark.validate_and_normalize(
+            "appearance.dark",
+            panel_radius_max,
+            tooltip_radius_max,
+            progress_radius_max,
+        )?;
+        normalized.appearance.light = self.appearance.light.validate_and_normalize(
+            "appearance.light",
+            panel_radius_max,
+            tooltip_radius_max,
+            progress_radius_max,
+        )?;
         Ok(normalized)
     }
 
@@ -359,9 +386,10 @@ r#"{{
             startup_desc = localized(zh, "是否随 Windows 启动", "Start with Windows"),
             startup = g.start_with_windows,
             language_desc = localized(zh, "界面语言", "UI language"),
-            language_options = localized(zh, 
-                "可选：system | en | nl | es | fr | de | ja | ko | zh-CN | zh-TW | ru | pt-BR",
-                "Options: system | en | nl | es | fr | de | ja | ko | zh-CN | zh-TW | ru | pt-BR",
+            language_options = localized(
+                zh,
+                "可选：system | zh-CN | en",
+                "Options: system | zh-CN | en",
             ),
             language = q(&g.language),
             appearance_group = localized(zh, "外观设置", "Appearance settings"),
@@ -373,8 +401,8 @@ r#"{{
             layout = q(&a.layout),
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
             light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
-            dark_json = theme_jsonc(dark, zh, 6),
-            light_json = theme_jsonc(light, zh, 6),
+            dark_json = theme_jsonc(dark, zh, 6, &a.layout),
+            light_json = theme_jsonc(light, zh, 6, &a.layout),
             schema_desc = localized(zh, "公开配置结构版本", "Public configuration schema version"),
             schema_options = localized(zh, "固定值：1", "Fixed value: 1"),
             schema = self.schema_version,
@@ -408,9 +436,17 @@ fn push_color_jsonc(
     lines.push(String::new());
 }
 
-fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
+fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize, layout: &str) -> String {
     let pad = " ".repeat(indent);
     let mut lines = Vec::new();
+    let preset = if layout == "minimal" {
+        AppearancePreset::Minimal
+    } else {
+        AppearancePreset::Default
+    };
+    let panel_radius_max = panel_corner_radius_max(preset);
+    let tooltip_radius_max = tooltip_corner_radius_max();
+    let progress_radius_max = progress_corner_radius_max(preset);
 
     push_color_jsonc(
         &mut lines,
@@ -444,7 +480,14 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
     ));
     lines.push(String::new());
     lines.push(format!("{pad}// {}", localized(zh, "面板圆角半径；0 为直角", "Panel corner radius; 0 means square")));
-    lines.push(format!("{pad}// {}", localized(zh, "范围：0–24", "Range: 0–24")));
+    lines.push(format!(
+        "{pad}// {}",
+        if zh {
+            format!("范围：0–{panel_radius_max}")
+        } else {
+            format!("Range: 0–{panel_radius_max}")
+        }
+    ));
     lines.push(format!("{pad}\"panel_corner_radius\": {},", style.panel_corner_radius));
     lines.push(String::new());
 
@@ -467,7 +510,14 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
     ));
     lines.push(String::new());
     lines.push(format!("{pad}// {}", localized(zh, "浮框圆角半径；0 为直角", "Tooltip corner radius; 0 means square")));
-    lines.push(format!("{pad}// {}", localized(zh, "范围：0–24", "Range: 0–24")));
+    lines.push(format!(
+        "{pad}// {}",
+        if zh {
+            format!("范围：0–{tooltip_radius_max}")
+        } else {
+            format!("Range: 0–{tooltip_radius_max}")
+        }
+    ));
     lines.push(format!("{pad}\"tooltip_corner_radius\": {},", style.tooltip_corner_radius));
     lines.push(String::new());
 
@@ -494,7 +544,14 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize) -> String {
     }
 
     lines.push(format!("{pad}// {}", localized(zh, "进度条圆角半径；0 为直角", "Progress-bar corner radius; 0 means square")));
-    lines.push(format!("{pad}// {}", localized(zh, "范围：0–24", "Range: 0–24")));
+    lines.push(format!(
+        "{pad}// {}",
+        if zh {
+            format!("范围：0–{progress_radius_max}")
+        } else {
+            format!("Range: 0–{progress_radius_max}")
+        }
+    ));
     lines.push(format!("{pad}\"progress_corner_radius\": {}", style.progress_corner_radius));
     lines.push(String::new());
 
