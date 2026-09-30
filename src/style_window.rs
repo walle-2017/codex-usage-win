@@ -47,6 +47,7 @@ pub const WM_STYLE_TOOLTIP_BLUR_PREVIEW: u32 = WM_APP + 133;
 pub const WM_STYLE_CORNER_PREVIEW: u32 = WM_APP + 134;
 
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
+const JSON_SAVE_MASK_CLASS: &str = "CodexUsageJsonSaveMaskV1";
 const WINDOW_WIDTH: i32 = 980;
 const WINDOW_HEIGHT: i32 = 700;
 const WINDOW_MIN_WIDTH: i32 = 980;
@@ -267,7 +268,6 @@ struct PanelState {
     json_scroll_dragging: bool,
     json_scroll_drag_offset: i32,
     edit_brush: isize,
-    json_mask_brush: isize,
     font: isize,
     json_font: isize,
 }
@@ -755,52 +755,12 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             LPARAM(json_background.to_colorref() as isize),
         );
 
-        let static_class = native_interop::wide_str("STATIC");
-        // Use an owned layered popup instead of a layered child. Layered child
-        // windows depend on Windows 8+ manifest compatibility declarations,
-        // while an owned no-activate popup is supported consistently and still
-        // stays visually attached to the settings window.
-        let json_save_mask = match CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            PCWSTR::from_raw(static_class.as_ptr()),
-            PCWSTR::from_raw(empty.as_ptr()),
-            WS_POPUP,
-            0,
-            0,
-            s(700),
-            s(480),
-            hwnd,
-            HMENU(ID_JSON_SAVE_MASK as usize as *mut _),
-            GetModuleHandleW(PCWSTR::null()).unwrap(),
-            None,
-        ) {
-            Ok(value) => value,
-            Err(_) => {
-                let _ = DestroyWindow(hwnd);
-                let _ = DeleteObject(font);
-                let _ = DeleteObject(json_font);
-                return;
-            }
-        };
-        let _ = SetLayeredWindowAttributes(
-            json_save_mask,
-            COLORREF(0),
-            JSON_SAVE_MASK_ALPHA,
-            LWA_ALPHA,
-        );
-
         let edit_background = if snapshot.is_dark {
             Color::from_hex("#20242AFF")
         } else {
             Color::from_hex("#EEF3F8FF")
         };
         let edit_brush = CreateSolidBrush(COLORREF(edit_background.to_colorref()));
-        let mask_background = if snapshot.is_dark {
-            Color::from_hex("#0F141AFF")
-        } else {
-            Color::from_hex("#AEB8C4FF")
-        };
-        let json_mask_brush = CreateSolidBrush(COLORREF(mask_background.to_colorref()));
 
         apply_fixed_titlebar(hwnd);
 
@@ -821,7 +781,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 corner_edit: SendHwnd::from_hwnd(corner_edit),
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
-                json_save_mask: SendHwnd::from_hwnd(json_save_mask),
+                json_save_mask: SendHwnd::from_hwnd(HWND::default()),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
                 focused_corner_edit: false,
@@ -843,7 +803,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_scroll_dragging: false,
                 json_scroll_drag_offset: 0,
                 edit_brush: edit_brush.0 as isize,
-                json_mask_brush: json_mask_brush.0 as isize,
                 font: font.0 as isize,
                 json_font: json_font.0 as isize,
             });
@@ -880,16 +839,6 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
             s.edit_brush = brush.0 as isize;
 
-            if s.json_mask_brush != 0 {
-                let _ = DeleteObject(HGDIOBJ(s.json_mask_brush as *mut _));
-            }
-            let mask_background = if s.snapshot.is_dark {
-                Color::from_hex("#0F141AFF")
-            } else {
-                Color::from_hex("#AEB8C4FF")
-            };
-            let mask_brush = CreateSolidBrush(COLORREF(mask_background.to_colorref()));
-            s.json_mask_brush = mask_brush.0 as isize;
         }
         (
             s.hwnd.to_hwnd(),
@@ -1769,6 +1718,93 @@ fn layout_numeric_edits(hwnd: HWND) {
 }
 
 
+unsafe extern "system" fn json_save_mask_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let is_dark = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.snapshot.is_dark).unwrap_or(false)
+            };
+            fill(
+                hdc,
+                client,
+                if is_dark {
+                    Color::from_hex("#0F141AFF")
+                } else {
+                    Color::from_hex("#AEB8C4FF")
+                },
+            );
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn ensure_json_save_mask(owner: HWND) -> Option<HWND> {
+    let existing = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.json_save_mask.to_hwnd())
+    }?;
+    if !existing.0.is_null() {
+        return Some(existing);
+    }
+
+    unsafe {
+        let class_name = native_interop::wide_str(JSON_SAVE_MASK_CLASS);
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(json_save_mask_wnd_proc),
+            hInstance: GetModuleHandleW(PCWSTR::null()).unwrap().into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let empty = native_interop::wide_str("");
+        let mask = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            owner,
+            HMENU(ID_JSON_SAVE_MASK as usize as *mut _),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ).ok()?;
+
+        let _ = SetLayeredWindowAttributes(
+            mask,
+            COLORREF(0),
+            JSON_SAVE_MASK_ALPHA,
+            LWA_ALPHA,
+        );
+
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.json_save_mask = SendHwnd::from_hwnd(mask);
+        }
+        Some(mask)
+    }
+}
+
 fn layout_settings_children(hwnd: HWND) {
     let Some((json_edit, json_save_mask, section, discard_pending, save_mask_visible)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1806,21 +1842,24 @@ fn layout_settings_children(hwnd: HWND) {
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | visibility,
         );
 
-        let mask_visibility = if save_mask_visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
-        let mut mask_origin = POINT {
-            x: json_rect.left,
-            y: json_rect.top,
-        };
-        let _ = ClientToScreen(hwnd, &mut mask_origin);
-        let _ = SetWindowPos(
-            json_save_mask.to_hwnd(),
-            HWND_TOP,
-            mask_origin.x,
-            mask_origin.y,
-            (json_rect.right - json_rect.left).max(1),
-            (json_rect.bottom - json_rect.top).max(1),
-            SWP_NOACTIVATE | SWP_NOCOPYBITS | mask_visibility,
-        );
+        let mask_hwnd = json_save_mask.to_hwnd();
+        if !mask_hwnd.0.is_null() {
+            let mask_visibility = if save_mask_visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+            let mut mask_origin = POINT {
+                x: json_rect.left,
+                y: json_rect.top,
+            };
+            let _ = ClientToScreen(hwnd, &mut mask_origin);
+            let _ = SetWindowPos(
+                mask_hwnd,
+                HWND_TOP,
+                mask_origin.x,
+                mask_origin.y,
+                (json_rect.right - json_rect.left).max(1),
+                (json_rect.bottom - json_rect.top).max(1),
+                SWP_NOACTIVATE | SWP_NOCOPYBITS | mask_visibility,
+            );
+        }
 
         if visible {
             let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
@@ -2344,6 +2383,7 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
         }
     }
     if action == JsonAction::Apply {
+        let _ = ensure_json_save_mask(hwnd);
         layout_settings_children(hwnd);
     }
     unsafe {
@@ -4327,27 +4367,6 @@ unsafe extern "system" fn wnd_proc(
 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        WM_CTLCOLORSTATIC => {
-            let child = HWND(lparam.0 as *mut _);
-            let (mask, is_dark, brush) = {
-                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(s) = state.as_ref() else {
-                    return DefWindowProcW(hwnd, msg, wparam, lparam);
-                };
-                (s.json_save_mask.to_hwnd(), s.snapshot.is_dark, s.json_mask_brush)
-            };
-            if child == mask {
-                let hdc = HDC(wparam.0 as *mut _);
-                let background = if is_dark {
-                    Color::from_hex("#0F141AFF")
-                } else {
-                    Color::from_hex("#AEB8C4FF")
-                };
-                let _ = SetBkColor(hdc, COLORREF(background.to_colorref()));
-                return LRESULT(brush);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
         WM_CTLCOLOREDIT => {
             let hdc = HDC(wparam.0 as *mut _);
             let (is_dark, brush) = {
@@ -4424,9 +4443,9 @@ unsafe extern "system" fn wnd_proc(
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.take().map(|s| (s.font, s.json_font, s.edit_brush, s.json_mask_brush))
+                state.take().map(|s| (s.font, s.json_font, s.edit_brush, s.json_save_mask))
             };
-            if let Some((font, json_font, edit_brush, json_mask_brush)) = resources {
+            if let Some((font, json_font, edit_brush, json_save_mask)) = resources {
                 if font != 0 {
                     let _ = DeleteObject(HGDIOBJ(font as *mut _));
                 }
@@ -4436,8 +4455,9 @@ unsafe extern "system" fn wnd_proc(
                 if edit_brush != 0 {
                     let _ = DeleteObject(HGDIOBJ(edit_brush as *mut _));
                 }
-                if json_mask_brush != 0 {
-                    let _ = DeleteObject(HGDIOBJ(json_mask_brush as *mut _));
+                let mask = json_save_mask.to_hwnd();
+                if !mask.0.is_null() {
+                    let _ = DestroyWindow(mask);
                 }
             }
             LRESULT(0)
