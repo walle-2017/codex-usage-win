@@ -286,9 +286,9 @@ struct CompositionBlurContext
         // inset by one physical pixel so the Composition backdrop must not
         // remain as a rectangular layer behind the rounded border.
         const float inset = (safe_width > 2.0f && safe_height > 2.0f) ? 1.0f : 0.0f;
-        const float clip_width = std::max(1.0f, safe_width - inset * 2.0f);
-        const float clip_height = std::max(1.0f, safe_height - inset * 2.0f);
-        const float max_radius = std::min(clip_width, clip_height) * 0.5f;
+        const float clip_width = (std::max)(1.0f, safe_width - inset * 2.0f);
+        const float clip_height = (std::max)(1.0f, safe_height - inset * 2.0f);
+        const float max_radius = (std::min)(clip_width, clip_height) * 0.5f;
         const float radius = std::clamp(corner_radius, 0.0f, max_radius);
         clip_geometry.Offset({inset, inset});
         clip_geometry.Size({clip_width, clip_height});
