@@ -32,6 +32,13 @@ pub enum LanguageId {
 }
 
 impl LanguageId {
+    // Keep legacy language IDs readable for existing settings, but expose only
+    // Simplified Chinese and English as selectable UI languages.
+    pub const SELECTABLE: [LanguageId; 2] = [
+        LanguageId::SimplifiedChinese,
+        LanguageId::English,
+    ];
+
     pub const ALL: [LanguageId; 11] = [
         LanguageId::English,
         LanguageId::Dutch,
@@ -45,6 +52,13 @@ impl LanguageId {
         LanguageId::Russian,
         LanguageId::PortugueseBrazil,
     ];
+
+    pub fn ui_supported(self) -> Self {
+        match self {
+            Self::SimplifiedChinese | Self::TraditionalChinese => Self::SimplifiedChinese,
+            _ => Self::English,
+        }
+    }
 
     pub fn code(self) -> &'static str {
         match self {
@@ -131,6 +145,16 @@ mod tests {
     use super::LanguageId;
 
     #[test]
+    fn selectable_ui_languages_are_chinese_and_english_only() {
+        assert_eq!(
+            LanguageId::SELECTABLE,
+            [LanguageId::SimplifiedChinese, LanguageId::English]
+        );
+        assert_eq!(LanguageId::TraditionalChinese.ui_supported(), LanguageId::SimplifiedChinese);
+        assert_eq!(LanguageId::Japanese.ui_supported(), LanguageId::English);
+    }
+
+    #[test]
     fn parses_simplified_chinese_locales() {
         assert_eq!(
             LanguageId::from_code("zh-CN"),
@@ -201,7 +225,9 @@ pub struct Strings {
 }
 
 pub fn resolve_language(language_override: Option<LanguageId>) -> LanguageId {
-    language_override.unwrap_or_else(detect_system_language)
+    language_override
+        .map(LanguageId::ui_supported)
+        .unwrap_or_else(detect_system_language)
 }
 
 pub fn detect_system_language() -> LanguageId {
@@ -211,6 +237,7 @@ pub fn detect_system_language() -> LanguageId {
         .or_else(default_ui_locale)
         .or_else(default_locale_name)
         .unwrap_or(LanguageId::English)
+        .ui_supported()
 }
 
 fn preferred_ui_languages() -> Vec<String> {
