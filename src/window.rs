@@ -6386,8 +6386,10 @@ fn draw_drag_handle(hdc: HDC, height: i32, color: &Color, hovered: bool) {
     let gap_y = if hovered { sc(1).max(1) } else { sc(2).max(1) };
     let matrix_w = dot * 2 + gap_x;
     let matrix_h = dot * 3 + gap_y * 2;
+    // Nudge the visible grip away from the rounded left edge without
+    // changing the established drag hit target or content layout.
     let hit_center_x = sc(DRAG_HANDLE_HIT_W) / 2;
-    let origin_x = hit_center_x - matrix_w / 2;
+    let origin_x = hit_center_x + sc(2) - matrix_w / 2;
     let origin_y = (height - matrix_h) / 2;
     let hover_color = if hovered {
         Color::rgba(
