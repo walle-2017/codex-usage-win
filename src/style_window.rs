@@ -182,6 +182,12 @@ enum JsonAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonSaveFeedback {
+    Saving,
+    Saved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingDiscardAction {
     SwitchSection(Section),
     Close,
@@ -251,6 +257,7 @@ struct PanelState {
     json_dirty: bool,
     json_status: String,
     json_status_path: Option<PathBuf>,
+    json_save_feedback: Option<JsonSaveFeedback>,
     pending_json_action: Option<JsonAction>,
     pending_discard_action: Option<PendingDiscardAction>,
     json_scroll_hovered: bool,
@@ -784,6 +791,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_dirty: false,
                 json_status: String::new(),
                 json_status_path: None,
+                json_save_feedback: None,
                 pending_json_action: None,
                 pending_discard_action: None,
                 json_scroll_hovered: false,
@@ -808,7 +816,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let (hwnd, section, json_dirty) = {
+    let (hwnd, section, json_dirty, json_apply_pending) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
@@ -826,12 +834,17 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
             s.edit_brush = brush.0 as isize;
         }
-        (s.hwnd.to_hwnd(), s.section, s.json_dirty)
+        (
+            s.hwnd.to_hwnd(),
+            s.section,
+            s.json_dirty,
+            s.pending_json_action == Some(JsonAction::Apply),
+        )
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
     layout_settings_children(hwnd);
-    if section == Section::Json {
+    if section == Section::Json && !json_apply_pending {
         if !json_dirty {
             reload_json_editor_from_snapshot();
         } else {
@@ -1988,6 +2001,7 @@ fn write_json_editor(text: &str, status: String, dirty: bool) {
         s.syncing_json_edit = true;
         s.json_status = status;
         s.json_status_path = None;
+        s.json_save_feedback = None;
         s.json_dirty = dirty;
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
@@ -2203,12 +2217,7 @@ fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'stati
 }
 
 fn begin_json_action(hwnd: HWND, action: JsonAction) {
-    if action == JsonAction::Apply {
-        apply_json_editor();
-        return;
-    }
-
-    let language = {
+    {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
@@ -2217,11 +2226,14 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
             return;
         }
         s.pending_json_action = Some(action);
-        s.json_status = json_action_running_text(action, s.snapshot.language).to_string();
-        s.json_status_path = None;
-        s.snapshot.language
-    };
-    let _ = language;
+        if action == JsonAction::Apply {
+            s.json_save_feedback = Some(JsonSaveFeedback::Saving);
+        } else {
+            s.json_save_feedback = None;
+            s.json_status = json_action_running_text(action, s.snapshot.language).to_string();
+            s.json_status_path = None;
+        }
+    }
     unsafe {
         let _ = SetTimer(hwnd, JSON_ACTION_TIMER_ID, JSON_ACTION_DELAY_MS, None);
         let _ = InvalidateRect(hwnd, None, false);
@@ -2267,6 +2279,9 @@ fn schedule_json_validation(hwnd: HWND) {
         if s.syncing_json_edit {
             false
         } else {
+            // Any user edit after a successful save replaces the saved indicator
+            // with the normal unsaved-changes state immediately.
+            s.json_save_feedback = None;
             // Mark dirty immediately so closing the window before the debounce
             // fires still triggers the unsaved-changes confirmation.
             s.json_dirty = true;
@@ -2565,17 +2580,23 @@ fn export_json_file(hwnd: HWND) {
 }
 
 fn apply_json_editor() {
-    let (edit, language) = {
+    let (edit, language, hwnd) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
             return;
         };
-        (s.json_edit.to_hwnd(), s.snapshot.language)
+        (s.json_edit.to_hwnd(), s.snapshot.language, s.hwnd.to_hwnd())
     };
     let raw = read_large_edit_text(edit);
     let settings = match parse_jsonc(&raw) {
         Ok(value) => value,
         Err(error) => {
+            {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.json_save_feedback = None;
+                }
+            }
             set_json_status(json_action_error(
                 "无法应用：配置存在错误",
                 "Cannot apply: configuration has errors",
@@ -2590,23 +2611,32 @@ fn apply_json_editor() {
         let mut pending = PENDING_EDITABLE_SETTINGS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *pending = Some(settings.clone());
+        *pending = Some(settings);
     }
+
+    // WM_SETTINGS_JSON_APPLY is handled synchronously by the parent. Keep the
+    // editor dirty until it returns so the parent's style_window::sync() cannot
+    // reload the pre-apply snapshot into the RichEdit control.
     send_parent(WM_SETTINGS_JSON_APPLY, 0, 0);
-    let (settings, language) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        (s.snapshot.editable_settings.clone(), s.snapshot.language)
-    };
-    let standard = settings.to_jsonc(language);
-    let status = if language == LanguageId::SimplifiedChinese {
-        "✓ 已保存，并从当前应用设置重新载入".to_string()
-    } else {
-        "✓ Saved and reloaded from current application settings".to_string()
-    };
-    write_json_editor(&standard, status, false);
+
+    {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            s.json_dirty = false;
+            s.json_save_feedback = Some(JsonSaveFeedback::Saved);
+            if s.json_status.starts_with('×') {
+                s.json_status.clear();
+                s.json_status_path = None;
+            }
+        }
+    }
+
+    // The parent sync has already updated the snapshot/theme. Refresh syntax
+    // colors in place, without replacing the user's JSON text or caret.
+    refresh_json_editor_theme();
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
 }
 
 fn hex_layout_snapshot() -> Option<([SendHwnd; HEX_EDIT_COUNT], Section, Option<StyleColorTarget>)> {
@@ -4403,6 +4433,7 @@ unsafe fn paint(hwnd: HWND) {
         invalid_hex_edits,
         json_status,
         json_status_path,
+        json_save_feedback,
         json_dirty,
         discard_pending,
         font,
@@ -4425,6 +4456,7 @@ unsafe fn paint(hwnd: HWND) {
             s.invalid_hex_edits,
             s.json_status.clone(),
             s.json_status_path.clone(),
+            s.json_save_feedback,
             s.json_dirty,
             s.pending_discard_action.is_some(),
             s.font,
@@ -4561,6 +4593,7 @@ unsafe fn paint(hwnd: HWND) {
             &snapshot,
             &json_status,
             json_status_path.as_deref(),
+            json_save_feedback,
             json_dirty,
             hovered,
             pressed,
@@ -5043,6 +5076,7 @@ unsafe fn paint_json_page(
     snapshot: &StyleWindowSnapshot,
     status: &str,
     status_path: Option<&std::path::Path>,
+    save_feedback: Option<JsonSaveFeedback>,
     dirty: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
@@ -5196,11 +5230,26 @@ unsafe fn paint_json_page(
         let _ = DeleteObject(pen);
     }
 
-    if dirty {
-        let _ = SetTextColor(hdc, COLORREF(Color::from_hex("#D69E2EFF").to_colorref()));
+    let second_line = match save_feedback {
+        Some(JsonSaveFeedback::Saving) => Some((
+            if zh { "◌ 保存中" } else { "◌ Saving" },
+            Color::from_hex("#8FA8C7FF"),
+        )),
+        Some(JsonSaveFeedback::Saved) => Some((
+            if zh { "✓ 保存成功" } else { "✓ Saved" },
+            Color::from_hex("#55B879FF"),
+        )),
+        None if dirty => Some((
+            if zh { "● 有未保存更改" } else { "● Unsaved changes" },
+            Color::from_hex("#D69E2EFF"),
+        )),
+        None => None,
+    };
+    if let Some((text, color)) = second_line {
+        let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
         draw_text(
             hdc,
-            if zh { "● 有未保存更改" } else { "● Unsaved changes" },
+            text,
             RECT {
                 left: scale(hwnd, 200),
                 top: status_top + scale(hwnd, 28),
