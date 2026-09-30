@@ -266,11 +266,15 @@ struct CompositionBlurContext
 
         // Do not rely on DesktopWindowTarget's asynchronous resize propagation.
         // Keep the entire visual tree explicitly bounded and clipped.
-        set_bounds(1.0f, 1.0f, 0.0f);
+        set_bounds(1.0f, 1.0f, 0.0f, 0.0f);
         target.Root(root);
     }
 
-    void set_bounds(float width, float height, float corner_radius)
+    void set_bounds(
+        float width,
+        float height,
+        float clip_inset,
+        float clip_radius)
     {
         const float safe_width = width > 1.0f ? width : 1.0f;
         const float safe_height = height > 1.0f ? height : 1.0f;
@@ -282,14 +286,16 @@ struct CompositionBlurContext
         blur_visual.Size(size);
         tint_visual.Size(size);
 
-        // Match the foreground panel geometry exactly. The visible panel is
-        // inset by one physical pixel so the Composition backdrop must not
-        // remain as a rectangular layer behind the rounded border.
-        const float inset = (safe_width > 2.0f && safe_height > 2.0f) ? 1.0f : 0.0f;
+        // The foreground owns the visible one-pixel border. Clip the
+        // Composition backdrop to the foreground's inner fill geometry rather
+        // than merely rounding the full HWND; otherwise the blur/tint leaks
+        // outside the border at the edges and corners.
+        const float max_inset = (std::min)(safe_width, safe_height) * 0.5f;
+        const float inset = std::clamp(clip_inset, 0.0f, max_inset);
         const float clip_width = (std::max)(1.0f, safe_width - inset * 2.0f);
         const float clip_height = (std::max)(1.0f, safe_height - inset * 2.0f);
         const float max_radius = (std::min)(clip_width, clip_height) * 0.5f;
-        const float radius = std::clamp(corner_radius, 0.0f, max_radius);
+        const float radius = std::clamp(clip_radius, 0.0f, max_radius);
         clip_geometry.Offset({inset, inset});
         clip_geometry.Size({clip_width, clip_height});
         clip_geometry.CornerRadius({radius, radius});
@@ -339,7 +345,8 @@ extern "C" __declspec(dllexport) int codex_composition_blur_set_bounds(
     void* context,
     float width,
     float height,
-    float corner_radius) noexcept
+    float clip_inset,
+    float clip_radius) noexcept
 {
     if (!context || width <= 0.0f || height <= 0.0f) {
         return 0;
@@ -348,7 +355,8 @@ extern "C" __declspec(dllexport) int codex_composition_blur_set_bounds(
         static_cast<CompositionBlurContext*>(context)->set_bounds(
             width,
             height,
-            corner_radius);
+            clip_inset,
+            clip_radius);
         return 1;
     } catch (...) {
         return 0;
