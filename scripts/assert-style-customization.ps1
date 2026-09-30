@@ -260,19 +260,18 @@ if ($styleWindow -notmatch 'WM_APP \+ 120' -or
 if ($styleProduction -notmatch 'pub\s+dark:\s+ThemeStyle' -or $styleProduction -notmatch 'pub\s+light:\s+ThemeStyle') {
     throw 'Dark and light theme styles must be stored separately.'
 }
-if ($styleProduction -notmatch 'CORNER_RADIUS_MAX:\s*u8\s*=\s*24' -or
-    $styleProduction -notmatch 'panel_corner_radius:\s*u8' -or
-    $styleProduction -notmatch 'tooltip_corner_radius:\s*u8' -or
-    $styleProduction -notmatch 'progress_corner_radius:\s*u8' -or
+if ($styleProduction -notmatch 'panel_corner_radius_max\(' -or
+    $styleProduction -notmatch 'tooltip_corner_radius_max\(' -or
+    $styleProduction -notmatch 'progress_corner_radius_max\(' -or
+    $styleProduction -notmatch 'metrics\(\)\.widget_height' -or
+    $styleProduction -notmatch 'metrics\(\)\.bar_height' -or
     $styleWindow -notmatch 'ID_EDIT_CORNER' -or
     $styleWindow -notmatch 'EditorSelection::CornerRadius' -or
-    $styleWindow -notmatch 'update_corner_from_numeric_edit\(' -or
-    $styleWindow -notmatch 'raw_value\.min\(u16::from\(CORNER_RADIUS_MAX\)\)' -or
+    $styleWindow -notmatch 'corner_radius_max_for_section\(' -or
+    $styleWindow -notmatch 'raw_value\.min\(u16::from\(radius_max\)\)' -or
     $styleWindow -notmatch 'WM_STYLE_CORNER_PREVIEW' -or
-    $windowProduction -notmatch 'panel_corner_radius' -or
-    $windowProduction -notmatch 'tooltip_corner_radius' -or
-    $windowProduction -notmatch 'progress_corner_radius') {
-    throw 'Panel, tooltip, and progress must expose a bounded 0-24 numeric corner-radius setting.'
+    $windowProduction -notmatch 'clamp_corner_radii') {
+    throw 'Panel, tooltip, and progress corner-radius limits must adapt to their actual component dimensions.'
 }
 if ($styleProduction -notmatch 'panel_frosted_strength:\s*u8' -or
     $styleProduction -notmatch 'FROSTED_STRENGTH_MAX:\s*u8\s*=\s*100') {
@@ -350,8 +349,12 @@ if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
     throw 'Composition backdrop must use explicit size and rounded hard clipping to match the panel and prevent stale-DPI blur tails.'
 }
 if ($native -notmatch 'set_composition_blur_bounds' -or
-    $windowProduction -notmatch 'sync_composition_blur_bounds') {
-    throw 'Rust must synchronize Composition visual bounds with the backdrop HWND.'
+    $native -notmatch 'clip_inset' -or
+    $native -notmatch 'clip_radius' -or
+    $windowProduction -notmatch 'sync_composition_blur_bounds' -or
+    $windowProduction -notmatch 'outer_inset \+ PANEL_BORDER_WIDTH_PX' -or
+    $windowProduction -notmatch 'outer_radius - PANEL_BORDER_WIDTH_PX') {
+    throw 'Rust must synchronize exact inner-fill geometry with the Composition backdrop.'
 }
 if ($windowProduction -notmatch 's\.taskbar_hwnd\.unwrap_or_else\(\|\| s\.hwnd\.to_hwnd\(\)\)') {
     throw 'DPI refresh must prefer the selected taskbar during cross-monitor popup moves.'
@@ -542,11 +545,11 @@ foreach ($message in @(
         throw "Unified settings message is not connected end-to-end: $message"
     }
 }
-if ($styleWindow -notmatch '"当前自定义"' -or
-    $styleWindow -notmatch '"Current custom"' -or
+if ($styleWindow -match '"当前自定义"' -or
+    $styleWindow -match '"Current custom"' -or
     $styleWindow -notmatch 'paint_style_preview_card\(' -or
     $styleWindow -notmatch 'if\s+!matched') {
-    throw 'Preset page must dynamically show a current custom preview only when no official preset matches.'
+    throw 'Preset page must show the custom preview without a redundant Current custom heading.'
 }
 if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'strip_jsonc_comments' -or
@@ -804,11 +807,13 @@ if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
 if ($settingsModel -notmatch 'panel_corner_radius:\s*u8' -or
     $settingsModel -notmatch 'tooltip_corner_radius:\s*u8' -or
     $settingsModel -notmatch 'progress_corner_radius:\s*u8' -or
-    $settingsModel -notmatch 'panel_corner_radius' -or
-    $settingsModel -notmatch 'tooltip_corner_radius' -or
-    $settingsModel -notmatch 'progress_corner_radius' -or
-    $settingsModel -notmatch 'allowed range is 0-\{CORNER_RADIUS_MAX\}') {
-    throw 'Numeric corner radii must round-trip through editable JSON/JSONC settings and reject values above the bound.'
+    $settingsModel -notmatch 'panel_radius_max' -or
+    $settingsModel -notmatch 'tooltip_radius_max' -or
+    $settingsModel -notmatch 'progress_radius_max' -or
+    $settingsModel -notmatch 'panel_corner_radius_max\(' -or
+    $settingsModel -notmatch 'tooltip_corner_radius_max\(' -or
+    $settingsModel -notmatch 'progress_corner_radius_max\(') {
+    throw 'Numeric corner radii must round-trip through JSON/JSONC and validate against component-specific bounds.'
 }
 
 if ($styleWindow -notmatch "if s\.json_status\.starts_with\('×'\)" -or
@@ -825,6 +830,19 @@ if ($drawSliderBlock -match 'Ellipse\(' -or
     $drawSliderBlock -notmatch 'fill_rounded_rect\(hdc, track' -or
     $drawSliderBlock -notmatch 'fill_rounded_rect\(hdc, thumb, accent, radius\)') {
     throw 'Settings sliders must use anti-aliased rounded primitives instead of GDI Ellipse thumbs.'
+}
+if ($styleWindow -notmatch 'SETTINGS_EDIT_SUBCLASS_ID' -or
+    $styleWindow -notmatch 'handle_settings_mouse_wheel\(' -or
+    $styleWindow -notmatch 'adjust_numeric_by_wheel\(' -or
+    $styleWindow -notmatch 'adjust_slider_by_wheel\(' -or
+    $styleWindow -notmatch 'JSON_ERROR_SHAKE_STEPS:\s*u8\s*=\s*10' -or
+    $styleWindow -notmatch 'scale\(hwnd, 4\)' -or
+    $styleWindow -notmatch '"5H"' -or
+    $styleWindow -notmatch '"7D"' -or
+    $styleWindow -notmatch 'LanguageId::SELECTABLE\.len\(\)' -or
+    $styleWindow -notmatch 'Some\(LanguageId::SimplifiedChinese\).*"中文"' -or
+    $styleWindow -notmatch 'Some\(LanguageId::English\).*"English"') {
+    throw 'Settings must support wheel adjustment, compact JSON-error shake, 5H/7D labels, and Chinese/English-only language selection.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
