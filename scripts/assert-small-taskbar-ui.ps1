@@ -3,8 +3,9 @@ $ErrorActionPreference = 'Stop'
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 
-if ($windowProduction -notmatch 'hit_center_x\s*=\s*sc\(DRAG_HANDLE_HIT_W\)\s*/\s*2') {
-    throw 'Dotted drag handle must remain centered inside its hit area.'
+if ($windowProduction -notmatch 'hit_center_x\s*=\s*sc\(DRAG_HANDLE_HIT_W\)\s*/\s*2' -or
+    $windowProduction -notmatch 'origin_x\s*=\s*hit_center_x\s*\+\s*sc\(2\)\s*-\s*matrix_w\s*/\s*2') {
+    throw 'Dotted drag handle must keep its hit strip while using the small inward visual offset.'
 }
 if ($windowProduction -notmatch 'const\s+SMALL_TASKBAR_THRESHOLD:\s*i32\s*=\s*34') {
     throw 'Small-taskbar mode must use the defined 34px logical threshold.'
