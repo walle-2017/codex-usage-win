@@ -39,19 +39,7 @@ impl LanguageId {
         LanguageId::English,
     ];
 
-    pub const ALL: [LanguageId; 11] = [
-        LanguageId::English,
-        LanguageId::Dutch,
-        LanguageId::Spanish,
-        LanguageId::French,
-        LanguageId::German,
-        LanguageId::Japanese,
-        LanguageId::Korean,
-        LanguageId::SimplifiedChinese,
-        LanguageId::TraditionalChinese,
-        LanguageId::Russian,
-        LanguageId::PortugueseBrazil,
-    ];
+
 
     pub fn ui_supported(self) -> Self {
         match self {
