@@ -215,7 +215,8 @@ struct CompositionBlurContext
     wuc::Compositor compositor{nullptr};
     wucd::DesktopWindowTarget target{nullptr};
     wuc::ContainerVisual root{nullptr};
-    wuc::InsetClip root_clip{nullptr};
+    wuc::CompositionRoundedRectangleGeometry clip_geometry{nullptr};
+    wuc::CompositionGeometricClip root_clip{nullptr};
     wuc::SpriteVisual blur_visual{nullptr};
     wuc::SpriteVisual tint_visual{nullptr};
     wuc::CompositionEffectBrush blur_brush{nullptr};
@@ -250,7 +251,8 @@ struct CompositionBlurContext
         blur_brush.SetSourceParameter(L"backdrop", backdrop);
 
         root = compositor.CreateContainerVisual();
-        root_clip = compositor.CreateInsetClip();
+        clip_geometry = compositor.CreateRoundedRectangleGeometry();
+        root_clip = compositor.CreateGeometricClip(clip_geometry);
         root.Clip(root_clip);
 
         blur_visual = compositor.CreateSpriteVisual();
@@ -264,11 +266,11 @@ struct CompositionBlurContext
 
         // Do not rely on DesktopWindowTarget's asynchronous resize propagation.
         // Keep the entire visual tree explicitly bounded and clipped.
-        set_bounds(1.0f, 1.0f);
+        set_bounds(1.0f, 1.0f, 0.0f);
         target.Root(root);
     }
 
-    void set_bounds(float width, float height)
+    void set_bounds(float width, float height, float corner_radius)
     {
         const float safe_width = width > 1.0f ? width : 1.0f;
         const float safe_height = height > 1.0f ? height : 1.0f;
@@ -279,6 +281,18 @@ struct CompositionBlurContext
         root.Size(size);
         blur_visual.Size(size);
         tint_visual.Size(size);
+
+        // Match the foreground panel geometry exactly. The visible panel is
+        // inset by one physical pixel so the Composition backdrop must not
+        // remain as a rectangular layer behind the rounded border.
+        const float inset = (safe_width > 2.0f && safe_height > 2.0f) ? 1.0f : 0.0f;
+        const float clip_width = std::max(1.0f, safe_width - inset * 2.0f);
+        const float clip_height = std::max(1.0f, safe_height - inset * 2.0f);
+        const float max_radius = std::min(clip_width, clip_height) * 0.5f;
+        const float radius = std::clamp(corner_radius, 0.0f, max_radius);
+        clip_geometry.Offset({inset, inset});
+        clip_geometry.Size({clip_width, clip_height});
+        clip_geometry.CornerRadius({radius, radius});
     }
 
     void set_blur(float amount)
@@ -324,13 +338,17 @@ extern "C" __declspec(dllexport) void* codex_composition_blur_create(
 extern "C" __declspec(dllexport) int codex_composition_blur_set_bounds(
     void* context,
     float width,
-    float height) noexcept
+    float height,
+    float corner_radius) noexcept
 {
     if (!context || width <= 0.0f || height <= 0.0f) {
         return 0;
     }
     try {
-        static_cast<CompositionBlurContext*>(context)->set_bounds(width, height);
+        static_cast<CompositionBlurContext*>(context)->set_bounds(
+            width,
+            height,
+            corner_radius);
         return 1;
     } catch (...) {
         return 0;
