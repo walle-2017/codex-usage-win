@@ -771,12 +771,15 @@ if ($styleWindow -notmatch 'PendingDiscardAction' -or
     $styleWindow -notmatch 'HitTarget::KeepEditing' -or
     $styleWindow -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::SwitchSection\(section\)\)' -or
     $styleWindow -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Close\)' -or
-    $styleWindow -notmatch 'if zh \{ "放弃" \} else \{ "Discard" \}' -or
-    $styleWindow -notmatch 'if zh \{ "继续" \} else \{ "Continue" \}' -or
+    $styleWindow -notmatch 'if zh \{ "未保存的更改" \} else \{ "Unsaved changes" \}' -or
+    $styleWindow -notmatch '当前 JSON 配置尚未保存。继续操作将丢失这些更改。' -or
+    $styleWindow -notmatch 'if zh \{ "丢弃更改" \} else \{ "Discard changes" \}' -or
+    $styleWindow -notmatch 'if zh \{ "返回编辑" \} else \{ "Return to editing" \}' -or
+    $styleWindow -notmatch '#B65F63FF' -or
     $styleWindow -match '#C93C49FF' -or
     $styleWindow -match 'MessageBoxW\(' -or
     $styleWindow -match 'MB_YESNO') {
-    throw 'Unsaved JSON changes must use a subdued settings-styled modal with short Discard/Continue actions.'
+    throw 'Unsaved JSON changes must use the revised warning copy, a muted red Discard changes action, and Return to editing.'
 }
 if ($styleWindow -notmatch 'redraw_settings_window\(' -or
     $styleWindow -notmatch 'RDW_INVALIDATE\s*\|\s*RDW_ERASE\s*\|\s*RDW_ALLCHILDREN\s*\|\s*RDW_UPDATENOW' -or
