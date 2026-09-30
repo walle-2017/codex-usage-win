@@ -6342,6 +6342,15 @@ unsafe fn fill(hdc: HDC, rect: RECT, color: Color) {
 }
 
 unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORMAT) {
+    // windows-rs exposes DrawTextW through a mutable UTF-16 slice. Passing an
+    // empty Vec leaves the native call with a zero-length slice backed by a
+    // dangling Vec pointer. The JSON validation status is intentionally cleared
+    // when an invalid document becomes valid, so that exact transition can reach
+    // this helper with an empty string. Skip the native call entirely for empty
+    // labels/status text.
+    if text.is_empty() {
+        return;
+    }
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     let _ = DrawTextW(hdc, &mut wide, &mut rect, format);
 }
