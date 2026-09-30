@@ -312,8 +312,8 @@ if ($native -notmatch 'pub\s+a:\s+u8' -or $native -notmatch 'to_hex_rgba') {
 }
 foreach ($hex in @(
     '#242A31FF', '#343B43FF', '#A0A0A0FF', '#FFFFFFFF', '#92979DFF',
-    '#EEF1F4FF', '#D4D9DFFF', '#404040FF', '#202020FF', '#666666FF',
-    '#55A8F2FF', '#E6B84AFF', '#D95C5CFF', '#363A3FFF', '#AAAAAAFF'
+    '#F6F8FAFF', '#C7D0D9FF', '#46515DFF', '#17212BFF', '#596777FF',
+    '#55A8F2FF', '#E6B84AFF', '#D95C5CFF', '#363A3FFF', '#D6DDE4FF'
 )) {
     if ($styleProduction -notmatch [regex]::Escape($hex)) {
         throw "Expected RGBA default is missing: $hex"
