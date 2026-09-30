@@ -43,5 +43,8 @@ if ($windowProduction -notmatch 'effective_show_session\s*=\s*if\s+small_taskbar
     $windowProduction -notmatch 'effective_show_weekly\s*=\s*if\s+small_taskbar_mode') {
     throw 'Paint path must render only the selected row in small-taskbar mode.'
 }
+if ($windowProduction -notmatch '(?s)fn\s+minimal_hover_text\s*\(.*?AppearancePreset::Minimal.*?format_precise_reset_time\(section\.resets_at\)') {
+    throw 'Minimal-layout hover tooltip must show the full local reset date and time.'
+}
 
 Write-Host 'PASS: small-taskbar UI and vertical-centering contract is satisfied.'
