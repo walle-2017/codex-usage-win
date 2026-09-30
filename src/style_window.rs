@@ -1287,6 +1287,17 @@ fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
     }
 }
 
+fn language_popup_rect(hwnd: HWND) -> RECT {
+    let first = language_option_rect(hwnd, 0);
+    let last = language_option_rect(hwnd, language_option_count() - 1);
+    RECT {
+        left: first.left,
+        top: first.top,
+        right: last.right,
+        bottom: last.bottom,
+    }
+}
+
 fn language_code_for_index(index: usize) -> String {
     if index == 0 {
         "system".to_string()
@@ -5021,6 +5032,12 @@ unsafe fn paint_general_page(
     );
 
     if popup_open {
+        // Paint one opaque popup surface first. The option rows use rounded
+        // corners individually; without this backing surface their clipped
+        // corners expose controls from the General page underneath.
+        let popup_rect = language_popup_rect(hwnd);
+        fill_rounded_rect(hdc, popup_rect, card, scale(hwnd, 7));
+
         for index in 0..language_option_count() {
             let option = language_option_rect(hwnd, index);
             let selected = current_language_index == index;
@@ -5073,16 +5090,9 @@ unsafe fn paint_general_page(
                 );
             }
         }
-        let first = language_option_rect(hwnd, 0);
-        let last = language_option_rect(hwnd, language_option_count() - 1);
         draw_rounded_outline_rect(
             hdc,
-            RECT {
-                left: first.left,
-                top: first.top,
-                right: last.right,
-                bottom: last.bottom,
-            },
+            popup_rect,
             accent,
             scale(hwnd, 7),
             1,
