@@ -82,11 +82,11 @@ const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
 const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
-const JSON_ERROR_PULSE_TIMER_ID: usize = 0x4A57;
+const JSON_ERROR_SHAKE_TIMER_ID: usize = 0x4A57;
 const JSON_ACTION_DELAY_MS: u32 = 200;
 const JSON_VALIDATION_DELAY_MS: u32 = 90;
-const JSON_ERROR_PULSE_INTERVAL_MS: u32 = 30;
-const JSON_ERROR_PULSE_STEPS: u8 = 6;
+const JSON_ERROR_SHAKE_INTERVAL_MS: u32 = 16;
+const JSON_ERROR_SHAKE_STEPS: u8 = 18;
 const JSON_WHEEL_DELTA: i32 = 120;
 const JSON_WHEEL_LINES_PER_NOTCH: i32 = 3;
 
@@ -264,7 +264,7 @@ struct PanelState {
     json_status: String,
     json_status_path: Option<PathBuf>,
     json_save_feedback: Option<JsonSaveFeedback>,
-    json_error_pulse_step: u8,
+    json_error_shake_step: u8,
     pending_json_action: Option<JsonAction>,
     pending_discard_action: Option<PendingDiscardAction>,
     json_scroll_hovered: bool,
@@ -800,7 +800,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 json_status: String::new(),
                 json_status_path: None,
                 json_save_feedback: None,
-                json_error_pulse_step: 0,
+                json_error_shake_step: 0,
                 pending_json_action: None,
                 pending_discard_action: None,
                 json_scroll_hovered: false,
@@ -1467,6 +1467,16 @@ unsafe extern "system" fn json_edit_subclass_proc(
     _subclass_id: usize,
     _ref_data: usize,
 ) -> LRESULT {
+    let saving = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .as_ref()
+            .is_some_and(|s| s.json_save_feedback == Some(JsonSaveFeedback::Saving))
+    };
+    if saving && matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+        return LRESULT(0);
+    }
+
     if msg == WM_MOUSEWHEEL {
         let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
         if delta != 0 {
@@ -1740,7 +1750,28 @@ unsafe extern "system" fn json_save_mask_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1),
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // The save mask is a real interaction barrier for the JSON editor.
+        // Keep it hit-testable so mouse clicks cannot pass through to the
+        // RichEdit or the parent's custom scrollbar.
+        WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        WM_MOUSEWHEEL
+        | WM_MOUSEHWHEEL
+        | WM_LBUTTONDOWN
+        | WM_LBUTTONUP
+        | WM_LBUTTONDBLCLK
+        | WM_RBUTTONDOWN
+        | WM_RBUTTONUP
+        | WM_RBUTTONDBLCLK
+        | WM_MBUTTONDOWN
+        | WM_MBUTTONUP
+        | WM_MBUTTONDBLCLK
+        | WM_XBUTTONDOWN
+        | WM_XBUTTONUP
+        | WM_XBUTTONDBLCLK => LRESULT(0),
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(None, IDC_ARROW).unwrap_or_default());
+            LRESULT(1)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -2233,72 +2264,331 @@ fn json_error_location(error: &str) -> Option<(usize, usize)> {
     Some((line.trim().parse().ok()?, column.trim().parse().ok()?))
 }
 
-fn friendly_json_error(error: &str, language: LanguageId) -> String {
-    let zh = language == LanguageId::SimplifiedChinese;
-    let location = json_error_location(error);
-    let raw_detail = error
-        .split_once(": ")
-        .map(|(_, detail)| detail)
-        .unwrap_or(error);
+#[derive(Clone, Copy)]
+enum JsonErrorPhrase {
+    Heading,
+    ControlCharacter,
+    UnknownSetting,
+    MissingSetting,
+    DuplicateSetting,
+    InvalidColor,
+    FrostedRange,
+    CornerRange,
+    UsageDisplay,
+    QuotaAlert,
+    RefreshInterval,
+    SchemaVersion,
+    UnsupportedLanguage,
+    Theme,
+    Layout,
+    InvalidType,
+    UnterminatedComment,
+    GenericSyntax,
+}
 
-    let detail = if raw_detail.contains("control character") {
-        if zh {
-            "字符串中包含非法控制字符。请检查这一行的引号、换行或转义字符。".to_string()
-        } else {
-            "A string contains an invalid control character. Check quotes, line breaks, and escapes on this line.".to_string()
-        }
-    } else if raw_detail.contains("unknown field") {
-        let field = raw_detail
-            .split(char::from(96u8))
-            .nth(1)
-            .unwrap_or("?");
-        if zh {
-            format!("未知配置项：{field}。请检查属性名是否拼写正确。")
-        } else {
-            format!("Unknown setting: {field}. Check the property name.")
-        }
-    } else if raw_detail.contains("expected #RRGGBB or #RRGGBBAA") {
-        if zh {
-            "颜色格式无效。允许 #RRGGBB 或 #RRGGBBAA。".to_string()
-        } else {
-            "Invalid color format. Use #RRGGBB or #RRGGBBAA.".to_string()
-        }
-    } else if raw_detail.contains("frosted_strength: allowed range is 0-100") {
-        if zh {
-            "磨砂强度超出范围。允许范围：0–100。".to_string()
-        } else {
-            "Frosted intensity is out of range. Allowed range: 0–100.".to_string()
-        }
-    } else if raw_detail.contains("session_5h and weekly cannot both be false") {
-        if zh {
-            "显示用量设置无效：5 小时额度和每周额度不能同时关闭。".to_string()
-        } else {
-            "Usage display is invalid: the 5-hour and weekly quotas cannot both be disabled.".to_string()
-        }
-    } else if raw_detail.contains("quota_alert_percent: allowed values") {
-        if zh {
-            "额度提醒值无效。允许：0、10、20、30。".to_string()
-        } else {
-            "Invalid quota alert value. Allowed values: 0, 10, 20, 30.".to_string()
-        }
-    } else if raw_detail.contains("refresh_interval: allowed values") {
-        if zh {
-            "刷新频率无效。允许：1m、5m、15m、1h。".to_string()
-        } else {
-            "Invalid refresh interval. Allowed values: 1m, 5m, 15m, 1h.".to_string()
-        }
+fn json_error_phrase(language: LanguageId, phrase: JsonErrorPhrase) -> &'static str {
+    use JsonErrorPhrase::*;
+    match language {
+        LanguageId::English => match phrase {
+            Heading => "Configuration has errors",
+            ControlCharacter => "A string contains an invalid control character. Check quotes, line breaks, and escapes.",
+            UnknownSetting => "Unknown setting. Check the property name.",
+            MissingSetting => "A required setting is missing.",
+            DuplicateSetting => "A setting is defined more than once.",
+            InvalidColor => "Invalid color format. Use #RRGGBB or #RRGGBBAA.",
+            FrostedRange => "Frosted intensity is out of range. Allowed range: 0–100.",
+            CornerRange => "Corner radius is out of range. Allowed range: 0–24.",
+            UsageDisplay => "Usage display is invalid: the 5-hour and weekly quotas cannot both be disabled.",
+            QuotaAlert => "Invalid quota alert value. Allowed values: 0, 10, 20, 30.",
+            RefreshInterval => "Invalid refresh interval. Allowed values: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Unsupported configuration schema version.",
+            UnsupportedLanguage => "Unsupported language setting.",
+            Theme => "Invalid theme value. Allowed values: system, dark, light.",
+            Layout => "Invalid layout value. Allowed values: default, minimal.",
+            InvalidType => "A configuration value has the wrong type.",
+            UnterminatedComment => "A block comment is not closed.",
+            GenericSyntax => "Invalid JSON syntax or configuration value near this position.",
+        },
+        LanguageId::Dutch => match phrase {
+            Heading => "De configuratie bevat fouten",
+            ControlCharacter => "Een tekenreeks bevat een ongeldig besturingsteken. Controleer aanhalingstekens, regeleinden en escapes.",
+            UnknownSetting => "Onbekende instelling. Controleer de naam van de eigenschap.",
+            MissingSetting => "Een verplichte instelling ontbreekt.",
+            DuplicateSetting => "Een instelling is meer dan één keer opgegeven.",
+            InvalidColor => "Ongeldige kleurnotatie. Gebruik #RRGGBB of #RRGGBBAA.",
+            FrostedRange => "De matglassterkte valt buiten het bereik. Toegestaan: 0–100.",
+            CornerRange => "De hoekradius valt buiten het bereik. Toegestaan: 0–24.",
+            UsageDisplay => "De gebruiksweergave is ongeldig: het 5-uurs- en weekquotum kunnen niet beide uitgeschakeld zijn.",
+            QuotaAlert => "Ongeldige quotumwaarde. Toegestaan: 0, 10, 20, 30.",
+            RefreshInterval => "Ongeldig vernieuwingsinterval. Toegestaan: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Niet-ondersteunde configuratieschemaversie.",
+            UnsupportedLanguage => "Niet-ondersteunde taalinstelling.",
+            Theme => "Ongeldig thema. Toegestaan: system, dark, light.",
+            Layout => "Ongeldige indeling. Toegestaan: default, minimal.",
+            InvalidType => "Een configuratiewaarde heeft het verkeerde type.",
+            UnterminatedComment => "Een blokcommentaar is niet afgesloten.",
+            GenericSyntax => "Ongeldige JSON-syntaxis of configuratiewaarde rond deze positie.",
+        },
+        LanguageId::Spanish => match phrase {
+            Heading => "La configuración contiene errores",
+            ControlCharacter => "Una cadena contiene un carácter de control no válido. Revisa comillas, saltos de línea y escapes.",
+            UnknownSetting => "Opción desconocida. Revisa el nombre de la propiedad.",
+            MissingSetting => "Falta una opción obligatoria.",
+            DuplicateSetting => "Una opción está definida más de una vez.",
+            InvalidColor => "Formato de color no válido. Usa #RRGGBB o #RRGGBBAA.",
+            FrostedRange => "La intensidad del efecto es inválida. Rango permitido: 0–100.",
+            CornerRange => "El radio de esquina está fuera de rango. Rango permitido: 0–24.",
+            UsageDisplay => "La visualización de uso no es válida: las cuotas de 5 horas y semanal no pueden estar ambas desactivadas.",
+            QuotaAlert => "Valor de alerta de cuota no válido. Valores permitidos: 0, 10, 20, 30.",
+            RefreshInterval => "Intervalo de actualización no válido. Valores permitidos: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Versión del esquema de configuración no compatible.",
+            UnsupportedLanguage => "Configuración de idioma no compatible.",
+            Theme => "Tema no válido. Valores permitidos: system, dark, light.",
+            Layout => "Diseño no válido. Valores permitidos: default, minimal.",
+            InvalidType => "Un valor de configuración tiene un tipo incorrecto.",
+            UnterminatedComment => "Un comentario de bloque no está cerrado.",
+            GenericSyntax => "Sintaxis JSON o valor de configuración no válido cerca de esta posición.",
+        },
+        LanguageId::French => match phrase {
+            Heading => "La configuration contient des erreurs",
+            ControlCharacter => "Une chaîne contient un caractère de contrôle non valide. Vérifiez les guillemets, retours à la ligne et échappements.",
+            UnknownSetting => "Paramètre inconnu. Vérifiez le nom de la propriété.",
+            MissingSetting => "Un paramètre obligatoire est manquant.",
+            DuplicateSetting => "Un paramètre est défini plusieurs fois.",
+            InvalidColor => "Format de couleur non valide. Utilisez #RRGGBB ou #RRGGBBAA.",
+            FrostedRange => "L’intensité de flou est hors limites. Plage autorisée : 0–100.",
+            CornerRange => "Le rayon d’angle est hors limites. Plage autorisée : 0–24.",
+            UsageDisplay => "L’affichage de l’utilisation est invalide : les quotas 5 heures et hebdomadaire ne peuvent pas être désactivés tous les deux.",
+            QuotaAlert => "Valeur d’alerte de quota invalide. Valeurs autorisées : 0, 10, 20, 30.",
+            RefreshInterval => "Intervalle d’actualisation invalide. Valeurs autorisées : 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Version de schéma de configuration non prise en charge.",
+            UnsupportedLanguage => "Langue configurée non prise en charge.",
+            Theme => "Thème invalide. Valeurs autorisées : system, dark, light.",
+            Layout => "Disposition invalide. Valeurs autorisées : default, minimal.",
+            InvalidType => "Une valeur de configuration a un type incorrect.",
+            UnterminatedComment => "Un commentaire de bloc n’est pas fermé.",
+            GenericSyntax => "Syntaxe JSON ou valeur de configuration invalide près de cette position.",
+        },
+        LanguageId::German => match phrase {
+            Heading => "Die Konfiguration enthält Fehler",
+            ControlCharacter => "Eine Zeichenfolge enthält ein ungültiges Steuerzeichen. Prüfe Anführungszeichen, Zeilenumbrüche und Escape-Sequenzen.",
+            UnknownSetting => "Unbekannte Einstellung. Prüfe den Eigenschaftsnamen.",
+            MissingSetting => "Eine erforderliche Einstellung fehlt.",
+            DuplicateSetting => "Eine Einstellung wurde mehrfach definiert.",
+            InvalidColor => "Ungültiges Farbformat. Verwende #RRGGBB oder #RRGGBBAA.",
+            FrostedRange => "Die Milchglasstärke liegt außerhalb des Bereichs. Zulässig: 0–100.",
+            CornerRange => "Der Eckenradius liegt außerhalb des Bereichs. Zulässig: 0–24.",
+            UsageDisplay => "Die Nutzungsanzeige ist ungültig: 5-Stunden- und Wochenkontingent können nicht beide deaktiviert sein.",
+            QuotaAlert => "Ungültiger Kontingentwarnwert. Zulässig: 0, 10, 20, 30.",
+            RefreshInterval => "Ungültiges Aktualisierungsintervall. Zulässig: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Nicht unterstützte Konfigurationsschemaversion.",
+            UnsupportedLanguage => "Nicht unterstützte Spracheinstellung.",
+            Theme => "Ungültiges Design. Zulässig: system, dark, light.",
+            Layout => "Ungültiges Layout. Zulässig: default, minimal.",
+            InvalidType => "Ein Konfigurationswert hat den falschen Typ.",
+            UnterminatedComment => "Ein Blockkommentar wurde nicht geschlossen.",
+            GenericSyntax => "Ungültige JSON-Syntax oder ungültiger Konfigurationswert nahe dieser Position.",
+        },
+        LanguageId::Japanese => match phrase {
+            Heading => "設定にエラーがあります",
+            ControlCharacter => "文字列に無効な制御文字があります。引用符、改行、エスケープを確認してください。",
+            UnknownSetting => "不明な設定項目です。プロパティ名を確認してください。",
+            MissingSetting => "必須の設定項目がありません。",
+            DuplicateSetting => "同じ設定項目が複数回定義されています。",
+            InvalidColor => "色の形式が無効です。#RRGGBB または #RRGGBBAA を使用してください。",
+            FrostedRange => "フロスト強度が範囲外です。許容範囲：0～100。",
+            CornerRange => "角丸半径が範囲外です。許容範囲：0～24。",
+            UsageDisplay => "使用量表示が無効です。5時間枠と週間枠を同時に無効にはできません。",
+            QuotaAlert => "クォータ通知値が無効です。使用可能：0、10、20、30。",
+            RefreshInterval => "更新間隔が無効です。使用可能：1m、5m、15m、1h。",
+            SchemaVersion => "サポートされていない設定スキーマのバージョンです。",
+            UnsupportedLanguage => "サポートされていない言語設定です。",
+            Theme => "テーマの値が無効です。使用可能：system、dark、light。",
+            Layout => "レイアウトの値が無効です。使用可能：default、minimal。",
+            InvalidType => "設定値の型が正しくありません。",
+            UnterminatedComment => "ブロックコメントが閉じられていません。",
+            GenericSyntax => "この位置付近の JSON 構文または設定値が無効です。",
+        },
+        LanguageId::Korean => match phrase {
+            Heading => "구성에 오류가 있습니다",
+            ControlCharacter => "문자열에 잘못된 제어 문자가 있습니다. 따옴표, 줄바꿈, 이스케이프를 확인하세요.",
+            UnknownSetting => "알 수 없는 설정입니다. 속성 이름을 확인하세요.",
+            MissingSetting => "필수 설정이 누락되었습니다.",
+            DuplicateSetting => "같은 설정이 두 번 이상 정의되었습니다.",
+            InvalidColor => "색상 형식이 잘못되었습니다. #RRGGBB 또는 #RRGGBBAA를 사용하세요.",
+            FrostedRange => "반투명 강도가 범위를 벗어났습니다. 허용 범위: 0–100.",
+            CornerRange => "모서리 반경이 범위를 벗어났습니다. 허용 범위: 0–24.",
+            UsageDisplay => "사용량 표시 설정이 잘못되었습니다. 5시간 할당량과 주간 할당량을 모두 끌 수 없습니다.",
+            QuotaAlert => "할당량 알림 값이 잘못되었습니다. 허용 값: 0, 10, 20, 30.",
+            RefreshInterval => "새로 고침 간격이 잘못되었습니다. 허용 값: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "지원되지 않는 구성 스키마 버전입니다.",
+            UnsupportedLanguage => "지원되지 않는 언어 설정입니다.",
+            Theme => "테마 값이 잘못되었습니다. 허용 값: system, dark, light.",
+            Layout => "레이아웃 값이 잘못되었습니다. 허용 값: default, minimal.",
+            InvalidType => "구성 값의 형식이 올바르지 않습니다.",
+            UnterminatedComment => "블록 주석이 닫히지 않았습니다.",
+            GenericSyntax => "이 위치 근처의 JSON 구문 또는 구성 값이 잘못되었습니다.",
+        },
+        LanguageId::SimplifiedChinese => match phrase {
+            Heading => "配置存在错误",
+            ControlCharacter => "字符串中包含非法控制字符。请检查引号、换行或转义字符。",
+            UnknownSetting => "存在未知配置项。请检查属性名是否拼写正确。",
+            MissingSetting => "缺少必填配置项。",
+            DuplicateSetting => "同一配置项被重复定义。",
+            InvalidColor => "颜色格式无效。请使用 #RRGGBB 或 #RRGGBBAA。",
+            FrostedRange => "磨砂强度超出范围。允许范围：0–100。",
+            CornerRange => "圆角半径超出范围。允许范围：0–24。",
+            UsageDisplay => "显示用量设置无效：5 小时额度和每周额度不能同时关闭。",
+            QuotaAlert => "额度提醒值无效。允许：0、10、20、30。",
+            RefreshInterval => "刷新频率无效。允许：1m、5m、15m、1h。",
+            SchemaVersion => "配置版本不受支持。",
+            UnsupportedLanguage => "语言设置不受支持。",
+            Theme => "主题值无效。允许：system、dark、light。",
+            Layout => "排版值无效。允许：default、minimal。",
+            InvalidType => "配置值类型不正确。",
+            UnterminatedComment => "块注释未正确结束。",
+            GenericSyntax => "此位置附近的 JSON 语法或配置值无效。",
+        },
+        LanguageId::TraditionalChinese => match phrase {
+            Heading => "設定存在錯誤",
+            ControlCharacter => "字串中包含無效控制字元。請檢查引號、換行或跳脫字元。",
+            UnknownSetting => "存在未知設定項目。請檢查屬性名稱是否正確。",
+            MissingSetting => "缺少必要設定項目。",
+            DuplicateSetting => "同一設定項目被重複定義。",
+            InvalidColor => "色彩格式無效。請使用 #RRGGBB 或 #RRGGBBAA。",
+            FrostedRange => "霧化強度超出範圍。允許範圍：0–100。",
+            CornerRange => "圓角半徑超出範圍。允許範圍：0–24。",
+            UsageDisplay => "用量顯示設定無效：5 小時額度與每週額度不能同時關閉。",
+            QuotaAlert => "額度提醒值無效。允許：0、10、20、30。",
+            RefreshInterval => "重新整理間隔無效。允許：1m、5m、15m、1h。",
+            SchemaVersion => "設定版本不受支援。",
+            UnsupportedLanguage => "語言設定不受支援。",
+            Theme => "主題值無效。允許：system、dark、light。",
+            Layout => "版面配置值無效。允許：default、minimal。",
+            InvalidType => "設定值類型不正確。",
+            UnterminatedComment => "區塊註解未正確結束。",
+            GenericSyntax => "此位置附近的 JSON 語法或設定值無效。",
+        },
+        LanguageId::Russian => match phrase {
+            Heading => "В конфигурации есть ошибки",
+            ControlCharacter => "Строка содержит недопустимый управляющий символ. Проверьте кавычки, переводы строк и экранирование.",
+            UnknownSetting => "Неизвестный параметр. Проверьте имя свойства.",
+            MissingSetting => "Отсутствует обязательный параметр.",
+            DuplicateSetting => "Параметр указан более одного раза.",
+            InvalidColor => "Недопустимый формат цвета. Используйте #RRGGBB или #RRGGBBAA.",
+            FrostedRange => "Интенсивность размытия вне диапазона. Допустимо: 0–100.",
+            CornerRange => "Радиус скругления вне диапазона. Допустимо: 0–24.",
+            UsageDisplay => "Настройка отображения использования недопустима: нельзя одновременно отключить 5-часовую и недельную квоты.",
+            QuotaAlert => "Недопустимое значение уведомления о квоте. Допустимо: 0, 10, 20, 30.",
+            RefreshInterval => "Недопустимый интервал обновления. Допустимо: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Неподдерживаемая версия схемы конфигурации.",
+            UnsupportedLanguage => "Неподдерживаемая настройка языка.",
+            Theme => "Недопустимая тема. Допустимо: system, dark, light.",
+            Layout => "Недопустимая раскладка. Допустимо: default, minimal.",
+            InvalidType => "Значение конфигурации имеет неверный тип.",
+            UnterminatedComment => "Блочный комментарий не закрыт.",
+            GenericSyntax => "Недопустимый JSON или значение конфигурации рядом с этой позицией.",
+        },
+        LanguageId::PortugueseBrazil => match phrase {
+            Heading => "A configuração contém erros",
+            ControlCharacter => "Uma string contém um caractere de controle inválido. Verifique aspas, quebras de linha e escapes.",
+            UnknownSetting => "Configuração desconhecida. Verifique o nome da propriedade.",
+            MissingSetting => "Uma configuração obrigatória está ausente.",
+            DuplicateSetting => "Uma configuração foi definida mais de uma vez.",
+            InvalidColor => "Formato de cor inválido. Use #RRGGBB ou #RRGGBBAA.",
+            FrostedRange => "A intensidade do efeito está fora do intervalo. Permitido: 0–100.",
+            CornerRange => "O raio do canto está fora do intervalo. Permitido: 0–24.",
+            UsageDisplay => "A exibição de uso é inválida: as cotas de 5 horas e semanal não podem estar ambas desativadas.",
+            QuotaAlert => "Valor de alerta de cota inválido. Permitidos: 0, 10, 20, 30.",
+            RefreshInterval => "Intervalo de atualização inválido. Permitidos: 1m, 5m, 15m, 1h.",
+            SchemaVersion => "Versão do esquema de configuração não compatível.",
+            UnsupportedLanguage => "Configuração de idioma não compatível.",
+            Theme => "Tema inválido. Permitidos: system, dark, light.",
+            Layout => "Layout inválido. Permitidos: default, minimal.",
+            InvalidType => "Um valor de configuração tem o tipo incorreto.",
+            UnterminatedComment => "Um comentário de bloco não foi fechado.",
+            GenericSyntax => "Sintaxe JSON ou valor de configuração inválido próximo desta posição.",
+        },
+    }
+}
+
+fn json_error_location_text(
+    language: LanguageId,
+    line: usize,
+    column: usize,
+    detail: &str,
+) -> String {
+    match language {
+        LanguageId::English => format!("Line {line}, column {column}: {detail}"),
+        LanguageId::Dutch => format!("Regel {line}, kolom {column}: {detail}"),
+        LanguageId::Spanish => format!("Línea {line}, columna {column}: {detail}"),
+        LanguageId::French => format!("Ligne {line}, colonne {column} : {detail}"),
+        LanguageId::German => format!("Zeile {line}, Spalte {column}: {detail}"),
+        LanguageId::Japanese => format!("{line} 行 {column} 列：{detail}"),
+        LanguageId::Korean => format!("{line}행 {column}열: {detail}"),
+        LanguageId::SimplifiedChinese => format!("第 {line} 行，第 {column} 列：{detail}"),
+        LanguageId::TraditionalChinese => format!("第 {line} 行，第 {column} 欄：{detail}"),
+        LanguageId::Russian => format!("Строка {line}, столбец {column}: {detail}"),
+        LanguageId::PortugueseBrazil => format!("Linha {line}, coluna {column}: {detail}"),
+    }
+}
+
+fn json_error_status(language: LanguageId, detail: &str) -> String {
+    let heading = json_error_phrase(language, JsonErrorPhrase::Heading);
+    match language {
+        LanguageId::Japanese
+        | LanguageId::SimplifiedChinese
+        | LanguageId::TraditionalChinese => format!("× {heading}：{detail}"),
+        _ => format!("× {heading}: {detail}"),
+    }
+}
+
+fn friendly_json_error(error: &str, language: LanguageId) -> String {
+    let location = json_error_location(error);
+    let full = error;
+    let phrase = if full.contains("control character") {
+        JsonErrorPhrase::ControlCharacter
+    } else if full.contains("unknown field") {
+        JsonErrorPhrase::UnknownSetting
+    } else if full.contains("missing field") {
+        JsonErrorPhrase::MissingSetting
+    } else if full.contains("duplicate field") {
+        JsonErrorPhrase::DuplicateSetting
+    } else if full.contains("expected #RRGGBB or #RRGGBBAA")
+        || full.contains("invalid color")
+    {
+        JsonErrorPhrase::InvalidColor
+    } else if full.contains("frosted_strength: allowed range is 0-100") {
+        JsonErrorPhrase::FrostedRange
+    } else if full.contains("corner_radius: allowed range is") {
+        JsonErrorPhrase::CornerRange
+    } else if full.contains("session_5h and weekly cannot both be false") {
+        JsonErrorPhrase::UsageDisplay
+    } else if full.contains("quota_alert_percent: allowed values") {
+        JsonErrorPhrase::QuotaAlert
+    } else if full.contains("refresh_interval: allowed values") {
+        JsonErrorPhrase::RefreshInterval
+    } else if full.contains("schema_version: expected") {
+        JsonErrorPhrase::SchemaVersion
+    } else if full.contains("general.language: unsupported language code") {
+        JsonErrorPhrase::UnsupportedLanguage
+    } else if full.contains("appearance.theme: allowed values") {
+        JsonErrorPhrase::Theme
+    } else if full.contains("appearance.layout: allowed values") {
+        JsonErrorPhrase::Layout
+    } else if full.contains("invalid type") {
+        JsonErrorPhrase::InvalidType
+    } else if full.contains("unterminated block comment") {
+        JsonErrorPhrase::UnterminatedComment
     } else {
-        raw_detail.to_string()
+        JsonErrorPhrase::GenericSyntax
     };
 
+    let detail = json_error_phrase(language, phrase);
     if let Some((line, column)) = location {
-        if zh {
-            format!("第 {line} 行，第 {column} 列\n{detail}")
-        } else {
-            format!("Line {line}, column {column}\n{detail}")
-        }
+        json_error_location_text(language, line, column, detail)
     } else {
-        detail
+        detail.to_string()
     }
 }
 
@@ -2385,20 +2675,20 @@ fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'stati
     }
 }
 
-fn start_json_error_pulse(hwnd: HWND) {
+fn start_json_error_shake(hwnd: HWND) {
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
-        s.json_error_pulse_step = 1;
+        s.json_error_shake_step = 1;
     }
     unsafe {
-        let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+        let _ = KillTimer(hwnd, JSON_ERROR_SHAKE_TIMER_ID);
         let _ = SetTimer(
             hwnd,
-            JSON_ERROR_PULSE_TIMER_ID,
-            JSON_ERROR_PULSE_INTERVAL_MS,
+            JSON_ERROR_SHAKE_TIMER_ID,
+            JSON_ERROR_SHAKE_INTERVAL_MS,
             None,
         );
         let _ = InvalidateRect(hwnd, None, false);
@@ -2406,29 +2696,40 @@ fn start_json_error_pulse(hwnd: HWND) {
     }
 }
 
-fn advance_json_error_pulse(hwnd: HWND) {
+fn advance_json_error_shake(hwnd: HWND) {
     let finished = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
-        if s.json_error_pulse_step == 0 {
+        if s.json_error_shake_step == 0 {
             true
-        } else if s.json_error_pulse_step >= JSON_ERROR_PULSE_STEPS {
-            s.json_error_pulse_step = 0;
+        } else if s.json_error_shake_step >= JSON_ERROR_SHAKE_STEPS {
+            s.json_error_shake_step = 0;
             true
         } else {
-            s.json_error_pulse_step += 1;
+            s.json_error_shake_step += 1;
             false
         }
     };
     unsafe {
         if finished {
-            let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+            let _ = KillTimer(hwnd, JSON_ERROR_SHAKE_TIMER_ID);
         }
         let _ = InvalidateRect(hwnd, None, false);
         let _ = UpdateWindow(hwnd);
     }
+}
+
+fn json_error_shake_offset(hwnd: HWND, step: u8) -> i32 {
+    if step == 0 || JSON_ERROR_SHAKE_STEPS <= 1 {
+        return 0;
+    }
+    let progress = f32::from(step.saturating_sub(1))
+        / f32::from(JSON_ERROR_SHAKE_STEPS.saturating_sub(1));
+    let amplitude = scale(hwnd, 8) as f32 * (1.0 - progress);
+    let phase = progress * std::f32::consts::PI * 6.0 + std::f32::consts::FRAC_PI_2;
+    (amplitude * phase.sin()).round() as i32
 }
 
 fn show_json_apply_validation_error(
@@ -2445,14 +2746,10 @@ fn show_json_apply_validation_error(
         };
         s.json_save_feedback = None;
         s.json_status_path = None;
-        s.json_status = if language == LanguageId::SimplifiedChinese {
-            format!("× 配置存在错误\n{detail}")
-        } else {
-            format!("× Configuration has errors\n{detail}")
-        };
+        s.json_status = json_error_status(language, &detail);
     }
     locate_json_error(edit, error);
-    start_json_error_pulse(hwnd);
+    start_json_error_shake(hwnd);
 }
 
 fn begin_json_apply(hwnd: HWND) {
@@ -2490,7 +2787,7 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
         s.pending_json_action = Some(action);
         if action == JsonAction::Apply {
             s.json_save_feedback = Some(JsonSaveFeedback::Saving);
-            s.json_error_pulse_step = 0;
+            s.json_error_shake_step = 0;
         } else {
             s.json_save_feedback = None;
             s.json_status = json_action_running_text(action, s.snapshot.language).to_string();
@@ -2499,7 +2796,7 @@ fn begin_json_action(hwnd: HWND, action: JsonAction) {
     }
     if action == JsonAction::Apply {
         unsafe {
-            let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+            let _ = KillTimer(hwnd, JSON_ERROR_SHAKE_TIMER_ID);
         }
         let _ = ensure_json_save_mask(hwnd);
         layout_settings_children(hwnd);
@@ -2558,10 +2855,10 @@ fn finish_pending_json_action(hwnd: HWND) {
 
 fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: LanguageId) -> String {
     let detail = friendly_json_error(error, language);
-    if language == LanguageId::SimplifiedChinese {
-        format!("× {action_zh}\n{detail}")
-    } else {
-        format!("× {action_en}\n{detail}")
+    match language {
+        LanguageId::SimplifiedChinese => format!("× {action_zh}：{detail}"),
+        LanguageId::English => format!("× {action_en}: {detail}"),
+        _ => json_error_status(language, &detail),
     }
 }
 
@@ -2577,7 +2874,7 @@ fn schedule_json_validation(hwnd: HWND) {
             // Any user edit after a successful save replaces the saved indicator
             // with the normal unsaved-changes state immediately.
             s.json_save_feedback = None;
-            s.json_error_pulse_step = 0;
+            s.json_error_shake_step = 0;
             // Mark dirty immediately so closing the window before the debounce
             // fires still triggers the unsaved-changes confirmation.
             s.json_dirty = true;
@@ -2590,7 +2887,7 @@ fn schedule_json_validation(hwnd: HWND) {
 
     unsafe {
         let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
-        let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+        let _ = KillTimer(hwnd, JSON_ERROR_SHAKE_TIMER_ID);
         let _ = SetTimer(
             hwnd,
             JSON_VALIDATION_TIMER_ID,
@@ -2638,11 +2935,7 @@ fn update_json_validation_status(_mark_dirty: bool) {
             match parsed {
                 Err(error) => {
                     let detail = friendly_json_error(&error, language);
-                    s.json_status = if language == LanguageId::SimplifiedChinese {
-                        format!("× 配置存在错误\n{detail}")
-                    } else {
-                        format!("× Configuration has errors\n{detail}")
-                    };
+                    s.json_status = json_error_status(language, &detail);
                     s.json_status_path = None;
                 }
                 Ok(_) => {
@@ -4014,8 +4307,8 @@ unsafe extern "system" fn wnd_proc(
                 update_json_validation_status(false);
                 return LRESULT(0);
             }
-            if wparam.0 == JSON_ERROR_PULSE_TIMER_ID {
-                advance_json_error_pulse(hwnd);
+            if wparam.0 == JSON_ERROR_SHAKE_TIMER_ID {
+                advance_json_error_shake(hwnd);
                 return LRESULT(0);
             }
             if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
@@ -4553,7 +4846,7 @@ unsafe extern "system" fn wnd_proc(
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
-            let _ = KillTimer(hwnd, JSON_ERROR_PULSE_TIMER_ID);
+            let _ = KillTimer(hwnd, JSON_ERROR_SHAKE_TIMER_ID);
             let resources = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.take().map(|s| (s.font, s.json_font, s.edit_brush, s.json_save_mask))
@@ -4728,7 +5021,7 @@ unsafe fn paint(hwnd: HWND) {
         json_status,
         json_status_path,
         json_save_feedback,
-        json_error_pulse_step,
+        json_error_shake_step,
         json_dirty,
         discard_pending,
         font,
@@ -4752,7 +5045,7 @@ unsafe fn paint(hwnd: HWND) {
             s.json_status.clone(),
             s.json_status_path.clone(),
             s.json_save_feedback,
-            s.json_error_pulse_step,
+            s.json_error_shake_step,
             s.json_dirty,
             s.pending_discard_action.is_some(),
             s.font,
@@ -4890,7 +5183,7 @@ unsafe fn paint(hwnd: HWND) {
             &json_status,
             json_status_path.as_deref(),
             json_save_feedback,
-            json_error_pulse_step,
+            json_error_shake_step,
             json_dirty,
             hovered,
             pressed,
@@ -5373,7 +5666,7 @@ unsafe fn paint_json_page(
     status: &str,
     status_path: Option<&std::path::Path>,
     save_feedback: Option<JsonSaveFeedback>,
-    error_pulse_step: u8,
+    error_shake_step: u8,
     dirty: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
@@ -5491,72 +5784,29 @@ unsafe fn paint_json_page(
     let status_top = edit_rect.bottom + scale(hwnd, 8);
     let prefix_width = if zh { scale(hwnd, 96) } else { scale(hwnd, 150) };
 
-    // Invalid Apply keeps the configuration-validation message and briefly
-    // enlarges it before returning to the normal UI font size.
-    let pulse_percent = match error_pulse_step {
-        1 => 106,
-        2 => 112,
-        3 => 116,
-        4 => 112,
-        5 => 106,
-        _ => 100,
-    };
-    let pulse_font = if !success && pulse_percent > 100 {
-        let font_name = native_interop::wide_str(fonts::face(
-            fonts::FontRole::Ui,
-            Some(snapshot.language),
-        ));
-        let height = ((scale(hwnd, 14) * pulse_percent + 50) / 100).max(1);
-        Some(CreateFontW(
-            -height,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_TT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            CLEARTYPE_QUALITY.0 as u32,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            PCWSTR::from_raw(font_name.as_ptr()),
-        ))
+    // Invalid Apply uses a short horizontal shake whose amplitude decays
+    // smoothly to zero. Font size stays stable to avoid layout jitter.
+    let error_shake_x = if !success {
+        json_error_shake_offset(hwnd, error_shake_step)
     } else {
-        None
+        0
     };
-    let old_status_font = pulse_font.as_ref().and_then(|font| {
-        if font.0.is_null() {
-            None
-        } else {
-            Some(SelectObject(hdc, HGDIOBJ(font.0)))
-        }
-    });
 
     draw_text(
         hdc,
         status,
         RECT {
-            left: scale(hwnd, 200),
+            left: scale(hwnd, 200) + error_shake_x,
             top: status_top,
             right: if status_path.is_some() {
-                scale(hwnd, 200) + prefix_width
+                scale(hwnd, 200) + prefix_width + error_shake_x
             } else {
-                client.right - scale(hwnd, 24)
+                client.right - scale(hwnd, 24) + error_shake_x
             },
             bottom: status_top + scale(hwnd, 26),
         },
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-    if let Some(old_font) = old_status_font {
-        SelectObject(hdc, old_font);
-    }
-    if let Some(font) = pulse_font {
-        if !font.0.is_null() {
-            let _ = DeleteObject(font);
-        }
-    }
     if let Some(path) = status_path {
         let path_text = path.to_string_lossy();
         let path_left = scale(hwnd, 200) + prefix_width;
