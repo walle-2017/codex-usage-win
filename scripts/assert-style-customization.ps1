@@ -37,15 +37,15 @@ if ($styleProduction -notmatch 'enum\s+ThemePreset' -or
     $styleWindow -notmatch '"石墨"' -or
     $styleWindow -notmatch '"深海"' -or
     $styleWindow -notmatch '"松影"' -or
-    $styleWindow -notmatch '"晨霜"' -or
-    $styleWindow -notmatch '"雾蓝"' -or
-    $styleWindow -notmatch '"暖砂"' -or
+    $styleWindow -notmatch '"云瓷"' -or
+    $styleWindow -notmatch '"晴湾"' -or
+    $styleWindow -notmatch '"麦光"' -or
     $styleWindow -notmatch '"Graphite"' -or
     $styleWindow -notmatch '"Deep Sea"' -or
     $styleWindow -notmatch '"Pine Shade"' -or
-    $styleWindow -notmatch '"Morning Frost"' -or
-    $styleWindow -notmatch '"Mist Blue"' -or
-    $styleWindow -notmatch '"Warm Sand"' -or
+    $styleWindow -notmatch '"Cloud Porcelain"' -or
+    $styleWindow -notmatch '"Clear Bay"' -or
+    $styleWindow -notmatch '"Wheat Glow"' -or
     $styleWindow -notmatch 'Section::Preset' -or
     $styleWindow -notmatch 'paint_preset_gallery\(' -or
     $styleWindow -notmatch 'preset_card_rect\(' -or
@@ -60,8 +60,9 @@ if ($styleWindow -match 'fn\s+preset_rect\(') {
 foreach ($hex in @(
     '#0F1B24FF', '#294252FF', '#3FB7E9FF',
     '#14211DFF', '#2B4038FF', '#56C596FF',
-    '#F3F7FAFF', '#CFDCE4FF', '#49616FFF', '#1F3440FF', '#5E7480FF', '#B53F3FFF', '#2F8FB8FF',
-    '#F8F4ECFF', '#DED4C4FF', '#665A48FF', '#2E2922FF', '#756A59FF', '#B4463EFF', '#3C8F8AFF'
+    '#F6F8FAFF', '#C7D0D9FF', '#46515DFF', '#17212BFF', '#596777FF', '#B33F49FF', '#4A8FD8FF',
+    '#DCEFF5FF', '#AFCFD8FF', '#335965FF', '#12343DFF', '#426976FF', '#AD4146FF', '#1597B7FF',
+    '#FFF1DCFF', '#DDBF8FFF', '#685339FF', '#332514FF', '#795F3DFF', '#B24039FF', '#4E8A6EFF'
 )) {
     if ($styleProduction -notmatch [regex]::Escape($hex)) {
         throw "Expected coordinated theme-preset color is missing: $hex"
@@ -69,6 +70,7 @@ foreach ($hex in @(
 }
 if ($style -notmatch 'preset_text_colors_keep_readable_contrast' -or
     $style -notmatch 'redesigned_light_presets_keep_error_text_readable' -or
+    $style -notmatch 'redesigned_light_presets_are_visually_distinct' -or
     $style -notmatch 'ratio\s*>=\s*4\.5') {
     throw 'Theme presets must keep an automated readable text-contrast quality gate.'
 }
