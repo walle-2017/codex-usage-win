@@ -3466,11 +3466,23 @@ fn hide_tooltip_blur_backdrop() {
 
 fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, height: i32) -> Option<HWND> {
     let params = BlurBackdropParams { blur_bits: blur_amount.to_bits(), tint };
+    let corner_radius_px = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| sc(i32::from(s.styles.active(s.is_dark).tooltip_corner_radius)) as f32)
+            .unwrap_or(0.0)
+    };
     if let (Some(hwnd), Some(context)) = (tooltip_blur_hwnd(), tooltip_blur_context()) {
         let unchanged = *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) == Some(params);
         if unchanged || (native_interop::set_composition_blur_amount(context, blur_amount)
             && native_interop::set_composition_blur_tint(context, tint)) {
-            let _ = native_interop::set_composition_blur_bounds(context, width, height);
+            let _ = native_interop::set_composition_blur_bounds(
+                context,
+                width,
+                height,
+                corner_radius_px,
+            );
             *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) = Some(params);
             return Some(hwnd);
         }
@@ -3490,7 +3502,12 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
             HWND::default(), HMENU::default(), GetModuleHandleW(PCWSTR::null()).ok()?, None,
         ).ok()?;
         let context = native_interop::create_composition_blur(hwnd, blur_amount, tint)?;
-        let _ = native_interop::set_composition_blur_bounds(context, width, height);
+        let _ = native_interop::set_composition_blur_bounds(
+                context,
+                width,
+                height,
+                corner_radius_px,
+            );
         let owner = { let state = lock_state(); state.as_ref().and_then(|s| s.taskbar_hwnd) };
         native_interop::set_popup_owner(hwnd, owner);
         *TOOLTIP_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner()) = Some(SendHwnd::from_hwnd(hwnd));
