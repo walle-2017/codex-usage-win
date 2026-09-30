@@ -576,25 +576,30 @@ if ($styleWindow -notmatch '✓ 已重新载入' -or
     $styleWindow -notmatch '✓ 已格式化' -or
     $styleWindow -notmatch '✓ 成功导入' -or
     $styleWindow -notmatch '✓ 成功导出' -or
-    $styleWindow -notmatch '已保存，并从当前应用设置重新载入' -or
+    $styleWindow -notmatch 'JsonSaveFeedback::Saving' -or
+    $styleWindow -notmatch 'JsonSaveFeedback::Saved' -or
+    $styleWindow -notmatch '◌ 保存中' -or
+    $styleWindow -notmatch '✓ 保存成功' -or
     $styleWindow -notmatch 'JsonStatusPath' -or
     $styleWindow -notmatch 'ShellExecuteW' -or
     $styleWindow -notmatch 'Comment\) => Color::from_hex\("#777777FF"\)' -or
     $styleWindow -notmatch 'Comment\) => Color::from_hex\("#999999FF"\)' -or
     $styleWindow -notmatch 'if zh \{ "应用" \} else \{ "Apply" \}') {
-    throw 'JSON action feedback, clickable file paths, Apply label, save confirmation, and subdued comment colors must remain stable.'
+    throw 'JSON action feedback, second-line saving/saved state, clickable file paths, Apply label, and subdued comment colors must remain stable.'
 }
 if ($styleWindow -notmatch 'JSON_ACTION_DELAY_MS: u32 = 200' -or
     $styleWindow -notmatch '◌ 载入中' -or
     $styleWindow -notmatch '◌ 格式化中' -or
     $styleWindow -notmatch '◌ 导入中' -or
     $styleWindow -notmatch '◌ 导出中' -or
+    $styleWindow -notmatch '◌ 保存中' -or
     $styleWindow -notmatch 'SetTimer\(hwnd, JSON_ACTION_TIMER_ID, JSON_ACTION_DELAY_MS' -or
     $styleWindow -notmatch 'pending_json_action' -or
-    $styleWindow -notmatch 'json_action_pending' -or
+    $styleWindow -notmatch 'json_apply_pending' -or
+    $styleWindow -notmatch 'json_save_feedback = None' -or
     $styleWindow -notmatch 'GetTextExtentPoint32W' -or
     $styleWindow -notmatch 'path_left \+ path_width') {
-    throw 'JSON actions must expose a 200ms running state and file-link underline/hit area must match the rendered path width.'
+    throw 'JSON actions including Apply must expose a 200ms running state; editing after save must restore unsaved state; file-link underline/hit area must match the rendered path width.'
 }
 if ($styleWindow -notmatch 'codex-usage-win-config-\{:\\04\}' -and
     $styleWindow -notmatch 'codex-usage-win-config-') {
