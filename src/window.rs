@@ -3768,14 +3768,8 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
     };
 
     if s.appearance_preset == AppearancePreset::Minimal {
-        let reset = appearance::taskbar_value_text(
-            AppearancePreset::Default,
-            s.language,
-            section,
-            window,
-        )
-        .secondary
-        .unwrap_or_else(|| "--".to_string());
+        let reset = format_precise_reset_time(section.resets_at)
+            .unwrap_or_else(|| "--".to_string());
         return Some(format!("{label} · {reset}"));
     }
 
