@@ -756,11 +756,15 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         );
 
         let static_class = native_interop::wide_str("STATIC");
+        // Use an owned layered popup instead of a layered child. Layered child
+        // windows depend on Windows 8+ manifest compatibility declarations,
+        // while an owned no-activate popup is supported consistently and still
+        // stays visually attached to the settings window.
         let json_save_mask = match CreateWindowExW(
-            WS_EX_LAYERED,
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             PCWSTR::from_raw(static_class.as_ptr()),
             PCWSTR::from_raw(empty.as_ptr()),
-            WS_CHILD,
+            WS_POPUP,
             0,
             0,
             s(700),
@@ -1803,11 +1807,16 @@ fn layout_settings_children(hwnd: HWND) {
         );
 
         let mask_visibility = if save_mask_visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+        let mut mask_origin = POINT {
+            x: json_rect.left,
+            y: json_rect.top,
+        };
+        let _ = ClientToScreen(hwnd, &mut mask_origin);
         let _ = SetWindowPos(
             json_save_mask.to_hwnd(),
             HWND_TOP,
-            json_rect.left,
-            json_rect.top,
+            mask_origin.x,
+            mask_origin.y,
             (json_rect.right - json_rect.left).max(1),
             (json_rect.bottom - json_rect.top).max(1),
             SWP_NOACTIVATE | SWP_NOCOPYBITS | mask_visibility,
