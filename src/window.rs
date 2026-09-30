@@ -528,6 +528,7 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
     settings.styles.normalize();
+    settings.styles.clamp_corner_radii(settings.appearance_preset);
     settings
 }
 
@@ -1088,6 +1089,7 @@ fn set_window_title(hwnd: HWND, strings: Strings) {
 }
 
 fn apply_language_to_state(state: &mut AppState, language_override: Option<LanguageId>) {
+    let language_override = language_override.map(LanguageId::ui_supported);
     state.language_override = language_override;
     state.language = localization::resolve_language(language_override);
     set_window_title(state.hwnd.to_hwnd(), state.language.strings());
@@ -1498,7 +1500,11 @@ pub fn run() {
         }
 
         let settings = load_settings();
-        let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
+        let language_override = settings
+            .language
+            .as_deref()
+            .and_then(LanguageId::from_code)
+            .map(LanguageId::ui_supported);
         let language = localization::resolve_language(language_override);
 
         // Create as layered popup (will be reparented into taskbar)
@@ -1775,18 +1781,27 @@ fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
     let Some(context) = blur_backdrop_context() else {
         return false;
     };
-    let corner_radius_px = {
+    let (clip_inset_px, clip_radius_px) = {
         let state = lock_state();
         state
             .as_ref()
-            .map(|s| sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius)) as f32)
-            .unwrap_or(0.0)
+            .map(|s| {
+                let outer_radius =
+                    sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius));
+                let outer_inset = sc(1).max(1);
+                (
+                    (outer_inset + PANEL_BORDER_WIDTH_PX) as f32,
+                    (outer_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32,
+                )
+            })
+            .unwrap_or((0.0, 0.0))
     };
     native_interop::set_composition_blur_bounds(
         context,
         width,
         height,
-        corner_radius_px,
+        clip_inset_px,
+        clip_radius_px,
     )
 }
 
@@ -3466,12 +3481,16 @@ fn hide_tooltip_blur_backdrop() {
 
 fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, height: i32) -> Option<HWND> {
     let params = BlurBackdropParams { blur_bits: blur_amount.to_bits(), tint };
-    let corner_radius_px = {
+    let (clip_inset_px, clip_radius_px) = {
         let state = lock_state();
         state
             .as_ref()
-            .map(|s| sc(i32::from(s.styles.active(s.is_dark).tooltip_corner_radius)) as f32)
-            .unwrap_or(0.0)
+            .map(|s| {
+                let outer_radius =
+                    sc(i32::from(s.styles.active(s.is_dark).tooltip_corner_radius));
+                (1.0, (outer_radius - 1).max(0) as f32)
+            })
+            .unwrap_or((0.0, 0.0))
     };
     if let (Some(hwnd), Some(context)) = (tooltip_blur_hwnd(), tooltip_blur_context()) {
         let unchanged = *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) == Some(params);
@@ -3481,7 +3500,8 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
                 context,
                 width,
                 height,
-                corner_radius_px,
+                clip_inset_px,
+                clip_radius_px,
             );
             *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) = Some(params);
             return Some(hwnd);
@@ -3506,7 +3526,8 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
                 context,
                 width,
                 height,
-                corner_radius_px,
+                clip_inset_px,
+                clip_radius_px,
             );
         let owner = { let state = lock_state(); state.as_ref().and_then(|s| s.taskbar_hwnd) };
         native_interop::set_popup_owner(hwnd, owner);
@@ -5099,6 +5120,7 @@ unsafe extern "system" fn wnd_proc(
                     } else {
                         AppearancePreset::Default
                     };
+                    s.styles.clamp_corner_radii(s.appearance_preset);
                     refresh_usage_texts(s);
                 }
             }
@@ -5194,16 +5216,13 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == style_window::WM_SETTINGS_LANGUAGE_CHANGE => {
-            let index = wparam.0;
-            let language_override = if index == 0 {
-                None
-            } else {
-                LanguageId::ALL.get(index - 1).copied()
+            let Some(language) = LanguageId::SELECTABLE.get(wparam.0).copied() else {
+                return LRESULT(0);
             };
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
-                    apply_language_to_state(s, language_override);
+                    apply_language_to_state(s, Some(language));
                 }
             }
             save_state_settings();
@@ -5826,7 +5845,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     let language_override = if settings.general.language == "system" {
         None
     } else {
-        LanguageId::ALL
+        LanguageId::SELECTABLE
             .iter()
             .copied()
             .find(|language| language.code() == settings.general.language)
@@ -5871,6 +5890,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         s.appearance_preset = appearance_preset;
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
+        s.styles.clamp_corner_radii(s.appearance_preset);
         apply_language_to_state(s, language_override);
         refresh_usage_texts(s);
 
