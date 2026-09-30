@@ -156,26 +156,27 @@ impl ThemeStyle {
     }
 
     pub fn light_default() -> Self {
+        // Cloud Porcelain: neutral cool-white surfaces with crisp slate text.
         Self {
-            panel_background: "#EEF1F4FF".into(),
-            panel_border: "#D4D9DFFF".into(),
+            panel_background: "#F6F8FAFF".into(),
+            panel_border: "#C7D0D9FF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
             panel_corner_radius: 2,
-            tooltip_background: Some("#EEF1F4FF".into()),
-            tooltip_border: Some("#D4D9DFFF".into()),
+            tooltip_background: Some("#F6F8FAFF".into()),
+            tooltip_border: Some("#C7D0D9FF".into()),
             tooltip_frosted_strength: Some(0),
             tooltip_corner_radius: 2,
-            quota_type: "#404040FF".into(),
-            remaining: "#202020FF".into(),
-            reset_time: "#666666FF".into(),
-            error: "#D95C5CFF".into(),
-            progress_high: "#55A8F2FF".into(),
-            progress_medium: "#E6B84AFF".into(),
-            progress_low: "#D95C5CFF".into(),
-            progress_consumed: "#AAAAAAFF".into(),
+            quota_type: "#46515DFF".into(),
+            remaining: "#17212BFF".into(),
+            reset_time: "#596777FF".into(),
+            error: "#B33F49FF".into(),
+            progress_high: "#4A8FD8FF".into(),
+            progress_medium: "#A87521FF".into(),
+            progress_low: "#C34F59FF".into(),
+            progress_consumed: "#D6DDE4FF".into(),
             progress_corner_radius: 1,
-            drag_handle: "#8A929AFF".into(),
+            drag_handle: "#7D8997FF".into(),
         }
     }
 
@@ -205,25 +206,26 @@ impl ThemeStyle {
                 drag_handle: "#648397FF".into(),
             },
             (false, ThemePreset::Ocean) => Self {
-                panel_background: "#F3F7FAFF".into(),
-                panel_border: "#CFDCE4FF".into(),
+                // Clear Bay: visibly blue-tinted surfaces with marine cyan accents.
+                panel_background: "#DCEFF5FF".into(),
+                panel_border: "#AFCFD8FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
                 panel_corner_radius: 2,
-                tooltip_background: Some("#F3F7FAFF".into()),
-                tooltip_border: Some("#CFDCE4FF".into()),
+                tooltip_background: Some("#DCEFF5FF".into()),
+                tooltip_border: Some("#AFCFD8FF".into()),
                 tooltip_frosted_strength: Some(0),
                 tooltip_corner_radius: 2,
-                quota_type: "#49616FFF".into(),
-                remaining: "#1F3440FF".into(),
-                reset_time: "#5E7480FF".into(),
-                error: "#B53F3FFF".into(),
-                progress_high: "#2F8FB8FF".into(),
-                progress_medium: "#B07A2AFF".into(),
-                progress_low: "#C55353FF".into(),
-                progress_consumed: "#CAD7DEFF".into(),
+                quota_type: "#335965FF".into(),
+                remaining: "#12343DFF".into(),
+                reset_time: "#426976FF".into(),
+                error: "#AD4146FF".into(),
+                progress_high: "#1597B7FF".into(),
+                progress_medium: "#A6751FFF".into(),
+                progress_low: "#C14A54FF".into(),
+                progress_consumed: "#BDD8DEFF".into(),
                 progress_corner_radius: 1,
-                drag_handle: "#78909CFF".into(),
+                drag_handle: "#5F8995FF".into(),
             },
             (true, ThemePreset::Forest) => Self {
                 panel_background: "#14211DFF".into(),
@@ -247,25 +249,26 @@ impl ThemeStyle {
                 drag_handle: "#6A887BFF".into(),
             },
             (false, ThemePreset::Forest) => Self {
-                panel_background: "#F8F4ECFF".into(),
-                panel_border: "#DED4C4FF".into(),
+                // Wheat Glow: warm ivory surfaces with restrained sage and amber accents.
+                panel_background: "#FFF1DCFF".into(),
+                panel_border: "#DDBF8FFF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
                 panel_corner_radius: 2,
-                tooltip_background: Some("#F8F4ECFF".into()),
-                tooltip_border: Some("#DED4C4FF".into()),
+                tooltip_background: Some("#FFF1DCFF".into()),
+                tooltip_border: Some("#DDBF8FFF".into()),
                 tooltip_frosted_strength: Some(0),
                 tooltip_corner_radius: 2,
-                quota_type: "#665A48FF".into(),
-                remaining: "#2E2922FF".into(),
-                reset_time: "#756A59FF".into(),
-                error: "#B4463EFF".into(),
-                progress_high: "#3C8F8AFF".into(),
-                progress_medium: "#B27924FF".into(),
-                progress_low: "#C65349FF".into(),
-                progress_consumed: "#D8CCBAFF".into(),
+                quota_type: "#685339FF".into(),
+                remaining: "#332514FF".into(),
+                reset_time: "#795F3DFF".into(),
+                error: "#B24039FF".into(),
+                progress_high: "#4E8A6EFF".into(),
+                progress_medium: "#B97917FF".into(),
+                progress_low: "#C64C43FF".into(),
+                progress_consumed: "#DEC9A7FF".into(),
                 progress_corner_radius: 1,
-                drag_handle: "#958775FF".into(),
+                drag_handle: "#9B7B55FF".into(),
             },
         }
     }
@@ -570,7 +573,7 @@ mod tests {
 
     #[test]
     fn redesigned_light_presets_keep_error_text_readable() {
-        for preset in [ThemePreset::Ocean, ThemePreset::Forest] {
+        for preset in ThemePreset::ALL {
             let style = ThemeStyle::preset(false, preset);
             let background = style.color(StyleColorTarget::PanelBackground);
             let ratio = contrast_ratio(background, style.color(StyleColorTarget::Error));
@@ -578,6 +581,26 @@ mod tests {
                 ratio >= 4.5,
                 "{preset:?} error contrast {ratio:.2} is below 4.5"
             );
+        }
+    }
+
+    #[test]
+    fn redesigned_light_presets_are_visually_distinct() {
+        let backgrounds = ThemePreset::ALL.map(|preset| {
+            ThemeStyle::preset(false, preset).color(StyleColorTarget::PanelBackground)
+        });
+        for left in 0..backgrounds.len() {
+            for right in (left + 1)..backgrounds.len() {
+                let a = backgrounds[left];
+                let b = backgrounds[right];
+                let channel_distance = u16::from(a.r.abs_diff(b.r))
+                    + u16::from(a.g.abs_diff(b.g))
+                    + u16::from(a.b.abs_diff(b.b));
+                assert!(
+                    channel_distance >= 32,
+                    "light preset backgrounds {left} and {right} are too similar: {channel_distance}"
+                );
+            }
         }
     }
 
