@@ -122,11 +122,11 @@ impl ThemeStyle {
             panel_border: "#343B43FF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
-            panel_corner_radius: 0,
+            panel_corner_radius: 2,
             tooltip_background: Some("#242A31FF".into()),
             tooltip_border: Some("#343B43FF".into()),
             tooltip_frosted_strength: Some(0),
-            tooltip_corner_radius: 0,
+            tooltip_corner_radius: 2,
             quota_type: "#A0A0A0FF".into(),
             remaining: "#FFFFFFFF".into(),
             reset_time: "#92979DFF".into(),
@@ -135,7 +135,7 @@ impl ThemeStyle {
             progress_medium: "#E6B84AFF".into(),
             progress_low: "#D95C5CFF".into(),
             progress_consumed: "#363A3FFF".into(),
-            progress_corner_radius: 0,
+            progress_corner_radius: 1,
             drag_handle: "#69727CFF".into(),
         }
     }
@@ -146,11 +146,11 @@ impl ThemeStyle {
             panel_border: "#D4D9DFFF".into(),
             panel_blur_radius: 0,
             panel_frosted_strength: 0,
-            panel_corner_radius: 0,
+            panel_corner_radius: 2,
             tooltip_background: Some("#EEF1F4FF".into()),
             tooltip_border: Some("#D4D9DFFF".into()),
             tooltip_frosted_strength: Some(0),
-            tooltip_corner_radius: 0,
+            tooltip_corner_radius: 2,
             quota_type: "#404040FF".into(),
             remaining: "#202020FF".into(),
             reset_time: "#666666FF".into(),
@@ -159,7 +159,7 @@ impl ThemeStyle {
             progress_medium: "#E6B84AFF".into(),
             progress_low: "#D95C5CFF".into(),
             progress_consumed: "#AAAAAAFF".into(),
-            progress_corner_radius: 0,
+            progress_corner_radius: 1,
             drag_handle: "#8A929AFF".into(),
         }
     }
@@ -173,11 +173,11 @@ impl ThemeStyle {
                 panel_border: "#294252FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_corner_radius: 0,
+                panel_corner_radius: 2,
                 tooltip_background: Some("#0F1B24FF".into()),
                 tooltip_border: Some("#294252FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_corner_radius: 0,
+                tooltip_corner_radius: 2,
                 quota_type: "#8CA7B8FF".into(),
                 remaining: "#EAF7FFFF".into(),
                 reset_time: "#7192A8FF".into(),
@@ -186,7 +186,7 @@ impl ThemeStyle {
                 progress_medium: "#E3B65BFF".into(),
                 progress_low: "#F06A6AFF".into(),
                 progress_consumed: "#263B49FF".into(),
-                progress_corner_radius: 0,
+                progress_corner_radius: 1,
                 drag_handle: "#648397FF".into(),
             },
             (false, ThemePreset::Ocean) => Self {
@@ -194,11 +194,11 @@ impl ThemeStyle {
                 panel_border: "#CFDCE4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_corner_radius: 0,
+                panel_corner_radius: 2,
                 tooltip_background: Some("#F3F7FAFF".into()),
                 tooltip_border: Some("#CFDCE4FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_corner_radius: 0,
+                tooltip_corner_radius: 2,
                 quota_type: "#49616FFF".into(),
                 remaining: "#1F3440FF".into(),
                 reset_time: "#5E7480FF".into(),
@@ -207,7 +207,7 @@ impl ThemeStyle {
                 progress_medium: "#B07A2AFF".into(),
                 progress_low: "#C55353FF".into(),
                 progress_consumed: "#CAD7DEFF".into(),
-                progress_corner_radius: 0,
+                progress_corner_radius: 1,
                 drag_handle: "#78909CFF".into(),
             },
             (true, ThemePreset::Forest) => Self {
@@ -215,11 +215,11 @@ impl ThemeStyle {
                 panel_border: "#2B4038FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_corner_radius: 0,
+                panel_corner_radius: 2,
                 tooltip_background: Some("#14211DFF".into()),
                 tooltip_border: Some("#2B4038FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_corner_radius: 0,
+                tooltip_corner_radius: 2,
                 quota_type: "#9AB3A8FF".into(),
                 remaining: "#F0FAF5FF".into(),
                 reset_time: "#7F9C8FFF".into(),
@@ -228,7 +228,7 @@ impl ThemeStyle {
                 progress_medium: "#D9B45BFF".into(),
                 progress_low: "#E96B5DFF".into(),
                 progress_consumed: "#2B3E37FF".into(),
-                progress_corner_radius: 0,
+                progress_corner_radius: 1,
                 drag_handle: "#6A887BFF".into(),
             },
             (false, ThemePreset::Forest) => Self {
@@ -236,11 +236,11 @@ impl ThemeStyle {
                 panel_border: "#DED4C4FF".into(),
                 panel_blur_radius: 0,
                 panel_frosted_strength: 0,
-                panel_corner_radius: 0,
+                panel_corner_radius: 2,
                 tooltip_background: Some("#F8F4ECFF".into()),
                 tooltip_border: Some("#DED4C4FF".into()),
                 tooltip_frosted_strength: Some(0),
-                tooltip_corner_radius: 0,
+                tooltip_corner_radius: 2,
                 quota_type: "#665A48FF".into(),
                 remaining: "#2E2922FF".into(),
                 reset_time: "#756A59FF".into(),
@@ -249,7 +249,7 @@ impl ThemeStyle {
                 progress_medium: "#B27924FF".into(),
                 progress_low: "#C65349FF".into(),
                 progress_consumed: "#D8CCBAFF".into(),
-                progress_corner_radius: 0,
+                progress_corner_radius: 1,
                 drag_handle: "#958775FF".into(),
             },
         }
@@ -450,6 +450,18 @@ mod tests {
         let styles = StyleSettings::default();
         assert_eq!(styles.dark.panel_background, "#242A31FF");
         assert_eq!(styles.light.panel_background, "#EEF1F4FF");
+    }
+
+    #[test]
+    fn built_in_presets_use_requested_corner_radii() {
+        for is_dark in [true, false] {
+            for preset in ThemePreset::ALL {
+                let style = ThemeStyle::preset(is_dark, preset);
+                assert_eq!(style.panel_corner_radius, 2, "{preset:?} panel radius");
+                assert_eq!(style.tooltip_corner_radius, 2, "{preset:?} tooltip radius");
+                assert_eq!(style.progress_corner_radius, 1, "{preset:?} progress radius");
+            }
+        }
     }
 
     #[test]
