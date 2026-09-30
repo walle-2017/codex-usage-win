@@ -3754,17 +3754,9 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
     let s = state.as_ref()?;
     let codex = s.data.as_ref()?.codex.as_ref()?;
     let strings = s.language.strings();
-    let (label, section, window) = match target {
-        MinimalHoverTarget::Session => (
-            strings.session_window,
-            &codex.session,
-            poller::UsageWindowKind::Session,
-        ),
-        MinimalHoverTarget::Weekly => (
-            strings.weekly_window,
-            &codex.weekly,
-            poller::UsageWindowKind::Weekly,
-        ),
+    let (label, section) = match target {
+        MinimalHoverTarget::Session => (strings.session_window, &codex.session),
+        MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
     if s.appearance_preset == AppearancePreset::Minimal {
