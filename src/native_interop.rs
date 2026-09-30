@@ -28,7 +28,8 @@ unsafe extern "C" {
         context: *mut std::ffi::c_void,
         width: f32,
         height: f32,
-        corner_radius: f32,
+        clip_inset: f32,
+        clip_radius: f32,
     ) -> i32;
     fn codex_composition_blur_set_amount(
         context: *mut std::ffi::c_void,
@@ -352,7 +353,8 @@ pub fn set_composition_blur_bounds(
     context: usize,
     width: i32,
     height: i32,
-    corner_radius: f32,
+    clip_inset: f32,
+    clip_radius: f32,
 ) -> bool {
     if context == 0 || width <= 0 || height <= 0 {
         return false;
@@ -362,7 +364,8 @@ pub fn set_composition_blur_bounds(
             context as *mut std::ffi::c_void,
             width as f32,
             height as f32,
-            corner_radius.max(0.0),
+            clip_inset.max(0.0),
+            clip_radius.max(0.0),
         ) != 0
     }
 }
