@@ -2543,6 +2543,44 @@ fn json_error_status(language: LanguageId, detail: &str) -> String {
     }
 }
 
+fn json_error_key(error: &str) -> Option<String> {
+    // Business validation errors use the exact dotted JSON path before the
+    // first colon, e.g. "general.refresh_interval: allowed values ...".
+    // Keep that path verbatim in localized UI so users can find the setting.
+    let without_location = if let Some((_, detail)) = error.split_once(": ") {
+        if error.starts_with("line ") {
+            detail
+        } else {
+            error
+        }
+    } else {
+        error
+    };
+
+    if let Some((candidate, _)) = without_location.split_once(':') {
+        let candidate = candidate.trim();
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+        {
+            return Some(candidate.to_string());
+        }
+    }
+
+    // serde field errors quote the actual JSON key with backticks.
+    for marker in ["unknown field `", "missing field `", "duplicate field `"] {
+        if let Some(rest) = error.split_once(marker).map(|(_, rest)| rest) {
+            if let Some((key, _)) = rest.split_once('`') {
+                if !key.is_empty() {
+                    return Some(key.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn friendly_json_error(error: &str, language: LanguageId) -> String {
     let location = json_error_location(error);
     let full = error;
@@ -2584,11 +2622,22 @@ fn friendly_json_error(error: &str, language: LanguageId) -> String {
         JsonErrorPhrase::GenericSyntax
     };
 
-    let detail = json_error_phrase(language, phrase);
-    if let Some((line, column)) = location {
-        json_error_location_text(language, line, column, detail)
+    let localized = json_error_phrase(language, phrase);
+    let detail = if let Some(key) = json_error_key(error) {
+        match language {
+            LanguageId::Japanese
+            | LanguageId::SimplifiedChinese
+            | LanguageId::TraditionalChinese => format!("{key}：{localized}"),
+            _ => format!("{key}: {localized}"),
+        }
     } else {
-        detail.to_string()
+        localized.to_string()
+    };
+
+    if let Some((line, column)) = location {
+        json_error_location_text(language, line, column, &detail)
+    } else {
+        detail
     }
 }
 
