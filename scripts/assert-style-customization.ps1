@@ -358,11 +358,21 @@ if ($controlPrimitives -notmatch 'codex_draw_settings_icon' -or
     $controlPrimitives -notmatch 'D2D1_LINE_JOIN_ROUND' -or
     $controlPrimitives -notmatch 'Painter palette|painter palette' -or
     $controlPrimitives -notmatch 'crescent moon' -or
-    $controlPrimitives -notmatch 'isometric cube' -or
+    $controlPrimitives -notmatch 'Default layout - full two-row usage panel' -or
+    $controlPrimitives -notmatch 'Minimal layout - one compact usage row' -or
+    $controlPrimitives -notmatch 'graphite cube' -or
     $controlPrimitives -notmatch 'smooth waves' -or
     $controlPrimitives -notmatch 'pine tree' -or
+    $controlPrimitives -notmatch 'Cloud Porcelain - cloud' -or
+    $controlPrimitives -notmatch 'Clear Bay - sun over calm bay' -or
+    $controlPrimitives -notmatch 'Wheat Glow - wheat ear' -or
+    $controlPrimitives -notmatch 'JSON Reload - circular arrow' -or
+    $controlPrimitives -notmatch 'JSON Format - braces with formatted lines' -or
+    $controlPrimitives -notmatch 'JSON Import - arrow into tray' -or
+    $controlPrimitives -notmatch 'JSON Export - arrow out of tray' -or
+    $controlPrimitives -notmatch 'JSON Apply - check in circle' -or
     $controlPrimitives -notmatch 'paintbrush') {
-    throw 'Settings icons must use rounded Direct2D vector paths matching the approved mockup.'
+    throw 'Settings icons must use rounded Direct2D vector paths with distinct layout, light-preset, and JSON-action glyphs.'
 }
 
 if ($native -notmatch 'set_composition_blur_bounds' -or
@@ -709,11 +719,21 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::PresetOcean' -or
     $styleWindow -notmatch 'SettingsIcon::PresetForest' -or
     $styleWindow -notmatch 'SettingsIcon::PresetCustom' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetCloud' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetBay' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetWheat' -or
+    $styleWindow -notmatch 'SettingsIcon::JsonReload' -or
+    $styleWindow -notmatch 'SettingsIcon::JsonFormat' -or
+    $styleWindow -notmatch 'SettingsIcon::JsonImport' -or
+    $styleWindow -notmatch 'SettingsIcon::JsonExport' -or
+    $styleWindow -notmatch 'SettingsIcon::JsonApply' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
     $styleWindow -notmatch 'draw_antialiased_settings_icon\(' -or
     $styleWindow -notmatch 'theme_icon\(mode\)' -or
     $styleWindow -notmatch 'layout_icon\(preset\)' -or
-    $styleWindow -notmatch 'preset_icon\(preset\)') {
+    $styleWindow -notmatch 'preset_icon\(preset,\s*snapshot\.is_dark\)' -or
+    $styleWindow -notmatch 'json_action_icon\(action\)' -or
+    $styleWindow -notmatch 'json_action_icon\(apply\)') {
     throw 'Settings icon vocabulary must use the precise anti-aliased path renderer for navigation, Theme/Layout buttons, preset cards, and Custom.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
