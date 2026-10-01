@@ -350,6 +350,21 @@ if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
     $composition -notmatch 'tint_visual\.Size\(size\)') {
     throw 'Composition backdrop must use explicit size and rounded hard clipping to match the panel and prevent stale-DPI blur tails.'
 }
+if ($native -notmatch 'codex_draw_settings_icon') {
+    throw 'Rust native interop must expose the Direct2D settings-icon renderer.'
+}
+if ($controlPrimitives -notmatch 'codex_draw_settings_icon' -or
+    $controlPrimitives -notmatch 'D2D1_CAP_STYLE_ROUND' -or
+    $controlPrimitives -notmatch 'D2D1_LINE_JOIN_ROUND' -or
+    $controlPrimitives -notmatch 'Painter palette|painter palette' -or
+    $controlPrimitives -notmatch 'crescent moon' -or
+    $controlPrimitives -notmatch 'isometric cube' -or
+    $controlPrimitives -notmatch 'smooth waves' -or
+    $controlPrimitives -notmatch 'pine tree' -or
+    $controlPrimitives -notmatch 'paintbrush') {
+    throw 'Settings icons must use rounded Direct2D vector paths matching the approved mockup.'
+}
+
 if ($native -notmatch 'set_composition_blur_bounds' -or
     $native -notmatch 'clip_inset' -or
     $native -notmatch 'clip_radius' -or
@@ -676,6 +691,7 @@ if ($paintNavigationBlock -notmatch 'Section::Tooltip' -or
     throw 'Settings sidebar must paint the Tooltip entry and its matching navigation icon.'
 }
 if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
+    $styleWindow -notmatch '#\[repr\(i32\)\]' -or
     $styleWindow -notmatch 'SettingsIcon::General' -or
     $styleWindow -notmatch 'SettingsIcon::Preset' -or
     $styleWindow -notmatch 'SettingsIcon::Panel' -or
@@ -694,10 +710,11 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::PresetForest' -or
     $styleWindow -notmatch 'SettingsIcon::PresetCustom' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
+    $styleWindow -notmatch 'draw_antialiased_settings_icon\(' -or
     $styleWindow -notmatch 'theme_icon\(mode\)' -or
     $styleWindow -notmatch 'layout_icon\(preset\)' -or
     $styleWindow -notmatch 'preset_icon\(preset\)') {
-    throw 'Settings icon vocabulary must cover navigation, Theme/Layout buttons, preset cards, and Custom.'
+    throw 'Settings icon vocabulary must use the precise anti-aliased path renderer for navigation, Theme/Layout buttons, preset cards, and Custom.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
