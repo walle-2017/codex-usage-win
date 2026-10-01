@@ -7569,6 +7569,7 @@ unsafe fn draw_settings_icon(
     let _ = DeleteObject(pen);
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn draw_segment_with_icon(
     hdc: HDC,
     hwnd: HWND,
