@@ -205,6 +205,14 @@ enum SettingsIcon {
     PresetOcean,
     PresetForest,
     PresetCustom,
+    PresetCloud,
+    PresetBay,
+    PresetWheat,
+    JsonReload,
+    JsonFormat,
+    JsonImport,
+    JsonExport,
+    JsonApply,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1117,11 +1125,24 @@ fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
     }
 }
 
-fn preset_icon(preset: ThemePreset) -> SettingsIcon {
-    match preset {
-        ThemePreset::Classic => SettingsIcon::PresetClassic,
-        ThemePreset::Ocean => SettingsIcon::PresetOcean,
-        ThemePreset::Forest => SettingsIcon::PresetForest,
+fn preset_icon(preset: ThemePreset, is_dark: bool) -> SettingsIcon {
+    match (is_dark, preset) {
+        (true, ThemePreset::Classic) => SettingsIcon::PresetClassic,
+        (true, ThemePreset::Ocean) => SettingsIcon::PresetOcean,
+        (true, ThemePreset::Forest) => SettingsIcon::PresetForest,
+        (false, ThemePreset::Classic) => SettingsIcon::PresetCloud,
+        (false, ThemePreset::Ocean) => SettingsIcon::PresetBay,
+        (false, ThemePreset::Forest) => SettingsIcon::PresetWheat,
+    }
+}
+
+fn json_action_icon(action: JsonAction) -> SettingsIcon {
+    match action {
+        JsonAction::Reload => SettingsIcon::JsonReload,
+        JsonAction::Format => SettingsIcon::JsonFormat,
+        JsonAction::Import => SettingsIcon::JsonImport,
+        JsonAction::Export => SettingsIcon::JsonExport,
+        JsonAction::Apply => SettingsIcon::JsonApply,
     }
 }
 
@@ -6098,25 +6119,28 @@ unsafe fn paint_json_page(
         (JsonAction::Export, "导出", "Export"),
     ] {
         let target = HitTarget::Json(action);
-        draw_segment(
+        let action_background = button_background(
+            target,
+            false,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card,
+                hover: card_hover,
+                pressed: card_pressed,
+                selected: card,
+                selected_hover: card_hover,
+                selected_pressed: card_pressed,
+            },
+        );
+        draw_segment_with_icon(
             hdc,
+            hwnd,
             json_action_rect(hwnd, action),
             false,
-            button_background(
-                target,
-                false,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card,
-                    hover: card_hover,
-                    pressed: card_pressed,
-                    selected: card,
-                    selected_hover: card_hover,
-                    selected_pressed: card_pressed,
-                },
-            ),
+            action_background,
             primary,
+            json_action_icon(action),
             if zh { zh_label } else { en_label },
         );
     }
@@ -6282,8 +6306,9 @@ unsafe fn paint_json_page(
     } else {
         card_pressed
     };
-    draw_segment(
+    draw_segment_with_icon(
         hdc,
+        hwnd,
         json_action_rect(hwnd, apply),
         dirty,
         apply_background,
@@ -6292,6 +6317,7 @@ unsafe fn paint_json_page(
         } else {
             secondary
         },
+        json_action_icon(apply),
         if zh { "应用" } else { "Apply" },
     );
 }
@@ -6658,7 +6684,7 @@ unsafe fn paint_preset_gallery(
             hwnd,
             r,
             &style,
-            preset_icon(preset),
+            preset_icon(preset, snapshot.is_dark),
             preset_label(preset, snapshot.is_dark, snapshot.language),
             selected,
             surface,
