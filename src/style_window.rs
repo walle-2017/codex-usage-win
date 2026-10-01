@@ -185,6 +185,7 @@ enum WheelNumericTarget {
     Corner,
 }
 
+#[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsIcon {
     General,
@@ -5680,7 +5681,7 @@ unsafe fn paint_navigation(
             );
         }
         let icon_color = if selected { accent } else { secondary };
-        let icon_size = scale(hwnd, 18);
+        let icon_size = scale(hwnd, 20);
         let icon_rect = RECT {
             left: r.left + scale(hwnd, 14),
             top: r.top + ((r.bottom - r.top) - icon_size) / 2,
@@ -6707,7 +6708,7 @@ unsafe fn paint_style_preview_card(
         scale(hwnd, SETTINGS_CARD_RADIUS),
         if selected { 2 } else { 1 },
     );
-    let title_icon_size = scale(hwnd, 18);
+    let title_icon_size = scale(hwnd, 20);
     let title_icon_rect = RECT {
         left: r.left + scale(hwnd, 12),
         top: r.top + scale(hwnd, 10),
@@ -6721,7 +6722,7 @@ unsafe fn paint_style_preview_card(
         hdc,
         label,
         RECT {
-            left: r.left + scale(hwnd, 40),
+            left: r.left + scale(hwnd, 42),
             top: r.top + scale(hwnd, 8),
             right: r.right - scale(hwnd, 12),
             bottom: r.top + scale(hwnd, 38),
@@ -7242,6 +7243,14 @@ unsafe fn draw_settings_icon(
     color: Color,
     background: Color,
 ) {
+    // Primary path: Direct2D geometry matched to the approved icon mockup.
+    // This gives every glyph the same rounded caps/joins and anti-aliasing.
+    if native_interop::draw_antialiased_settings_icon(hdc, rect, icon as i32, color) {
+        return;
+    }
+
+    // Conservative GDI fallback for systems where the Direct2D DC target
+    // cannot be created. Normal Windows 10/11 rendering takes the path above.
     let width = (rect.right - rect.left).max(1);
     let height = (rect.bottom - rect.top).max(1);
     let cx = rect.left + width / 2;
@@ -7591,8 +7600,8 @@ unsafe fn draw_segment_with_icon(
     };
     draw_rounded_outline_rect(hdc, rect, border, radius, 1);
 
-    let icon_size = scale(hwnd, 16).min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
-    let gap = scale(hwnd, 6);
+    let icon_size = scale(hwnd, 18).min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
+    let gap = scale(hwnd, 7);
     let text_width = text_width_px(hwnd, text).max(scale(hwnd, 12));
     let group_width = icon_size + gap + text_width;
     let group_left = rect.left + ((rect.right - rect.left - group_width) / 2).max(scale(hwnd, 6));
