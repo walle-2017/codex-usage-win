@@ -73,6 +73,18 @@ unsafe extern "C" {
         stroke_a: u8,
         stroke_width: f32,
     ) -> i32;
+    fn codex_draw_settings_icon(
+        hdc_raw: isize,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        icon_kind: i32,
+        color_r: u8,
+        color_g: u8,
+        color_b: u8,
+        color_a: u8,
+    ) -> i32;
 }
 
 // Win event constants
@@ -432,6 +444,31 @@ pub fn directwrite_text_mask(
         )
     };
     (ok != 0).then_some(coverage)
+}
+
+pub fn draw_antialiased_settings_icon(
+    hdc: HDC,
+    rect: RECT,
+    icon_kind: i32,
+    color: Color,
+) -> bool {
+    if hdc.0.is_null() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return false;
+    }
+    unsafe {
+        codex_draw_settings_icon(
+            hdc.0 as isize,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            icon_kind,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ) != 0
+    }
 }
 
 pub fn draw_antialiased_rounded_rect(
