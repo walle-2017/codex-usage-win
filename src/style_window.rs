@@ -186,6 +186,27 @@ enum WheelNumericTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsIcon {
+    General,
+    Preset,
+    Panel,
+    Tooltip,
+    Text,
+    Progress,
+    Interaction,
+    Json,
+    ThemeSystem,
+    ThemeDark,
+    ThemeLight,
+    LayoutDefault,
+    LayoutMinimal,
+    PresetClassic,
+    PresetOcean,
+    PresetForest,
+    PresetCustom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JsonAction {
     Reload,
     Format,
@@ -1063,16 +1084,43 @@ fn section_rect(hwnd: HWND, section: Section) -> RECT {
     rect(hwnd, 20, top, 166, bottom)
 }
 
-fn navigation_text_inset(section: Section) -> i32 {
+fn navigation_text_inset(_section: Section) -> i32 {
+    44
+}
+
+fn navigation_icon(section: Section) -> SettingsIcon {
     match section {
-        Section::General => 14,
-        Section::Preset
-        | Section::Panel
-        | Section::Tooltip
-        | Section::Text
-        | Section::Progress
-        | Section::Interaction
-        | Section::Json => 24,
+        Section::General => SettingsIcon::General,
+        Section::Preset => SettingsIcon::Preset,
+        Section::Panel => SettingsIcon::Panel,
+        Section::Tooltip => SettingsIcon::Tooltip,
+        Section::Text => SettingsIcon::Text,
+        Section::Progress => SettingsIcon::Progress,
+        Section::Interaction => SettingsIcon::Interaction,
+        Section::Json => SettingsIcon::Json,
+    }
+}
+
+fn theme_icon(mode: ThemeMode) -> SettingsIcon {
+    match mode {
+        ThemeMode::System => SettingsIcon::ThemeSystem,
+        ThemeMode::Dark => SettingsIcon::ThemeDark,
+        ThemeMode::Light => SettingsIcon::ThemeLight,
+    }
+}
+
+fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
+    match preset {
+        AppearancePreset::Default => SettingsIcon::LayoutDefault,
+        AppearancePreset::Minimal => SettingsIcon::LayoutMinimal,
+    }
+}
+
+fn preset_icon(preset: ThemePreset) -> SettingsIcon {
+    match preset {
+        ThemePreset::Classic => SettingsIcon::PresetClassic,
+        ThemePreset::Ocean => SettingsIcon::PresetOcean,
+        ThemePreset::Forest => SettingsIcon::PresetForest,
     }
 }
 
@@ -5631,6 +5679,23 @@ unsafe fn paint_navigation(
                 scale(hwnd, 2),
             );
         }
+        let icon_color = if selected { accent } else { secondary };
+        let icon_size = scale(hwnd, 18);
+        let icon_rect = RECT {
+            left: r.left + scale(hwnd, 14),
+            top: r.top + ((r.bottom - r.top) - icon_size) / 2,
+            right: r.left + scale(hwnd, 14) + icon_size,
+            bottom: r.top + ((r.bottom - r.top) - icon_size) / 2 + icon_size,
+        };
+        draw_settings_icon(
+            hdc,
+            hwnd,
+            navigation_icon(item),
+            icon_rect,
+            icon_color,
+            section_bg,
+        );
+
         let _ = SetTextColor(
             hdc,
             COLORREF(if selected { primary } else { secondary }.to_colorref()),
@@ -6287,25 +6352,28 @@ unsafe fn paint_appearance_page(
     for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
         let selected = snapshot.theme_mode == mode;
         let target = HitTarget::Theme(mode);
-        draw_segment(
+        let control_background = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card_hover,
+                hover: card_pressed,
+                pressed: card_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        draw_segment_with_icon(
             hdc,
+            hwnd,
             theme_rect(hwnd, mode),
             selected,
-            button_background(
-                target,
-                selected,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
+            control_background,
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            theme_icon(mode),
             match (zh, mode) {
                 (true, ThemeMode::System) => "跟随系统",
                 (true, ThemeMode::Dark) => "深色",
@@ -6320,25 +6388,28 @@ unsafe fn paint_appearance_page(
     for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
         let selected = snapshot.appearance_preset == preset;
         let target = HitTarget::Layout(preset);
-        draw_segment(
+        let control_background = button_background(
+            target,
+            selected,
+            hovered,
+            pressed,
+            ButtonPalette {
+                normal: card_hover,
+                hover: card_pressed,
+                pressed: card_pressed,
+                selected: accent,
+                selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        draw_segment_with_icon(
             hdc,
+            hwnd,
             layout_rect(hwnd, preset),
             selected,
-            button_background(
-                target,
-                selected,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
+            control_background,
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            layout_icon(preset),
             match (zh, preset) {
                 (true, AppearancePreset::Default) => "默认",
                 (true, AppearancePreset::Minimal) => "极简",
@@ -6586,6 +6657,7 @@ unsafe fn paint_preset_gallery(
             hwnd,
             r,
             &style,
+            preset_icon(preset),
             preset_label(preset, snapshot.is_dark, snapshot.language),
             selected,
             surface,
@@ -6602,6 +6674,7 @@ unsafe fn paint_preset_gallery(
             hwnd,
             custom_preset_card_rect(hwnd),
             &snapshot.active_style,
+            SettingsIcon::PresetCustom,
             if zh { "自定义" } else { "Custom" },
             true,
             card,
@@ -6618,6 +6691,7 @@ unsafe fn paint_style_preview_card(
     hwnd: HWND,
     r: RECT,
     style: &ThemeStyle,
+    icon: SettingsIcon,
     label: &str,
     selected: bool,
     surface: Color,
@@ -6633,12 +6707,21 @@ unsafe fn paint_style_preview_card(
         scale(hwnd, SETTINGS_CARD_RADIUS),
         if selected { 2 } else { 1 },
     );
+    let title_icon_size = scale(hwnd, 18);
+    let title_icon_rect = RECT {
+        left: r.left + scale(hwnd, 12),
+        top: r.top + scale(hwnd, 10),
+        right: r.left + scale(hwnd, 12) + title_icon_size,
+        bottom: r.top + scale(hwnd, 10) + title_icon_size,
+    };
+    draw_settings_icon(hdc, hwnd, icon, title_icon_rect, primary, surface);
+
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
         label,
         RECT {
-            left: r.left + scale(hwnd, 12),
+            left: r.left + scale(hwnd, 40),
             top: r.top + scale(hwnd, 8),
             right: r.right - scale(hwnd, 12),
             bottom: r.top + scale(hwnd, 38),
@@ -7149,6 +7232,389 @@ fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
             if zh { "拖拽点" } else { "Drag handle" }
         }
     }
+}
+
+unsafe fn draw_settings_icon(
+    hdc: HDC,
+    hwnd: HWND,
+    icon: SettingsIcon,
+    rect: RECT,
+    color: Color,
+    background: Color,
+) {
+    let width = (rect.right - rect.left).max(1);
+    let height = (rect.bottom - rect.top).max(1);
+    let cx = rect.left + width / 2;
+    let cy = rect.top + height / 2;
+    let stroke = scale(hwnd, 2).max(1);
+
+    let pen = CreatePen(PS_SOLID, stroke, COLORREF(color.to_colorref()));
+    let old_pen = SelectObject(hdc, pen);
+    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    let line = |hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32| {
+        let _ = MoveToEx(hdc, x1, y1, None);
+        let _ = LineTo(hdc, x2, y2);
+    };
+
+    match icon {
+        SettingsIcon::General => {
+            for (index, offset) in [-5, 0, 5].into_iter().enumerate() {
+                let y = cy + scale(hwnd, offset);
+                line(hdc, rect.left + scale(hwnd, 1), y, rect.right - scale(hwnd, 1), y);
+                let dot_x = match index {
+                    0 => rect.left + width * 2 / 3,
+                    1 => rect.left + width / 3,
+                    _ => rect.left + width * 3 / 5,
+                };
+                fill_rounded_rect(
+                    hdc,
+                    RECT {
+                        left: dot_x - scale(hwnd, 2),
+                        top: y - scale(hwnd, 2),
+                        right: dot_x + scale(hwnd, 2),
+                        bottom: y + scale(hwnd, 2),
+                    },
+                    color,
+                    scale(hwnd, 2),
+                );
+            }
+        }
+        SettingsIcon::Preset => {
+            let _ = Ellipse(
+                hdc,
+                rect.left + scale(hwnd, 1),
+                rect.top + scale(hwnd, 1),
+                rect.right - scale(hwnd, 1),
+                rect.bottom - scale(hwnd, 1),
+            );
+            for (dx, dy) in [(-4, -3), (2, -5), (5, 1)] {
+                fill_rounded_rect(
+                    hdc,
+                    RECT {
+                        left: cx + scale(hwnd, dx) - scale(hwnd, 1),
+                        top: cy + scale(hwnd, dy) - scale(hwnd, 1),
+                        right: cx + scale(hwnd, dx) + scale(hwnd, 1),
+                        bottom: cy + scale(hwnd, dy) + scale(hwnd, 1),
+                    },
+                    color,
+                    scale(hwnd, 1),
+                );
+            }
+        }
+        SettingsIcon::Panel => {
+            draw_rounded_outline_rect(
+                hdc,
+                RECT {
+                    left: rect.left + scale(hwnd, 1),
+                    top: rect.top + scale(hwnd, 2),
+                    right: rect.right - scale(hwnd, 1),
+                    bottom: rect.bottom - scale(hwnd, 2),
+                },
+                color,
+                scale(hwnd, 3),
+                stroke,
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 2),
+                rect.top + scale(hwnd, 7),
+                rect.right - scale(hwnd, 2),
+                rect.top + scale(hwnd, 7),
+            );
+        }
+        SettingsIcon::Tooltip => {
+            draw_rounded_outline_rect(
+                hdc,
+                RECT {
+                    left: rect.left + scale(hwnd, 1),
+                    top: rect.top + scale(hwnd, 1),
+                    right: rect.right - scale(hwnd, 1),
+                    bottom: rect.bottom - scale(hwnd, 5),
+                },
+                color,
+                scale(hwnd, 3),
+                stroke,
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 5),
+                rect.bottom - scale(hwnd, 5),
+                rect.left + scale(hwnd, 5),
+                rect.bottom - scale(hwnd, 1),
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 5),
+                rect.bottom - scale(hwnd, 1),
+                rect.left + scale(hwnd, 10),
+                rect.bottom - scale(hwnd, 5),
+            );
+        }
+        SettingsIcon::Text => {
+            line(
+                hdc,
+                rect.left + scale(hwnd, 2),
+                rect.top + scale(hwnd, 2),
+                rect.right - scale(hwnd, 2),
+                rect.top + scale(hwnd, 2),
+            );
+            line(hdc, cx, rect.top + scale(hwnd, 2), cx, rect.bottom - scale(hwnd, 2));
+        }
+        SettingsIcon::Progress => {
+            draw_rounded_outline_rect(
+                hdc,
+                RECT {
+                    left: rect.left + scale(hwnd, 1),
+                    top: cy - scale(hwnd, 4),
+                    right: rect.right - scale(hwnd, 1),
+                    bottom: cy + scale(hwnd, 4),
+                },
+                color,
+                scale(hwnd, 4),
+                stroke,
+            );
+            fill_rounded_rect(
+                hdc,
+                RECT {
+                    left: rect.left + scale(hwnd, 4),
+                    top: cy - scale(hwnd, 1),
+                    right: cx + scale(hwnd, 2),
+                    bottom: cy + scale(hwnd, 1),
+                },
+                color,
+                scale(hwnd, 1),
+            );
+        }
+        SettingsIcon::Interaction => {
+            line(
+                hdc,
+                rect.left + scale(hwnd, 4),
+                rect.top + scale(hwnd, 2),
+                rect.left + scale(hwnd, 4),
+                rect.bottom - scale(hwnd, 3),
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 4),
+                rect.top + scale(hwnd, 2),
+                rect.right - scale(hwnd, 3),
+                cy + scale(hwnd, 3),
+            );
+            line(
+                hdc,
+                rect.right - scale(hwnd, 3),
+                cy + scale(hwnd, 3),
+                cx + scale(hwnd, 1),
+                cy + scale(hwnd, 4),
+            );
+            line(
+                hdc,
+                cx + scale(hwnd, 1),
+                cy + scale(hwnd, 4),
+                rect.left + scale(hwnd, 4),
+                rect.bottom - scale(hwnd, 3),
+            );
+            line(hdc, rect.left + scale(hwnd, 1), rect.top + scale(hwnd, 1), rect.left - scale(hwnd, 1), rect.top - scale(hwnd, 2));
+            line(hdc, rect.right - scale(hwnd, 3), rect.top + scale(hwnd, 1), rect.right - scale(hwnd, 1), rect.top - scale(hwnd, 1));
+        }
+        SettingsIcon::Json => {
+            let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
+            draw_text(hdc, "{}", rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        SettingsIcon::ThemeSystem => {
+            draw_rounded_outline_rect(
+                hdc,
+                RECT {
+                    left: rect.left + scale(hwnd, 1),
+                    top: rect.top + scale(hwnd, 2),
+                    right: rect.right - scale(hwnd, 1),
+                    bottom: rect.bottom - scale(hwnd, 5),
+                },
+                color,
+                scale(hwnd, 2),
+                stroke,
+            );
+            line(hdc, cx, rect.bottom - scale(hwnd, 5), cx, rect.bottom - scale(hwnd, 1));
+            line(
+                hdc,
+                cx - scale(hwnd, 4),
+                rect.bottom - scale(hwnd, 1),
+                cx + scale(hwnd, 4),
+                rect.bottom - scale(hwnd, 1),
+            );
+        }
+        SettingsIcon::ThemeDark => {
+            let moon = RECT {
+                left: rect.left + scale(hwnd, 2),
+                top: rect.top + scale(hwnd, 1),
+                right: rect.right - scale(hwnd, 2),
+                bottom: rect.bottom - scale(hwnd, 1),
+            };
+            fill_rounded_rect(hdc, moon, color, width.min(height) / 2);
+            fill_rounded_rect(
+                hdc,
+                RECT {
+                    left: moon.left + scale(hwnd, 5),
+                    top: moon.top - scale(hwnd, 2),
+                    right: moon.right + scale(hwnd, 2),
+                    bottom: moon.bottom - scale(hwnd, 5),
+                },
+                background,
+                width.min(height) / 2,
+            );
+        }
+        SettingsIcon::ThemeLight => {
+            let sun_radius = scale(hwnd, 4);
+            let _ = Ellipse(
+                hdc,
+                cx - sun_radius,
+                cy - sun_radius,
+                cx + sun_radius,
+                cy + sun_radius,
+            );
+            for (dx, dy) in [(0, -8), (0, 8), (-8, 0), (8, 0), (-6, -6), (6, -6), (-6, 6), (6, 6)] {
+                let sx = cx + scale(hwnd, dx) * 3 / 4;
+                let sy = cy + scale(hwnd, dy) * 3 / 4;
+                let ex = cx + scale(hwnd, dx);
+                let ey = cy + scale(hwnd, dy);
+                line(hdc, sx, sy, ex, ey);
+            }
+        }
+        SettingsIcon::LayoutDefault => {
+            for (y, left_pad, right_pad) in [(cy - scale(hwnd, 5), 2, 5), (cy, 5, 2), (cy + scale(hwnd, 5), 2, 7)] {
+                line(
+                    hdc,
+                    rect.left + scale(hwnd, left_pad),
+                    y,
+                    rect.right - scale(hwnd, right_pad),
+                    y,
+                );
+            }
+        }
+        SettingsIcon::LayoutMinimal => {
+            line(
+                hdc,
+                rect.left + scale(hwnd, 4),
+                cy - scale(hwnd, 4),
+                rect.right - scale(hwnd, 4),
+                cy - scale(hwnd, 4),
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 6),
+                cy + scale(hwnd, 4),
+                rect.right - scale(hwnd, 6),
+                cy + scale(hwnd, 4),
+            );
+        }
+        SettingsIcon::PresetClassic => {
+            let top = (cx, rect.top + scale(hwnd, 1));
+            let left = (rect.left + scale(hwnd, 2), cy - scale(hwnd, 2));
+            let right = (rect.right - scale(hwnd, 2), cy - scale(hwnd, 2));
+            let bottom = (cx, rect.bottom - scale(hwnd, 1));
+            line(hdc, top.0, top.1, left.0, left.1);
+            line(hdc, top.0, top.1, right.0, right.1);
+            line(hdc, left.0, left.1, bottom.0, bottom.1);
+            line(hdc, right.0, right.1, bottom.0, bottom.1);
+            line(hdc, left.0, left.1, cx, cy + scale(hwnd, 2));
+            line(hdc, right.0, right.1, cx, cy + scale(hwnd, 2));
+            line(hdc, cx, cy + scale(hwnd, 2), bottom.0, bottom.1);
+        }
+        SettingsIcon::PresetOcean => {
+            for y in [cy - scale(hwnd, 5), cy, cy + scale(hwnd, 5)] {
+                let x0 = rect.left + scale(hwnd, 1);
+                let step = (rect.right - rect.left - scale(hwnd, 2)) / 4;
+                let _ = MoveToEx(hdc, x0, y, None);
+                for index in 1..=4 {
+                    let x = x0 + step * index;
+                    let wave_y = y + if index % 2 == 0 { -scale(hwnd, 2) } else { scale(hwnd, 2) };
+                    let _ = LineTo(hdc, x, wave_y);
+                }
+            }
+        }
+        SettingsIcon::PresetForest => {
+            line(hdc, cx, rect.top + scale(hwnd, 1), rect.left + scale(hwnd, 2), cy + scale(hwnd, 5));
+            line(hdc, cx, rect.top + scale(hwnd, 1), rect.right - scale(hwnd, 2), cy + scale(hwnd, 5));
+            line(hdc, rect.left + scale(hwnd, 2), cy + scale(hwnd, 5), rect.right - scale(hwnd, 2), cy + scale(hwnd, 5));
+            line(hdc, cx, cy + scale(hwnd, 5), cx, rect.bottom - scale(hwnd, 1));
+        }
+        SettingsIcon::PresetCustom => {
+            line(
+                hdc,
+                rect.right - scale(hwnd, 2),
+                rect.top + scale(hwnd, 2),
+                cx - scale(hwnd, 1),
+                cy + scale(hwnd, 2),
+            );
+            line(
+                hdc,
+                rect.right - scale(hwnd, 5),
+                rect.top + scale(hwnd, 1),
+                cx - scale(hwnd, 4),
+                cy - scale(hwnd, 1),
+            );
+            let _ = Ellipse(
+                hdc,
+                rect.left + scale(hwnd, 1),
+                cy,
+                cx + scale(hwnd, 1),
+                rect.bottom - scale(hwnd, 1),
+            );
+        }
+    }
+
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    let _ = DeleteObject(pen);
+}
+
+unsafe fn draw_segment_with_icon(
+    hdc: HDC,
+    hwnd: HWND,
+    rect: RECT,
+    selected: bool,
+    background: Color,
+    foreground: Color,
+    icon: SettingsIcon,
+    text: &str,
+) {
+    let height = (rect.bottom - rect.top).max(1);
+    let radius = (height / 4).clamp(5, 10);
+    fill_rounded_rect(hdc, rect, background, radius);
+
+    let border = if selected {
+        Color::from_hex("#76A7FFFF")
+    } else {
+        subtle_control_border(background)
+    };
+    draw_rounded_outline_rect(hdc, rect, border, radius, 1);
+
+    let icon_size = scale(hwnd, 16).min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
+    let gap = scale(hwnd, 6);
+    let text_width = text_width_px(hwnd, text).max(scale(hwnd, 12));
+    let group_width = icon_size + gap + text_width;
+    let group_left = rect.left + ((rect.right - rect.left - group_width) / 2).max(scale(hwnd, 6));
+    let icon_rect = RECT {
+        left: group_left,
+        top: rect.top + (height - icon_size) / 2,
+        right: group_left + icon_size,
+        bottom: rect.top + (height - icon_size) / 2 + icon_size,
+    };
+    draw_settings_icon(hdc, hwnd, icon, icon_rect, foreground, background);
+
+    let _ = SetTextColor(hdc, COLORREF(foreground.to_colorref()));
+    draw_text(
+        hdc,
+        text,
+        RECT {
+            left: icon_rect.right + gap,
+            top: rect.top,
+            right: rect.right - scale(hwnd, 6),
+            bottom: rect.bottom,
+        },
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
 }
 
 unsafe fn draw_segment(
