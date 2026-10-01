@@ -201,7 +201,7 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
     HDC hdc = reinterpret_cast<HDC>(hdc_raw);
     const int width = right - left;
     const int height = bottom - top;
-    if (!hdc || width <= 0 || height <= 0 || icon_kind < 0 || icon_kind > 17) {
+    if (!hdc || width <= 0 || height <= 0 || icon_kind < 0 || icon_kind > 24) {
         return 0;
     }
     if (!ensure_control_factory()) {
@@ -495,18 +495,22 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             line(17.3f, 6.7f, 19.1f, 4.9f);
             break;
 
-        case 11: // Default layout - three staggered lines.
-            line(8.0f, 6.0f, 19.0f, 6.0f);
-            line(5.0f, 12.0f, 16.0f, 12.0f);
-            line(8.0f, 18.0f, 14.0f, 18.0f);
+        case 11: // Default layout - full two-row usage panel.
+            rounded_rect(3.0f, 3.0f, 21.0f, 21.0f, 2.8f);
+            line(5.5f, 8.0f, 9.0f, 8.0f);
+            line(11.0f, 8.0f, 18.5f, 8.0f);
+            line(5.5f, 16.0f, 9.0f, 16.0f);
+            line(11.0f, 16.0f, 18.5f, 16.0f);
+            line(5.5f, 11.5f, 18.5f, 11.5f);
             break;
 
-        case 12: // Minimal layout - two centered lines.
-            line(7.0f, 8.0f, 17.0f, 8.0f);
-            line(8.5f, 16.0f, 15.5f, 16.0f);
+        case 12: // Minimal layout - one compact usage row.
+            rounded_rect(3.0f, 7.0f, 21.0f, 17.0f, 2.8f);
+            line(5.5f, 12.0f, 9.0f, 12.0f);
+            line(11.0f, 12.0f, 18.5f, 12.0f);
             break;
 
-        case 13: // Classic preset - isometric cube.
+        case 13: // Dark Classic - isometric graphite cube.
             draw_icon_path(
                 g_control_factory.Get(),
                 target.Get(),
@@ -528,7 +532,7 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             line(12.0f, 11.7f, 12.0f, 21.0f);
             break;
 
-        case 14: // Ocean preset - three smooth waves.
+        case 14: // Dark Ocean - three smooth waves.
             for (float y : {6.0f, 12.0f, 18.0f}) {
                 draw_icon_path(
                     g_control_factory.Get(),
@@ -549,7 +553,7 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             }
             break;
 
-        case 15: // Forest preset - pine tree.
+        case 15: // Dark Forest - pine tree.
             draw_icon_path(
                 g_control_factory.Get(),
                 target.Get(),
@@ -609,11 +613,166 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
                 });
             break;
 
-        case 17:
-            // Reserved to preserve ABI if another icon is added; currently
-            // render the custom brush rather than leaving an empty glyph.
-            line(5.0f, 19.0f, 19.0f, 5.0f);
-            line(15.5f, 4.5f, 19.5f, 8.5f);
+        case 17: // Light Cloud Porcelain - cloud.
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(5.0f, 17.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(2.8f, 17.0f), p(2.5f, 13.4f), p(4.7f, 12.4f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(5.3f, 8.8f), p(8.5f, 6.4f), p(12.0f, 7.6f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(13.8f, 5.6f), p(17.6f, 6.4f), p(18.2f, 9.6f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(21.4f, 10.0f), p(22.0f, 15.8f), p(18.0f, 17.0f)));
+                    sink->AddLine(p(5.0f, 17.0f));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            break;
+
+        case 18: // Light Clear Bay - sun over calm bay.
+            line(3.0f, 15.0f, 21.0f, 15.0f);
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(4.0f, 19.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(7.0f, 16.5f), p(9.0f, 21.5f), p(12.0f, 19.0f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(15.0f, 16.5f), p(17.0f, 21.5f), p(20.0f, 19.0f)));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(7.0f, 15.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(7.3f, 10.7f), p(9.2f, 8.3f), p(12.0f, 8.3f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(14.8f, 8.3f), p(16.7f, 10.7f), p(17.0f, 15.0f)));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            line(12.0f, 4.0f, 12.0f, 6.0f);
+            line(5.3f, 7.3f, 7.0f, 8.7f);
+            line(18.7f, 7.3f, 17.0f, 8.7f);
+            break;
+
+        case 19: // Light Wheat Glow - wheat ear.
+            line(12.0f, 21.0f, 12.0f, 5.0f);
+            line(12.0f, 18.0f, 8.0f, 15.0f);
+            line(12.0f, 15.0f, 16.0f, 12.0f);
+            line(12.0f, 12.0f, 8.5f, 9.0f);
+            line(12.0f, 9.0f, 15.5f, 6.0f);
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(8.0f, 15.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(5.7f, 14.7f), p(4.8f, 13.0f), p(5.2f, 11.5f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(7.0f, 11.7f), p(8.0f, 12.8f), p(8.0f, 15.0f)));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(16.0f, 12.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(18.3f, 11.7f), p(19.2f, 10.0f), p(18.8f, 8.5f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(17.0f, 8.7f), p(16.0f, 9.8f), p(16.0f, 12.0f)));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            break;
+
+        case 20: // JSON Reload - circular arrow.
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(18.5f, 8.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(16.6f, 4.4f), p(12.0f, 3.0f), p(8.0f, 5.0f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(4.0f, 7.0f), p(3.0f, 12.5f), p(5.7f, 16.2f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(8.3f, 19.9f), p(13.5f, 20.6f), p(17.0f, 17.5f)));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            line(18.5f, 8.0f, 18.5f, 3.8f);
+            line(18.5f, 8.0f, 14.3f, 8.0f);
+            break;
+
+        case 21: // JSON Format - braces with formatted lines.
+            draw_icon_path(
+                g_control_factory.Get(),
+                target.Get(),
+                brush.Get(),
+                stroke_style.Get(),
+                stroke_width,
+                [&](ID2D1GeometrySink* sink) {
+                    sink->BeginFigure(p(7.5f, 4.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(5.8f, 4.0f), p(5.5f, 5.4f), p(5.5f, 7.0f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(5.5f, 9.5f), p(4.5f, 11.0f), p(3.0f, 12.0f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(4.5f, 13.0f), p(5.5f, 14.5f), p(5.5f, 17.0f)));
+                    sink->AddBezier(D2D1::BezierSegment(
+                        p(5.5f, 18.6f), p(5.8f, 20.0f), p(7.5f, 20.0f)));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                });
+            line(10.0f, 7.0f, 20.0f, 7.0f);
+            line(10.0f, 12.0f, 17.0f, 12.0f);
+            line(10.0f, 17.0f, 19.0f, 17.0f);
+            break;
+
+        case 22: // JSON Import - arrow into tray.
+            line(12.0f, 3.0f, 12.0f, 14.0f);
+            line(8.0f, 10.0f, 12.0f, 14.0f);
+            line(16.0f, 10.0f, 12.0f, 14.0f);
+            line(5.0f, 17.0f, 5.0f, 20.0f);
+            line(5.0f, 20.0f, 19.0f, 20.0f);
+            line(19.0f, 20.0f, 19.0f, 17.0f);
+            break;
+
+        case 23: // JSON Export - arrow out of tray.
+            line(12.0f, 14.0f, 12.0f, 3.0f);
+            line(8.0f, 7.0f, 12.0f, 3.0f);
+            line(16.0f, 7.0f, 12.0f, 3.0f);
+            line(5.0f, 17.0f, 5.0f, 20.0f);
+            line(5.0f, 20.0f, 19.0f, 20.0f);
+            line(19.0f, 20.0f, 19.0f, 17.0f);
+            break;
+
+        case 24: // JSON Apply - check in circle.
+            ellipse(12.0f, 12.0f, 8.5f);
+            line(7.5f, 12.2f, 10.5f, 15.2f);
+            line(10.5f, 15.2f, 16.8f, 8.7f);
             break;
 
         default:
