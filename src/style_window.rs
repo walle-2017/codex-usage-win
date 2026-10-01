@@ -7597,6 +7597,10 @@ unsafe fn draw_settings_icon(
                 rect.bottom - scale(hwnd, 1),
             );
         }
+        // New light-preset and JSON-action glyphs are defined by the precise
+        // Direct2D path renderer above. If Direct2D is unavailable, keep the
+        // button text usable rather than substituting a misleading glyph.
+        _ => {}
     }
 
     SelectObject(hdc, old_brush);
