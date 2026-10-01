@@ -670,8 +670,34 @@ $paintNavigationBlock = [regex]::Match(
     $styleWindow,
     '(?s)unsafe\s+fn\s+paint_navigation\s*\(.*?\n\}'
 ).Value
-if ($paintNavigationBlock -notmatch 'Section::Tooltip') {
-    throw 'Settings sidebar must paint the Tooltip navigation entry as well as hit-test it.'
+if ($paintNavigationBlock -notmatch 'Section::Tooltip' -or
+    $paintNavigationBlock -notmatch 'navigation_icon\(item\)' -or
+    $paintNavigationBlock -notmatch 'draw_settings_icon\(') {
+    throw 'Settings sidebar must paint the Tooltip entry and its matching navigation icon.'
+}
+if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
+    $styleWindow -notmatch 'SettingsIcon::General' -or
+    $styleWindow -notmatch 'SettingsIcon::Preset' -or
+    $styleWindow -notmatch 'SettingsIcon::Panel' -or
+    $styleWindow -notmatch 'SettingsIcon::Tooltip' -or
+    $styleWindow -notmatch 'SettingsIcon::Text' -or
+    $styleWindow -notmatch 'SettingsIcon::Progress' -or
+    $styleWindow -notmatch 'SettingsIcon::Interaction' -or
+    $styleWindow -notmatch 'SettingsIcon::Json' -or
+    $styleWindow -notmatch 'SettingsIcon::ThemeSystem' -or
+    $styleWindow -notmatch 'SettingsIcon::ThemeDark' -or
+    $styleWindow -notmatch 'SettingsIcon::ThemeLight' -or
+    $styleWindow -notmatch 'SettingsIcon::LayoutDefault' -or
+    $styleWindow -notmatch 'SettingsIcon::LayoutMinimal' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetClassic' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetOcean' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetForest' -or
+    $styleWindow -notmatch 'SettingsIcon::PresetCustom' -or
+    $styleWindow -notmatch 'draw_segment_with_icon\(' -or
+    $styleWindow -notmatch 'theme_icon\(mode\)' -or
+    $styleWindow -notmatch 'layout_icon\(preset\)' -or
+    $styleWindow -notmatch 'preset_icon\(preset\)') {
+    throw 'Settings icon vocabulary must cover navigation, Theme/Layout buttons, preset cards, and Custom.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
