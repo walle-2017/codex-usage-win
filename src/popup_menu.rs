@@ -863,15 +863,20 @@ unsafe extern "system" fn wnd_proc(
             if !state.items[index].enabled {
                 return LRESULT(0);
             }
-            match &state.items[index].action {
+            match state.items[index].action.clone() {
                 PopupAction::Command(command) => {
-                    let _ = PostMessageW(
-                        state.command_target,
+                    // Dispatch while the embedded taskbar host HWND is still
+                    // guaranteed to be valid. An asynchronously posted command
+                    // can be lost if popup teardown coincides with Explorer
+                    // recreating the embedded child window.
+                    let command_target = state.command_target;
+                    let root = state.root_hwnd;
+                    let _ = SendMessageW(
+                        command_target,
                         WM_COMMAND,
-                        WPARAM(*command as usize),
+                        WPARAM(command as usize),
                         LPARAM(0),
                     );
-                    let root = state.root_hwnd;
                     if !root.0.is_null() {
                         let _ = DestroyWindow(root);
                     }
