@@ -1375,7 +1375,8 @@ fn custom_preset_card_rect(hwnd: HWND) -> RECT {
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 660, 414, 920, 450)
+    // Chinese / English only: keep the selector compact and right-aligned.
+    rect(hwnd, 760, 414, 920, 450)
 }
 
 fn language_option_count() -> usize {
