@@ -790,6 +790,20 @@ unsafe fn paint(hwnd: HWND, state: &PopupState) {
     let _ = EndPaint(hwnd, &ps);
 }
 
+unsafe fn dispatch_submenu_command(state: &PopupState, command: u16) {
+    let command_target = state.command_target;
+    let root = state.root_hwnd;
+    if !root.0.is_null() {
+        let _ = PostMessageW(root, WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    let _ = PostMessageW(
+        command_target,
+        WM_COMMAND,
+        WPARAM(command as usize),
+        LPARAM(0),
+    );
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -808,6 +822,40 @@ unsafe extern "system" fn wnd_proc(
             if !raw.is_null() {
                 paint(hwnd, &*raw);
                 return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_MOUSEACTIVATE => {
+            let raw = state_ptr(hwnd);
+            if !raw.is_null() && !(*raw).is_root {
+                // A submenu is intentionally non-activating. Be explicit rather
+                // than relying only on WS_EX_NOACTIVATE so Explorer/taskbar
+                // ownership cannot transfer activation and tear down the chain.
+                return LRESULT(MA_NOACTIVATE as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_LBUTTONDOWN => {
+            let raw = state_ptr(hwnd);
+            if raw.is_null() {
+                return LRESULT(0);
+            }
+            let state = &*raw;
+            if !state.is_root {
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                if let Some(index) = hit_item(&state.items, y, dpi) {
+                    if state.items[index].enabled {
+                        if let PopupAction::Command(command) = state.items[index].action {
+                            // Dispatch submenu commands on mouse-down. A
+                            // WS_EX_NOACTIVATE popup can lose WM_LBUTTONUP when
+                            // Explorer changes activation/ownership during the
+                            // click, which previously made version actions inert.
+                            dispatch_submenu_command(state, command);
+                            return LRESULT(0);
+                        }
+                    }
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -865,12 +913,10 @@ unsafe extern "system" fn wnd_proc(
             }
             match state.items[index].action.clone() {
                 PopupAction::Command(command) => {
-                    let command_target = state.command_target;
-                    let root = state.root_hwnd;
                     if state.is_root {
-                        // Root-menu commands are safe to dispatch synchronously:
-                        // the handler cannot invalidate a child menu currently
-                        // processing this mouse-up.
+                        // Root-menu commands retain standard mouse-up activation.
+                        let command_target = state.command_target;
+                        let root = state.root_hwnd;
                         let _ = SendMessageW(
                             command_target,
                             WM_COMMAND,
@@ -880,24 +926,10 @@ unsafe extern "system" fn wnd_proc(
                         if !root.0.is_null() {
                             let _ = DestroyWindow(root);
                         }
-                    } else {
-                        // Submenu commands may launch an updater, browser, or
-                        // another top-level UI. Running that action synchronously
-                        // from the submenu's mouse-up can re-enter activation and
-                        // destroy the popup chain while this window proc is still
-                        // using its state. Queue teardown first, then the command;
-                        // both target this UI thread, so FIFO ordering guarantees
-                        // the external action runs after the popup chain is gone.
-                        if !root.0.is_null() {
-                            let _ = PostMessageW(root, WM_CLOSE, WPARAM(0), LPARAM(0));
-                        }
-                        let _ = PostMessageW(
-                            command_target,
-                            WM_COMMAND,
-                            WPARAM(command as usize),
-                            LPARAM(0),
-                        );
                     }
+                    // Submenu commands are intentionally dispatched on
+                    // WM_LBUTTONDOWN above; their WM_LBUTTONUP is not reliable
+                    // for WS_EX_NOACTIVATE popup chains hosted by Explorer.
                 }
                 PopupAction::Submenu(_) => open_submenu(hwnd, index),
                 PopupAction::Separator => {}
@@ -961,6 +993,15 @@ mod positioning_tests {
             top,
             right,
             bottom,
+        }
+    }
+
+    #[test]
+    fn submenu_command_ids_are_clickable_commands() {
+        for command in [60u16, 61u16] {
+            let item = PopupItem::command("version action", command);
+            assert!(item.enabled);
+            assert!(matches!(item.action, PopupAction::Command(id) if id == command));
         }
     }
 
