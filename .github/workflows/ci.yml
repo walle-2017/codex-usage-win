@@ -4,17 +4,56 @@ on:
   push:
     branches:
       - main
-      - feature/v1.0.5-style-settings-panel-v1
-      - feature/v1.0.5-unified-settings
-      - feature/v1.0.5-settings-controls-fluent
   pull_request:
     branches:
       - main
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
+  cleanup-obsolete-workflow-history:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete runs from obsolete workflows
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const obsoleteWorkflowIds = [
+              352913813, // One-time obsolete branch cleanup
+              372840829, // Publish v1.0.5
+              364940518, // Generate embedded font assets
+              360455619, // Finalize approved UI changes
+              360273225, // Temporary RED cursor and titlebar contract
+              360274075, // Temporary apply cursor and titlebar changes
+              360144147, // Temporary style theme and text fix
+              359231918, // Delete obsolete branches
+              359230992, // Delete blur-tail repro branches
+              355527210, // Rewrite renamed v1.0.3 and v1.0.4
+            ];
+
+            for (const workflow_id of obsoleteWorkflowIds) {
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRuns,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id,
+                  per_page: 100,
+                },
+              );
+
+              for (const run of runs) {
+                await github.rest.actions.deleteWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id,
+                });
+                core.info(`Deleted obsolete workflow run ${run.id}`);
+              }
+            }
+
   verify:
     runs-on: windows-latest
     steps:
