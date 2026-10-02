@@ -555,6 +555,7 @@ if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
     $styleWindow -notmatch '"常规"' -or
     $styleWindow -notmatch '"JSON 配置"' -or
     $styleWindow -notmatch 'language_button_rect' -or
+    $styleWindow -notmatch 'rect\(hwnd,\s*760,\s*414,\s*920,\s*450\)' -or
     $styleWindow -notmatch 'language_popup_open' -or
     $styleWindow -notmatch 'LanguageOption' -or
     $styleWindow -notmatch 'ID_EDIT_JSON') {
