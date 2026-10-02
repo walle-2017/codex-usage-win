@@ -6403,7 +6403,7 @@ unsafe fn paint_appearance_page(
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             theme_icon(mode),
             match (zh, mode) {
-                (true, ThemeMode::System) => "跟随系统",
+                (true, ThemeMode::System) => "系统",
                 (true, ThemeMode::Dark) => "深色",
                 (true, ThemeMode::Light) => "浅色",
                 (false, ThemeMode::System) => "System",
