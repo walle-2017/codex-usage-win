@@ -29,7 +29,11 @@ function Assert-NoMatch {
 # Existing secure updater contracts.
 Assert-Match $window 'const\s+IDM_CHECK_UPDATE\s*:' 'window.rs must define IDM_CHECK_UPDATE.'
 Assert-Match $window 'updater::start_update' 'The version command must start updater asynchronously.'
-Assert-Match $popupMenu '(?s)if\s+state\.is_root\s*\{.*?SendMessageW\(\s*command_target,\s*WM_COMMAND.*?\}\s*else\s*\{.*?PostMessageW\(root,\s*WM_CLOSE.*?PostMessageW\(\s*command_target,\s*WM_COMMAND' 'Root commands may dispatch synchronously, but submenu commands must close the popup chain first and defer WM_COMMAND to avoid activation/reentrancy breaking Check Update/Open GitHub.'
+Assert-Match $popupMenu 'WM_MOUSEACTIVATE\s*=>' 'Popup submenus must explicitly suppress activation transfer.'
+Assert-Match $popupMenu 'MA_NOACTIVATE' 'Popup submenus must return MA_NOACTIVATE.'
+Assert-Match $popupMenu '(?s)WM_LBUTTONDOWN\s*=>.*?!state\.is_root.*?PopupAction::Command\(command\).*?dispatch_submenu_command\(state,\s*command\)' 'Submenu commands must dispatch from mouse-down because Explorer-hosted no-activate popups can lose mouse-up.'
+Assert-Match $popupMenu '(?s)fn\s+dispatch_submenu_command\([^)]*\).*?PostMessageW\(root,\s*WM_CLOSE.*?PostMessageW\(\s*command_target,\s*WM_COMMAND' 'Submenu command dispatch must close the popup chain before posting WM_COMMAND to the app window.'
+Assert-Match $popupMenu '(?s)WM_LBUTTONUP\s*=>.*?if\s+state\.is_root.*?SendMessageW\(\s*command_target,\s*WM_COMMAND' 'Root-menu commands must retain standard mouse-up activation.'
 Assert-Match $window '(?s)fn\s+open_github_releases\([^)]*\).*?ShellExecuteW\(\s*HWND::default\(\)' 'Open GitHub must not use the Explorer-embedded child HWND as the ShellExecute owner.'
 Assert-Match $window 'open GitHub Releases failed ShellExecute code=' 'Open GitHub failures must leave a diagnostic instead of failing silently.'
 Assert-Match $window 'updater::WM_APP_UPDATE_RESULT\s*=>' 'Update results must return to the UI thread.'
