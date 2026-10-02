@@ -7,6 +7,7 @@ $UpdaterPath = Join-Path $PSScriptRoot '..\src\updater.rs'
 $TrayPath = Join-Path $PSScriptRoot '..\src\tray_icon.rs'
 $CargoPath = Join-Path $PSScriptRoot '..\Cargo.toml'
 $LocalizationPath = Join-Path $PSScriptRoot '..\src\localization\mod.rs'
+$PopupMenuPath = Join-Path $PSScriptRoot '..\src\popup_menu.rs'
 
 $window = Get-Content -Raw -LiteralPath $WindowPath
 $main = Get-Content -Raw -LiteralPath $MainPath
@@ -14,6 +15,7 @@ $updater = Get-Content -Raw -LiteralPath $UpdaterPath
 $tray = Get-Content -Raw -LiteralPath $TrayPath
 $cargo = Get-Content -Raw -LiteralPath $CargoPath
 $localization = Get-Content -Raw -LiteralPath $LocalizationPath
+$popupMenu = Get-Content -Raw -LiteralPath $PopupMenuPath
 
 function Assert-Match {
     param([string]$Text, [string]$Pattern, [string]$Message)
@@ -27,6 +29,9 @@ function Assert-NoMatch {
 # Existing secure updater contracts.
 Assert-Match $window 'const\s+IDM_CHECK_UPDATE\s*:' 'window.rs must define IDM_CHECK_UPDATE.'
 Assert-Match $window 'updater::start_update' 'The version command must start updater asynchronously.'
+Assert-Match $popupMenu '(?s)PopupAction::Command\(command\).*?SendMessageW\(\s*command_target,\s*WM_COMMAND.*?DestroyWindow\(root\)' 'Popup submenu commands must execute synchronously before popup teardown so embedded taskbar HWND recreation cannot drop Check Update/Open GitHub commands.'
+Assert-Match $window '(?s)fn\s+open_github_releases\([^)]*\).*?ShellExecuteW\(\s*HWND::default\(\)' 'Open GitHub must not use the Explorer-embedded child HWND as the ShellExecute owner.'
+Assert-Match $window 'open GitHub Releases failed ShellExecute code=' 'Open GitHub failures must leave a diagnostic instead of failing silently.'
 Assert-Match $window 'updater::WM_APP_UPDATE_RESULT\s*=>' 'Update results must return to the UI thread.'
 Assert-Match $main '(?m)^mod\s+updater;' 'main.rs must register updater.'
 Assert-Match $updater 'https://github\.com/walle-2017/codex-usage-win/releases/latest' 'Latest discovery must use the fork github.com redirect endpoint.'
