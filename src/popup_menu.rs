@@ -865,20 +865,38 @@ unsafe extern "system" fn wnd_proc(
             }
             match state.items[index].action.clone() {
                 PopupAction::Command(command) => {
-                    // Dispatch while the embedded taskbar host HWND is still
-                    // guaranteed to be valid. An asynchronously posted command
-                    // can be lost if popup teardown coincides with Explorer
-                    // recreating the embedded child window.
                     let command_target = state.command_target;
                     let root = state.root_hwnd;
-                    let _ = SendMessageW(
-                        command_target,
-                        WM_COMMAND,
-                        WPARAM(command as usize),
-                        LPARAM(0),
-                    );
-                    if !root.0.is_null() {
-                        let _ = DestroyWindow(root);
+                    if state.is_root {
+                        // Root-menu commands are safe to dispatch synchronously:
+                        // the handler cannot invalidate a child menu currently
+                        // processing this mouse-up.
+                        let _ = SendMessageW(
+                            command_target,
+                            WM_COMMAND,
+                            WPARAM(command as usize),
+                            LPARAM(0),
+                        );
+                        if !root.0.is_null() {
+                            let _ = DestroyWindow(root);
+                        }
+                    } else {
+                        // Submenu commands may launch an updater, browser, or
+                        // another top-level UI. Running that action synchronously
+                        // from the submenu's mouse-up can re-enter activation and
+                        // destroy the popup chain while this window proc is still
+                        // using its state. Queue teardown first, then the command;
+                        // both target this UI thread, so FIFO ordering guarantees
+                        // the external action runs after the popup chain is gone.
+                        if !root.0.is_null() {
+                            let _ = PostMessageW(root, WM_CLOSE, WPARAM(0), LPARAM(0));
+                        }
+                        let _ = PostMessageW(
+                            command_target,
+                            WM_COMMAND,
+                            WPARAM(command as usize),
+                            LPARAM(0),
+                        );
                     }
                 }
                 PopupAction::Submenu(_) => open_submenu(hwnd, index),
@@ -944,6 +962,16 @@ mod positioning_tests {
             right,
             bottom,
         }
+    }
+
+    #[test]
+    fn version_submenu_commands_remain_plain_command_items() {
+        let items = vec![
+            PopupItem::command("Check for updates", 60),
+            PopupItem::command("Open GitHub", 61),
+        ];
+        assert!(matches!(items[0].action, PopupAction::Command(60)));
+        assert!(matches!(items[1].action, PopupAction::Command(61)));
     }
 
     #[test]
