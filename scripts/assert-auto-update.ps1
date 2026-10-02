@@ -29,7 +29,7 @@ function Assert-NoMatch {
 # Existing secure updater contracts.
 Assert-Match $window 'const\s+IDM_CHECK_UPDATE\s*:' 'window.rs must define IDM_CHECK_UPDATE.'
 Assert-Match $window 'updater::start_update' 'The version command must start updater asynchronously.'
-Assert-Match $popupMenu '(?s)PopupAction::Command\(command\).*?SendMessageW\(\s*command_target,\s*WM_COMMAND.*?DestroyWindow\(root\)' 'Popup submenu commands must execute synchronously before popup teardown so embedded taskbar HWND recreation cannot drop Check Update/Open GitHub commands.'
+Assert-Match $popupMenu '(?s)if\s+state\.is_root\s*\{.*?SendMessageW\(\s*command_target,\s*WM_COMMAND.*?\}\s*else\s*\{.*?PostMessageW\(root,\s*WM_CLOSE.*?PostMessageW\(\s*command_target,\s*WM_COMMAND' 'Root commands may dispatch synchronously, but submenu commands must close the popup chain first and defer WM_COMMAND to avoid activation/reentrancy breaking Check Update/Open GitHub.'
 Assert-Match $window '(?s)fn\s+open_github_releases\([^)]*\).*?ShellExecuteW\(\s*HWND::default\(\)' 'Open GitHub must not use the Explorer-embedded child HWND as the ShellExecute owner.'
 Assert-Match $window 'open GitHub Releases failed ShellExecute code=' 'Open GitHub failures must leave a diagnostic instead of failing silently.'
 Assert-Match $window 'updater::WM_APP_UPDATE_RESULT\s*=>' 'Update results must return to the UI thread.'
