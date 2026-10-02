@@ -1007,7 +1007,7 @@ mod positioning_tests {
 
     #[test]
     fn version_submenu_commands_remain_plain_command_items() {
-        let items = vec![
+        let items = [
             PopupItem::command("Check for updates", 60),
             PopupItem::command("Open GitHub", 61),
         ];
@@ -1024,7 +1024,7 @@ mod positioning_tests {
             item_text_right_inset(&submenu),
             SUBMENU_TEXT_RIGHT_INSET
         );
-        assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH);
+        const { assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH) };
     }
 
     #[test]
