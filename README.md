@@ -13,37 +13,23 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 
 ## Features
 
-- Codex 5-hour and 7-day remaining quota
-- Reset time/date display
-- Default and minimal taskbar layouts
-- Follow-system, forced dark, and forced light themes
-- Per-theme live style editing with bidirectionally linked Hex/RGBA color controls and an inline 0–100% Windows Composition Gaussian backdrop blur control
-- Dark presets: Graphite, Deep Sea, and Pine Shade; light presets: Cloud Porcelain, Clear Bay, and Wheat Glow, shown as real-color preview cards and editable after applying
-- Optional low-quota alerts
-- Configurable refresh interval
-- Windows light/dark theme support
+- Native Windows taskbar monitor for Codex 5-hour and 7-day remaining quota
+- Reset time/date display, including full reset timestamps in the Minimal-layout tooltip
+- Default and Minimal taskbar layouts
+- System, Dark, and Light theme modes
+- Unified native Settings panel with General, Presets, Panel, Tooltip, Text, Progress, Interaction, and JSON Configuration pages
+- Independent per-theme customization for panel, tooltip, text, progress bar, drag handle, frosted blur, and component corner radii
+- Bidirectionally linked Hex/RGBA color controls, live preview, mouse-wheel adjustment, and automatic persistence
+- Coordinated presets: Graphite, Deep Sea, and Pine Shade for dark mode; Cloud Porcelain, Clear Bay, and Wheat Glow for light mode
+- Native JSON configuration editor with validation, formatting, import/export, localized errors, unsaved-change protection, and apply feedback
+- Consistent Direct2D anti-aliased vector icons throughout Settings and JSON actions
+- Optional low-quota alerts and configurable refresh interval
 - Chinese and English settings UI, with legacy-language migration compatibility
-- Multi-monitor taskbar placement and DPI-aware dragging
+- Multi-monitor taskbar placement, high-DPI rendering, and DPI-aware dragging
 - Explorer restart recovery and single-instance protection
 - Windows manual system-proxy support
-- GitHub Release update discovery for the standalone build
+- GitHub standalone build with stable Release discovery, SHA256-verified in-app update flow, and direct GitHub Releases access
 - Microsoft Store MSIX build with Store-managed updates
-
-## What's new in v1.0.5
-
-v1.0.5 is a major settings and visual-customization update:
-
-- Rebuilt Settings as a unified native panel with General, Presets, Panel, Tooltip, Text, Progress, Interaction, and JSON Configuration pages.
-- Added System, Dark, and Light theme selection, plus Default and Minimal taskbar layouts.
-- Added six coordinated presets: Graphite, Deep Sea, and Pine Shade for dark mode; Cloud Porcelain, Clear Bay, and Wheat Glow for light mode.
-- Added per-theme RGBA/Hex color editing, frosted-blur strength, adaptive corner radii, mouse-wheel adjustment, and live preview/save behavior.
-- Added a native JSON configuration editor with validation, formatting, import/export, localized errors, unsaved-change protection, and apply feedback.
-- Added a unified Direct2D anti-aliased vector icon system throughout Settings and JSON actions.
-- Refined Minimal-layout tooltips, full reset date/time display, drag-handle spacing, rounded Composition clipping, and high-DPI rendering.
-- Improved the custom popup menu and version submenu behavior, including reliable Check for Updates and GitHub actions.
-- Expanded regression checks and Store-build validation while preserving v1.0.4 settings migration compatibility.
-
-See the full [v1.0.5 changelog](CHANGELOG.md#v105) and [GitHub Release](https://github.com/walle-2017/codex-usage-win/releases/tag/v1.0.5).
 
 ## Safety
 
