@@ -1066,18 +1066,26 @@ fn manual_update_required_message(language: LanguageId, version: &str) -> String
     }
 }
 
-fn open_github_releases(hwnd: HWND) {
+fn open_github_releases(_hwnd: HWND) {
     unsafe {
         let operation = native_interop::wide_str("open");
         let url = native_interop::wide_str(GITHUB_RELEASES_URL);
-        let _ = ShellExecuteW(
-            hwnd,
+        // Do not use the Explorer-embedded child HWND as the ShellExecute
+        // owner; Explorer may recreate that child while the popup is closing.
+        let result = ShellExecuteW(
+            HWND::default(),
             PCWSTR::from_raw(operation.as_ptr()),
             PCWSTR::from_raw(url.as_ptr()),
             PCWSTR::null(),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
+        if (result.0 as isize) <= 32 {
+            diagnose::log(format!(
+                "open GitHub Releases failed ShellExecute code={}",
+                result.0 as isize
+            ));
+        }
     }
 }
 
