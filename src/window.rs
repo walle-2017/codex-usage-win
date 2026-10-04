@@ -936,6 +936,18 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HorizontalSpan {
+    left: i32,
+    right: i32,
+}
+
+impl HorizontalSpan {
+    fn width(self) -> i32 {
+        (self.right - self.left).max(0)
+    }
+}
+
 fn tray_left_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT) -> i32 {
     let mut tray_left = taskbar_rect.right;
     if let Some(tray_hwnd) = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd") {
@@ -988,6 +1000,122 @@ fn legacy_left_offset(
     )
 }
 
+fn free_spans_from_occupied(
+    taskbar_rect: RECT,
+    tray_left: i32,
+    occupied_rects: &[RECT],
+    margin: i32,
+) -> Vec<HorizontalSpan> {
+    let start = taskbar_rect.left;
+    let end = tray_left.clamp(taskbar_rect.left, taskbar_rect.right);
+    if end <= start {
+        return Vec::new();
+    }
+
+    let margin = margin.max(0);
+    let mut occupied: Vec<HorizontalSpan> = occupied_rects
+        .iter()
+        .filter(|rect| rect.bottom > taskbar_rect.top && rect.top < taskbar_rect.bottom)
+        .filter_map(|rect| {
+            let left = (rect.left - margin).max(start);
+            let right = (rect.right + margin).min(end);
+            (right > left).then_some(HorizontalSpan { left, right })
+        })
+        .collect();
+    occupied.sort_by_key(|span| (span.left, span.right));
+
+    let mut merged: Vec<HorizontalSpan> = Vec::new();
+    for span in occupied {
+        if let Some(last) = merged.last_mut() {
+            if span.left <= last.right {
+                last.right = last.right.max(span.right);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+
+    let mut free = Vec::new();
+    let mut cursor = start;
+    for span in merged {
+        if span.left > cursor {
+            free.push(HorizontalSpan {
+                left: cursor,
+                right: span.left,
+            });
+        }
+        cursor = cursor.max(span.right);
+    }
+    if cursor < end {
+        free.push(HorizontalSpan {
+            left: cursor,
+            right: end,
+        });
+    }
+    free
+}
+
+fn taskbar_free_spans(taskbar_hwnd: HWND, taskbar_rect: RECT) -> Option<Vec<HorizontalSpan>> {
+    let controls = native_interop::taskbar_control_rects(taskbar_hwnd)?;
+    if controls.is_empty() {
+        diagnose::log("taskbar free-space query returned no actionable controls; failing closed");
+        return None;
+    }
+    let tray_left = tray_left_for_taskbar(taskbar_hwnd, taskbar_rect);
+    Some(free_spans_from_occupied(
+        taskbar_rect,
+        tray_left,
+        &controls,
+        sc(TASKBAR_CONTROL_MARGIN_LOGICAL),
+    ))
+}
+
+fn nearest_free_left_offset(
+    taskbar_rect: RECT,
+    free_spans: &[HorizontalSpan],
+    widget_width: i32,
+    desired_left_offset: i32,
+) -> Option<i32> {
+    let mut best: Option<(i32, i32)> = None;
+    for span in free_spans.iter().copied().filter(|span| span.width() >= widget_width) {
+        let min_left = span.left - taskbar_rect.left;
+        let max_left = span.right - taskbar_rect.left - widget_width;
+        let candidate = desired_left_offset.clamp(min_left, max_left);
+        let distance = (candidate - desired_left_offset).abs();
+        if best.map(|(best_distance, _)| distance < best_distance).unwrap_or(true) {
+            best = Some((distance, candidate));
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
+fn placement_for_free_spans(
+    configured_preset: AppearancePreset,
+    language: LanguageId,
+    taskbar_rect: RECT,
+    free_spans: &[HorizontalSpan],
+    desired_left_offset: i32,
+) -> Option<(AppearancePreset, i32, i32)> {
+    let candidates = match configured_preset {
+        AppearancePreset::Default => [Some(AppearancePreset::Default), None],
+        AppearancePreset::Minimal => [Some(AppearancePreset::Minimal), None],
+        AppearancePreset::Adaptive => [
+            Some(AppearancePreset::Default),
+            Some(AppearancePreset::Minimal),
+        ],
+    };
+
+    for preset in candidates.into_iter().flatten() {
+        let width = total_widget_width_for_preset(language, preset);
+        if let Some(left) =
+            nearest_free_left_offset(taskbar_rect, free_spans, width, desired_left_offset)
+        {
+            return Some((preset, width, left));
+        }
+    }
+    None
+}
+
 fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
     let dpi = dpi.max(1);
     (logical_x as f64 * dpi as f64 / 96.0).round() as i32
@@ -998,12 +1126,13 @@ fn drag_left_from_cursor(taskbar_rect: RECT, pt: POINT, anchor_px: i32) -> i32 {
 }
 
 fn left_offset_for_drag_left(
-    taskbar_hwnd: HWND,
+    _taskbar_hwnd: HWND,
     taskbar_rect: RECT,
     widget_width: i32,
     drag_left: i32,
 ) -> i32 {
-    clamp_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width, drag_left)
+    let taskbar_width = taskbar_rect.right - taskbar_rect.left;
+    clamp_left_offset(drag_left, (taskbar_width - widget_width).max(0))
 }
 
 fn now_unix_secs() -> u64 {
@@ -3302,6 +3431,60 @@ fn tray_reposition_is_suppressed() -> bool {
     }
 }
 
+fn set_widget_hidden_for_taskbar_space(hidden: bool) -> bool {
+    let mut state = lock_state();
+    let Some(s) = state.as_mut() else {
+        return false;
+    };
+    let changed = s.hidden_for_taskbar_space != hidden;
+    s.hidden_for_taskbar_space = hidden;
+    changed
+}
+
+fn show_taskbar_space_warning(language: LanguageId) {
+    let title = native_interop::wide_str(language.strings().window_title);
+    let body = native_interop::wide_str(match language {
+        LanguageId::SimplifiedChinese => {
+            "任务栏当前没有足够的空白区域容纳组件，组件已临时隐藏。空白区域恢复后将自动显示。"
+        }
+        LanguageId::TraditionalChinese => {
+            "工作列目前沒有足夠的空白區域容納元件，元件已暫時隱藏。空白區域恢復後將自動顯示。"
+        }
+        LanguageId::Japanese => {
+            "タスクバーに十分な空き領域がないため、ウィジェットを一時的に非表示にしました。空き領域が確保されると自動的に再表示します。"
+        }
+        LanguageId::Korean => {
+            "작업 표시줄에 충분한 빈 공간이 없어 위젯을 일시적으로 숨겼습니다. 공간이 확보되면 자동으로 다시 표시됩니다."
+        }
+        _ => {
+            "There is not enough empty taskbar space for the widget. It has been temporarily hidden and will reappear automatically when enough space is available."
+        }
+    });
+    unsafe {
+        let _ = MessageBoxW(
+            HWND::default(),
+            PCWSTR::from_raw(body.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        );
+    }
+}
+
+fn hide_widget_for_taskbar_space(hwnd: HWND, language: LanguageId, reason: &str) {
+    let changed = set_widget_hidden_for_taskbar_space(true);
+    hide_minimal_usage_tooltip();
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        if let Some(backdrop) = blur_backdrop_hwnd() {
+            let _ = ShowWindow(backdrop, SW_HIDE);
+        }
+    }
+    diagnose::log(format!("taskbar widget temporarily hidden: {reason}"));
+    if changed {
+        show_taskbar_space_warning(language);
+    }
+}
+
 fn position_at_taskbar() {
     refresh_dpi();
     let (
@@ -3312,6 +3495,8 @@ fn position_at_taskbar() {
         taskbar_hwnd,
         taskbar_monitor,
         blur_active,
+        configured_preset,
+        language,
     ) = {
         let state = lock_state();
         let s = match state.as_ref() {
@@ -3336,6 +3521,8 @@ fn position_at_taskbar() {
             taskbar_hwnd,
             s.taskbar_monitor.clone(),
             s.composition_blur_active,
+            s.appearance_preset,
+            s.language,
         )
     };
 
@@ -3360,16 +3547,16 @@ fn position_at_taskbar() {
         }
     }
 
-    let tray_left = tray_left_for_taskbar(taskbar_hwnd, taskbar_rect);
-    let widget_width = total_widget_width();
-    let max_left =
-        max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width);
-
+    let migration_preset = match configured_preset {
+        AppearancePreset::Minimal => AppearancePreset::Minimal,
+        _ => AppearancePreset::Default,
+    };
+    let migration_width = total_widget_width_for_preset(language, migration_preset);
     let desired_left_offset = if let Some(legacy_tray_offset) = legacy_tray_offset {
         let migrated = legacy_left_offset(
             taskbar_hwnd,
             taskbar_rect,
-            widget_width,
+            migration_width,
             legacy_tray_offset,
         );
         {
@@ -3389,10 +3576,37 @@ fn position_at_taskbar() {
         desired_left_offset
     };
 
-    // Clamp only for the current frame. Never write this transient clamp back
-    // to settings: TrayNotifyWnd can temporarily grow/shrink as Explorer moves
-    // notification icons, and persisting the clamp causes permanent drift.
-    let actual_left_offset = desired_left_offset.clamp(0, max_left);
+    let Some(free_spans) = taskbar_free_spans(taskbar_hwnd, taskbar_rect) else {
+        hide_widget_for_taskbar_space(hwnd, language, "unable to resolve safe taskbar free space");
+        return;
+    };
+    let Some((effective_preset, widget_width, actual_left_offset)) =
+        placement_for_free_spans(
+            configured_preset,
+            language,
+            taskbar_rect,
+            &free_spans,
+            desired_left_offset,
+        )
+    else {
+        hide_widget_for_taskbar_space(hwnd, language, "no empty span is wide enough");
+        return;
+    };
+
+    let (was_hidden, effective_changed) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        let was_hidden = s.hidden_for_taskbar_space;
+        let effective_changed = s.effective_appearance_preset != effective_preset;
+        s.hidden_for_taskbar_space = false;
+        s.effective_appearance_preset = effective_preset;
+        if effective_changed {
+            refresh_usage_texts(s);
+        }
+        (was_hidden, effective_changed)
+    };
 
     let widget_height = {
         let state = lock_state();
@@ -3403,19 +3617,13 @@ fn position_at_taskbar() {
     };
     let y = compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
     if embedded {
-        let x = actual_left_offset;
-        native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
-        diagnose::log(format!(
-            "positioned embedded widget monitor={} desired_left={} actual_left={} max_left={} tray_left={} y={} w={} h={}",
-            taskbar_monitor.as_deref().unwrap_or("<unknown>"),
-            desired_left_offset,
+        native_interop::move_window(
+            hwnd,
             actual_left_offset,
-            max_left,
-            tray_left,
             y - taskbar_rect.top,
             widget_width,
-            widget_height
-        ));
+            widget_height,
+        );
     } else {
         let x = taskbar_rect.left + actual_left_offset;
         if blur_active {
@@ -3423,24 +3631,31 @@ fn position_at_taskbar() {
         } else {
             native_interop::move_window(hwnd, x, y, widget_width, widget_height);
         }
-        diagnose::log(format!(
-            "positioned fallback widget monitor={} desired_left={} actual_left={} max_left={} tray_left={} x={} y={} w={} h={}",
-            taskbar_monitor.as_deref().unwrap_or("<unknown>"),
-            desired_left_offset,
-            actual_left_offset,
-            max_left,
-            tray_left,
-            x,
-            y,
-            widget_width,
-            widget_height
-        ));
     }
+
     if !embedded && !blur_active {
         bind_popup_windows_to_taskbar_owner(hwnd);
     }
-}
+    if was_hidden {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
 
+    diagnose::log(format!(
+        "positioned taskbar widget monitor={} configured={:?} effective={:?} desired_left={} actual_left={} free_spans={} w={} h={} restored={} layout_changed={}",
+        taskbar_monitor.as_deref().unwrap_or("<unknown>"),
+        configured_preset,
+        effective_preset,
+        desired_left_offset,
+        actual_left_offset,
+        free_spans.len(),
+        widget_width,
+        widget_height,
+        was_hidden,
+        effective_changed
+    ));
+}
 fn compute_anchor_y(anchor_top: i32, anchor_height: i32, widget_height: i32) -> i32 {
     anchor_top + (anchor_height - widget_height).max(0) / 2
 }
