@@ -397,7 +397,11 @@ r#"{{
             theme_options = localized(zh, "可选：system | dark | light", "Options: system | dark | light"),
             theme = q(&a.theme),
             layout_desc = localized(zh, "组件排版", "Widget layout"),
-            layout_options = localized(zh, "可选：default | minimal", "Options: default | minimal"),
+            layout_options = localized(
+                zh,
+                "可选：default | minimal | adaptive；adaptive 会按可用宽度自动在默认/极简间切换",
+                "Options: default | minimal | adaptive; adaptive switches between Default and Minimal based on available width",
+            ),
             layout = q(&a.layout),
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
             light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
