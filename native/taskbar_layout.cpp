@@ -41,7 +41,7 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
         return -1;
     }
 
-    HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitialize = SUCCEEDED(init);
     if (FAILED(init) && init != RPC_E_CHANGED_MODE) {
         return -1;
