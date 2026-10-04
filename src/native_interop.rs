@@ -109,12 +109,12 @@ pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 pub const TIMER_POLL: usize = 1;
 pub const TIMER_COUNTDOWN: usize = 2;
 pub const TIMER_RESET_POLL: usize = 3;
-pub const TIMER_TASKBAR_LAYOUT: usize = 4;
 
 // Custom messages
 pub const WM_APP: u32 = 0x8000;
 pub const WM_APP_USAGE_UPDATED: u32 = WM_APP + 1;
 pub const WM_APP_TRAY: u32 = WM_APP + 3;
+pub const WM_APP_TASKBAR_LAYOUT_UPDATED: u32 = WM_APP + 4;
 
 const WINDOWS_TO_UNIX_EPOCH_SECONDS: u64 = 11_644_473_600;
 
