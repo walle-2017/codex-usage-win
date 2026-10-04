@@ -73,6 +73,11 @@ unsafe extern "C" {
         stroke_a: u8,
         stroke_width: f32,
     ) -> i32;
+    fn codex_taskbar_control_rects(
+        taskbar_hwnd_raw: isize,
+        out_rects: *mut TaskbarControlRect,
+        capacity: usize,
+    ) -> i32;
     fn codex_draw_settings_icon(
         hdc_raw: isize,
         left: i32,
@@ -87,6 +92,15 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct TaskbarControlRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
 // Win event constants
 pub const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
 pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
@@ -95,6 +109,7 @@ pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 pub const TIMER_POLL: usize = 1;
 pub const TIMER_COUNTDOWN: usize = 2;
 pub const TIMER_RESET_POLL: usize = 3;
+pub const TIMER_TASKBAR_LAYOUT: usize = 4;
 
 // Custom messages
 pub const WM_APP: u32 = 0x8000;
@@ -183,6 +198,32 @@ pub fn find_taskbars() -> Vec<TaskbarWindow> {
         )
     });
     taskbars
+}
+
+/// Query visible actionable taskbar controls through Windows UI Automation.
+///
+/// A failure returns None rather than pretending the whole taskbar is empty. The
+/// placement layer can then fail closed and temporarily hide the widget.
+pub fn taskbar_control_rects(taskbar_hwnd: HWND) -> Option<Vec<RECT>> {
+    const CAPACITY: usize = 256;
+    let mut raw = vec![TaskbarControlRect::default(); CAPACITY];
+    let count = unsafe {
+        codex_taskbar_control_rects(taskbar_hwnd.0 as isize, raw.as_mut_ptr(), raw.len())
+    };
+    if count < 0 {
+        return None;
+    }
+    raw.truncate(count as usize);
+    Some(
+        raw.into_iter()
+            .map(|rect| RECT {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+            })
+            .collect(),
+    )
 }
 
 /// Find a child window by class name
