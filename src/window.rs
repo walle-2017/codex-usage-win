@@ -6803,7 +6803,8 @@ mod tests {
             HorizontalSpan { left: 100, right: 360 },
             HorizontalSpan { left: 700, right: 1000 },
         ];
-        assert_eq!(nearest_free_left_offset(taskbar, &free, 180, 650), Some(720));
+        assert_eq!(nearest_free_left_offset(taskbar, &free, 180, 650), Some(650));
+        assert_eq!(nearest_free_left_offset(taskbar, &free, 180, 900), Some(720));
         assert_eq!(nearest_free_left_offset(taskbar, &free, 180, 40), Some(40));
     }
 
