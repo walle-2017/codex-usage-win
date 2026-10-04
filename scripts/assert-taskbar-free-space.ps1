@@ -12,7 +12,8 @@ foreach ($required in @(
     'nearest_free_left_offset',
     'placement_for_free_spans',
     'hidden_for_taskbar_space',
-    'TIMER_TASKBAR_LAYOUT',
+    'spawn_taskbar_layout_worker',
+    'WM_APP_TASKBAR_LAYOUT_UPDATED',
     'TASKBAR_CONTROL_MARGIN_LOGICAL',
     'show_taskbar_space_warning',
     'MessageBoxW'
@@ -58,8 +59,20 @@ if ($position -notmatch 'hide_widget_for_taskbar_space' -or
     throw 'Positioning must hide on insufficient space and apply the resolved adaptive layout.'
 }
 
-if ($window -notmatch 'TIMER_TASKBAR_LAYOUT\s*=>\s*\{[\s\S]*?position_at_taskbar\(\)[\s\S]*?render_layered\(\)') {
-    throw 'Taskbar layout must be polled so hidden widgets restore automatically.'
+$worker = [regex]::Match(
+    $window,
+    '(?s)fn\s+spawn_taskbar_layout_worker\s*\(.*?\n\}'
+).Value
+if ($worker -notmatch 'native_interop::taskbar_control_rects' -or
+    $worker -notmatch 'PostMessageW' -or
+    $window -notmatch 'WM_APP_TASKBAR_LAYOUT_UPDATED\s*=>|msg\s*==\s*WM_APP_TASKBAR_LAYOUT_UPDATED') {
+    throw 'Taskbar UI Automation must run on a background worker and notify the UI thread asynchronously.'
+}
+if ($position -match 'native_interop::taskbar_control_rects') {
+    throw 'The UI thread must never synchronously query taskbar UI Automation while embedded in Explorer.'
+}
+if ((Get-Content -Raw (Join-Path $PSScriptRoot '..\native\taskbar_layout.cpp')) -notmatch 'COINIT_MULTITHREADED') {
+    throw 'The taskbar UI Automation worker must initialize COM as MTA.'
 }
 
 Write-Host 'PASS: adaptive taskbar free-space placement contract.'
