@@ -971,18 +971,6 @@ fn clamp_left_offset(left_offset: i32, max_left: i32) -> i32 {
     left_offset.clamp(0, max_left.max(0))
 }
 
-fn clamp_left_offset_for_taskbar(
-    taskbar_hwnd: HWND,
-    taskbar_rect: RECT,
-    widget_width: i32,
-    left_offset: i32,
-) -> i32 {
-    clamp_left_offset(
-        left_offset,
-        max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width),
-    )
-}
-
 fn legacy_left_offset_from_max(max_left: i32, tray_offset: i32) -> i32 {
     let max_left = max_left.max(0);
     max_left - tray_offset.clamp(0, max_left)
