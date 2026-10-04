@@ -201,7 +201,7 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
     HDC hdc = reinterpret_cast<HDC>(hdc_raw);
     const int width = right - left;
     const int height = bottom - top;
-    if (!hdc || width <= 0 || height <= 0 || icon_kind < 0 || icon_kind > 24) {
+    if (!hdc || width <= 0 || height <= 0 || icon_kind < 0 || icon_kind > 25) {
         return 0;
     }
     if (!ensure_control_factory()) {
@@ -773,6 +773,11 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             ellipse(12.0f, 12.0f, 8.5f);
             line(7.5f, 12.2f, 10.5f, 15.2f);
             line(10.5f, 15.2f, 16.8f, 8.7f);
+            break;
+        case 25: // Adaptive layout - progressively compact rows.
+            draw_line(left + 2.0f, top + 4.0f, right - 2.0f, top + 4.0f, 1.5f);
+            draw_line(left + 4.0f, top + height * 0.5f, right - 4.0f, top + height * 0.5f, 1.5f);
+            draw_line(left + 7.0f, bottom - 4.0f, right - 7.0f, bottom - 4.0f, 1.5f);
             break;
 
         default:
