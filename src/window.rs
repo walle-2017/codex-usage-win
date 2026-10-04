@@ -1794,10 +1794,13 @@ pub fn run() {
         // Register system tray icon(s)
         sync_tray_icons(hwnd);
 
-        // Position and show. While the process runs, the taskbar widget is always visible.
+        // Position and show when a safe taskbar slot exists. If space is
+        // temporarily exhausted, position_at_taskbar() keeps the widget hidden.
         position_at_taskbar();
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        diagnose::log("window shown");
+        if !widget_hidden_for_taskbar_space() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            diagnose::log("window shown");
+        }
 
         // Initial render via UpdateLayeredWindow (for embedded) or InvalidateRect (fallback)
         render_layered();
@@ -1830,6 +1833,7 @@ pub fn run() {
                 .unwrap_or(POLL_15_MIN)
         };
         SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
+        SetTimer(hwnd, TIMER_TASKBAR_LAYOUT, TASKBAR_LAYOUT_POLL_MS, None);
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
         // icon (the shell discards tray registrations when it restarts). This
@@ -2105,6 +2109,9 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
 }
 
 fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
+    if widget_hidden_for_taskbar_space() {
+        return;
+    }
     bind_popup_windows_to_taskbar_owner(foreground_hwnd);
     let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
         return;
@@ -2300,17 +2307,19 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
         // and simply render the normal opaque/transparent panel again.
         bind_popup_windows_to_taskbar_owner(hwnd);
         position_at_taskbar();
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if !widget_hidden_for_taskbar_space() {
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
         }
         diagnose::log("frosted glass disabled; keeping foreground in stable layered popup mode");
         return;
@@ -2327,8 +2336,10 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
     };
     if attach_to_preferred_taskbar(hwnd, taskbar_monitor.as_deref(), taskbar_index) {
         position_at_taskbar();
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if !widget_hidden_for_taskbar_space() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
         }
     } else {
         native_interop::detach_from_taskbar_as_popup(hwnd);
@@ -2348,6 +2359,9 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
 /// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
     refresh_dpi();
+    if widget_hidden_for_taskbar_space() {
+        return;
+    }
     let (
         hwnd_val,
         is_dark,
@@ -4428,6 +4442,10 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     schedule_countdown_timer();
                 }
+                TIMER_TASKBAR_LAYOUT => {
+                    position_at_taskbar();
+                    render_layered();
+                }
                 TIMER_RESET_POLL => {
                     let should_poll = {
                         let state = lock_state();
@@ -5542,6 +5560,9 @@ fn refresh_widget_after_style_editor_close() {
         state.as_ref().map(|s| s.hwnd.to_hwnd())
     };
     render_layered();
+    if widget_hidden_for_taskbar_space() {
+        return;
+    }
     if let Some(hwnd) = hwnd {
         let (embedded, frosted_active) = {
             let state = lock_state();
