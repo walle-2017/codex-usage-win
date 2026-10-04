@@ -775,9 +775,9 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             line(10.5f, 15.2f, 16.8f, 8.7f);
             break;
         case 25: // Adaptive layout - progressively compact rows.
-            draw_line(left + 2.0f, top + 4.0f, right - 2.0f, top + 4.0f, 1.5f);
-            draw_line(left + 4.0f, top + height * 0.5f, right - 4.0f, top + height * 0.5f, 1.5f);
-            draw_line(left + 7.0f, bottom - 4.0f, right - 7.0f, bottom - 4.0f, 1.5f);
+            line(4.0f, 6.0f, 20.0f, 6.0f);
+            line(6.0f, 12.0f, 18.0f, 12.0f);
+            line(8.0f, 18.0f, 16.0f, 18.0f);
             break;
 
         default:
