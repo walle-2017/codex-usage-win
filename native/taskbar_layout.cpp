@@ -84,7 +84,7 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
         goto cleanup;
     }
 
-    if (length < 0 || static_cast<std::size_t>(length) > capacity) {
+    if (length < 0) {
         goto cleanup;
     }
 
@@ -113,6 +113,11 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
             && is_actionable_taskbar_control(control_type)
             && rect.right > rect.left
             && rect.bottom > rect.top) {
+            if (static_cast<std::size_t>(written) >= capacity) {
+                element->Release();
+                written = -1;
+                goto cleanup;
+            }
             out_rects[written++] = CodexTaskbarControlRect{
                 rect.left,
                 rect.top,
