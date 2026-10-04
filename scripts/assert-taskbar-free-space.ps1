@@ -38,10 +38,14 @@ $placement = [regex]::Match(
     $window,
     '(?s)fn\s+placement_for_free_spans\s*\(.*?\n\}'
 ).Value
-$defaultPos = $placement.IndexOf('Some(AppearancePreset::Default)')
-$minimalPos = $placement.IndexOf('Some(AppearancePreset::Minimal)')
-if ($defaultPos -lt 0 -or $minimalPos -lt 0 -or $defaultPos -ge $minimalPos) {
-    throw 'Adaptive layout must prefer Default and fall back to Minimal.'
+$defaultWidthPos = $placement.IndexOf('span.width() >= default_width')
+$minimalWidthPos = $placement.IndexOf('span.width() >= minimal_width')
+if ($defaultWidthPos -lt 0 -or
+    $minimalWidthPos -lt 0 -or
+    $defaultWidthPos -ge $minimalWidthPos -or
+    $placement -notmatch 'AppearancePreset::Default,\s*default_width' -or
+    $placement -notmatch 'AppearancePreset::Minimal,\s*minimal_width') {
+    throw 'Adaptive layout must use Default for a sufficiently wide target gap and fall back to Minimal for a narrower target gap.'
 }
 
 $position = [regex]::Match(
