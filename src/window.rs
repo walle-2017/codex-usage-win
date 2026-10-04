@@ -1084,26 +1084,47 @@ fn placement_for_free_spans(
     free_spans: &[HorizontalSpan],
     desired_left_offset: i32,
 ) -> Option<(AppearancePreset, i32, i32)> {
-    let candidates = match configured_preset {
-        AppearancePreset::Default => [Some(AppearancePreset::Default), None],
-        AppearancePreset::Minimal => [Some(AppearancePreset::Minimal), None],
-        AppearancePreset::Adaptive => [
-            Some(AppearancePreset::Default),
-            Some(AppearancePreset::Minimal),
-        ],
-    };
-
-    for preset in candidates.into_iter().flatten() {
-        let width = total_widget_width_for_preset(language, preset);
-        if let Some(left) =
+    match configured_preset {
+        AppearancePreset::Default | AppearancePreset::Minimal => {
+            let width = total_widget_width_for_preset(language, configured_preset);
             nearest_free_left_offset(taskbar_rect, free_spans, width, desired_left_offset)
-        {
-            return Some((preset, width, left));
+                .map(|left| (configured_preset, width, left))
+        }
+        AppearancePreset::Adaptive => {
+            let default_width =
+                total_widget_width_for_preset(language, AppearancePreset::Default);
+            let minimal_width =
+                total_widget_width_for_preset(language, AppearancePreset::Minimal);
+            let mut best: Option<(i32, u8, AppearancePreset, i32, i32)> = None;
+
+            for span in free_spans.iter().copied() {
+                let (preset, width, preference) = if span.width() >= default_width {
+                    (AppearancePreset::Default, default_width, 0u8)
+                } else if span.width() >= minimal_width {
+                    (AppearancePreset::Minimal, minimal_width, 1u8)
+                } else {
+                    continue;
+                };
+
+                let min_left = span.left - taskbar_rect.left;
+                let max_left = span.right - taskbar_rect.left - width;
+                let candidate = desired_left_offset.clamp(min_left, max_left);
+                let distance = (candidate - desired_left_offset).abs();
+                let value = (distance, preference, preset, width, candidate);
+
+                if best
+                    .as_ref()
+                    .map(|current| (distance, preference) < (current.0, current.1))
+                    .unwrap_or(true)
+                {
+                    best = Some(value);
+                }
+            }
+
+            best.map(|(_, _, preset, width, left)| (preset, width, left))
         }
     }
-    None
 }
-
 fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
     let dpi = dpi.max(1);
     (logical_x as f64 * dpi as f64 / 96.0).round() as i32
@@ -6839,6 +6860,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(placement.0, AppearancePreset::Minimal);
+    }
+
+    #[test]
+    fn adaptive_layout_prefers_nearby_minimal_gap_over_distant_default_gap() {
+        let taskbar = RECT {
+            left: 0,
+            top: 0,
+            right: 1600,
+            bottom: 48,
+        };
+        let default_width =
+            total_widget_width_for_preset(LanguageId::English, AppearancePreset::Default);
+        let minimal_width =
+            total_widget_width_for_preset(LanguageId::English, AppearancePreset::Minimal);
+        let free = [
+            HorizontalSpan {
+                left: 100,
+                right: 100 + default_width + 20,
+            },
+            HorizontalSpan {
+                left: 900,
+                right: 900 + minimal_width,
+            },
+        ];
+        let placement = placement_for_free_spans(
+            AppearancePreset::Adaptive,
+            LanguageId::English,
+            taskbar,
+            &free,
+            900,
+        )
+        .unwrap();
+        assert_eq!(placement.0, AppearancePreset::Minimal);
+        assert_eq!(placement.2, 900);
     }
 
     #[test]
