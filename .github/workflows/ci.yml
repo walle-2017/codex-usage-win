@@ -48,6 +48,9 @@ jobs:
       - name: Verify live drag anchor handling
         shell: pwsh
         run: ./scripts/assert-live-drag-anchor.ps1
+      - name: Verify adaptive taskbar free-space placement
+        shell: pwsh
+        run: ./scripts/assert-taskbar-free-space.ps1
       - name: Verify default taskbar UI contract
         shell: pwsh
         run: ./scripts/assert-default-ui.ps1
