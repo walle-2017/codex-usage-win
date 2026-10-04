@@ -478,10 +478,10 @@ $positionBlock = [regex]::Match(
     $windowProduction,
     '(?s)fn\s+position_at_taskbar\s*\(\)\s*\{.*?\n\}'
 ).Value
-if ($positionBlock -notmatch 'actual_left_offset\s*=\s*desired_left_offset\.clamp' -or
-    $positionBlock -notmatch 'Never write this transient clamp back' -or
+if ($positionBlock -notmatch 'taskbar_free_spans\(' -or
+    $positionBlock -notmatch 'placement_for_free_spans\(' -or
     $positionBlock -match 'taskbar_left_offset\s*=\s*actual_left_offset') {
-    throw 'Transient TrayNotifyWnd width changes must clamp only the current frame and must never persist positional drift.'
+    throw 'Taskbar layout changes must snap only the current frame into a safe free span without persisting positional drift.'
 }
 if ($windowProduction -notmatch 'current_taskbar_hwnd\s*!=\s*Some\(hovered_taskbar\.hwnd\)' -or
     $windowProduction -notmatch 'attach_to_taskbar_window\(' -or
