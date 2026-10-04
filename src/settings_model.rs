@@ -261,16 +261,16 @@ impl EditableSettings {
                 "appearance.theme: allowed values are system, dark, light".to_string(),
             );
         }
-        if !matches!(self.appearance.layout.as_str(), "default" | "minimal") {
+        if !matches!(self.appearance.layout.as_str(), "default" | "minimal" | "adaptive") {
             return Err(
-                "appearance.layout: allowed values are default, minimal".to_string(),
+                "appearance.layout: allowed values are default, minimal, adaptive".to_string(),
             );
         }
 
-        let appearance_preset = if self.appearance.layout == "minimal" {
-            AppearancePreset::Minimal
-        } else {
-            AppearancePreset::Default
+        let appearance_preset = match self.appearance.layout.as_str() {
+            "minimal" => AppearancePreset::Minimal,
+            "adaptive" => AppearancePreset::Adaptive,
+            _ => AppearancePreset::Default,
         };
         let panel_radius_max = panel_corner_radius_max(appearance_preset);
         let tooltip_radius_max = tooltip_corner_radius_max();
@@ -439,10 +439,10 @@ fn push_color_jsonc(
 fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize, layout: &str) -> String {
     let pad = " ".repeat(indent);
     let mut lines = Vec::new();
-    let preset = if layout == "minimal" {
-        AppearancePreset::Minimal
-    } else {
-        AppearancePreset::Default
+    let preset = match layout {
+        "minimal" => AppearancePreset::Minimal,
+        "adaptive" => AppearancePreset::Adaptive,
+        _ => AppearancePreset::Default,
     };
     let panel_radius_max = panel_corner_radius_max(preset);
     let tooltip_radius_max = tooltip_corner_radius_max();
