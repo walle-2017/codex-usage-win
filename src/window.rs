@@ -6719,6 +6719,121 @@ mod tests {
     }
 
     #[test]
+    fn free_taskbar_spans_exclude_occupied_controls_and_tray() {
+        let taskbar = RECT {
+            left: 0,
+            top: 100,
+            right: 1000,
+            bottom: 148,
+        };
+        let occupied = [
+            RECT {
+                left: 400,
+                top: 104,
+                right: 520,
+                bottom: 144,
+            },
+            RECT {
+                left: 560,
+                top: 104,
+                right: 680,
+                bottom: 144,
+            },
+        ];
+        let free = free_spans_from_occupied(taskbar, 900, &occupied, 4);
+        assert_eq!(
+            free,
+            vec![
+                HorizontalSpan { left: 0, right: 396 },
+                HorizontalSpan { left: 524, right: 556 },
+                HorizontalSpan { left: 684, right: 900 },
+            ]
+        );
+    }
+
+    #[test]
+    fn free_space_snaps_to_nearest_safe_span() {
+        let taskbar = RECT {
+            left: 100,
+            top: 0,
+            right: 1100,
+            bottom: 48,
+        };
+        let free = [
+            HorizontalSpan { left: 100, right: 360 },
+            HorizontalSpan { left: 700, right: 1000 },
+        ];
+        assert_eq!(nearest_free_left_offset(taskbar, &free, 180, 650), Some(720));
+        assert_eq!(nearest_free_left_offset(taskbar, &free, 180, 40), Some(40));
+    }
+
+    #[test]
+    fn adaptive_layout_prefers_default_then_falls_back_to_minimal() {
+        let taskbar = RECT {
+            left: 0,
+            top: 0,
+            right: 1200,
+            bottom: 48,
+        };
+        let default_width =
+            total_widget_width_for_preset(LanguageId::English, AppearancePreset::Default);
+        let minimal_width =
+            total_widget_width_for_preset(LanguageId::English, AppearancePreset::Minimal);
+
+        let wide = [HorizontalSpan {
+            left: 100,
+            right: 100 + default_width + 20,
+        }];
+        let placement = placement_for_free_spans(
+            AppearancePreset::Adaptive,
+            LanguageId::English,
+            taskbar,
+            &wide,
+            100,
+        )
+        .unwrap();
+        assert_eq!(placement.0, AppearancePreset::Default);
+
+        let narrow = [HorizontalSpan {
+            left: 100,
+            right: 100 + minimal_width,
+        }];
+        let placement = placement_for_free_spans(
+            AppearancePreset::Adaptive,
+            LanguageId::English,
+            taskbar,
+            &narrow,
+            100,
+        )
+        .unwrap();
+        assert_eq!(placement.0, AppearancePreset::Minimal);
+    }
+
+    #[test]
+    fn adaptive_layout_reports_no_placement_when_even_minimal_does_not_fit() {
+        let taskbar = RECT {
+            left: 0,
+            top: 0,
+            right: 1200,
+            bottom: 48,
+        };
+        let minimal_width =
+            total_widget_width_for_preset(LanguageId::English, AppearancePreset::Minimal);
+        let too_small = [HorizontalSpan {
+            left: 100,
+            right: 100 + minimal_width - 1,
+        }];
+        assert!(placement_for_free_spans(
+            AppearancePreset::Adaptive,
+            LanguageId::English,
+            taskbar,
+            &too_small,
+            100,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn centers_widget_vertically() {
         assert_eq!(compute_anchor_y(100, 48, 42), 103);
         assert_eq!(compute_anchor_y(100, 32, 28), 102);
