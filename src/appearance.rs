@@ -11,6 +11,7 @@ pub enum AppearancePreset {
     #[default]
     Default,
     Minimal,
+    Adaptive,
 }
 
 impl<'de> Deserialize<'de> for AppearancePreset {
@@ -22,9 +23,10 @@ impl<'de> Deserialize<'de> for AppearancePreset {
         match value.as_str() {
             "compact" | "default" => Ok(Self::Default),
             "minimal" => Ok(Self::Minimal),
+            "adaptive" => Ok(Self::Adaptive),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["default", "minimal"],
+                &["default", "minimal", "adaptive"],
             )),
         }
     }
@@ -61,7 +63,7 @@ pub struct StyleMetrics {
 impl AppearancePreset {
     pub fn metrics(self) -> StyleMetrics {
         match self {
-            Self::Default => StyleMetrics {
+            Self::Default | Self::Adaptive => StyleMetrics {
                 widget_height: 42,
                 panel_radius: 0,
                 outer_padding: 6,
@@ -183,6 +185,20 @@ mod tests {
         let preset: AppearancePreset = serde_json::from_str("\"compact\"").unwrap();
         assert_eq!(preset, AppearancePreset::Default);
         assert_eq!(serde_json::to_string(&preset).unwrap(), "\"default\"");
+    }
+
+    #[test]
+    fn adaptive_uses_default_metrics_as_its_style_baseline() {
+        assert_eq!(
+            AppearancePreset::Adaptive.metrics(),
+            AppearancePreset::Default.metrics()
+        );
+        assert_eq!(
+            serde_json::to_string(&AppearancePreset::Adaptive).unwrap(),
+            "\"adaptive\""
+        );
+        let parsed: AppearancePreset = serde_json::from_str("\"adaptive\"").unwrap();
+        assert_eq!(parsed, AppearancePreset::Adaptive);
     }
 
     #[test]
