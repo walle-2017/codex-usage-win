@@ -4822,31 +4822,65 @@ unsafe extern "system" fn wnd_proc(
                                 drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
                             let final_drag_left =
                                 drag_left_from_cursor(taskbar_rect, pt, anchor_px);
-                            let widget_width = total_widget_width();
-                            let new_left_offset = left_offset_for_drag_left(
-                                taskbar_hwnd,
-                                taskbar_rect,
-                                widget_width,
-                                final_drag_left,
-                            );
-                            {
-                                let mut state = lock_state();
-                                if let Some(s) = state.as_mut() {
-                                    s.taskbar_left_offset = new_left_offset;
-                                    s.legacy_tray_offset = None;
-                                }
-                            }
-                            let monitor = {
+                            let (configured_preset, language, current_width) = {
                                 let state = lock_state();
                                 state
                                     .as_ref()
-                                    .and_then(|s| s.taskbar_monitor.clone())
-                                    .unwrap_or_else(|| "<unknown>".to_string())
+                                    .map(|s| {
+                                        (
+                                            s.appearance_preset,
+                                            s.language,
+                                            total_widget_width_for_state(s),
+                                        )
+                                    })
+                                    .unwrap_or((
+                                        AppearancePreset::Default,
+                                        LanguageId::English,
+                                        total_widget_width_for(LanguageId::English),
+                                    ))
                             };
-                            diagnose::log(format!(
-                                "drag saved taskbar_left_offset={} monitor={}",
-                                new_left_offset, monitor
-                            ));
+                            let clamped_drag_left = left_offset_for_drag_left(
+                                taskbar_hwnd,
+                                taskbar_rect,
+                                current_width,
+                                final_drag_left,
+                            );
+                            let safe_left_offset = taskbar_free_spans(taskbar_hwnd, taskbar_rect)
+                                .and_then(|free_spans| {
+                                    placement_for_free_spans(
+                                        configured_preset,
+                                        language,
+                                        taskbar_rect,
+                                        &free_spans,
+                                        clamped_drag_left,
+                                    )
+                                })
+                                .map(|(_, _, left)| left);
+
+                            if let Some(new_left_offset) = safe_left_offset {
+                                {
+                                    let mut state = lock_state();
+                                    if let Some(s) = state.as_mut() {
+                                        s.taskbar_left_offset = new_left_offset;
+                                        s.legacy_tray_offset = None;
+                                    }
+                                }
+                                let monitor = {
+                                    let state = lock_state();
+                                    state
+                                        .as_ref()
+                                        .and_then(|s| s.taskbar_monitor.clone())
+                                        .unwrap_or_else(|| "<unknown>".to_string())
+                                };
+                                diagnose::log(format!(
+                                    "drag saved safe taskbar_left_offset={} monitor={}",
+                                    new_left_offset, monitor
+                                ));
+                            } else {
+                                diagnose::log(
+                                    "drag release found no safe taskbar span; keeping desired offset and applying hidden state",
+                                );
+                            }
                             position_at_taskbar();
                             render_layered();
                         }
@@ -5064,11 +5098,16 @@ unsafe extern "system" fn wnd_proc(
                         state.as_ref().and_then(|s| {
                             let taskbar_hwnd = s.taskbar_hwnd?;
                             let taskbar_rect = native_interop::get_taskbar_rect(taskbar_hwnd)?;
-                            Some(max_left_offset_for_taskbar(
-                                taskbar_hwnd,
+                            let free_spans = taskbar_free_spans(taskbar_hwnd, taskbar_rect)?;
+                            let desired_right = taskbar_rect.right - taskbar_rect.left;
+                            placement_for_free_spans(
+                                s.appearance_preset,
+                                s.language,
                                 taskbar_rect,
-                                total_widget_width_for_state(s),
-                            ))
+                                &free_spans,
+                                desired_right,
+                            )
+                            .map(|(_, _, left)| left)
                         })
                     };
                     if let Some(target) = target {
@@ -5080,6 +5119,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                     position_at_taskbar();
+                    render_layered();
                 }
                 IDM_START_WITH_WINDOWS => {
                     set_startup_enabled(!is_startup_enabled());
