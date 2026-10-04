@@ -84,11 +84,16 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
         goto cleanup;
     }
 
+    if (length < 0 || static_cast<std::size_t>(length) > capacity) {
+        goto cleanup;
+    }
+
     written = 0;
-    for (int index = 0; index < length && static_cast<std::size_t>(written) < capacity; ++index) {
+    for (int index = 0; index < length; ++index) {
         IUIAutomationElement* element = nullptr;
         if (FAILED(elements->GetElement(index, &element)) || !element) {
-            continue;
+            written = -1;
+            goto cleanup;
         }
 
         BOOL offscreen = TRUE;
@@ -98,10 +103,13 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
         const HRESULT type_hr = element->get_CurrentControlType(&control_type);
         const HRESULT rect_hr = element->get_CurrentBoundingRectangle(&rect);
 
-        if (SUCCEEDED(offscreen_hr)
-            && SUCCEEDED(type_hr)
-            && SUCCEEDED(rect_hr)
-            && !offscreen
+        if (FAILED(offscreen_hr) || FAILED(type_hr) || FAILED(rect_hr)) {
+            element->Release();
+            written = -1;
+            goto cleanup;
+        }
+
+        if (!offscreen
             && is_actionable_taskbar_control(control_type)
             && rect.right > rect.left
             && rect.bottom > rect.top) {
