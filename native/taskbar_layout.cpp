@@ -96,21 +96,29 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
             goto cleanup;
         }
 
-        BOOL offscreen = TRUE;
         CONTROLTYPEID control_type = 0;
+        const HRESULT type_hr = element->get_CurrentControlType(&control_type);
+        if (FAILED(type_hr)) {
+            element->Release();
+            written = -1;
+            goto cleanup;
+        }
+        if (!is_actionable_taskbar_control(control_type)) {
+            element->Release();
+            continue;
+        }
+
+        BOOL offscreen = TRUE;
         RECT rect{};
         const HRESULT offscreen_hr = element->get_CurrentIsOffscreen(&offscreen);
-        const HRESULT type_hr = element->get_CurrentControlType(&control_type);
         const HRESULT rect_hr = element->get_CurrentBoundingRectangle(&rect);
-
-        if (FAILED(offscreen_hr) || FAILED(type_hr) || FAILED(rect_hr)) {
+        if (FAILED(offscreen_hr) || FAILED(rect_hr)) {
             element->Release();
             written = -1;
             goto cleanup;
         }
 
         if (!offscreen
-            && is_actionable_taskbar_control(control_type)
             && rect.right > rect.left
             && rect.bottom > rect.top) {
             if (static_cast<std::size_t>(written) >= capacity) {
