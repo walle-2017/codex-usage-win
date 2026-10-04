@@ -15,7 +15,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 
 - Native Windows taskbar monitor for Codex 5-hour and 7-day remaining quota
 - Reset time/date display, including full reset timestamps in the Minimal-layout tooltip
-- Default and Minimal taskbar layouts
+- Default, Minimal, and Adaptive taskbar layouts; Adaptive automatically uses Default when space allows and Minimal in narrower gaps
 - System, Dark, and Light theme modes
 - Unified native Settings panel with General, Presets, Panel, Tooltip, Text, Progress, Interaction, and JSON Configuration pages
 - Independent per-theme customization for panel, tooltip, text, progress bar, drag handle, frosted blur, and component corner radii
@@ -25,7 +25,8 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 - Consistent Direct2D anti-aliased vector icons throughout Settings and JSON actions
 - Optional low-quota alerts and configurable refresh interval
 - Chinese and English settings UI, with legacy-language migration compatibility
-- Multi-monitor taskbar placement, high-DPI rendering, and DPI-aware dragging
+- Multi-monitor taskbar placement that avoids occupied taskbar controls, temporarily hides when no safe gap is wide enough, and restores automatically when space returns
+- High-DPI rendering and DPI-aware dragging
 - Explorer restart recovery and single-instance protection
 - Windows manual system-proxy support
 - GitHub standalone build with stable Release discovery, SHA256-verified in-app update flow, and direct GitHub Releases access
