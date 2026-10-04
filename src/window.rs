@@ -26,7 +26,8 @@ use crate::fonts;
 use crate::localization::{self, LanguageId, Strings};
 use crate::models::AppUsageData;
 use crate::native_interop::{
-    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TRAY, WM_APP_USAGE_UPDATED,
+    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_TASKBAR_LAYOUT, WM_APP_TRAY,
+    WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
 use crate::popup_menu::{self, PopupItem};
@@ -68,6 +69,8 @@ struct AppState {
     language_override: Option<LanguageId>,
     language: LanguageId,
     appearance_preset: AppearancePreset,
+    effective_appearance_preset: AppearancePreset,
+    hidden_for_taskbar_space: bool,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -148,6 +151,7 @@ const IDM_ALERT_30: u16 = 83;
 
 const IDM_LAYOUT_DEFAULT: u16 = 91;
 const IDM_LAYOUT_MINIMAL: u16 = 92;
+const IDM_LAYOUT_ADAPTIVE: u16 = 97;
 const IDM_THEME_SYSTEM: u16 = 93;
 const IDM_THEME_DARK: u16 = 94;
 const IDM_THEME_LIGHT: u16 = 95;
@@ -180,6 +184,8 @@ const MIN_INTERACTIVE_ALPHA: u8 = 1;
 const FROSTED_MAX_BLUR_PX: f32 = 20.0;
 const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
+const TASKBAR_LAYOUT_POLL_MS: u32 = 1_000;
+const TASKBAR_CONTROL_MARGIN_LOGICAL: i32 = 4;
 
 const GITHUB_RELEASES_URL: &str =
     "https://github.com/walle-2017/codex-usage-win/releases";
@@ -1014,14 +1020,15 @@ fn refresh_usage_texts(state: &mut AppState) {
     let Some(codex) = state.data.as_ref().and_then(|data| data.codex.as_ref()) else {
         return;
     };
+    let preset = effective_appearance_preset(state);
     state.codex_session_text = appearance::taskbar_line(
-        state.appearance_preset,
+        preset,
         state.language,
         &codex.session,
         poller::UsageWindowKind::Session,
     );
     state.codex_weekly_text = appearance::taskbar_line(
-        state.appearance_preset,
+        preset,
         state.language,
         &codex.weekly,
         poller::UsageWindowKind::Weekly,
@@ -1335,19 +1342,35 @@ fn is_small_taskbar_height(taskbar_height: i32) -> bool {
     is_small_taskbar_height_at_dpi(taskbar_height, CURRENT_DPI.load(Ordering::Relaxed))
 }
 
+fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
+    match state.appearance_preset {
+        AppearancePreset::Adaptive => state.effective_appearance_preset,
+        preset => preset,
+    }
+}
+
 fn widget_height_for_state(state: &AppState) -> i32 {
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
     } else {
-        sc(state.appearance_preset.metrics().widget_height)
+        sc(effective_appearance_preset(state).metrics().widget_height)
     }
 }
+
 fn current_appearance_preset() -> AppearancePreset {
     let state = lock_state();
     state
         .as_ref()
-        .map(|s| s.appearance_preset)
+        .map(effective_appearance_preset)
         .unwrap_or_default()
+}
+
+fn widget_hidden_for_taskbar_space() -> bool {
+    let state = lock_state();
+    state
+        .as_ref()
+        .map(|s| s.hidden_for_taskbar_space)
+        .unwrap_or(false)
 }
 
 fn current_theme_style() -> ThemeStyle {
@@ -1364,7 +1387,7 @@ fn current_style_color(target: StyleColorTarget) -> Color {
 
 fn row_bar_segment_count(preset: AppearancePreset) -> i32 {
     match preset {
-        AppearancePreset::Default => 8,
+        AppearancePreset::Default | AppearancePreset::Adaptive => 8,
         AppearancePreset::Minimal => 6,
     }
 }
@@ -1412,7 +1435,7 @@ fn total_widget_width_for(language: LanguageId) -> i32 {
 }
 
 fn total_widget_width_for_state(state: &AppState) -> i32 {
-    total_widget_width_for_preset(state.language, state.appearance_preset)
+    total_widget_width_for_preset(state.language, effective_appearance_preset(state))
 }
 
 fn total_widget_width() -> i32 {
@@ -1420,7 +1443,7 @@ fn total_widget_width() -> i32 {
         let state = lock_state();
         state
             .as_ref()
-            .map(|s| (s.language, s.appearance_preset))
+            .map(|s| (s.language, effective_appearance_preset(s)))
             .unwrap_or((LanguageId::English, AppearancePreset::Default))
     };
     total_widget_width_for_preset(language, preset)
@@ -1572,6 +1595,11 @@ pub fn run() {
                 language_override,
                 language,
                 appearance_preset: settings.appearance_preset,
+                effective_appearance_preset: match settings.appearance_preset {
+                    AppearancePreset::Minimal => AppearancePreset::Minimal,
+                    _ => AppearancePreset::Default,
+                },
+                hidden_for_taskbar_space: false,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -3767,7 +3795,7 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
         MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
-    if s.appearance_preset == AppearancePreset::Minimal {
+    if effective_appearance_preset(s) == AppearancePreset::Minimal {
         let reset = format_precise_reset_time(section.resets_at)
             .unwrap_or_else(|| "--".to_string());
         return Some(format!("{label} · {reset}"));
@@ -3941,7 +3969,7 @@ fn minimal_percent_hit(
         let state = lock_state();
         let s = state.as_ref()?;
         (
-            s.appearance_preset,
+            effective_appearance_preset(s),
             s.small_taskbar_mode,
             s.small_show_weekly,
             s.show_session_window,
@@ -4006,7 +4034,7 @@ fn default_reset_hit(
         let state = lock_state();
         let s = state.as_ref()?;
         (
-            s.appearance_preset,
+            effective_appearance_preset(s),
             s.small_taskbar_mode,
             s.small_show_weekly,
             s.show_session_window,
@@ -4911,11 +4939,11 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     style_window::sync(style_settings_snapshot());
                 }
-                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL => {
-                    let preset = if id == IDM_LAYOUT_MINIMAL {
-                        AppearancePreset::Minimal
-                    } else {
-                        AppearancePreset::Default
+                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL | IDM_LAYOUT_ADAPTIVE => {
+                    let preset = match id {
+                        IDM_LAYOUT_MINIMAL => AppearancePreset::Minimal,
+                        IDM_LAYOUT_ADAPTIVE => AppearancePreset::Adaptive,
+                        _ => AppearancePreset::Default,
                     };
                     {
                         let mut state = lock_state();
@@ -5109,10 +5137,10 @@ unsafe extern "system" fn wnd_proc(
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
-                    s.appearance_preset = if wparam.0 == 1 {
-                        AppearancePreset::Minimal
-                    } else {
-                        AppearancePreset::Default
+                    s.appearance_preset = match wparam.0 {
+                        1 => AppearancePreset::Minimal,
+                        2 => AppearancePreset::Adaptive,
+                        _ => AppearancePreset::Default,
                     };
                     s.styles.clamp_corner_radii(s.appearance_preset);
                     refresh_usage_texts(s);
@@ -5774,6 +5802,7 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
             layout: match state.appearance_preset {
                 AppearancePreset::Default => "default",
                 AppearancePreset::Minimal => "minimal",
+                AppearancePreset::Adaptive => "adaptive",
             }
             .to_string(),
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
@@ -5855,10 +5884,10 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         "light" => ThemeMode::Light,
         _ => ThemeMode::System,
     };
-    let appearance_preset = if settings.appearance.layout == "minimal" {
-        AppearancePreset::Minimal
-    } else {
-        AppearancePreset::Default
+    let appearance_preset = match settings.appearance.layout.as_str() {
+        "minimal" => AppearancePreset::Minimal,
+        "adaptive" => AppearancePreset::Adaptive,
+        _ => AppearancePreset::Default,
     };
     let startup_enabled = settings.general.start_with_windows;
 
