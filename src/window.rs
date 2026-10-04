@@ -3654,6 +3654,9 @@ fn position_at_taskbar() {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
+        if blur_active {
+            sync_blur_backdrop_zorder(hwnd);
+        }
     }
 
     diagnose::log(format!(
