@@ -201,7 +201,6 @@ enum SettingsIcon {
     ThemeLight,
     LayoutDefault,
     LayoutMinimal,
-    LayoutAdaptive,
     PresetClassic,
     PresetOcean,
     PresetForest,
@@ -214,6 +213,7 @@ enum SettingsIcon {
     JsonImport,
     JsonExport,
     JsonApply,
+    LayoutAdaptive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
