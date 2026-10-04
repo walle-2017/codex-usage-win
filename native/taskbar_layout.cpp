@@ -52,6 +52,7 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
     IUIAutomationCondition* condition = nullptr;
     IUIAutomationElementArray* elements = nullptr;
     int written = -1;
+    int length = 0;
 
     HRESULT hr = CoCreateInstance(
         CLSID_CUIAutomation,
@@ -78,7 +79,6 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
         goto cleanup;
     }
 
-    int length = 0;
     hr = elements->get_Length(&length);
     if (FAILED(hr)) {
         goto cleanup;
