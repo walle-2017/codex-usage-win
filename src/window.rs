@@ -26,8 +26,8 @@ use crate::fonts;
 use crate::localization::{self, LanguageId, Strings};
 use crate::models::AppUsageData;
 use crate::native_interop::{
-    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_TASKBAR_LAYOUT, WM_APP_TRAY,
-    WM_APP_USAGE_UPDATED,
+    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TASKBAR_LAYOUT_UPDATED,
+    WM_APP_TRAY, WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
 use crate::popup_menu::{self, PopupItem};
@@ -71,6 +71,7 @@ struct AppState {
     appearance_preset: AppearancePreset,
     effective_appearance_preset: AppearancePreset,
     hidden_for_taskbar_space: bool,
+    taskbar_space_warning_shown: bool,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -215,6 +216,14 @@ static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
 static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
+
+#[derive(Clone, Debug)]
+struct TaskbarLayoutSnapshot {
+    taskbar_hwnd_raw: isize,
+    controls: Vec<RECT>,
+}
+
+static TASKBAR_LAYOUT_CACHE: Mutex<Vec<TaskbarLayoutSnapshot>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -1043,10 +1052,21 @@ fn free_spans_from_occupied(
     free
 }
 
+fn cached_taskbar_controls(taskbar_hwnd: HWND) -> Option<Vec<RECT>> {
+    let raw = taskbar_hwnd.0 as isize;
+    let cache = TASKBAR_LAYOUT_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache
+        .iter()
+        .find(|snapshot| snapshot.taskbar_hwnd_raw == raw)
+        .map(|snapshot| snapshot.controls.clone())
+}
+
 fn taskbar_free_spans(taskbar_hwnd: HWND, taskbar_rect: RECT) -> Option<Vec<HorizontalSpan>> {
-    let controls = native_interop::taskbar_control_rects(taskbar_hwnd)?;
+    let controls = cached_taskbar_controls(taskbar_hwnd)?;
     if controls.is_empty() {
-        diagnose::log("taskbar free-space query returned no actionable controls; failing closed");
+        diagnose::log("taskbar free-space cache has no actionable controls; failing closed");
         return None;
     }
     let tray_left = tray_left_for_taskbar(taskbar_hwnd, taskbar_rect);
@@ -1056,6 +1076,46 @@ fn taskbar_free_spans(taskbar_hwnd: HWND, taskbar_rect: RECT) -> Option<Vec<Hori
         &controls,
         sc(TASKBAR_CONTROL_MARGIN_LOGICAL),
     ))
+}
+
+fn spawn_taskbar_layout_worker(hwnd: HWND) {
+    let target = SendHwnd::from_hwnd(hwnd);
+    std::thread::spawn(move || loop {
+        let taskbars = native_interop::find_taskbars();
+        let mut next_cache = Vec::new();
+
+        for taskbar in taskbars {
+            if let Some(controls) = native_interop::taskbar_control_rects(taskbar.hwnd) {
+                next_cache.push(TaskbarLayoutSnapshot {
+                    taskbar_hwnd_raw: taskbar.hwnd.0 as isize,
+                    controls,
+                });
+            } else {
+                diagnose::log(format!(
+                    "background taskbar UI Automation query failed for hwnd={:?}",
+                    taskbar.hwnd
+                ));
+            }
+        }
+
+        {
+            let mut cache = TASKBAR_LAYOUT_CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cache = next_cache;
+        }
+
+        unsafe {
+            let _ = PostMessageW(
+                target.to_hwnd(),
+                WM_APP_TASKBAR_LAYOUT_UPDATED,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(u64::from(TASKBAR_LAYOUT_POLL_MS)));
+    });
 }
 
 fn nearest_free_left_offset(
@@ -1738,6 +1798,7 @@ pub fn run() {
                     _ => AppearancePreset::Default,
                 },
                 hidden_for_taskbar_space: false,
+                taskbar_space_warning_shown: false,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -1803,6 +1864,11 @@ pub fn run() {
         // Register system tray icon(s)
         sync_tray_icons(hwnd);
 
+        // UI Automation must never run synchronously on this UI thread after the
+        // widget has been embedded into Explorer. The dedicated MTA worker keeps
+        // a cache and posts a lightweight update message back to this window.
+        spawn_taskbar_layout_worker(hwnd);
+
         // Position and show when a safe taskbar slot exists. If space is
         // temporarily exhausted, position_at_taskbar() keeps the widget hidden.
         position_at_taskbar();
@@ -1842,7 +1908,6 @@ pub fn run() {
                 .unwrap_or(POLL_15_MIN)
         };
         SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
-        SetTimer(hwnd, TIMER_TASKBAR_LAYOUT, TASKBAR_LAYOUT_POLL_MS, None);
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
         // icon (the shell discards tray registrations when it restarts). This
@@ -3454,16 +3519,6 @@ fn tray_reposition_is_suppressed() -> bool {
     }
 }
 
-fn set_widget_hidden_for_taskbar_space(hidden: bool) -> bool {
-    let mut state = lock_state();
-    let Some(s) = state.as_mut() else {
-        return false;
-    };
-    let changed = s.hidden_for_taskbar_space != hidden;
-    s.hidden_for_taskbar_space = hidden;
-    changed
-}
-
 fn show_taskbar_space_warning(language: LanguageId) {
     let title = native_interop::wide_str(language.strings().window_title);
     let body = native_interop::wide_str(match language {
@@ -3493,8 +3548,26 @@ fn show_taskbar_space_warning(language: LanguageId) {
     }
 }
 
-fn hide_widget_for_taskbar_space(hwnd: HWND, language: LanguageId, reason: &str) {
-    let changed = set_widget_hidden_for_taskbar_space(true);
+fn hide_widget_for_taskbar_space(
+    hwnd: HWND,
+    language: LanguageId,
+    reason: &str,
+    notify_user: bool,
+) {
+    let should_warn = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        s.hidden_for_taskbar_space = true;
+        if notify_user && !s.taskbar_space_warning_shown {
+            s.taskbar_space_warning_shown = true;
+            true
+        } else {
+            false
+        }
+    };
+
     hide_minimal_usage_tooltip();
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
@@ -3503,7 +3576,7 @@ fn hide_widget_for_taskbar_space(hwnd: HWND, language: LanguageId, reason: &str)
         }
     }
     diagnose::log(format!("taskbar widget temporarily hidden: {reason}"));
-    if changed {
+    if should_warn {
         show_taskbar_space_warning(language);
     }
 }
@@ -3600,7 +3673,12 @@ fn position_at_taskbar() {
     };
 
     let Some(free_spans) = taskbar_free_spans(taskbar_hwnd, taskbar_rect) else {
-        hide_widget_for_taskbar_space(hwnd, language, "unable to resolve safe taskbar free space");
+        hide_widget_for_taskbar_space(
+            hwnd,
+            language,
+            "safe taskbar layout cache is not ready",
+            false,
+        );
         return;
     };
     let Some((effective_preset, widget_width, actual_left_offset)) =
@@ -3612,7 +3690,12 @@ fn position_at_taskbar() {
             desired_left_offset,
         )
     else {
-        hide_widget_for_taskbar_space(hwnd, language, "no empty span is wide enough");
+        hide_widget_for_taskbar_space(
+            hwnd,
+            language,
+            "no empty span is wide enough",
+            true,
+        );
         return;
     };
 
@@ -3624,6 +3707,7 @@ fn position_at_taskbar() {
         let was_hidden = s.hidden_for_taskbar_space;
         let effective_changed = s.effective_appearance_preset != effective_preset;
         s.hidden_for_taskbar_space = false;
+        s.taskbar_space_warning_shown = false;
         s.effective_appearance_preset = effective_preset;
         if effective_changed {
             refresh_usage_texts(s);
@@ -4454,10 +4538,6 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     schedule_countdown_timer();
                 }
-                TIMER_TASKBAR_LAYOUT => {
-                    position_at_taskbar();
-                    render_layered();
-                }
                 TIMER_RESET_POLL => {
                     let should_poll = {
                         let state = lock_state();
@@ -4475,6 +4555,11 @@ unsafe extern "system" fn wnd_proc(
                 }
                 _ => {}
             }
+            LRESULT(0)
+        }
+        _ if msg == WM_APP_TASKBAR_LAYOUT_UPDATED => {
+            position_at_taskbar();
+            render_layered();
             LRESULT(0)
         }
         WM_APP_USAGE_UPDATED => {
