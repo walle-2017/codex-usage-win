@@ -201,6 +201,7 @@ enum SettingsIcon {
     ThemeLight,
     LayoutDefault,
     LayoutMinimal,
+    LayoutAdaptive,
     PresetClassic,
     PresetOcean,
     PresetForest,
@@ -1122,6 +1123,7 @@ fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
     match preset {
         AppearancePreset::Default => SettingsIcon::LayoutDefault,
         AppearancePreset::Minimal => SettingsIcon::LayoutMinimal,
+        AppearancePreset::Adaptive => SettingsIcon::LayoutAdaptive,
     }
 }
 
@@ -1159,6 +1161,7 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     let index = match preset {
         AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
+        AppearancePreset::Adaptive => 2,
     };
     rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
 }
@@ -4032,7 +4035,7 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Theme(mode));
             }
         }
-        for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+        for preset in [AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive] {
             if pt_in_rect(layout_rect(hwnd, preset), x, y) {
                 return Some(HitTarget::Layout(preset));
             }
@@ -4115,7 +4118,11 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
         HitTarget::Layout(preset) => {
             send_parent(
                 WM_STYLE_LAYOUT_CHANGE,
-                if preset == AppearancePreset::Default { 0 } else { 1 },
+                match preset {
+                    AppearancePreset::Default => 0,
+                    AppearancePreset::Minimal => 1,
+                    AppearancePreset::Adaptive => 2,
+                },
                 0,
             );
         }
@@ -6413,7 +6420,7 @@ unsafe fn paint_appearance_page(
         );
     }
 
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+    for preset in [AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive] {
         let selected = snapshot.appearance_preset == preset;
         let target = HitTarget::Layout(preset);
         let control_background = button_background(
@@ -6441,8 +6448,10 @@ unsafe fn paint_appearance_page(
             match (zh, preset) {
                 (true, AppearancePreset::Default) => "默认",
                 (true, AppearancePreset::Minimal) => "极简",
+                (true, AppearancePreset::Adaptive) => "自适应",
                 (false, AppearancePreset::Default) => "Default",
                 (false, AppearancePreset::Minimal) => "Minimal",
+                (false, AppearancePreset::Adaptive) => "Adaptive",
             },
         );
     }
@@ -7542,6 +7551,29 @@ unsafe fn draw_settings_icon(
                 cy + scale(hwnd, 4),
                 rect.right - scale(hwnd, 6),
                 cy + scale(hwnd, 4),
+            );
+        }
+        SettingsIcon::LayoutAdaptive => {
+            line(
+                hdc,
+                rect.left + scale(hwnd, 3),
+                cy - scale(hwnd, 5),
+                rect.right - scale(hwnd, 3),
+                cy - scale(hwnd, 5),
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 6),
+                cy + scale(hwnd, 1),
+                rect.right - scale(hwnd, 6),
+                cy + scale(hwnd, 1),
+            );
+            line(
+                hdc,
+                rect.left + scale(hwnd, 9),
+                cy + scale(hwnd, 7),
+                rect.right - scale(hwnd, 9),
+                cy + scale(hwnd, 7),
             );
         }
         SettingsIcon::PresetClassic => {
