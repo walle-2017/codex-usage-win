@@ -12,6 +12,14 @@ use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
 
+thread_local! {
+    static REPARENT_DIAGNOSTIC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn reparent_diagnostic_active() -> bool {
+    REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.get())
+}
+
 // Window style constants
 pub const WS_POPUP_STYLE: u32 = 0x80000000;
 pub const WS_CHILD_STYLE: u32 = 0x40000000;
@@ -351,7 +359,20 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             IsWindow(taskbar_hwnd).as_bool(), IsWindow(hwnd).as_bool(),
             target_depth, target_contains_widget, GetAncestor(taskbar_hwnd, GA_ROOT)
         ));
+        REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
+        crate::diagnose::log("taskbar SetParent begin");
         let set_parent_result = SetParent(hwnd, taskbar_hwnd);
+        // Capture the original failure before any subsequent USER32 calls.
+        let immediate_error = if set_parent_result.is_err() {
+            Some(windows::core::Error::from_win32())
+        } else {
+            None
+        };
+        REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
+        crate::diagnose::log(format!(
+            "taskbar SetParent end result={:?} immediate_last_error={:?}",
+            set_parent_result, immediate_error
+        ));
         // SetParent's previous-parent return value alone cannot prove that the
         // requested parent is now active. Verify the actual parent explicitly.
         let actual_parent = GetAncestor(hwnd, GA_PARENT);
