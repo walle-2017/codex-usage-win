@@ -1120,6 +1120,20 @@ fn merge_taskbar_layout_cache(
     changed
 }
 
+fn preserve_valid_cached_taskbars<F>(
+    active_taskbars: &mut BTreeSet<isize>,
+    cache: &[TaskbarLayoutSnapshot],
+    mut is_valid_taskbar: F,
+) where
+    F: FnMut(isize) -> bool,
+{
+    for snapshot in cache {
+        if is_valid_taskbar(snapshot.taskbar_hwnd_raw) {
+            active_taskbars.insert(snapshot.taskbar_hwnd_raw);
+        }
+    }
+}
+
 fn spawn_taskbar_layout_worker(hwnd: HWND) {
     let target = SendHwnd::from_hwnd(hwnd);
     std::thread::spawn(move || {
@@ -1141,12 +1155,11 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
                 let cache = TASKBAR_LAYOUT_CACHE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                for snapshot in cache.iter() {
-                    let cached_hwnd = HWND(snapshot.taskbar_hwnd_raw as *mut _);
-                    if native_interop::is_taskbar_window(cached_hwnd) {
-                        active_taskbars.insert(snapshot.taskbar_hwnd_raw);
-                    }
-                }
+                preserve_valid_cached_taskbars(
+                    &mut active_taskbars,
+                    &cache,
+                    |raw| native_interop::is_taskbar_window(HWND(raw as *mut _)),
+                );
             }
 
             let mut successful_updates = Vec::new();
@@ -6950,6 +6963,42 @@ mod tests {
         assert!((blur_amount_for_strength(50) - 10.0).abs() < f32::EPSILON);
         assert!((blur_amount_for_strength(100) - 20.0).abs() < f32::EPSILON);
         assert!((blur_amount_for_strength(255) - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn transient_taskbar_enumeration_gap_keeps_valid_cached_handle_active() {
+        let cache = vec![TaskbarLayoutSnapshot {
+            taskbar_hwnd_raw: 11,
+            controls: vec![RECT {
+                left: 100,
+                top: 0,
+                right: 200,
+                bottom: 48,
+            }],
+        }];
+        let mut active = BTreeSet::new();
+
+        preserve_valid_cached_taskbars(&mut active, &cache, |raw| raw == 11);
+
+        assert!(active.contains(&11));
+    }
+
+    #[test]
+    fn invalid_cached_handle_is_not_kept_active() {
+        let cache = vec![TaskbarLayoutSnapshot {
+            taskbar_hwnd_raw: 11,
+            controls: vec![RECT {
+                left: 100,
+                top: 0,
+                right: 200,
+                bottom: 48,
+            }],
+        }];
+        let mut active = BTreeSet::new();
+
+        preserve_valid_cached_taskbars(&mut active, &cache, |_| false);
+
+        assert!(!active.contains(&11));
     }
 
     #[test]
