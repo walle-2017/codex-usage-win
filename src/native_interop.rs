@@ -361,7 +361,7 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
         ));
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
         crate::diagnose::log("taskbar SetParent begin");
-        let set_parent_result = SetParent(hwnd, taskbar_hwnd);
+        let mut set_parent_result = SetParent(hwnd, taskbar_hwnd);
         // Capture the original failure before any subsequent USER32 calls.
         let immediate_error = if set_parent_result.is_err() {
             Some(windows::core::Error::from_win32())
@@ -369,6 +369,26 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             None
         };
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
+        // Opt-in single-variable experiment. Never detach the child or change
+        // its parent on failure unless USER32 accepts the normal SetParent call.
+        if set_parent_result.is_err()
+            && std::env::var_os("CODEX_TASKBAR_FRAME_REFRESH_EXPERIMENT").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            let refresh = SetWindowPos(
+                hwnd, HWND::default(), 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            crate::diagnose::log(format!(
+                "taskbar frame refresh experiment refresh_result={:?}", refresh
+            ));
+            if refresh.is_ok() {
+                set_parent_result = SetParent(hwnd, taskbar_hwnd);
+                crate::diagnose::log(format!(
+                    "taskbar frame refresh experiment retry_result={:?}", set_parent_result
+                ));
+            }
+        }
         crate::diagnose::log(format!(
             "taskbar SetParent end result={:?} immediate_last_error={:?}",
             set_parent_result, immediate_error
