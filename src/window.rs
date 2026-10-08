@@ -834,14 +834,25 @@ fn log_drag_input_snapshot(stage: &str, hwnd: HWND) {
         let capture = GetCapture();
         let fg_thread = GetWindowThreadProcessId(foreground, None);
         let widget_thread = GetWindowThreadProcessId(hwnd, None);
+        let mut explorer_gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let gui_result = if fg_thread != 0 {
+            GetGUIThreadInfo(fg_thread, &mut explorer_gui)
+        } else {
+            BOOL(0)
+        };
         let foreground_root = if foreground != HWND::default() {
             GetAncestor(foreground, GA_ROOT)
         } else {
             HWND::default()
         };
         diagnose::log(format!(
-            "drag input snapshot stage={} foreground={:?} foreground_root={:?} foreground_thread={} active={:?} focus={:?} capture={:?} widget={:?} widget_thread={}",
-            stage, foreground, foreground_root, fg_thread, active, focus, capture, hwnd, widget_thread
+            "drag input snapshot stage={} foreground={:?} foreground_root={:?} foreground_thread={} active={:?} focus={:?} capture={:?} widget={:?} widget_thread={} gui_ok={} gui_flags={:#x} gui_active={:?} gui_focus={:?} gui_capture={:?} gui_menu_owner={:?} gui_move_size={:?}",
+            stage, foreground, foreground_root, fg_thread, active, focus, capture, hwnd, widget_thread,
+            gui_result.as_bool(), explorer_gui.flags, explorer_gui.hwndActive, explorer_gui.hwndFocus,
+            explorer_gui.hwndCapture, explorer_gui.hwndMenuOwner, explorer_gui.hwndMoveSize
         ));
     }
 }
