@@ -324,7 +324,7 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             hwnd, taskbar_hwnd, widget_context, target_context, old_thread_context
         ));
         let set_parent_result = SetParent(hwnd, taskbar_hwnd);
-        if old_thread_context.0 != 0 {
+        if !old_thread_context.0.is_null() {
             let _ = SetThreadDpiAwarenessContext(old_thread_context);
         }
         // SetParent's previous-parent return value alone cannot prove that the
