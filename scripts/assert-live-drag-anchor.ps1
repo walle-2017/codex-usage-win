@@ -21,6 +21,16 @@ if ($body -notmatch 'drag_left_from_cursor\s*\(') { throw 'Cursor-anchored absol
 if ($body -match 'offset_for_drop_point\s*\(') { throw 'Live handoff still uses docked drop-point offset geometry.' }
 if ($body -match 'drag_start_mouse_x\s*-\s*pt\.x') { throw 'Live dragging still uses the old delta model.' }
 
+$taskbarAtPoint = [regex]::Match($source, '(?s)fn\s+taskbar_at_point\s*\(.*?\n\}')
+if (-not $taskbarAtPoint.Success) { throw 'Unable to locate taskbar_at_point.' }
+$taskbarBody = $taskbarAtPoint.Value
+if ($taskbarBody -notmatch 'native_interop::find_taskbars' -or
+    $taskbarBody -notmatch 'native_interop::is_taskbar_window' -or
+    $taskbarBody -notmatch 'state\.taskbar_hwnd' -or
+    $taskbarBody -notmatch 'get_taskbar_rect') {
+    throw 'Dragging must fall back to the persisted valid taskbar when EnumWindows temporarily omits it.'
+}
+
 $up = [regex]::Match($source, '(?s)WM_LBUTTONUP\s*=>\s*\{(?<body>.*?)\n\s*WM_RBUTTONUP\s*=>')
 if (-not $up.Success) { throw 'Unable to locate WM_LBUTTONUP.' }
 if ($up.Groups['body'].Value -notmatch 'left_offset_for_drag_left\s*\(') { throw 'Persisted left-edge offset is not finalized from the final drag-left position.' }
