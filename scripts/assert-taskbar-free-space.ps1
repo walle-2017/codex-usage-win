@@ -76,6 +76,20 @@ if ($worker -notmatch 'merge_taskbar_layout_cache' -or
     $worker -match '\*cache\s*=\s*next_cache') {
     throw 'Transient UI Automation failures or empty results must preserve the last-known-good taskbar layout cache.'
 }
+$watchdog = [regex]::Match(
+    $window,
+    '(?s)fn\s+spawn_taskbar_watchdog\s*\(\)\s*\{.*?\n\}'
+).Value
+if ($worker -notmatch 'preserve_valid_cached_taskbars' -or
+    $worker -notmatch 'is_taskbar_window' -or
+    $watchdog -notmatch 'is_taskbar_window\(old\)') {
+    throw 'A transient EnumWindows gap must not be treated as taskbar destruction while the cached taskbar HWND/class is still valid.'
+}
+if ($native -notmatch 'pub fn is_taskbar_window' -or
+    $native -notmatch 'IsWindow\(hwnd\)' -or
+    $native -notmatch 'Shell_SecondaryTrayWnd') {
+    throw 'Persisted taskbar handles must be validated directly by HWND and taskbar class.'
+}
 if ((Get-Content -Raw (Join-Path $PSScriptRoot '..\native\taskbar_layout.cpp')) -notmatch 'COINIT_MULTITHREADED') {
     throw 'The taskbar UI Automation worker must initialize COM as MTA.'
 }
