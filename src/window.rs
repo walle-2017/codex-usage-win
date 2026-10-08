@@ -846,7 +846,14 @@ fn attach_to_taskbar_window(
         native_interop::unhook_win_event(hook);
     }
 
-    native_interop::embed_in_taskbar(hwnd, taskbar.hwnd);
+    if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
+        diagnose::log(format!(
+            "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
+            taskbar.hwnd,
+            taskbar.monitor_device.as_deref().unwrap_or("<unknown>")
+        ));
+        return false;
+    }
 
     let tray_notify = native_interop::find_child_window(taskbar.hwnd, "TrayNotifyWnd");
     let hook = tray_notify.and_then(|tray_hwnd| {
