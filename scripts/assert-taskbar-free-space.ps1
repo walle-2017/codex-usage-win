@@ -71,6 +71,11 @@ if ($worker -notmatch 'native_interop::taskbar_control_rects' -or
 if ($position -match 'native_interop::taskbar_control_rects') {
     throw 'The UI thread must never synchronously query taskbar UI Automation while embedded in Explorer.'
 }
+if ($worker -notmatch 'merge_taskbar_layout_cache' -or
+    $worker -notmatch 'preserving last-known-good layout' -or
+    $worker -match '\*cache\s*=\s*next_cache') {
+    throw 'Transient UI Automation failures or empty results must preserve the last-known-good taskbar layout cache.'
+}
 if ((Get-Content -Raw (Join-Path $PSScriptRoot '..\native\taskbar_layout.cpp')) -notmatch 'COINIT_MULTITHREADED') {
     throw 'The taskbar UI Automation worker must initialize COM as MTA.'
 }
