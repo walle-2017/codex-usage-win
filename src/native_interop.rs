@@ -202,19 +202,19 @@ pub fn find_taskbars() -> Vec<TaskbarWindow> {
 
 /// Query visible actionable taskbar controls through Windows UI Automation.
 ///
-/// A failure returns None rather than pretending the whole taskbar is empty. The
-/// placement layer can then fail closed and temporarily hide the widget.
-pub fn taskbar_control_rects(taskbar_hwnd: HWND) -> Option<Vec<RECT>> {
+/// Failures preserve the native HRESULT so the background cache can retain the
+/// last-known-good taskbar geometry and diagnose transient UI Automation errors.
+pub fn taskbar_control_rects(taskbar_hwnd: HWND) -> Result<Vec<RECT>, i32> {
     const CAPACITY: usize = 256;
     let mut raw = vec![TaskbarControlRect::default(); CAPACITY];
     let count = unsafe {
         codex_taskbar_control_rects(taskbar_hwnd.0 as isize, raw.as_mut_ptr(), raw.len())
     };
     if count < 0 {
-        return None;
+        return Err(count);
     }
     raw.truncate(count as usize);
-    Some(
+    Ok(
         raw.into_iter()
             .map(|rect| RECT {
                 left: rect.left,
