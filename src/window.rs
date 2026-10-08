@@ -360,10 +360,15 @@ fn spawn_taskbar_watchdog() {
             continue;
         };
 
-        let taskbars = native_interop::find_taskbars();
-        if taskbars.iter().any(|taskbar| taskbar.hwnd == old) {
+        // Do not treat one failed EnumWindows pass as an Explorer restart.
+        // Opening Start / shell flyouts can transiently make the taskbar absent
+        // from our top-level enumeration even though the persisted HWND is still
+        // alive and still has a taskbar class.
+        if native_interop::is_taskbar_window(old) {
             continue;
         }
+
+        let taskbars = native_interop::find_taskbars();
 
         if let Some(preferred_monitor) = preferred_monitor.as_deref() {
             if let Some(replacement) = taskbars
@@ -1124,10 +1129,26 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
 
         loop {
             let taskbars = native_interop::find_taskbars();
-            let active_taskbars: BTreeSet<isize> = taskbars
+            let mut active_taskbars: BTreeSet<isize> = taskbars
                 .iter()
                 .map(|taskbar| taskbar.hwnd.0 as isize)
                 .collect();
+
+            // EnumWindows is not a reliable destruction signal for the taskbar:
+            // Start/shell transitions can transiently omit a still-valid taskbar.
+            // Preserve last-known-good snapshots while their HWND/class are valid.
+            {
+                let cache = TASKBAR_LAYOUT_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for snapshot in cache.iter() {
+                    let cached_hwnd = HWND(snapshot.taskbar_hwnd_raw as *mut _);
+                    if native_interop::is_taskbar_window(cached_hwnd) {
+                        active_taskbars.insert(snapshot.taskbar_hwnd_raw);
+                    }
+                }
+            }
+
             let mut successful_updates = Vec::new();
 
             for taskbar in taskbars {
