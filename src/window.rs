@@ -5050,12 +5050,19 @@ unsafe extern "system" fn wnd_proc(
                 let release_taskbar = taskbar_at_point(pt);
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) {
-                        if embedded {
-                            let _ =
-                                attach_to_taskbar_window(hwnd, target_index, &target_taskbar);
+                        let switched = if embedded {
+                            attach_to_taskbar_window(hwnd, target_index, &target_taskbar)
                         } else {
-                            let _ =
-                                select_taskbar_for_popup_window(target_index, &target_taskbar);
+                            select_taskbar_for_popup_window(target_index, &target_taskbar)
+                        };
+                        if !switched {
+                            // A failed cross-taskbar drop must not save the
+                            // target monitor's screen X as an old-taskbar offset.
+                            // Restore the last known safe position and visibility.
+                            diagnose::log("drag release: taskbar switch failed; restoring original taskbar placement");
+                            position_at_taskbar();
+                            render_layered();
+                            return LRESULT(0);
                         }
                     }
 
