@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -1078,43 +1078,119 @@ fn taskbar_free_spans(taskbar_hwnd: HWND, taskbar_rect: RECT) -> Option<Vec<Hori
     ))
 }
 
+fn same_control_rects(left: &[RECT], right: &[RECT]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            a.left == b.left
+                && a.top == b.top
+                && a.right == b.right
+                && a.bottom == b.bottom
+        })
+}
+
+fn merge_taskbar_layout_cache(
+    cache: &mut Vec<TaskbarLayoutSnapshot>,
+    active_taskbars: &BTreeSet<isize>,
+    successful_updates: Vec<TaskbarLayoutSnapshot>,
+) -> bool {
+    let previous_len = cache.len();
+    cache.retain(|snapshot| active_taskbars.contains(&snapshot.taskbar_hwnd_raw));
+    let mut changed = cache.len() != previous_len;
+
+    for update in successful_updates {
+        if let Some(existing) = cache
+            .iter_mut()
+            .find(|snapshot| snapshot.taskbar_hwnd_raw == update.taskbar_hwnd_raw)
+        {
+            if !same_control_rects(&existing.controls, &update.controls) {
+                existing.controls = update.controls;
+                changed = true;
+            }
+        } else {
+            cache.push(update);
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 fn spawn_taskbar_layout_worker(hwnd: HWND) {
     let target = SendHwnd::from_hwnd(hwnd);
-    std::thread::spawn(move || loop {
-        let taskbars = native_interop::find_taskbars();
-        let mut next_cache = Vec::new();
+    std::thread::spawn(move || {
+        // Track only failure-state transitions so a persistent Explorer/UIA
+        // condition does not flood the runtime log once per second.
+        let mut last_failures: BTreeMap<isize, Option<i32>> = BTreeMap::new();
 
-        for taskbar in taskbars {
-            if let Some(controls) = native_interop::taskbar_control_rects(taskbar.hwnd) {
-                next_cache.push(TaskbarLayoutSnapshot {
-                    taskbar_hwnd_raw: taskbar.hwnd.0 as isize,
-                    controls,
-                });
-            } else {
-                diagnose::log(format!(
-                    "background taskbar UI Automation query failed for hwnd={:?}",
-                    taskbar.hwnd
-                ));
+        loop {
+            let taskbars = native_interop::find_taskbars();
+            let active_taskbars: BTreeSet<isize> = taskbars
+                .iter()
+                .map(|taskbar| taskbar.hwnd.0 as isize)
+                .collect();
+            let mut successful_updates = Vec::new();
+
+            for taskbar in taskbars {
+                let raw = taskbar.hwnd.0 as isize;
+                match native_interop::taskbar_control_rects(taskbar.hwnd) {
+                    Ok(controls) if !controls.is_empty() => {
+                        if last_failures.remove(&raw).is_some() {
+                            diagnose::log(format!(
+                                "taskbar UI Automation query recovered hwnd={:?} controls={}",
+                                taskbar.hwnd,
+                                controls.len()
+                            ));
+                        }
+                        successful_updates.push(TaskbarLayoutSnapshot {
+                            taskbar_hwnd_raw: raw,
+                            controls,
+                        });
+                    }
+                    Ok(_) => {
+                        if last_failures.get(&raw) != Some(&None) {
+                            diagnose::log(format!(
+                                "taskbar UI Automation returned zero actionable controls hwnd={:?}; preserving last-known-good layout",
+                                taskbar.hwnd
+                            ));
+                            last_failures.insert(raw, None);
+                        }
+                    }
+                    Err(status) => {
+                        let state = Some(status);
+                        if last_failures.get(&raw) != Some(&state) {
+                            diagnose::log(format!(
+                                "taskbar UI Automation query failed hwnd={:?} hresult=0x{:08X}; preserving last-known-good layout",
+                                taskbar.hwnd,
+                                status as u32
+                            ));
+                            last_failures.insert(raw, state);
+                        }
+                    }
+                }
             }
-        }
 
-        {
-            let mut cache = TASKBAR_LAYOUT_CACHE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *cache = next_cache;
-        }
+            last_failures.retain(|raw, _| active_taskbars.contains(raw));
 
-        unsafe {
-            let _ = PostMessageW(
-                target.to_hwnd(),
-                WM_APP_TASKBAR_LAYOUT_UPDATED,
-                WPARAM(0),
-                LPARAM(0),
-            );
-        }
+            let changed = {
+                let mut cache = TASKBAR_LAYOUT_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                merge_taskbar_layout_cache(&mut cache, &active_taskbars, successful_updates)
+            };
 
-        std::thread::sleep(Duration::from_millis(u64::from(TASKBAR_LAYOUT_POLL_MS)));
+            if changed {
+                unsafe {
+                    let _ = PostMessageW(
+                        target.to_hwnd(),
+                        WM_APP_TASKBAR_LAYOUT_UPDATED,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(u64::from(TASKBAR_LAYOUT_POLL_MS)));
+        }
     });
 }
 
