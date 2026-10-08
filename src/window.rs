@@ -107,6 +107,7 @@ struct AppState {
     dragging: bool,
     drag_anchor_logical_x: i32,
     drag_reparenting: bool,
+    failed_drag_target: Option<HWND>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2022,6 +2023,7 @@ pub fn run() {
                 dragging: false,
                 drag_anchor_logical_x: 0,
                 drag_reparenting: false,
+        failed_drag_target: None,
             });
         }
 
@@ -4836,6 +4838,7 @@ unsafe extern "system" fn wnd_proc(
                 s.dragging = true;
                 s.drag_handle_hovered = true;
                 s.drag_anchor_logical_x = anchor_logical_x;
+                s.failed_drag_target = None;
             }
             {
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
@@ -4904,6 +4907,9 @@ unsafe extern "system" fn wnd_proc(
 
                 let mut switched_taskbar = false;
                 if current_taskbar_hwnd != Some(hovered_taskbar.hwnd) {
+                    if lock_state().as_ref().and_then(|s| s.failed_drag_target) == Some(hovered_taskbar.hwnd) {
+                        return LRESULT(0);
+                    }
                         let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed);
                         let target_dpi = GetDpiForWindow(hovered_taskbar.hwnd);
                         if target_dpi > 0 {
@@ -4936,6 +4942,7 @@ unsafe extern "system" fn wnd_proc(
                                 if let Some(s) = state.as_mut() {
                                     s.dragging = true;
                                     s.drag_reparenting = false;
+                                    s.failed_drag_target = None;
                                 }
                             }
                             SetCapture(hwnd);
@@ -4945,6 +4952,7 @@ unsafe extern "system" fn wnd_proc(
                             let mut state = lock_state();
                             if let Some(s) = state.as_mut() {
                                 s.drag_reparenting = false;
+                                s.failed_drag_target = Some(hovered_taskbar.hwnd);
                             }
                             SetCapture(hwnd);
                             // The widget is still a child of the old taskbar.
@@ -5078,8 +5086,9 @@ unsafe extern "system" fn wnd_proc(
                     s.drag_reparenting = false;
                     let was_dragging = s.dragging;
                     s.dragging = false;
+                    let failed_target = s.failed_drag_target.take();
                     if was_dragging {
-                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, s.embedded))
+                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, s.embedded, failed_target))
                     } else {
                         None
                     }
@@ -5113,10 +5122,10 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_hwnd, anchor_logical_x, embedded)) = drag_result {
+            if let Some((current_taskbar_hwnd, anchor_logical_x, embedded, failed_target)) = drag_result {
                 let release_taskbar = taskbar_at_point(pt);
                 if let Some((target_index, target_taskbar)) = release_taskbar {
-                    if current_taskbar_hwnd != Some(target_taskbar.hwnd) {
+                    if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
                         let switched = if embedded {
                             attach_to_taskbar_window(hwnd, target_index, &target_taskbar)
                         } else {
