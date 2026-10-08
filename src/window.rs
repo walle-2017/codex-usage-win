@@ -838,14 +838,6 @@ fn attach_to_taskbar_window(
         taskbar.rect.bottom
     ));
 
-    let old_hook = {
-        let mut state = lock_state();
-        state.as_mut().and_then(|s| s.win_event_hook.take())
-    };
-    if let Some(hook) = old_hook {
-        native_interop::unhook_win_event(hook);
-    }
-
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
@@ -853,6 +845,15 @@ fn attach_to_taskbar_window(
             taskbar.monitor_device.as_deref().unwrap_or("<unknown>")
         ));
         return false;
+    }
+
+    // Only release the old event hook after the window actually moves.
+    let old_hook = {
+        let mut state = lock_state();
+        state.as_mut().and_then(|s| s.win_event_hook.take())
+    };
+    if let Some(hook) = old_hook {
+        native_interop::unhook_win_event(hook);
     }
 
     let tray_notify = native_interop::find_child_window(taskbar.hwnd, "TrayNotifyWnd");
