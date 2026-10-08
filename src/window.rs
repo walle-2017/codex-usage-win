@@ -841,7 +841,7 @@ fn log_drag_input_snapshot(stage: &str, hwnd: HWND) {
         let gui_result = if fg_thread != 0 {
             GetGUIThreadInfo(fg_thread, &mut explorer_gui)
         } else {
-            BOOL(0)
+            Err(windows::core::Error::from_win32())
         };
         let foreground_root = if foreground != HWND::default() {
             GetAncestor(foreground, GA_ROOT)
@@ -851,7 +851,7 @@ fn log_drag_input_snapshot(stage: &str, hwnd: HWND) {
         diagnose::log(format!(
             "drag input snapshot stage={} foreground={:?} foreground_root={:?} foreground_thread={} active={:?} focus={:?} capture={:?} widget={:?} widget_thread={} gui_ok={} gui_flags={:#x} gui_active={:?} gui_focus={:?} gui_capture={:?} gui_menu_owner={:?} gui_move_size={:?}",
             stage, foreground, foreground_root, fg_thread, active, focus, capture, hwnd, widget_thread,
-            gui_result.as_bool(), explorer_gui.flags, explorer_gui.hwndActive, explorer_gui.hwndFocus,
+            gui_result.is_ok(), explorer_gui.flags, explorer_gui.hwndActive, explorer_gui.hwndFocus,
             explorer_gui.hwndCapture, explorer_gui.hwndMenuOwner, explorer_gui.hwndMoveSize
         ));
     }
