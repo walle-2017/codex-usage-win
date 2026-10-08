@@ -297,7 +297,7 @@ pub fn get_window_rect_safe(hwnd: HWND) -> Option<RECT> {
 }
 
 /// Embed our window as a child of the taskbar
-pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
+pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
     unsafe {
         // Preserve existing extended style, add tool window + no activate
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -312,8 +312,19 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
         let new_style = (style & !WS_POPUP_STYLE) | WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE;
         let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
 
-        let _ = SetParent(hwnd, taskbar_hwnd);
-        let _ = SetWindowPos(
+        let set_parent_result = SetParent(hwnd, taskbar_hwnd);
+        // SetParent's previous-parent return value alone cannot prove that the
+        // requested parent is now active. Verify the actual parent explicitly.
+        let actual_parent = GetAncestor(hwnd, GA_PARENT);
+        let parent_matches = actual_parent == taskbar_hwnd;
+        if !parent_matches {
+            crate::diagnose::log(format!(
+                "taskbar reparent failed widget={:?} target={:?} actual_parent={:?} set_parent_result={:?}",
+                hwnd, taskbar_hwnd, actual_parent, set_parent_result
+            ));
+            return false;
+        }
+        let frame_result = SetWindowPos(
             hwnd,
             HWND_NOTOPMOST,
             0,
@@ -322,6 +333,11 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
+        crate::diagnose::log(format!(
+            "taskbar reparent verified widget={:?} target={:?} actual_parent={:?} frame_result={:?}",
+            hwnd, taskbar_hwnd, actual_parent, frame_result
+        ));
+        true
     }
 }
 
