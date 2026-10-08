@@ -328,6 +328,29 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             hwnd, previous_parent, taskbar_hwnd, source_style, source_ex_style, capture,
             widget_thread, source_thread, target_thread, widget_context, target_context
         ));
+        // Check for a newly-created shell hierarchy or an invalid target
+        // topology before attempting the transfer. USER32 can reject SetParent
+        // with ERROR_INVALID_PARAMETER even when both HWNDs are valid.
+        let mut ancestor = taskbar_hwnd;
+        let mut target_depth = 0usize;
+        let mut target_contains_widget = false;
+        for _ in 0..64 {
+            if ancestor == hwnd {
+                target_contains_widget = true;
+                break;
+            }
+            let next = GetAncestor(ancestor, GA_PARENT);
+            if next == HWND::default() || next == ancestor {
+                break;
+            }
+            ancestor = next;
+            target_depth += 1;
+        }
+        crate::diagnose::log(format!(
+            "taskbar reparent topology target_valid={} source_valid={} target_depth={} target_contains_widget={} target_root={:?}",
+            IsWindow(taskbar_hwnd).as_bool(), IsWindow(hwnd).as_bool(),
+            target_depth, target_contains_widget, GetAncestor(taskbar_hwnd, GA_ROOT)
+        ));
         let set_parent_result = SetParent(hwnd, taskbar_hwnd);
         // SetParent's previous-parent return value alone cannot prove that the
         // requested parent is now active. Verify the actual parent explicitly.
