@@ -4642,6 +4642,29 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if native_interop::reparent_diagnostic_active() {
+        let message_name = match msg {
+            WM_WINDOWPOSCHANGING => Some("WM_WINDOWPOSCHANGING"),
+            WM_WINDOWPOSCHANGED => Some("WM_WINDOWPOSCHANGED"),
+            WM_STYLECHANGING => Some("WM_STYLECHANGING"),
+            WM_STYLECHANGED => Some("WM_STYLECHANGED"),
+            WM_PARENTNOTIFY => Some("WM_PARENTNOTIFY"),
+            WM_CHILDACTIVATE => Some("WM_CHILDACTIVATE"),
+            WM_ACTIVATE => Some("WM_ACTIVATE"),
+            WM_SETFOCUS => Some("WM_SETFOCUS"),
+            WM_KILLFOCUS => Some("WM_KILLFOCUS"),
+            WM_CAPTURECHANGED => Some("WM_CAPTURECHANGED"),
+            WM_CANCELMODE => Some("WM_CANCELMODE"),
+            WM_DPICHANGED => Some("WM_DPICHANGED"),
+            _ => None,
+        };
+        if let Some(name) = message_name {
+            diagnose::log(format!(
+                "taskbar SetParent synchronous message={} hwnd={:?} wparam={:#x} lparam={:#x}",
+                name, hwnd, wparam.0, lparam.0
+            ));
+        }
+    }
     match msg {
         WM_PAINT => {
             let (embedded, frosted_active) = {
