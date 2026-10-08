@@ -4886,6 +4886,10 @@ unsafe extern "system" fn wnd_proc(
                                 s.drag_reparenting = false;
                             }
                             SetCapture(hwnd);
+                            // The widget is still a child of the old taskbar.
+                            // Its client coordinates must not follow the pointer
+                            // into another monitor or it will be clipped away.
+                            return LRESULT(0);
                         }
                 }
 
