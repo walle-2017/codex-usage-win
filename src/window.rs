@@ -6932,6 +6932,79 @@ mod tests {
     }
 
     #[test]
+    fn transient_taskbar_query_failure_keeps_last_known_good_cache() {
+        let original = RECT {
+            left: 100,
+            top: 0,
+            right: 200,
+            bottom: 48,
+        };
+        let mut cache = vec![TaskbarLayoutSnapshot {
+            taskbar_hwnd_raw: 11,
+            controls: vec![original],
+        }];
+        let active = BTreeSet::from([11isize]);
+
+        let changed = merge_taskbar_layout_cache(&mut cache, &active, Vec::new());
+
+        assert!(!changed);
+        assert_eq!(cache.len(), 1);
+        assert!(same_control_rects(&cache[0].controls, &[original]));
+    }
+
+    #[test]
+    fn successful_taskbar_query_replaces_last_known_good_cache() {
+        let original = RECT {
+            left: 100,
+            top: 0,
+            right: 200,
+            bottom: 48,
+        };
+        let updated = RECT {
+            left: 120,
+            top: 0,
+            right: 220,
+            bottom: 48,
+        };
+        let mut cache = vec![TaskbarLayoutSnapshot {
+            taskbar_hwnd_raw: 11,
+            controls: vec![original],
+        }];
+        let active = BTreeSet::from([11isize]);
+
+        let changed = merge_taskbar_layout_cache(
+            &mut cache,
+            &active,
+            vec![TaskbarLayoutSnapshot {
+                taskbar_hwnd_raw: 11,
+                controls: vec![updated],
+            }],
+        );
+
+        assert!(changed);
+        assert!(same_control_rects(&cache[0].controls, &[updated]));
+    }
+
+    #[test]
+    fn disappeared_taskbar_is_removed_from_layout_cache() {
+        let mut cache = vec![TaskbarLayoutSnapshot {
+            taskbar_hwnd_raw: 11,
+            controls: vec![RECT {
+                left: 100,
+                top: 0,
+                right: 200,
+                bottom: 48,
+            }],
+        }];
+        let active = BTreeSet::new();
+
+        let changed = merge_taskbar_layout_cache(&mut cache, &active, Vec::new());
+
+        assert!(changed);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
     fn free_taskbar_spans_exclude_occupied_controls_and_tray() {
         let taskbar = RECT {
             left: 0,
