@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
+use windows::Win32::UI::HiDpi::{GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 // Window style constants
@@ -312,7 +313,20 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
         let new_style = (style & !WS_POPUP_STYLE) | WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE;
         let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
 
+        // Explorer taskbars can use a different DPI-awareness context than the
+        // widget after a shell/Start-menu transition. Use the target parent's
+        // context only for the cross-process SetParent call, then restore it.
+        let target_context = GetWindowDpiAwarenessContext(taskbar_hwnd);
+        let widget_context = GetWindowDpiAwarenessContext(hwnd);
+        let old_thread_context = SetThreadDpiAwarenessContext(target_context);
+        crate::diagnose::log(format!(
+            "taskbar reparent contexts widget={:?} target={:?} widget_dpi_context={:?} target_dpi_context={:?} previous_thread_context={:?}",
+            hwnd, taskbar_hwnd, widget_context, target_context, old_thread_context
+        ));
         let set_parent_result = SetParent(hwnd, taskbar_hwnd);
+        if old_thread_context.0 != 0 {
+            let _ = SetThreadDpiAwarenessContext(old_thread_context);
+        }
         // SetParent's previous-parent return value alone cannot prove that the
         // requested parent is now active. Verify the actual parent explicitly.
         let actual_parent = GetAncestor(hwnd, GA_PARENT);
