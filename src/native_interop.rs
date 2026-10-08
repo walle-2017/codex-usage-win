@@ -165,6 +165,23 @@ pub fn monitor_device_name(hwnd: HWND) -> Option<String> {
     }
 }
 
+pub fn is_taskbar_window(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return false;
+        }
+        let mut class_name = [0u16; 64];
+        let len = GetClassNameW(hwnd, &mut class_name);
+        if len <= 0 {
+            return false;
+        }
+        matches!(
+            String::from_utf16_lossy(&class_name[..len as usize]).as_str(),
+            "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+        )
+    }
+}
+
 pub fn find_taskbars() -> Vec<TaskbarWindow> {
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let taskbars = &mut *(lparam.0 as *mut Vec<TaskbarWindow>);
