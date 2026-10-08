@@ -15,7 +15,7 @@ use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+    GetCapture, ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -823,6 +823,29 @@ fn select_preferred_taskbar(
     }
 }
 
+fn log_drag_input_snapshot(stage: &str, hwnd: HWND) {
+    if !diagnose::enabled() {
+        return;
+    }
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let active = GetActiveWindow();
+        let focus = GetFocus();
+        let capture = GetCapture();
+        let fg_thread = GetWindowThreadProcessId(foreground, None);
+        let widget_thread = GetWindowThreadProcessId(hwnd, None);
+        let foreground_root = if foreground != HWND::default() {
+            GetAncestor(foreground, GA_ROOT)
+        } else {
+            HWND::default()
+        };
+        diagnose::log(format!(
+            "drag input snapshot stage={} foreground={:?} foreground_root={:?} foreground_thread={} active={:?} focus={:?} capture={:?} widget={:?} widget_thread={}",
+            stage, foreground, foreground_root, fg_thread, active, focus, capture, hwnd, widget_thread
+        ));
+    }
+}
+
 fn attach_to_taskbar_window(
     hwnd: HWND,
     index: usize,
@@ -838,7 +861,9 @@ fn attach_to_taskbar_window(
         taskbar.rect.bottom
     ));
 
+    log_drag_input_snapshot("before-reparent", hwnd);
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
+        log_drag_input_snapshot("reparent-failed", hwnd);
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
             taskbar.hwnd,
@@ -4756,6 +4781,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            log_drag_input_snapshot("mouse-down", hwnd);
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             if !is_drag_handle_point(client_x, client_y) {
@@ -4982,7 +5008,12 @@ unsafe extern "system" fn wnd_proc(
             render_layered();
             LRESULT(0)
         }
+        WM_ACTIVATE | WM_SETFOCUS | WM_KILLFOCUS => {
+            log_drag_input_snapshot("activation-or-focus-message", hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CANCELMODE => {
+            log_drag_input_snapshot("cancel-mode", hwnd);
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -4994,6 +5025,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
+            log_drag_input_snapshot("capture-changed", hwnd);
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 if !s.drag_reparenting {
@@ -5003,6 +5035,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            log_drag_input_snapshot("mouse-up", hwnd);
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let drag_result = {
