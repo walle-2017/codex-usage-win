@@ -329,48 +329,6 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             widget_thread, source_thread, target_thread, widget_context, target_context
         ));
         let set_parent_result = SetParent(hwnd, taskbar_hwnd);
-        if GetAncestor(hwnd, GA_PARENT) != taskbar_hwnd
-            && is_taskbar_window(previous_parent)
-            && previous_parent != taskbar_hwnd
-        {
-            // A direct Explorer-taskbar -> Explorer-taskbar transition can fail
-            // after shell surfaces have been opened. Make one reversible attempt
-            // via an unparented popup; never commit a different taskbar state
-            // unless the final parent is verified.
-            crate::diagnose::log(format!(
-                "taskbar direct reparent failed; trying detached handoff widget={:?} from={:?} to={:?} result={:?}",
-                hwnd, previous_parent, taskbar_hwnd, set_parent_result
-            ));
-            let detach_result = SetParent(hwnd, HWND::default());
-            let detached = GetAncestor(hwnd, GA_PARENT) != previous_parent;
-            crate::diagnose::log(format!(
-                "taskbar detached handoff stage=detach result={:?} detached={} actual_parent={:?}",
-                detach_result, detached, GetAncestor(hwnd, GA_PARENT)
-            ));
-            if detached {
-                let _ = SetWindowLongW(
-                    hwnd,
-                    GWL_STYLE,
-                    ((new_style & !WS_CHILD_STYLE) | WS_POPUP_STYLE) as i32,
-                );
-                let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
-                let attach_result = SetParent(hwnd, taskbar_hwnd);
-                crate::diagnose::log(format!(
-                    "taskbar detached handoff stage=attach result={:?} actual_parent={:?}",
-                    attach_result, GetAncestor(hwnd, GA_PARENT)
-                ));
-                if GetAncestor(hwnd, GA_PARENT) != taskbar_hwnd {
-                    let rollback_result = SetParent(hwnd, previous_parent);
-                    crate::diagnose::log(format!(
-                        "taskbar detached handoff stage=rollback result={:?} actual_parent={:?}",
-                        rollback_result, GetAncestor(hwnd, GA_PARENT)
-                    ));
-                    if GetAncestor(hwnd, GA_PARENT) != previous_parent {
-                        crate::diagnose::log("taskbar detached handoff rollback failed; widget parent must be recovered");
-                    }
-                }
-            }
-        }
         // SetParent's previous-parent return value alone cannot prove that the
         // requested parent is now active. Verify the actual parent explicitly.
         let actual_parent = GetAncestor(hwnd, GA_PARENT);
