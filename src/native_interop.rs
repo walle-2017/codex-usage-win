@@ -10,6 +10,7 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVE
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
 
 // Window style constants
 pub const WS_POPUP_STYLE: u32 = 0x80000000;
