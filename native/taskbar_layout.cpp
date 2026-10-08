@@ -38,20 +38,21 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
 ) {
     HWND taskbar_hwnd = reinterpret_cast<HWND>(taskbar_hwnd_raw);
     if (!taskbar_hwnd || !IsWindow(taskbar_hwnd) || !out_rects || capacity == 0) {
-        return -1;
+        return static_cast<int>(E_INVALIDARG);
     }
 
     HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitialize = SUCCEEDED(init);
     if (FAILED(init) && init != RPC_E_CHANGED_MODE) {
-        return -1;
+        return static_cast<int>(init);
     }
 
     IUIAutomation* automation = nullptr;
     IUIAutomationElement* root = nullptr;
     IUIAutomationCondition* condition = nullptr;
     IUIAutomationElementArray* elements = nullptr;
-    int written = -1;
+    int result = static_cast<int>(E_FAIL);
+    int written = 0;
     int length = 0;
 
     HRESULT hr = CoCreateInstance(
@@ -61,46 +62,51 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
         IID_PPV_ARGS(&automation)
     );
     if (FAILED(hr) || !automation) {
+        result = FAILED(hr) ? static_cast<int>(hr) : static_cast<int>(E_UNEXPECTED);
         goto cleanup;
     }
 
     hr = automation->ElementFromHandle(taskbar_hwnd, &root);
     if (FAILED(hr) || !root) {
+        result = FAILED(hr) ? static_cast<int>(hr) : static_cast<int>(E_UNEXPECTED);
         goto cleanup;
     }
 
     hr = automation->CreateTrueCondition(&condition);
     if (FAILED(hr) || !condition) {
+        result = FAILED(hr) ? static_cast<int>(hr) : static_cast<int>(E_UNEXPECTED);
         goto cleanup;
     }
 
     hr = root->FindAll(TreeScope_Descendants, condition, &elements);
     if (FAILED(hr) || !elements) {
+        result = FAILED(hr) ? static_cast<int>(hr) : static_cast<int>(E_UNEXPECTED);
         goto cleanup;
     }
 
     hr = elements->get_Length(&length);
     if (FAILED(hr)) {
+        result = static_cast<int>(hr);
         goto cleanup;
     }
-
     if (length < 0) {
+        result = static_cast<int>(E_UNEXPECTED);
         goto cleanup;
     }
 
-    written = 0;
     for (int index = 0; index < length; ++index) {
         IUIAutomationElement* element = nullptr;
-        if (FAILED(elements->GetElement(index, &element)) || !element) {
-            written = -1;
+        hr = elements->GetElement(index, &element);
+        if (FAILED(hr) || !element) {
+            result = FAILED(hr) ? static_cast<int>(hr) : static_cast<int>(E_UNEXPECTED);
             goto cleanup;
         }
 
         CONTROLTYPEID control_type = 0;
-        const HRESULT type_hr = element->get_CurrentControlType(&control_type);
-        if (FAILED(type_hr)) {
+        hr = element->get_CurrentControlType(&control_type);
+        if (FAILED(hr)) {
             element->Release();
-            written = -1;
+            result = static_cast<int>(hr);
             goto cleanup;
         }
         if (!is_actionable_taskbar_control(control_type)) {
@@ -110,11 +116,16 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
 
         BOOL offscreen = TRUE;
         RECT rect{};
-        const HRESULT offscreen_hr = element->get_CurrentIsOffscreen(&offscreen);
-        const HRESULT rect_hr = element->get_CurrentBoundingRectangle(&rect);
-        if (FAILED(offscreen_hr) || FAILED(rect_hr)) {
+        hr = element->get_CurrentIsOffscreen(&offscreen);
+        if (FAILED(hr)) {
             element->Release();
-            written = -1;
+            result = static_cast<int>(hr);
+            goto cleanup;
+        }
+        hr = element->get_CurrentBoundingRectangle(&rect);
+        if (FAILED(hr)) {
+            element->Release();
+            result = static_cast<int>(hr);
             goto cleanup;
         }
 
@@ -123,7 +134,7 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
             && rect.bottom > rect.top) {
             if (static_cast<std::size_t>(written) >= capacity) {
                 element->Release();
-                written = -1;
+                result = static_cast<int>(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
                 goto cleanup;
             }
             out_rects[written++] = CodexTaskbarControlRect{
@@ -136,6 +147,8 @@ extern "C" __declspec(dllexport) int codex_taskbar_control_rects(
 
         element->Release();
     }
+
+    result = written;
 
 cleanup:
     if (elements) {
@@ -153,5 +166,5 @@ cleanup:
     if (uninitialize) {
         CoUninitialize();
     }
-    return written;
+    return result;
 }
