@@ -824,7 +824,7 @@ fn select_preferred_taskbar(
 }
 
 fn log_drag_input_snapshot(stage: &str, hwnd: HWND) {
-    if !diagnose::enabled() {
+    if !diagnose::is_enabled() {
         return;
     }
     unsafe {
