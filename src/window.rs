@@ -938,16 +938,50 @@ fn select_taskbar_for_popup_window(
     true
 }
 
+fn point_is_in_taskbar_rect(pt: POINT, rect: RECT) -> bool {
+    pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
+}
+
 fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)> {
-    native_interop::find_taskbars()
+    if let Some(found) = native_interop::find_taskbars()
         .into_iter()
         .enumerate()
-        .find(|(_, taskbar)| {
-            pt.x >= taskbar.rect.left
-                && pt.x < taskbar.rect.right
-                && pt.y >= taskbar.rect.top
-                && pt.y < taskbar.rect.bottom
-        })
+        .find(|(_, taskbar)| point_is_in_taskbar_rect(pt, taskbar.rect))
+    {
+        return Some(found);
+    }
+
+    // Opening Start or another shell surface can transiently omit the taskbar
+    // from EnumWindows. Dragging must still work on the current taskbar while
+    // its persisted HWND/class remains valid.
+    let (index, hwnd, monitor_device) = {
+        let state = lock_state();
+        let state = state.as_ref()?;
+        (
+            state.taskbar_index,
+            state.taskbar_hwnd?,
+            state.taskbar_monitor.clone(),
+        )
+    };
+
+    if !native_interop::is_taskbar_window(hwnd) {
+        return None;
+    }
+
+    let rect = native_interop::get_taskbar_rect(hwnd)
+        .or_else(|| native_interop::get_window_rect_safe(hwnd))?;
+    if !point_is_in_taskbar_rect(pt, rect) {
+        return None;
+    }
+
+    Some((
+        index,
+        native_interop::TaskbarWindow {
+            hwnd,
+            rect,
+            monitor_device,
+        },
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6963,6 +6997,20 @@ mod tests {
         assert!((blur_amount_for_strength(50) - 10.0).abs() < f32::EPSILON);
         assert!((blur_amount_for_strength(100) - 20.0).abs() < f32::EPSILON);
         assert!((blur_amount_for_strength(255) - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn point_in_taskbar_rect_uses_half_open_bounds() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 500,
+            bottom: 260,
+        };
+        assert!(point_is_in_taskbar_rect(POINT { x: 100, y: 200 }, rect));
+        assert!(point_is_in_taskbar_rect(POINT { x: 499, y: 259 }, rect));
+        assert!(!point_is_in_taskbar_rect(POINT { x: 500, y: 259 }, rect));
+        assert!(!point_is_in_taskbar_rect(POINT { x: 499, y: 260 }, rect));
     }
 
     #[test]
