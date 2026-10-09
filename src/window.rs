@@ -4670,6 +4670,12 @@ fn focus_cycle_enabled() -> bool {
       == Some(std::ffi::OsStr::new("1"))
 }
 
+fn mouse_noactivate_experiment_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_MOUSE_NOACTIVATE_EXPERIMENT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -4902,7 +4908,37 @@ unsafe extern "system" fn wnd_proc(
 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_MOUSEACTIVATE => {
+            // Compare with DefWindowProc's default mouse activation behavior.
+            // MA_NOACTIVATE preserves the incoming button-down message, unlike
+            // MA_NOACTIVATEANDEAT. Never affect non-drag widget interactions.
+            let enabled = mouse_noactivate_experiment_enabled();
+            let embedded = lock_state().as_ref().map(|s| s.embedded).unwrap_or(false);
+            let left_button = ((lparam.0 as usize >> 16) & 0xFFFF) as u32 == WM_LBUTTONDOWN;
+            let drag_handle = left_button
+                && (enabled || diagnose::is_enabled())
+                && cursor_is_on_drag_handle(hwnd);
+            if diagnose::is_enabled() {
+                diagnose::log(format!(
+                    "taskbar mouse noactivate experiment mouse_activate enabled={} embedded={} left_button={} drag_handle={} foreground={:?} widget={:?} wparam={:#x} lparam={:#x}",
+                    enabled, embedded, left_button, drag_handle,
+                    GetForegroundWindow(), hwnd, wparam.0, lparam.0
+                ));
+            }
+            if enabled && embedded && drag_handle {
+                diagnose::log("taskbar mouse noactivate experiment return=MA_NOACTIVATE");
+                LRESULT(3) // MA_NOACTIVATE: do not activate; keep WM_LBUTTONDOWN.
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
         WM_LBUTTONDOWN => {
+            if diagnose::is_enabled() {
+                diagnose::log(format!(
+                    "taskbar mouse noactivate experiment mouse_down enabled={} foreground={:?} widget={:?}",
+                    mouse_noactivate_experiment_enabled(), GetForegroundWindow(), hwnd
+                ));
+            }
             if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
             if focus_cycle_enabled() && FOCUS_CYCLE_ARMED.with(|cell| cell.replace(false)) {
                 let candidate = FOCUS_CYCLE_CANDIDATE.with(|cell| cell.get());
@@ -5181,7 +5217,13 @@ unsafe extern "system" fn wnd_proc(
             render_layered();
             LRESULT(0)
         }
-        WM_ACTIVATE | WM_SETFOCUS | WM_KILLFOCUS => {
+        WM_ACTIVATE | WM_ACTIVATEAPP | WM_NCACTIVATE | WM_SETFOCUS | WM_KILLFOCUS => {
+            if diagnose::is_enabled() {
+                diagnose::log(format!(
+                    "taskbar mouse noactivate experiment activation_message={:#x} wparam={:#x} lparam={:#x} foreground={:?}",
+                    msg, wparam.0, lparam.0, GetForegroundWindow()
+                ));
+            }
             log_drag_input_snapshot("activation-or-focus-message", hwnd);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
