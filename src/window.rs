@@ -1040,6 +1040,7 @@ fn attach_to_taskbar_window(
     ));
 
     log_drag_input_snapshot("before-reparent", hwnd);
+    observe_taskbar_activation_edge("before-reparent", true);
     log_taskbar_zorder_snapshot("before-reparent", Some(taskbar.hwnd));
     let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
     let handoff_attempt = if explorer_active_state_verify_enabled()
@@ -1065,6 +1066,7 @@ fn attach_to_taskbar_window(
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
         }
         log_drag_input_snapshot("reparent-failed", hwnd);
+        observe_taskbar_activation_edge("reparent-failed", true);
         log_taskbar_zorder_snapshot("reparent-failed", Some(taskbar.hwnd));
         sample_explorer_active_state("reparent-failed", true);
         if handoff_attempt != 0 {
@@ -1083,6 +1085,7 @@ fn attach_to_taskbar_window(
     }
 
     sample_explorer_active_state("reparent-success", true);
+    observe_taskbar_activation_edge("reparent-success", true);
     log_taskbar_zorder_snapshot("reparent-success", Some(taskbar.hwnd));
     if handoff_attempt != 0 {
         diagnose::log(format!(
@@ -2316,6 +2319,11 @@ pub fn run() {
             SetTimer(hwnd, TIMER_EXPLORER_STATE_VERIFY, 50, None);
             diagnose::log("taskbar active-state verify started interval_ms=50 read_only=true");
             sample_explorer_active_state("startup", true);
+        }
+        if taskbar_activation_edge_verify_enabled() {
+            SetTimer(hwnd, TIMER_TASKBAR_ACTIVATION_EDGE, 50, None);
+            diagnose::log("taskbar activation-edge observer started interval_ms=50 read_only=true");
+            observe_taskbar_activation_edge("startup", true);
         }
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
@@ -5009,6 +5017,124 @@ fn sample_explorer_active_state(stage: &str, force: bool) {
 }
 
 
+// Read-only transition monitor. Observe *edges* on the Explorer GUI thread
+// rather than inferring a state transition from a single SetParent snapshot.
+const TIMER_TASKBAR_ACTIVATION_EDGE: usize = 0xF053;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskbarActivationPhase {
+    Unknown,
+    Active,
+    Inactive,
+}
+
+struct TaskbarActivationEdgeTrack {
+    explorer_tid: u32,
+    phase: TaskbarActivationPhase,
+    phase_since: Instant,
+    observed_loss_at: Option<Instant>,
+    observed_return_at: Option<Instant>,
+    last_inactive_duration_ms: Option<u128>,
+    lost_count: u32,
+    returned_count: u32,
+    handoff_count: u32,
+    last_failed_returned_count: Option<u32>,
+}
+
+thread_local! {
+    static TASKBAR_ACTIVATION_EDGE_TRACK: std::cell::RefCell<Option<TaskbarActivationEdgeTrack>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn taskbar_activation_edge_verify_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_ACTIVATION_EDGE_VERIFY").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn observe_taskbar_activation_edge(stage: &str, force: bool) {
+    if !taskbar_activation_edge_verify_enabled() { return; }
+    unsafe {
+        let source_taskbar = lock_state().as_ref()
+            .and_then(|s| s.taskbar_hwnd).unwrap_or_default();
+        let tid = if source_taskbar != HWND::default() {
+            GetWindowThreadProcessId(source_taskbar, None)
+        } else { 0 };
+        let foreground = GetForegroundWindow();
+        let mut fg_pid = 0u32;
+        let fg_tid = GetWindowThreadProcessId(foreground, Some(&mut fg_pid));
+        let mut gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let gui_ok = tid != 0 && GetGUIThreadInfo(tid, &mut gui).is_ok();
+        let phase = if !gui_ok {
+            TaskbarActivationPhase::Unknown
+        } else if gui.hwndActive == HWND::default() && gui.hwndFocus == HWND::default() {
+            TaskbarActivationPhase::Inactive
+        } else {
+            TaskbarActivationPhase::Active
+        };
+        let now = Instant::now();
+        TASKBAR_ACTIVATION_EDGE_TRACK.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.as_ref().map(|v| v.explorer_tid != tid).unwrap_or(true) {
+                *state = Some(TaskbarActivationEdgeTrack {
+                    explorer_tid: tid,
+                    phase, phase_since: now,
+                    observed_loss_at: None, observed_return_at: None,
+                    last_inactive_duration_ms: None,
+                    lost_count: 0, returned_count: 0, handoff_count: 0,
+                    last_failed_returned_count: None,
+                });
+            }
+            let Some(track) = state.as_mut() else { return; };
+            let previous = track.phase;
+            let changed = previous != phase;
+            if changed {
+                if previous == TaskbarActivationPhase::Active
+                    && phase == TaskbarActivationPhase::Inactive
+                {
+                    track.lost_count = track.lost_count.saturating_add(1);
+                    track.observed_loss_at = Some(now);
+                }
+                if previous == TaskbarActivationPhase::Inactive
+                    && phase == TaskbarActivationPhase::Active
+                {
+                    track.returned_count = track.returned_count.saturating_add(1);
+                    track.observed_return_at = Some(now);
+                    track.last_inactive_duration_ms = track.observed_loss_at
+                        .map(|lost| now.duration_since(lost).as_millis());
+                }
+                track.phase = phase;
+                track.phase_since = now;
+            }
+            if stage == "before-reparent" {
+                track.handoff_count = track.handoff_count.saturating_add(1);
+            }
+            let since_failed_cycle = track.last_failed_returned_count.map(|last| {
+                track.returned_count.saturating_sub(last)
+            });
+            if stage == "reparent-failed" {
+                track.last_failed_returned_count = Some(track.returned_count);
+            }
+            if changed || force {
+                diagnose::log(format!(
+                    "taskbar activation-edge stage={} attempt={} prev={:?} phase={:?} changed={} shell_tid={} taskbar={:?} foreground={:?} fg_tid={} fg_pid={} fg_class={} shell_active={:?} shell_focus={:?} shell_capture={:?} gui_ok={} phase_age_ms={} lost_count={} returned_count={} since_failed_returned={:?} last_loss_age_ms={:?} last_return_age_ms={:?} last_inactive_duration_ms={:?}",
+                    stage, track.handoff_count, previous, phase, changed, tid, source_taskbar,
+                    foreground, fg_tid, fg_pid, explorer_activation_event_class(foreground),
+                    gui.hwndActive, gui.hwndFocus, gui.hwndCapture, gui_ok,
+                    now.duration_since(track.phase_since).as_millis(),
+                    track.lost_count, track.returned_count, since_failed_cycle,
+                    track.observed_loss_at.map(|v| now.duration_since(v).as_millis()),
+                    track.observed_return_at.map(|v| now.duration_since(v).as_millis()),
+                    track.last_inactive_duration_ms
+                ));
+            }
+        });
+    }
+}
+
 fn explorer_activation_events_enabled() -> bool {
     diagnose::is_enabled()
         && std::env::var_os("CODEX_TASKBAR_EXPLORER_EVENTS_EXPERIMENT").as_deref()
@@ -5058,7 +5184,9 @@ unsafe extern "system" fn on_explorer_activation_event(
     event_tid: u32,
     event_time_ms: u32,
 ) {
-    if !explorer_activation_events_enabled() && !zorder_diagnostic_enabled() { return; }
+    if !explorer_activation_events_enabled()
+        && !zorder_diagnostic_enabled()
+        && !taskbar_activation_edge_verify_enabled() { return; }
     let (taskbar, widget) = {
         let state = lock_state();
         (state.as_ref().and_then(|s| s.taskbar_hwnd),
@@ -5096,6 +5224,9 @@ unsafe extern "system" fn on_explorer_activation_event(
         log_taskbar_zorder_snapshot("win-event-zorder", None);
         return;
     }
+    if event == EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC {
+        observe_taskbar_activation_edge("foreground-event", true);
+    }
     if !explorer_activation_events_enabled() { return; }
     // Explorer focus only, to avoid logging unrelated accessibility events.
     // System foreground/menu events from all apps reveal focus transitions.
@@ -5124,8 +5255,10 @@ unsafe extern "system" fn on_explorer_activation_event(
 
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
     let mut ranges = Vec::new();
-    if explorer_activation_events_enabled() {
+    if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled() {
         ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
+    }
+    if explorer_activation_events_enabled() {
         ranges.push((EVENT_OBJECT_FOCUS_DIAGNOSTIC, EVENT_OBJECT_FOCUS_DIAGNOSTIC));
     }
     if zorder_diagnostic_enabled() {
@@ -5223,6 +5356,9 @@ unsafe extern "system" fn wnd_proc(
             match timer_id {
                 TIMER_EXPLORER_STATE_VERIFY => {
                     sample_explorer_active_state("poll", false);
+                }
+                TIMER_TASKBAR_ACTIVATION_EDGE => {
+                    observe_taskbar_activation_edge("poll", false);
                 }
                 TIMER_FOCUS_EXPERIMENT => {
                     if focus_experiment_enabled() {
@@ -5397,6 +5533,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            observe_taskbar_activation_edge("mouse-down", true);
             sample_explorer_active_state("mouse-down", true);
             log_explorer_activation_snapshot("mouse-down", None, None);
             if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
@@ -5710,6 +5847,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            observe_taskbar_activation_edge("mouse-up", true);
             sample_explorer_active_state("mouse-up", true);
             log_drag_input_snapshot("mouse-up", hwnd);
             let mut pt = POINT::default();
