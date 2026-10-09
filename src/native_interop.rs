@@ -11,7 +11,7 @@ use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::System::StationsAndDesktops::GetThreadDesktop;
-use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+use windows::Win32::UI::Input::KeyboardAndMouse::{AttachThreadInput, GetCapture};
 
 thread_local! {
     static REPARENT_DIAGNOSTIC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
