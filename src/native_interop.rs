@@ -10,6 +10,7 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVE
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::System::StationsAndDesktops::GetThreadDesktop;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
 
 thread_local! {
@@ -331,6 +332,37 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
         let widget_thread = GetWindowThreadProcessId(hwnd, None);
         let source_thread = GetWindowThreadProcessId(previous_parent, None);
         let target_thread = GetWindowThreadProcessId(taskbar_hwnd, None);
+        // Snapshot the source/target Explorer thread desktops and GUI input
+        // state without attaching queues or changing window ownership.
+        let source_pid = {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(previous_parent, Some(&mut pid));
+            pid
+        };
+        let target_pid = {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(taskbar_hwnd, Some(&mut pid));
+            pid
+        };
+        let widget_pid = {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            pid
+        };
+        let source_desktop = GetThreadDesktop(source_thread);
+        let target_desktop = GetThreadDesktop(target_thread);
+        let widget_desktop = GetThreadDesktop(widget_thread);
+        let mut target_gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let target_gui_ok = GetGUIThreadInfo(target_thread, &mut target_gui).is_ok();
+        crate::diagnose::log(format!(
+            "taskbar reparent environment source_pid={} target_pid={} widget_pid={} source_desktop={:?} target_desktop={:?} widget_desktop={:?} target_gui_ok={} target_gui_flags={:#x} target_gui_active={:?} target_gui_focus={:?} target_gui_capture={:?} target_gui_menu_owner={:?}",
+            source_pid, target_pid, widget_pid, source_desktop, target_desktop,
+            widget_desktop, target_gui_ok, target_gui.flags.0, target_gui.hwndActive,
+            target_gui.hwndFocus, target_gui.hwndCapture, target_gui.hwndMenuOwner
+        ));
         crate::diagnose::log(format!(
             "taskbar reparent before widget={:?} old_parent={:?} target={:?} style={:#x} ex_style={:#x} capture={:?} widget_thread={} source_thread={} target_thread={} widget_dpi_context={:?} target_dpi_context={:?}",
             hwnd, previous_parent, taskbar_hwnd, source_style, source_ex_style, capture,
@@ -361,34 +393,13 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
         ));
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
         crate::diagnose::log("taskbar SetParent begin");
-        let mut set_parent_result = SetParent(hwnd, taskbar_hwnd);
-        // Capture the original failure before any subsequent USER32 calls.
+        let set_parent_result = SetParent(hwnd, taskbar_hwnd);
         let immediate_error = if set_parent_result.is_err() {
             Some(windows::core::Error::from_win32())
         } else {
             None
         };
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
-        // Opt-in single-variable experiment. Never detach the child or change
-        // its parent on failure unless USER32 accepts the normal SetParent call.
-        if set_parent_result.is_err()
-            && std::env::var_os("CODEX_TASKBAR_FRAME_REFRESH_EXPERIMENT").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-        {
-            let refresh = SetWindowPos(
-                hwnd, HWND::default(), 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            crate::diagnose::log(format!(
-                "taskbar frame refresh experiment refresh_result={:?}", refresh
-            ));
-            if refresh.is_ok() {
-                set_parent_result = SetParent(hwnd, taskbar_hwnd);
-                crate::diagnose::log(format!(
-                    "taskbar frame refresh experiment retry_result={:?}", set_parent_result
-                ));
-            }
-        }
         crate::diagnose::log(format!(
             "taskbar SetParent end result={:?} immediate_last_error={:?}",
             set_parent_result, immediate_error
