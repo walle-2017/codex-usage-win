@@ -393,13 +393,40 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
         ));
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
         crate::diagnose::log("taskbar SetParent begin");
-        let set_parent_result = SetParent(hwnd, taskbar_hwnd);
+        let mut set_parent_result = SetParent(hwnd, taskbar_hwnd);
         let immediate_error = if set_parent_result.is_err() {
             Some(windows::core::Error::from_win32())
         } else {
             None
         };
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
+        // Optional controlled input-queue experiment. Attach only the widget
+        // thread to the Explorer taskbar thread, retry once, always detach.
+        // This is NOT used in normal operation.
+        if set_parent_result.is_err()
+            && widget_thread != 0
+            && target_thread != 0
+            && widget_thread != target_thread
+            && std::env::var_os("CODEX_TASKBAR_INPUT_QUEUE_EXPERIMENT").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            let attach = AttachThreadInput(widget_thread, target_thread, true);
+            crate::diagnose::log(format!(
+                "taskbar input queue experiment attach={:?} widget_thread={} target_thread={}",
+                attach, widget_thread, target_thread
+            ));
+            if attach.is_ok() {
+                set_parent_result = SetParent(hwnd, taskbar_hwnd);
+                let retry_error = if set_parent_result.is_err() {
+                    Some(windows::core::Error::from_win32())
+                } else { None };
+                let detach = AttachThreadInput(widget_thread, target_thread, false);
+                crate::diagnose::log(format!(
+                    "taskbar input queue experiment retry={:?} retry_error={:?} detach={:?}",
+                    set_parent_result, retry_error, detach
+                ));
+            }
+        }
         crate::diagnose::log(format!(
             "taskbar SetParent end result={:?} immediate_last_error={:?}",
             set_parent_result, immediate_error
