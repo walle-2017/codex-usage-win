@@ -314,28 +314,6 @@ pub fn get_window_rect_safe(hwnd: HWND) -> Option<RECT> {
     }
 }
 
-/// Experimental desktop activation, without synthetic pointer movement or clicks.
-/// Foreground activation is restricted by Windows; a false result is expected
-/// when the shell declines the request.
-pub fn try_activate_desktop_for_drag() -> bool {
-    unsafe {
-        let class = wide_str("Progman");
-        let desktop = FindWindowW(PCWSTR::from_raw(class.as_ptr()), PCWSTR::null());
-        let Ok(desktop) = desktop else {
-            crate::diagnose::log(format!("desktop activation experiment desktop_lookup={:?}", desktop));
-            return false;
-        };
-        let before = GetForegroundWindow();
-        let accepted = SetForegroundWindow(desktop).as_bool();
-        let after = GetForegroundWindow();
-        crate::diagnose::log(format!(
-            "desktop activation experiment desktop={:?} foreground_before={:?} accepted={} foreground_after={:?} activated={}",
-            desktop, before, accepted, after, after == desktop
-        ));
-        accepted && after == desktop
-    }
-}
-
 /// Embed our window as a child of the taskbar
 pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
     unsafe {
