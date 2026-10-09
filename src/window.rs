@@ -246,8 +246,8 @@ fn tooltip_owner_experiment_enabled() -> bool {
             == Some(std::ffi::OsStr::new("1"))
 }
 
-/// The requested owner is tracked by popup lifetime. Avoid retrying an
-/// unexpected GW_OWNER value on every WM_MOUSEMOVE / tooltip redraw.
+// The requested owner is tracked by popup lifetime. Avoid retrying an
+// unexpected GW_OWNER value on every WM_MOUSEMOVE / tooltip redraw.
 thread_local! {
     static LAST_TOOLTIP_OWNER_ATTEMPT: std::cell::Cell<isize> =
         const { std::cell::Cell::new(0) };
