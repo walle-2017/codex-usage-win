@@ -11,7 +11,7 @@ use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::System::StationsAndDesktops::GetThreadDesktop;
-use windows::Win32::UI::Input::KeyboardAndMouse::{AttachThreadInput, GetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
 
 thread_local! {
     static REPARENT_DIAGNOSTIC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -19,6 +19,13 @@ thread_local! {
 
 pub fn reparent_diagnostic_active() -> bool {
     REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.get())
+}
+
+// The Windows 0.58 projections do not expose AttachThreadInput in the enabled
+// modules; call the Win32 API directly for this opt-in diagnostic only.
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn AttachThreadInput(id_attach: u32, id_attach_to: u32, attach: i32) -> i32;
 }
 
 // Window style constants
@@ -410,17 +417,17 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             && std::env::var_os("CODEX_TASKBAR_INPUT_QUEUE_EXPERIMENT").as_deref()
                 == Some(std::ffi::OsStr::new("1"))
         {
-            let attach = AttachThreadInput(widget_thread, target_thread, true);
+            let attach = AttachThreadInput(widget_thread, target_thread, 1) != 0;
             crate::diagnose::log(format!(
                 "taskbar input queue experiment attach={:?} widget_thread={} target_thread={}",
                 attach, widget_thread, target_thread
             ));
-            if attach.is_ok() {
+            if attach {
                 set_parent_result = SetParent(hwnd, taskbar_hwnd);
                 let retry_error = if set_parent_result.is_err() {
                     Some(windows::core::Error::from_win32())
                 } else { None };
-                let detach = AttachThreadInput(widget_thread, target_thread, false);
+                let detach = AttachThreadInput(widget_thread, target_thread, 0) != 0;
                 crate::diagnose::log(format!(
                     "taskbar input queue experiment retry={:?} retry_error={:?} detach={:?}",
                     set_parent_result, retry_error, detach
