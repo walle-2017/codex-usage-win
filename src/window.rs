@@ -4637,6 +4637,13 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
+// A per-UI-thread drag onset snapshot. Cleared before invoking the shell so
+// incidental WM_MOUSEMOVE events cannot activate it more than once per drag.
+thread_local! {
+    static DESKTOP_ACTIVATION_DRAG_START: std::cell::Cell<Option<(i32, i32)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -4844,6 +4851,16 @@ unsafe extern "system" fn wnd_proc(
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
                 *last = None;
             }
+            if std::env::var_os("CODEX_TASKBAR_DESKTOP_ACTIVATION_EXPERIMENT").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                let mut start = POINT::default();
+                if GetCursorPos(&mut start).is_ok() {
+                    DESKTOP_ACTIVATION_DRAG_START.with(|cell| cell.set(Some((start.x, start.y))));
+                }
+            } else {
+                DESKTOP_ACTIVATION_DRAG_START.with(|cell| cell.set(None));
+            }
             SetCapture(hwnd);
             LRESULT(0)
         }
@@ -4886,6 +4903,44 @@ unsafe extern "system" fn wnd_proc(
                 }
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
+                let activate_desktop = DESKTOP_ACTIVATION_DRAG_START.with(|cell| {
+                    let Some((start_x, start_y)) = cell.get() else { return false; };
+                    if (pt.x - start_x).abs() < 6 && (pt.y - start_y).abs() < 6 {
+                        return false;
+                    }
+                    cell.set(None);
+                    true
+                });
+                if activate_desktop {
+                    // Release capture intentionally while suppressing the normal
+                    // capture-changed drag cancellation, then immediately restore.
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.drag_reparenting = true;
+                        }
+                    }
+                    let _ = ReleaseCapture();
+                    let activation = native_interop::try_activate_desktop_for_drag();
+                    SetCapture(hwnd);
+                    let capture_restored = GetCapture() == hwnd;
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.drag_reparenting = false;
+                            if !capture_restored {
+                                s.dragging = false;
+                            }
+                        }
+                    }
+                    diagnose::log(format!(
+                        "desktop activation experiment at_drag_start activated={} capture_restored={} cursor=({}, {})",
+                        activation, capture_restored, pt.x, pt.y
+                    ));
+                    if !capture_restored {
+                        return LRESULT(0);
+                    }
+                }
 
                 let (current_taskbar_hwnd, embedded, blur_active) = {
                     let state = lock_state();
@@ -5077,6 +5132,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            DESKTOP_ACTIVATION_DRAG_START.with(|cell| cell.set(None));
             log_drag_input_snapshot("mouse-up", hwnd);
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
