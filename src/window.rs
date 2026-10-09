@@ -4638,6 +4638,9 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
 }
 
 const WM_APP_DEFERRED_DRAG_RELEASE: u32 = WM_APP + 0x155;
+thread_local! {
+    static DEFERRED_DROP_REPLAY_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn deferred_taskbar_drop_enabled() -> bool {
     std::env::var_os("CODEX_TASKBAR_DEFERRED_DROP_EXPERIMENT").as_deref()
@@ -5088,8 +5091,10 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_LBUTTONUP | WM_APP_DEFERRED_DRAG_RELEASE => {
-            if msg == WM_LBUTTONUP && deferred_taskbar_drop_enabled() {
+        WM_LBUTTONUP => {
+            if deferred_taskbar_drop_enabled()
+                && !DEFERRED_DROP_REPLAY_ACTIVE.with(|active| active.get())
+            {
                 let dragging = lock_state().as_ref().map(|s| s.dragging).unwrap_or(false);
                 if dragging {
                     // Defer SetParent until WM_LBUTTONUP has returned and capture
@@ -5108,9 +5113,6 @@ unsafe extern "system" fn wnd_proc(
                     }
                     diagnose::log("taskbar deferred drop post failed; using original immediate drop");
                 }
-            }
-            if msg == WM_APP_DEFERRED_DRAG_RELEASE {
-                diagnose::log("taskbar deferred drop executing after input event");
             }
             log_drag_input_snapshot("mouse-up", hwnd);
             let mut pt = POINT::default();
@@ -5413,6 +5415,13 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             LRESULT(0)
+        }
+        WM_APP_DEFERRED_DRAG_RELEASE => {
+            diagnose::log("taskbar deferred drop executing after input event");
+            DEFERRED_DROP_REPLAY_ACTIVE.with(|active| active.set(true));
+            let result = SendMessageW(hwnd, WM_LBUTTONUP, wparam, lparam);
+            DEFERRED_DROP_REPLAY_ACTIVE.with(|active| active.set(false));
+            result
         }
         WM_RBUTTONUP => {
             let mut anchor = POINT {
