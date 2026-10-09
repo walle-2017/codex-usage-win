@@ -2098,6 +2098,10 @@ pub fn run() {
                 .unwrap_or(POLL_15_MIN)
         };
         SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
+        if focus_experiment_enabled() {
+            SetTimer(hwnd, TIMER_FOCUS_EXPERIMENT, 100, None);
+            diagnose::log("taskbar focus experiment started interval_ms=100");
+        }
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
         // icon (the shell discards tray registrations when it restarts). This
@@ -4637,6 +4641,18 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
+// Opt-in, read-only foreground transition monitor. It deliberately never
+// activates another window, sends input, or changes taskbar parenting.
+const TIMER_FOCUS_EXPERIMENT: usize = 0xF051;
+thread_local! {
+    static LAST_FOCUS_EXPERIMENT_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(-1) };
+}
+fn focus_experiment_enabled() -> bool {
+    diagnose::is_enabled() &&
+        std::env::var_os("CODEX_TASKBAR_FOCUS_EXPERIMENT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -4707,6 +4723,29 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_FOCUS_EXPERIMENT => {
+                    if focus_experiment_enabled() {
+                        let fg = GetForegroundWindow();
+                        let changed = LAST_FOCUS_EXPERIMENT_HWND.with(|cell| {
+                            if cell.get() == fg.0 as isize { false }
+                            else { cell.set(fg.0 as isize); true }
+                        });
+                        if changed {
+                            let fg_thread = GetWindowThreadProcessId(fg, None);
+                            let (taskbar_hwnd, widget_hwnd) = {
+                                let state = lock_state();
+                                (state.as_ref().and_then(|s| s.taskbar_hwnd), hwnd)
+                            };
+                            let taskbar_root = taskbar_hwnd.map(|h| GetAncestor(h, GA_ROOT));
+                            diagnose::log(format!(
+                                "taskbar focus experiment foreground_change foreground={:?} root={:?} thread={} taskbar={:?} taskbar_root={:?} taskbar_is_foreground={} ",
+                                fg, GetAncestor(fg, GA_ROOT), fg_thread, taskbar_hwnd,
+                                taskbar_root, taskbar_root == Some(fg) || taskbar_hwnd == Some(fg)
+                            ));
+                            log_drag_input_snapshot("foreground-transition", widget_hwnd);
+                        }
+                    }
+                }
                 TIMER_POLL => {
                     let auth_watch = {
                         let state = lock_state();
@@ -4817,6 +4856,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
             log_drag_input_snapshot("mouse-down", hwnd);
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
