@@ -4637,6 +4637,13 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
+const WM_APP_DEFERRED_DRAG_RELEASE: u32 = WM_APP + 0x155;
+
+fn deferred_taskbar_drop_enabled() -> bool {
+    std::env::var_os("CODEX_TASKBAR_DEFERRED_DROP_EXPERIMENT").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -4907,6 +4914,11 @@ unsafe extern "system" fn wnd_proc(
 
                 let mut switched_taskbar = false;
                 if current_taskbar_hwnd != Some(hovered_taskbar.hwnd) {
+                    if deferred_taskbar_drop_enabled() {
+                        // Keep the child safely on its current taskbar until mouse-up.
+                        // A child cannot visually travel outside that parent's clip.
+                        return LRESULT(0);
+                    }
                     if lock_state().as_ref().and_then(|s| s.failed_drag_target) == Some(hovered_taskbar.hwnd) {
                         return LRESULT(0);
                     }
@@ -5076,7 +5088,30 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_LBUTTONUP => {
+        WM_LBUTTONUP | WM_APP_DEFERRED_DRAG_RELEASE => {
+            if msg == WM_LBUTTONUP && deferred_taskbar_drop_enabled() {
+                let dragging = lock_state().as_ref().map(|s| s.dragging).unwrap_or(false);
+                if dragging {
+                    // Defer SetParent until WM_LBUTTONUP has returned and capture
+                    // release messages have completed. The original drop handler
+                    // runs on the following posted message, without injecting input.
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.drag_reparenting = true;
+                        }
+                    }
+                    let _ = ReleaseCapture();
+                    if PostMessageW(hwnd, WM_APP_DEFERRED_DRAG_RELEASE, wparam, lparam).is_ok() {
+                        diagnose::log("taskbar deferred drop queued after mouse-up and capture release");
+                        return LRESULT(0);
+                    }
+                    diagnose::log("taskbar deferred drop post failed; using original immediate drop");
+                }
+            }
+            if msg == WM_APP_DEFERRED_DRAG_RELEASE {
+                diagnose::log("taskbar deferred drop executing after input event");
+            }
             log_drag_input_snapshot("mouse-up", hwnd);
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
