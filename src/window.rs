@@ -875,6 +875,10 @@ fn attach_to_taskbar_window(
 
     log_drag_input_snapshot("before-reparent", hwnd);
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
+        if focus_cycle_enabled() {
+            FOCUS_CYCLE_ARMED.with(|cell| cell.set(true));
+            diagnose::log("taskbar focus cycle experiment armed by failed reparent");
+        }
         log_drag_input_snapshot("reparent-failed", hwnd);
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
@@ -4654,6 +4658,18 @@ fn focus_experiment_enabled() -> bool {
             == Some(std::ffi::OsStr::new("1"))
 }
 
+// A single opt-in focus-cycle attempt is armed only by a failed reparent.
+// The previous non-Explorer foreground HWND is observed, never fabricated.
+thread_local! {
+    static FOCUS_CYCLE_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FOCUS_CYCLE_CANDIDATE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+fn focus_cycle_enabled() -> bool {
+    diagnose::is_enabled() &&
+    std::env::var_os("CODEX_TASKBAR_FOCUS_CYCLE_EXPERIMENT").as_deref()
+      == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -4760,6 +4776,19 @@ unsafe extern "system" fn wnd_proc(
                                 fg, GetAncestor(fg, GA_ROOT), fg_thread, taskbar_hwnd,
                                 taskbar_root, taskbar_root == Some(fg) || taskbar_hwnd == Some(fg)
                             ));
+                            if focus_cycle_enabled() && fg != HWND::default()
+                                && taskbar_root != Some(fg) && taskbar_hwnd != Some(fg)
+                            {
+                                let mut fg_pid = 0u32;
+                                GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+                                let mut shell_pid = 0u32;
+                                if let Some(taskbar) = taskbar_hwnd {
+                                    GetWindowThreadProcessId(taskbar, Some(&mut shell_pid));
+                                }
+                                if fg_pid != 0 && shell_pid != 0 && fg_pid != shell_pid {
+                                    FOCUS_CYCLE_CANDIDATE.with(|cell| cell.set(fg.0 as isize));
+                                }
+                            }
                             log_drag_input_snapshot("foreground-transition", widget_hwnd);
                         }
                     }
@@ -4875,6 +4904,20 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_LBUTTONDOWN => {
             if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
+            if focus_cycle_enabled() && FOCUS_CYCLE_ARMED.with(|cell| cell.replace(false)) {
+                let candidate = FOCUS_CYCLE_CANDIDATE.with(|cell| cell.get());
+                let target = HWND(candidate as *mut _);
+                let original = GetForegroundWindow();
+                let valid = candidate != 0 && IsWindow(target).as_bool();
+                let accepted = if valid { SetForegroundWindow(target).as_bool() } else { false };
+                let after = GetForegroundWindow();
+                diagnose::log(format!(
+                    "taskbar focus cycle experiment candidate={:?} valid={} foreground_before={:?} accepted={} foreground_after={:?} switched={}",
+                    target, valid, original, accepted, after, valid && after == target
+                ));
+                // Never send synthetic button events or move the pointer.
+                // If foreground permission is denied, drag continues unchanged.
+            }
             log_drag_input_snapshot("mouse-down", hwnd);
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
