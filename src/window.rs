@@ -218,6 +218,118 @@ static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
 
+// Temporary read-only Windows z-order and tooltip ownership diagnostics.
+#[link(name = "user32")]
+unsafe extern "system" {
+    #[link_name = "GetWindow"]
+    fn get_window_zorder_diagnostic(hwnd: HWND, command: u32) -> HWND;
+}
+const GW_NEXT_ZORDER_DIAGNOSTIC: u32 = 2;
+const GW_PREV_ZORDER_DIAGNOSTIC: u32 = 3;
+const GW_OWNER_ZORDER_DIAGNOSTIC: u32 = 4;
+thread_local! {
+    static LAST_TOOLTIP_ZORDER_TRACE: std::cell::RefCell<Option<Instant>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn zorder_diagnostic_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_ZORDER_DIAGNOSTIC").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn zorder_window_description(label: &str, hwnd: HWND) -> String {
+    if hwnd == HWND::default() {
+        return format!("{label}=<none>");
+    }
+    unsafe {
+        let valid = IsWindow(hwnd).as_bool();
+        if !valid { return format!("{label}={:?} valid=false", hwnd); }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let owner = get_window_zorder_diagnostic(hwnd, GW_OWNER_ZORDER_DIAGNOSTIC);
+        let prev = get_window_zorder_diagnostic(hwnd, GW_PREV_ZORDER_DIAGNOSTIC);
+        let next = get_window_zorder_diagnostic(hwnd, GW_NEXT_ZORDER_DIAGNOSTIC);
+        let bounds = native_interop::get_window_rect_safe(hwnd);
+        let rect_text = bounds.map(|r| format!("({},{},{},{})",r.left,r.top,r.right,r.bottom))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        format!(
+            "{label}={:?} class={} valid={} visible={} owner={:?} root={:?} prev={:?} prev_class={} next={:?} ex_style={:#x} topmost={} rect={}",
+            hwnd, explorer_activation_event_class(hwnd), valid, IsWindowVisible(hwnd).as_bool(),
+            owner, GetAncestor(hwnd, GA_ROOT), prev, explorer_activation_event_class(prev),
+            next, ex_style, ex_style & WS_EX_TOPMOST.0 != 0, rect_text
+        )
+    }
+}
+
+/// Some modern shell surfaces occupy separate window bands. Only claim order
+/// when walking the same GetWindow predecessor chain finds the other HWND.
+fn zorder_above_relation(candidate: HWND, baseline: HWND) -> &'static str {
+    if candidate == HWND::default() || baseline == HWND::default() { return "unknown"; }
+    if candidate == baseline { return "same"; }
+    unsafe {
+        for (start, match_hwnd, verdict) in [
+            (baseline, candidate, "above"),
+            (candidate, baseline, "below"),
+        ] {
+            let mut cursor = start;
+            for _ in 0..256 {
+                let next = get_window_zorder_diagnostic(cursor, GW_PREV_ZORDER_DIAGNOSTIC);
+                if next == HWND::default() || next == cursor { break; }
+                if next == match_hwnd { return verdict; }
+                cursor = next;
+            }
+        }
+    }
+    "unknown"
+}
+
+fn log_taskbar_zorder_snapshot(stage: &str, target: Option<HWND>) {
+    if !zorder_diagnostic_enabled() { return; }
+    let (widget, taskbar) = {
+        let state = lock_state();
+        (state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default(),
+         state.as_ref().and_then(|s| s.taskbar_hwnd).unwrap_or_default())
+    };
+    let tooltip = MINIMAL_TOOLTIP_HWND.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().map(|h| h.to_hwnd()).unwrap_or_default();
+    let blur = TOOLTIP_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().map(|h| h.to_hwnd()).unwrap_or_default();
+    let fg = unsafe { GetForegroundWindow() };
+    diagnose::log(format!(
+        "taskbar zorder snapshot stage={} tooltip_vs_taskbar={} blur_vs_taskbar={} tooltip_vs_foreground={} target={:?} | {} | {} | {} | {} | {} | {}",
+        stage, zorder_above_relation(tooltip, taskbar),
+        zorder_above_relation(blur, taskbar), zorder_above_relation(tooltip, fg), target,
+        zorder_window_description("tooltip", tooltip),
+        zorder_window_description("blur", blur),
+        zorder_window_description("widget", widget),
+        zorder_window_description("taskbar", taskbar),
+        zorder_window_description("foreground", fg),
+        zorder_window_description("target", target.unwrap_or_default())
+    ));
+}
+
+fn log_tooltip_zorder_show(tooltip_placement_ok: bool, backdrop_placement_ok: Option<bool>) {
+    if !zorder_diagnostic_enabled() { return; }
+    let now = Instant::now();
+    let should_log = LAST_TOOLTIP_ZORDER_TRACE.with(|cell| {
+        let mut last = cell.borrow_mut();
+        let due = last.map(|old| now.duration_since(old) >= Duration::from_millis(600))
+            .unwrap_or(true);
+        if due || !tooltip_placement_ok || backdrop_placement_ok == Some(false) {
+            *last = Some(now);
+            true
+        } else { false }
+    });
+    if should_log {
+        diagnose::log(format!(
+            "taskbar zorder tooltip_show tooltip_setwindowpos_ok={} backdrop_setwindowpos_ok={:?}",
+            tooltip_placement_ok, backdrop_placement_ok
+        ));
+        log_taskbar_zorder_snapshot("tooltip-shown", None);
+    }
+}
+
+
 #[derive(Clone, Debug)]
 struct TaskbarLayoutSnapshot {
     taskbar_hwnd_raw: isize,
@@ -874,6 +986,7 @@ fn attach_to_taskbar_window(
     ));
 
     log_drag_input_snapshot("before-reparent", hwnd);
+    log_taskbar_zorder_snapshot("before-reparent", Some(taskbar.hwnd));
     let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
     let handoff_attempt = if explorer_active_state_verify_enabled()
         && source_taskbar.is_some() && source_taskbar != Some(taskbar.hwnd)
@@ -898,6 +1011,7 @@ fn attach_to_taskbar_window(
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
         }
         log_drag_input_snapshot("reparent-failed", hwnd);
+        log_taskbar_zorder_snapshot("reparent-failed", Some(taskbar.hwnd));
         sample_explorer_active_state("reparent-failed", true);
         if handoff_attempt != 0 {
             diagnose::log(format!(
@@ -915,6 +1029,7 @@ fn attach_to_taskbar_window(
     }
 
     sample_explorer_active_state("reparent-success", true);
+    log_taskbar_zorder_snapshot("reparent-success", Some(taskbar.hwnd));
     if handoff_attempt != 0 {
         diagnose::log(format!(
             "taskbar active-state verify handoff_result attempt={} success=true source={:?} target={:?}",
@@ -4389,7 +4504,11 @@ fn hide_minimal_usage_tooltip() {
     };
     if let Some(hwnd) = hwnd {
         unsafe {
+            let was_visible = IsWindowVisible(hwnd).as_bool();
             let _ = ShowWindow(hwnd, SW_HIDE);
+            if was_visible {
+                log_taskbar_zorder_snapshot("tooltip-hidden", None);
+            }
         }
     }
     hide_tooltip_blur_backdrop();
@@ -4495,6 +4614,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
                 (style.tooltip_frosted_strength(), style.color(StyleColorTarget::TooltipBackground))
             }).unwrap_or((0, Color::from_hex("#30343CFF")))
         };
+        let mut backdrop_placement_ok = None;
         let frosted_active = if tooltip_frosted_strength > 0 {
             if let Some(backdrop) = ensure_tooltip_blur_backdrop(
                 blur_amount_for_strength(tooltip_frosted_strength),
@@ -4502,7 +4622,10 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
                 width,
                 height,
             ) {
-                let _ = SetWindowPos(backdrop, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                backdrop_placement_ok = Some(
+                    SetWindowPos(backdrop, HWND_TOPMOST, x, y, width, height,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW).is_ok()
+                );
                 true
             } else {
                 false
@@ -4511,7 +4634,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             hide_tooltip_blur_backdrop();
             false
         };
-        let _ = SetWindowPos(
+        let tooltip_placement_ok = SetWindowPos(
             tooltip,
             HWND_TOPMOST,
             x,
@@ -4519,8 +4642,9 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             width,
             height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
+        ).is_ok();
         render_minimal_tooltip_layered(tooltip, width, height, frosted_active);
+        log_tooltip_zorder_show(tooltip_placement_ok, backdrop_placement_ok);
     }
 }
 
@@ -4887,6 +5011,9 @@ unsafe extern "system" fn on_explorer_activation_event(
         GetForegroundWindow(), widget
     ));
     log_explorer_activation_snapshot("win-event", taskbar, None);
+    if event == EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC {
+        log_taskbar_zorder_snapshot("win-event-foreground", None);
+    }
 }
 
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
