@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -50,6 +51,9 @@ jobs:
       - name: Verify taskbar mouse noactivate experiment
         shell: pwsh
         run: ./scripts/assert-taskbar-mouse-noactivate.ps1
+      - name: Verify Explorer activation event diagnostics
+        shell: pwsh
+        run: ./scripts/assert-explorer-activation-events.ps1
       - name: Verify adaptive taskbar free-space placement
         shell: pwsh
         run: ./scripts/assert-taskbar-free-space.ps1

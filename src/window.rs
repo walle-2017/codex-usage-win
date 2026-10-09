@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
-use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -874,12 +874,15 @@ fn attach_to_taskbar_window(
     ));
 
     log_drag_input_snapshot("before-reparent", hwnd);
+    let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+    log_explorer_activation_snapshot("before-reparent", source_taskbar, Some(taskbar.hwnd));
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
         if focus_cycle_enabled() {
             FOCUS_CYCLE_ARMED.with(|cell| cell.set(true));
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
         }
         log_drag_input_snapshot("reparent-failed", hwnd);
+        log_explorer_activation_snapshot("reparent-failed", source_taskbar, Some(taskbar.hwnd));
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
             taskbar.hwnd,
@@ -888,6 +891,7 @@ fn attach_to_taskbar_window(
         return false;
     }
 
+    log_explorer_activation_snapshot("reparent-success", source_taskbar, Some(taskbar.hwnd));
     // Only release the old event hook after the window actually moves.
     let old_hook = {
         let mut state = lock_state();
@@ -2093,6 +2097,9 @@ pub fn run() {
             updater::start_startup_update_check(hwnd, update_success_notified);
         }
 
+        // Separate diagnostic hooks; the event callback uses this UI message loop.
+        let explorer_activation_hooks = install_explorer_activation_hooks();
+
         // Poll timer: 15 minutes
         let initial_poll_ms = {
             let state = lock_state();
@@ -2129,6 +2136,9 @@ pub fn run() {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+        for hook in explorer_activation_hooks {
+            native_interop::unhook_win_event(hook);
         }
     }
 }
@@ -4670,10 +4680,112 @@ fn focus_cycle_enabled() -> bool {
       == Some(std::ffi::OsStr::new("1"))
 }
 
-fn mouse_noactivate_experiment_enabled() -> bool {
+// Opt-in, read-only Explorer foreground/menu/focus event tracing.
+const EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC: u32 = 0x0003;
+const EVENT_SYSTEM_MENUSTART_DIAGNOSTIC: u32 = 0x0004;
+const EVENT_SYSTEM_MENUEND_DIAGNOSTIC: u32 = 0x0005;
+const EVENT_OBJECT_FOCUS_DIAGNOSTIC: u32 = 0x8005;
+
+fn explorer_activation_events_enabled() -> bool {
     diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_MOUSE_NOACTIVATE_EXPERIMENT").as_deref()
+        && std::env::var_os("CODEX_TASKBAR_EXPLORER_EVENTS_EXPERIMENT").as_deref()
             == Some(std::ffi::OsStr::new("1"))
+}
+
+fn explorer_activation_event_class(hwnd: HWND) -> String {
+    if hwnd == HWND::default() { return "<none>".into(); }
+    let mut buf = [0u16; 96];
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if len > 0 { String::from_utf16_lossy(&buf[..len as usize]) }
+    else { "<unknown>".into() }
+}
+
+// Observe the Explorer GUI thread even when an unrelated app is foreground.
+fn log_explorer_activation_snapshot(stage: &str, source: Option<HWND>, target: Option<HWND>) {
+    if !explorer_activation_events_enabled() { return; }
+    unsafe {
+        let shell_hwnd = source.or_else(|| lock_state().as_ref().and_then(|s| s.taskbar_hwnd));
+        let shell_tid = shell_hwnd.map(|h| GetWindowThreadProcessId(h, None)).unwrap_or(0);
+        let target_tid = target.map(|h| GetWindowThreadProcessId(h, None)).unwrap_or(0);
+        let fg = GetForegroundWindow();
+        let mut fg_pid = 0u32;
+        let fg_tid = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        let mut gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let gui_ok = shell_tid != 0 && GetGUIThreadInfo(shell_tid, &mut gui).is_ok();
+        diagnose::log(format!(
+            "taskbar explorer activation snapshot stage={} source={:?} target={:?} shell_tid={} target_tid={} foreground={:?} fg_tid={} fg_pid={} shell_gui_ok={} flags={:#x} active={:?} focus={:?} capture={:?} menu_owner={:?} move_size={:?}",
+            stage, shell_hwnd, target, shell_tid, target_tid, fg, fg_tid, fg_pid,
+            gui_ok, gui.flags.0, gui.hwndActive, gui.hwndFocus, gui.hwndCapture,
+            gui.hwndMenuOwner, gui.hwndMoveSize
+        ));
+    }
+}
+
+// WINEVENT_OUTOFCONTEXT: delivered on the installing UI message-loop thread.
+// Intentionally read-only; do not send input or alter window activation/parenting.
+unsafe extern "system" fn on_explorer_activation_event(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    event_hwnd: HWND,
+    object_id: i32,
+    child_id: i32,
+    event_tid: u32,
+    event_time_ms: u32,
+) {
+    if !explorer_activation_events_enabled() { return; }
+    let (taskbar, widget) = {
+        let state = lock_state();
+        (state.as_ref().and_then(|s| s.taskbar_hwnd),
+         state.as_ref().map(|s| s.hwnd.to_hwnd()))
+    };
+    let mut event_pid = 0u32;
+    GetWindowThreadProcessId(event_hwnd, Some(&mut event_pid));
+    let mut explorer_pid = 0u32;
+    if let Some(h) = taskbar { GetWindowThreadProcessId(h, Some(&mut explorer_pid)); }
+    // Explorer focus only, to avoid logging unrelated accessibility events.
+    // System foreground/menu events from all apps reveal focus transitions.
+    if event == EVENT_OBJECT_FOCUS_DIAGNOSTIC
+        && (explorer_pid == 0 || event_pid != explorer_pid) {
+        return;
+    }
+    let label = match event {
+        EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC => "EVENT_SYSTEM_FOREGROUND",
+        EVENT_SYSTEM_MENUSTART_DIAGNOSTIC => "EVENT_SYSTEM_MENUSTART",
+        EVENT_SYSTEM_MENUEND_DIAGNOSTIC => "EVENT_SYSTEM_MENUEND",
+        EVENT_OBJECT_FOCUS_DIAGNOSTIC => "EVENT_OBJECT_FOCUS",
+        _ => return,
+    };
+    let root = if event_hwnd != HWND::default() {
+        GetAncestor(event_hwnd, GA_ROOT)
+    } else { HWND::default() };
+    diagnose::log(format!(
+        "taskbar explorer activation event={} event_time_ms={} hwnd={:?} root={:?} class={} event_tid={} event_pid={} explorer_pid={} object={} child={} foreground={:?} widget={:?}",
+        label, event_time_ms, event_hwnd, root, explorer_activation_event_class(root),
+        event_tid, event_pid, explorer_pid, object_id, child_id,
+        GetForegroundWindow(), widget
+    ));
+    log_explorer_activation_snapshot("win-event", taskbar, None);
+}
+
+fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
+    if !explorer_activation_events_enabled() { return Vec::new(); }
+    let mut hooks = Vec::new();
+    for (first, last) in [
+        (EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC),
+        (EVENT_OBJECT_FOCUS_DIAGNOSTIC, EVENT_OBJECT_FOCUS_DIAGNOSTIC),
+    ] {
+        let hook = unsafe {
+            SetWinEventHook(first, last, None, Some(on_explorer_activation_event), 0, 0, 0)
+        };
+        if hook.is_invalid() {
+            diagnose::log(format!("taskbar explorer activation hook failed first={:#x} last={:#x}", first, last));
+        } else { hooks.push(hook); }
+    }
+    diagnose::log(format!("taskbar explorer activation hooks installed={} requested=2", hooks.len()));
+    hooks
 }
 
 /// Main window procedure
@@ -4909,36 +5021,17 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_MOUSEACTIVATE => {
-            // Compare with DefWindowProc's default mouse activation behavior.
-            // MA_NOACTIVATE preserves the incoming button-down message, unlike
-            // MA_NOACTIVATEANDEAT. Never affect non-drag widget interactions.
-            let enabled = mouse_noactivate_experiment_enabled();
-            let embedded = lock_state().as_ref().map(|s| s.embedded).unwrap_or(false);
-            let left_button = ((lparam.0 as usize >> 16) & 0xFFFF) as u32 == WM_LBUTTONDOWN;
-            let drag_handle = left_button
-                && (enabled || diagnose::is_enabled())
-                && cursor_is_on_drag_handle(hwnd);
+            // Preserve Windows default activation behavior. This is logging only.
             if diagnose::is_enabled() {
                 diagnose::log(format!(
-                    "taskbar mouse noactivate experiment mouse_activate enabled={} embedded={} left_button={} drag_handle={} foreground={:?} widget={:?} wparam={:#x} lparam={:#x}",
-                    enabled, embedded, left_button, drag_handle,
+                    "taskbar mouse activation observed foreground={:?} widget={:?} wparam={:#x} lparam={:#x}",
                     GetForegroundWindow(), hwnd, wparam.0, lparam.0
                 ));
             }
-            if enabled && embedded && drag_handle {
-                diagnose::log("taskbar mouse noactivate experiment return=MA_NOACTIVATE");
-                LRESULT(3) // MA_NOACTIVATE: do not activate; keep WM_LBUTTONDOWN.
-            } else {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
-            if diagnose::is_enabled() {
-                diagnose::log(format!(
-                    "taskbar mouse noactivate experiment mouse_down enabled={} foreground={:?} widget={:?}",
-                    mouse_noactivate_experiment_enabled(), GetForegroundWindow(), hwnd
-                ));
-            }
+            log_explorer_activation_snapshot("mouse-down", None, None);
             if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
             if focus_cycle_enabled() && FOCUS_CYCLE_ARMED.with(|cell| cell.replace(false)) {
                 let candidate = FOCUS_CYCLE_CANDIDATE.with(|cell| cell.get());
