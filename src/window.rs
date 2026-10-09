@@ -4646,6 +4646,7 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
 const TIMER_FOCUS_EXPERIMENT: usize = 0xF051;
 thread_local! {
     static LAST_FOCUS_EXPERIMENT_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(-1) };
+    static LAST_EXTERNAL_FOREGROUND_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
 fn focus_experiment_enabled() -> bool {
     diagnose::is_enabled() &&
@@ -4737,6 +4738,23 @@ unsafe extern "system" fn wnd_proc(
                                 (state.as_ref().and_then(|s| s.taskbar_hwnd), hwnd)
                             };
                             let taskbar_root = taskbar_hwnd.map(|h| GetAncestor(h, GA_ROOT));
+                            // Retain only a visible, unrelated application window.
+                            // Never target Explorer's own shell windows or this process.
+                            let mut fg_pid = 0u32;
+                            let mut taskbar_pid = 0u32;
+                            let mut widget_pid = 0u32;
+                            GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+                            if let Some(taskbar) = taskbar_hwnd {
+                                GetWindowThreadProcessId(taskbar, Some(&mut taskbar_pid));
+                            }
+                            GetWindowThreadProcessId(widget_hwnd, Some(&mut widget_pid));
+                            if fg != HWND::default() && IsWindowVisible(fg).as_bool()
+                                && fg_pid != 0 && fg_pid != taskbar_pid && fg_pid != widget_pid
+                                && GetAncestor(fg, GA_ROOT) == fg
+                            {
+                                LAST_EXTERNAL_FOREGROUND_HWND.with(|cell| cell.set(fg.0 as isize));
+                                diagnose::log(format!("taskbar focus switch experiment candidate={:?} pid={}", fg, fg_pid));
+                            }
                             diagnose::log(format!(
                                 "taskbar focus experiment foreground_change foreground={:?} root={:?} thread={} taskbar={:?} taskbar_root={:?} taskbar_is_foreground={} ",
                                 fg, GetAncestor(fg, GA_ROOT), fg_thread, taskbar_hwnd,
@@ -4862,6 +4880,36 @@ unsafe extern "system" fn wnd_proc(
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             if !is_drag_handle_point(client_x, client_y) {
                 return LRESULT(0);
+            }
+            if diagnose::is_enabled()
+                && std::env::var_os("CODEX_TASKBAR_FOCUS_SWITCH_EXPERIMENT").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+            {
+                let target = LAST_EXTERNAL_FOREGROUND_HWND.with(|cell| HWND(cell.get() as *mut _));
+                let before = GetForegroundWindow();
+                let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+                if taskbar == Some(before)
+                    && target != HWND::default() && IsWindow(target).as_bool()
+                    && IsWindowVisible(target).as_bool()
+                {
+                    let mut target_pid = 0u32;
+                    let mut taskbar_pid = 0u32;
+                    GetWindowThreadProcessId(target, Some(&mut target_pid));
+                    if let Some(h) = taskbar { GetWindowThreadProcessId(h, Some(&mut taskbar_pid)); }
+                    if target_pid != 0 && target_pid != taskbar_pid {
+                        let accepted = SetForegroundWindow(target).as_bool();
+                        let after = GetForegroundWindow();
+                        diagnose::log(format!(
+                            "taskbar focus switch experiment candidate={:?} before={:?} accepted={} after={:?} actually_changed={}",
+                            target, before, accepted, after, after == target
+                        ));
+                    }
+                } else {
+                    diagnose::log(format!(
+                        "taskbar focus switch experiment skipped candidate={:?} foreground={:?} taskbar={:?}",
+                        target, before, taskbar
+                    ));
+                }
             }
 
             let window_dpi = GetDpiForWindow(hwnd);
