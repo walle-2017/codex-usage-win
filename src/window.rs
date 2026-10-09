@@ -4886,6 +4886,7 @@ unsafe extern "system" fn wnd_proc(
                 }
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
+
                 let (current_taskbar_hwnd, embedded, blur_active) = {
                     let state = lock_state();
                     state
