@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -53,6 +54,9 @@ jobs:
       - name: Verify Explorer activation event diagnostics
         shell: pwsh
         run: ./scripts/assert-explorer-activation-events.ps1
+      - name: Verify taskbar activation state correlation
+        shell: pwsh
+        run: ./scripts/assert-taskbar-active-state-verify.ps1
       - name: Verify adaptive taskbar free-space placement
         shell: pwsh
         run: ./scripts/assert-taskbar-free-space.ps1

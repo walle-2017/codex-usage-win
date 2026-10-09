@@ -875,6 +875,22 @@ fn attach_to_taskbar_window(
 
     log_drag_input_snapshot("before-reparent", hwnd);
     let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+    let handoff_attempt = if explorer_active_state_verify_enabled()
+        && source_taskbar.is_some() && source_taskbar != Some(taskbar.hwnd)
+    {
+        EXPLORER_HANDOFF_ATTEMPT.with(|c| {
+            let next = c.get().saturating_add(1);
+            c.set(next);
+            next
+        })
+    } else { 0 };
+    if handoff_attempt != 0 {
+        diagnose::log(format!(
+            "taskbar active-state verify handoff_begin attempt={} source={:?} target={:?}",
+            handoff_attempt, source_taskbar, taskbar.hwnd
+        ));
+    }
+    sample_explorer_active_state("before-reparent", true);
     log_explorer_activation_snapshot("before-reparent", source_taskbar, Some(taskbar.hwnd));
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
         if focus_cycle_enabled() {
@@ -882,6 +898,13 @@ fn attach_to_taskbar_window(
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
         }
         log_drag_input_snapshot("reparent-failed", hwnd);
+        sample_explorer_active_state("reparent-failed", true);
+        if handoff_attempt != 0 {
+            diagnose::log(format!(
+                "taskbar active-state verify handoff_result attempt={} success=false source={:?} target={:?}",
+                handoff_attempt, source_taskbar, taskbar.hwnd
+            ));
+        }
         log_explorer_activation_snapshot("reparent-failed", source_taskbar, Some(taskbar.hwnd));
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
@@ -891,6 +914,13 @@ fn attach_to_taskbar_window(
         return false;
     }
 
+    sample_explorer_active_state("reparent-success", true);
+    if handoff_attempt != 0 {
+        diagnose::log(format!(
+            "taskbar active-state verify handoff_result attempt={} success=true source={:?} target={:?}",
+            handoff_attempt, source_taskbar, taskbar.hwnd
+        ));
+    }
     log_explorer_activation_snapshot("reparent-success", source_taskbar, Some(taskbar.hwnd));
     // Only release the old event hook after the window actually moves.
     let old_hook = {
@@ -2112,6 +2142,11 @@ pub fn run() {
         if focus_experiment_enabled() {
             SetTimer(hwnd, TIMER_FOCUS_EXPERIMENT, 100, None);
             diagnose::log("taskbar focus experiment started interval_ms=100");
+        }
+        if explorer_active_state_verify_enabled() {
+            SetTimer(hwnd, TIMER_EXPLORER_STATE_VERIFY, 50, None);
+            diagnose::log("taskbar active-state verify started interval_ms=50 read_only=true");
+            sample_explorer_active_state("startup", true);
         }
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
@@ -4686,6 +4721,90 @@ const EVENT_SYSTEM_MENUSTART_DIAGNOSTIC: u32 = 0x0004;
 const EVENT_SYSTEM_MENUEND_DIAGNOSTIC: u32 = 0x0005;
 const EVENT_OBJECT_FOCUS_DIAGNOSTIC: u32 = 0x8005;
 
+// Samples the Explorer taskbar GUI thread without changing activation/capture.
+const TIMER_EXPLORER_STATE_VERIFY: usize = 0xF052;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ExplorerActiveSample {
+    taskbar: isize,
+    explorer_thread: u32,
+    foreground: isize,
+    active: isize,
+    focus: isize,
+    flags: u32,
+    gui_ok: bool,
+}
+
+struct ExplorerActiveTrack {
+    sample: ExplorerActiveSample,
+    observed_since: Instant,
+    previous_poll: Instant,
+    consecutive_samples: u32,
+}
+
+thread_local! {
+    static EXPLORER_ACTIVE_TRACK: std::cell::RefCell<Option<ExplorerActiveTrack>> =
+        const { std::cell::RefCell::new(None) };
+    static EXPLORER_HANDOFF_ATTEMPT: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn explorer_active_state_verify_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_ACTIVE_STATE_VERIFY").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn sample_explorer_active_state(stage: &str, force: bool) {
+    if !explorer_active_state_verify_enabled() { return; }
+    unsafe {
+        let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd).unwrap_or_default();
+        let tid = if taskbar != HWND::default() {
+            GetWindowThreadProcessId(taskbar, None)
+        } else { 0 };
+        let foreground = GetForegroundWindow();
+        let mut gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let gui_ok = tid != 0 && GetGUIThreadInfo(tid, &mut gui).is_ok();
+        let sample = ExplorerActiveSample {
+            taskbar: taskbar.0 as isize,
+            explorer_thread: tid,
+            foreground: foreground.0 as isize,
+            active: gui.hwndActive.0 as isize,
+            focus: gui.hwndFocus.0 as isize,
+            flags: gui.flags.0,
+            gui_ok,
+        };
+        let now = Instant::now();
+        EXPLORER_ACTIVE_TRACK.with(|cell| {
+            let mut track = cell.borrow_mut();
+            let changed = track.as_ref().map(|old| old.sample != sample).unwrap_or(true);
+            let prior_gap_ms = track.as_ref()
+                .map(|old| now.duration_since(old.previous_poll).as_millis()).unwrap_or(0);
+            if changed {
+                *track = Some(ExplorerActiveTrack {
+                    sample, observed_since: now, previous_poll: now, consecutive_samples: 1,
+                });
+            } else if let Some(old) = track.as_mut() {
+                old.previous_poll = now;
+                old.consecutive_samples = old.consecutive_samples.saturating_add(1);
+            }
+            let Some(current) = track.as_ref() else { return; };
+            if changed || force {
+                diagnose::log(format!(
+                    "taskbar active-state verify stage={} changed={} taskbar={:?} shell_tid={} foreground={:?} shell_active={:?} shell_focus={:?} shell_gui_ok={} flags={:#x} observed_same_ms={} consecutive_samples={} last_sample_gap_ms={}",
+                    stage, changed, taskbar, tid, foreground, gui.hwndActive, gui.hwndFocus,
+                    gui_ok, gui.flags.0, now.duration_since(current.observed_since).as_millis(),
+                    current.consecutive_samples, prior_gap_ms
+                ));
+            }
+        });
+    }
+}
+
+
 fn explorer_activation_events_enabled() -> bool {
     diagnose::is_enabled()
         && std::env::var_os("CODEX_TASKBAR_EXPLORER_EVENTS_EXPERIMENT").as_deref()
@@ -4858,6 +4977,9 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_EXPLORER_STATE_VERIFY => {
+                    sample_explorer_active_state("poll", false);
+                }
                 TIMER_FOCUS_EXPERIMENT => {
                     if focus_experiment_enabled() {
                         let fg = GetForegroundWindow();
@@ -5031,6 +5153,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            sample_explorer_active_state("mouse-down", true);
             log_explorer_activation_snapshot("mouse-down", None, None);
             if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
             if focus_cycle_enabled() && FOCUS_CYCLE_ARMED.with(|cell| cell.replace(false)) {
@@ -5343,6 +5466,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            sample_explorer_active_state("mouse-up", true);
             log_drag_input_snapshot("mouse-up", hwnd);
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
