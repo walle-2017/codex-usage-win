@@ -246,24 +246,48 @@ fn tooltip_owner_experiment_enabled() -> bool {
             == Some(std::ffi::OsStr::new("1"))
 }
 
-/// This is the only behavioral change in the opt-in experiment.
-/// Unlike set_popup_owner, it does NOT call SetWindowPos/ShowWindow;
-/// it runs before the existing tooltip placement and only on owner changes.
+/// The requested owner is tracked by popup lifetime. Avoid retrying an
+/// unexpected GW_OWNER value on every WM_MOUSEMOVE / tooltip redraw.
+thread_local! {
+    static LAST_TOOLTIP_OWNER_ATTEMPT: std::cell::Cell<isize> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn tooltip_disable_experiment_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_DISABLE_RESET_TOOLTIP").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Opt-in owner experiment: prefer CreateWindowExW(hwndParent=taskbar) and
+/// only adjust GWLP_HWNDPARENT when the widget switches to a new taskbar.
+/// Never activate other windows or change the embedded widget's parent.
 fn experiment_bind_tooltip_owner(tooltip: HWND) {
     if !tooltip_owner_experiment_enabled() { return; }
     let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
     let Some(owner) = taskbar else { return; };
     unsafe {
         if !IsWindow(owner).as_bool() { return; }
-        let previous_owner = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
-        if previous_owner == owner { return; }
-        let previous_value = SetWindowLongPtrW(tooltip, GWLP_HWNDPARENT, owner.0 as isize);
-        let actual_owner = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
+        let raw_before = GetWindowLongPtrW(tooltip, GWLP_HWNDPARENT);
+        let gw_before = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
+        if raw_before == owner.0 as isize { return; }
+        // Limit mutations to one attempt per new taskbar HWND for this popup.
+        let already_attempted = LAST_TOOLTIP_OWNER_ATTEMPT.with(|c| {
+            if c.get() == owner.0 as isize { true }
+            else { c.set(owner.0 as isize); false }
+        });
+        if already_attempted { return; }
+        SetLastError(WIN32_ERROR(0));
+        let prior = SetWindowLongPtrW(tooltip, GWLP_HWNDPARENT, owner.0 as isize);
+        let set_error = GetLastError();
+        let raw_after = GetWindowLongPtrW(tooltip, GWLP_HWNDPARENT);
+        let gw_after = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
         diagnose::log(format!(
-            "taskbar tooltip owner experiment requested={:?} before={:?} after={:?} prior_value={:#x} applied={}",
-            owner, previous_owner, actual_owner, previous_value, actual_owner == owner
+            "taskbar tooltip owner transition requested={:?} gw_before={:?} gw_after={:?} raw_before={:#x} raw_after={:#x} prior_value={:#x} set_last_error={:?} raw_matches={} gw_matches={}",
+            owner, gw_before, gw_after, raw_before, raw_after, prior, set_error,
+            raw_after == owner.0 as isize, gw_after == owner
         ));
-        log_taskbar_zorder_snapshot("tooltip-owner-experiment", None);
+        log_taskbar_zorder_snapshot("tooltip-owner-transition", None);
     }
 }
 
@@ -282,10 +306,11 @@ fn zorder_window_description(label: &str, hwnd: HWND) -> String {
         let rect_text = bounds.map(|r| format!("({},{},{},{})",r.left,r.top,r.right,r.bottom))
             .unwrap_or_else(|| "<unknown>".to_string());
         format!(
-            "{label}={:?} class={} valid={} visible={} owner={:?} root={:?} prev={:?} prev_class={} next={:?} ex_style={:#x} topmost={} rect={}",
+            "{label}={:?} class={} valid={} visible={} owner={:?} raw_parent_owner={:#x} root={:?} prev={:?} prev_class={} next={:?} ex_style={:#x} topmost={} rect={}",
             hwnd, explorer_activation_event_class(hwnd), valid, IsWindowVisible(hwnd).as_bool(),
-            owner, GetAncestor(hwnd, GA_ROOT), prev, explorer_activation_event_class(prev),
-            next, ex_style, ex_style & WS_EX_TOPMOST.0 != 0, rect_text
+            owner, GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT), GetAncestor(hwnd, GA_ROOT),
+            prev, explorer_activation_event_class(prev), next, ex_style,
+            ex_style & WS_EX_TOPMOST.0 != 0, rect_text
         )
     }
 }
@@ -4472,6 +4497,13 @@ fn minimal_tooltip_hwnd() -> Option<HWND> {
 
     register_minimal_tooltip_class();
     unsafe {
+        // WS_POPUP treats this as an *owner*, not a child parent.
+        // Only the opt-in variant starts life owned by Explorer's taskbar.
+        let desired_owner = if tooltip_owner_experiment_enabled() {
+            lock_state().as_ref().and_then(|s| s.taskbar_hwnd)
+                .filter(|owner| IsWindow(*owner).as_bool())
+                .unwrap_or_default()
+        } else { HWND::default() };
         let class_name = native_interop::wide_str(MINIMAL_TOOLTIP_CLASS);
         let title = native_interop::wide_str("");
         let hwnd = CreateWindowExW(
@@ -4483,12 +4515,24 @@ fn minimal_tooltip_hwnd() -> Option<HWND> {
             0,
             sc(112),
             sc(28),
-            HWND::default(),
+            desired_owner,
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).ok()?,
             None,
         )
         .ok()?;
+        // Existing tooltip HWNDs must not inherit the preceding popup's
+        // attempted owner when Explorer replaces the taskbar.
+        LAST_TOOLTIP_OWNER_ATTEMPT.with(|c| c.set(desired_owner.0 as isize));
+        if tooltip_owner_experiment_enabled() {
+            let raw_owner = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+            let gw_owner = get_window_zorder_diagnostic(hwnd, GW_OWNER_ZORDER_DIAGNOSTIC);
+            diagnose::log(format!(
+                "taskbar tooltip owner creation requested={:?} gw_owner={:?} raw_owner={:#x} raw_matches={} gw_matches={}",
+                desired_owner, gw_owner, raw_owner,
+                raw_owner == desired_owner.0 as isize, gw_owner == desired_owner
+            ));
+        }
         let mut state = MINIMAL_TOOLTIP_HWND
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -4576,6 +4620,9 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
+    // In isolation mode no tooltip/blur HWND is created or shown at all.
+    // No mouse activation, drag or SetParent behavior changes.
+    if tooltip_disable_experiment_enabled() { return; }
     let Some(text) = minimal_hover_text(target) else {
         hide_minimal_usage_tooltip();
         return;
