@@ -238,6 +238,35 @@ fn zorder_diagnostic_enabled() -> bool {
             == Some(std::ffi::OsStr::new("1"))
 }
 
+/// Single-variable experiment: only change the *tooltip foreground* popup owner.
+/// Do not change taskbar focus, the embedded widget or the SetParent path.
+fn tooltip_owner_experiment_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_TOOLTIP_OWNER_EXPERIMENT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+/// This is the only behavioral change in the opt-in experiment.
+/// Unlike set_popup_owner, it does NOT call SetWindowPos/ShowWindow;
+/// it runs before the existing tooltip placement and only on owner changes.
+fn experiment_bind_tooltip_owner(tooltip: HWND) {
+    if !tooltip_owner_experiment_enabled() { return; }
+    let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+    let Some(owner) = taskbar else { return; };
+    unsafe {
+        if !IsWindow(owner).as_bool() { return; }
+        let previous_owner = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
+        if previous_owner == owner { return; }
+        let previous_value = SetWindowLongPtrW(tooltip, GWLP_HWNDPARENT, owner.0 as isize);
+        let actual_owner = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
+        diagnose::log(format!(
+            "taskbar tooltip owner experiment requested={:?} before={:?} after={:?} prior_value={:#x} applied={}",
+            owner, previous_owner, actual_owner, previous_value, actual_owner == owner
+        ));
+        log_taskbar_zorder_snapshot("tooltip-owner-experiment", None);
+    }
+}
+
 fn zorder_window_description(label: &str, hwnd: HWND) -> String {
     if hwnd == HWND::default() {
         return format!("{label}=<none>");
@@ -4554,6 +4583,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(tooltip) = minimal_tooltip_hwnd() else {
         return;
     };
+    experiment_bind_tooltip_owner(tooltip);
     let measured_width = unsafe { measure_minimal_tooltip_width(&text) };
 
     {
@@ -4844,6 +4874,9 @@ const EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC: u32 = 0x0003;
 const EVENT_SYSTEM_MENUSTART_DIAGNOSTIC: u32 = 0x0004;
 const EVENT_SYSTEM_MENUEND_DIAGNOSTIC: u32 = 0x0005;
 const EVENT_OBJECT_FOCUS_DIAGNOSTIC: u32 = 0x8005;
+const EVENT_OBJECT_SHOW_ZORDER: u32 = 0x8002;
+const EVENT_OBJECT_HIDE_ZORDER: u32 = 0x8003;
+const EVENT_OBJECT_REORDER_ZORDER: u32 = 0x8004;
 
 // Samples the Explorer taskbar GUI thread without changing activation/capture.
 const TIMER_EXPLORER_STATE_VERIFY: usize = 0xF052;
@@ -4978,7 +5011,7 @@ unsafe extern "system" fn on_explorer_activation_event(
     event_tid: u32,
     event_time_ms: u32,
 ) {
-    if !explorer_activation_events_enabled() { return; }
+    if !explorer_activation_events_enabled() && !zorder_diagnostic_enabled() { return; }
     let (taskbar, widget) = {
         let state = lock_state();
         (state.as_ref().and_then(|s| s.taskbar_hwnd),
@@ -4988,6 +5021,35 @@ unsafe extern "system" fn on_explorer_activation_event(
     GetWindowThreadProcessId(event_hwnd, Some(&mut event_pid));
     let mut explorer_pid = 0u32;
     if let Some(h) = taskbar { GetWindowThreadProcessId(h, Some(&mut explorer_pid)); }
+    let root = if event_hwnd != HWND::default() {
+        GetAncestor(event_hwnd, GA_ROOT)
+    } else { HWND::default() };
+    if matches!(event, EVENT_OBJECT_SHOW_ZORDER | EVENT_OBJECT_HIDE_ZORDER | EVENT_OBJECT_REORDER_ZORDER) {
+        if !zorder_diagnostic_enabled() || object_id != 0 || child_id != 0 { return; }
+        let tooltip = MINIMAL_TOOLTIP_HWND.lock().unwrap_or_else(|e| e.into_inner())
+            .as_ref().map(|h| h.to_hwnd()).unwrap_or_default();
+        let root_class = explorer_activation_event_class(root);
+        let relevant = event_hwnd == tooltip
+            || widget == Some(event_hwnd)
+            || (explorer_pid != 0 && event_pid == explorer_pid
+                && (root == taskbar.unwrap_or_default()
+                    || root_class.starts_with("Shell_")))
+            || root_class == "Windows.UI.Core.CoreWindow";
+        if !relevant { return; }
+        let name = match event {
+            EVENT_OBJECT_SHOW_ZORDER => "EVENT_OBJECT_SHOW",
+            EVENT_OBJECT_HIDE_ZORDER => "EVENT_OBJECT_HIDE",
+            _ => "EVENT_OBJECT_REORDER",
+        };
+        diagnose::log(format!(
+            "taskbar zorder event={} event_time_ms={} hwnd={:?} root={:?} class={} event_pid={} explorer_pid={} foreground={:?}",
+            name, event_time_ms, event_hwnd, root, root_class, event_pid, explorer_pid,
+            GetForegroundWindow()
+        ));
+        log_taskbar_zorder_snapshot("win-event-zorder", None);
+        return;
+    }
+    if !explorer_activation_events_enabled() { return; }
     // Explorer focus only, to avoid logging unrelated accessibility events.
     // System foreground/menu events from all apps reveal focus transitions.
     if event == EVENT_OBJECT_FOCUS_DIAGNOSTIC
@@ -5001,9 +5063,6 @@ unsafe extern "system" fn on_explorer_activation_event(
         EVENT_OBJECT_FOCUS_DIAGNOSTIC => "EVENT_OBJECT_FOCUS",
         _ => return,
     };
-    let root = if event_hwnd != HWND::default() {
-        GetAncestor(event_hwnd, GA_ROOT)
-    } else { HWND::default() };
     diagnose::log(format!(
         "taskbar explorer activation event={} event_time_ms={} hwnd={:?} root={:?} class={} event_tid={} event_pid={} explorer_pid={} object={} child={} foreground={:?} widget={:?}",
         label, event_time_ms, event_hwnd, root, explorer_activation_event_class(root),
@@ -5017,12 +5076,18 @@ unsafe extern "system" fn on_explorer_activation_event(
 }
 
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
-    if !explorer_activation_events_enabled() { return Vec::new(); }
+    let mut ranges = Vec::new();
+    if explorer_activation_events_enabled() {
+        ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
+        ranges.push((EVENT_OBJECT_FOCUS_DIAGNOSTIC, EVENT_OBJECT_FOCUS_DIAGNOSTIC));
+    }
+    if zorder_diagnostic_enabled() {
+        ranges.push((EVENT_OBJECT_SHOW_ZORDER, EVENT_OBJECT_REORDER_ZORDER));
+    }
+    let requested = ranges.len();
     let mut hooks = Vec::new();
-    for (first, last) in [
-        (EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC),
-        (EVENT_OBJECT_FOCUS_DIAGNOSTIC, EVENT_OBJECT_FOCUS_DIAGNOSTIC),
-    ] {
+    for (first, last) in ranges {
+        // WinEvent out-of-context, on the existing GUI message-loop thread.
         let hook = unsafe {
             SetWinEventHook(first, last, None, Some(on_explorer_activation_event), 0, 0, 0)
         };
@@ -5030,7 +5095,12 @@ fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
             diagnose::log(format!("taskbar explorer activation hook failed first={:#x} last={:#x}", first, last));
         } else { hooks.push(hook); }
     }
-    diagnose::log(format!("taskbar explorer activation hooks installed={} requested=2", hooks.len()));
+    if requested > 0 {
+        diagnose::log(format!(
+            "taskbar explorer activation hooks installed={} requested={}",
+            hooks.len(), requested
+        ));
+    }
     hooks
 }
 

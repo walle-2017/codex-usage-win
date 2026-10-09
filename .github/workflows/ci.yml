@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -59,6 +60,9 @@ jobs:
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
+      - name: Verify tooltip owner isolation and reorder events
+        shell: pwsh
+        run: ./scripts/assert-taskbar-tooltip-owner-experiment.ps1
       - name: Verify adaptive taskbar free-space placement
         shell: pwsh
         run: ./scripts/assert-taskbar-free-space.ps1
