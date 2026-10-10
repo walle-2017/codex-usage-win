@@ -5272,7 +5272,7 @@ fn log_reparent_window_state(stage: &str, widget: HWND, source: Option<HWND>, ta
         let mut widget_pid = 0u32;
         let widget_tid = GetWindowThreadProcessId(widget, Some(&mut widget_pid));
         diagnose::log(format!(
-            "taskbar window-state stage={} widget={:?} parent={:?} root={:?} raw_parent={:#x} widget_tid={} widget_pid={} widget_style={:#x} widget_ex_style={:#x} child={} popup={} widget_visible={} widget_enabled={} source={:?} source_valid={} source_style={:#x} target={:?} target_valid={} target_style={:#x} foreground={:?} capture={:?}",
+            "taskbar window-state stage={} widget={:?} parent={:?} root={:?} raw_parent={:#x} widget_tid={} widget_pid={} widget_style={:#x} widget_ex_style={:#x} child={} popup={} is_widget_shown={} widget_enabled={} source={:?} source_valid={} source_style={:#x} target={:?} target_valid={} target_style={:#x} foreground={:?} capture={:?}",
             stage, widget, parent, root, raw_parent, widget_tid, widget_pid,
             style, ex_style, style & WS_CHILD.0 != 0, style & WS_POPUP.0 != 0,
             IsWindowVisible(widget).as_bool(), IsWindowEnabled(widget).as_bool(),
