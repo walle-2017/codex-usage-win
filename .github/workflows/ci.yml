@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -65,6 +66,9 @@ jobs:
       - name: Verify foreground cursor-position correlation
         shell: pwsh
         run: ./scripts/assert-taskbar-cursor-foreground.ps1
+      - name: Verify opt-in detached taskbar bridge safeguards
+        shell: pwsh
+        run: ./scripts/assert-taskbar-detached-bridge.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
