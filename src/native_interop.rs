@@ -314,119 +314,8 @@ pub fn get_window_rect_safe(hwnd: HWND) -> Option<RECT> {
     }
 }
 
-// Experimental cross-Explorer handoff through a temporary top-level parent.
-// Always opt-in; the normal direct SetParent path is unchanged.
-thread_local! {
-    static BRIDGE_RESCUED_AS_POPUP: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-pub fn take_bridge_popup_rescue() -> bool {
-    BRIDGE_RESCUED_AS_POPUP.with(|flag| flag.replace(false))
-}
-
-fn taskbar_bridge_experiment_enabled() -> bool {
-    crate::diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_DETACHED_BRIDGE_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-// The Win32 API may refuse a rollback too. We verify every parent transition;
-// if recovering the original parent is impossible, show an independent popup
-// and tell the window layer so its embedded bookkeeping does not become stale.
-unsafe fn try_detached_taskbar_bridge(
-    hwnd: HWND,
-    source: HWND,
-    target: HWND,
-    original_style: i32,
-    original_ex_style: i32,
-) -> Option<windows::core::Result<HWND>> {
-    crate::diagnose::log(format!(
-        "taskbar detached-bridge begin widget={:?} source={:?} target={:?} style={:#x} ex_style={:#x}",
-        hwnd, source, target, original_style, original_ex_style
-    ));
-    REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
-
-    // Retain child style for the SetParent(NULL) call as recommended by Win32,
-    // then explicitly make the transient unparented window a popup.
-    let detach = SetParent(hwnd, HWND::default());
-    let detached_parent = GetAncestor(hwnd, GA_PARENT);
-    let detached = detached_parent == HWND::default();
-
-    let mut popup_style_ok = false;
-    let mut retry: Option<windows::core::Result<HWND>> = None;
-    let mut attached_to_target = false;
-    if detached {
-        let popup_style = ((original_style as u32 & !(WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE))
-            | WS_POPUP_STYLE) as i32;
-        let _ = SetWindowLongW(hwnd, GWL_STYLE, popup_style);
-        popup_style_ok = GetWindowLongW(hwnd, GWL_STYLE) == popup_style;
-        if popup_style_ok {
-            // SetParent does not change WS_CHILD/WS_POPUP. Restore child style
-            // before making the Explorer target the new parent.
-            let _ = SetWindowLongW(hwnd, GWL_STYLE, original_style);
-            if GetWindowLongW(hwnd, GWL_STYLE) == original_style {
-                let result = SetParent(hwnd, target);
-                attached_to_target = GetAncestor(hwnd, GA_PARENT) == target;
-                crate::diagnose::log(format!(
-                    "taskbar detached-bridge target_result={:?} target_parent_matches={}",
-                    result, attached_to_target
-                ));
-                retry = Some(result);
-            }
-        }
-    }
-    let mut restored = false;
-    let mut rollback_result: Option<windows::core::Result<HWND>> = None;
-    if !attached_to_target && detached {
-        let _ = SetWindowLongW(hwnd, GWL_STYLE, original_style);
-        // Best-effort rollback; verify actual parent rather than trusting a
-        // return value alone. Do not change source/target thread input queues.
-        for _ in 0..2 {
-            let rollback = SetParent(hwnd, source);
-            restored = GetAncestor(hwnd, GA_PARENT) == source;
-            rollback_result = Some(rollback);
-            if restored { break; }
-        }
-    }
-    let final_parent = GetAncestor(hwnd, GA_PARENT);
-    if attached_to_target || restored || !detached {
-        let _ = SetWindowLongW(hwnd, GWL_STYLE, original_style);
-        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, original_ex_style);
-        let _ = SetWindowPos(
-            hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
-        );
-    } else {
-        // The native API rejected both target and source. An independent popup
-        // is safer than a WS_CHILD window without a valid parent.
-        let _ = SetParent(hwnd, HWND::default());
-        let popup_style = ((original_style as u32 & !(WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE))
-            | WS_POPUP_STYLE) as i32;
-        let _ = SetWindowLongW(hwnd, GWL_STYLE, popup_style);
-        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, original_ex_style);
-        let _ = SetWindowPos(
-            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
-        );
-        BRIDGE_RESCUED_AS_POPUP.with(|flag| flag.set(true));
-        crate::diagnose::log(
-            "taskbar detached-bridge emergency popup rescue; source rollback was rejected"
-        );
-    }
-
-    REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
-    crate::diagnose::log(format!(
-        "taskbar detached-bridge end detached_result={:?} detached={} popup_style_ok={} retry={:?} attached_to_target={} rollback={:?} restored={} final_parent={:?} actual_parent={:?}",
-        detach, detached, popup_style_ok, retry, attached_to_target,
-        rollback_result, restored, final_parent, GetAncestor(hwnd, GA_PARENT)
-    ));
-    if attached_to_target { retry } else { None }
-}
-
 /// Embed our window as a child of the taskbar
 pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
-    BRIDGE_RESCUED_AS_POPUP.with(|flag| flag.set(false));
     unsafe {
         // Preserve existing extended style, add tool window + no activate
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -518,26 +407,6 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             None
         };
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
-        // Only after a genuine direct handoff failure: detach through NULL,
-        // reattach to the target, or roll back to the original source.
-        // Initial embedding and successful direct reparenting never take this path.
-        if set_parent_result.is_err()
-            && taskbar_bridge_experiment_enabled()
-            && previous_parent != HWND::default()
-            && previous_parent != taskbar_hwnd
-            && IsWindow(previous_parent).as_bool()
-            && source_pid != 0
-            && source_pid == target_pid
-            && GetAncestor(hwnd, GA_PARENT) == previous_parent
-            && std::env::var_os("CODEX_TASKBAR_INPUT_QUEUE_EXPERIMENT").as_deref()
-                != Some(std::ffi::OsStr::new("1"))
-        {
-            if let Some(bridged_result) = try_detached_taskbar_bridge(
-                hwnd, previous_parent, taskbar_hwnd, source_style, source_ex_style
-            ) {
-                set_parent_result = bridged_result;
-            }
-        }
         // Optional controlled input-queue experiment. Attach only the widget
         // thread to the Explorer taskbar thread, retry once, always detach.
         // This is NOT used in normal operation.
@@ -545,7 +414,6 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             && widget_thread != 0
             && target_thread != 0
             && widget_thread != target_thread
-            && !BRIDGE_RESCUED_AS_POPUP.with(|flag| flag.get())
             && std::env::var_os("CODEX_TASKBAR_INPUT_QUEUE_EXPERIMENT").as_deref()
                 == Some(std::ffi::OsStr::new("1"))
         {

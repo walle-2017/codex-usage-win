@@ -1064,18 +1064,6 @@ fn attach_to_taskbar_window(
     sample_explorer_active_state("before-reparent", true);
     log_explorer_activation_snapshot("before-reparent", source_taskbar, Some(taskbar.hwnd));
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
-        if native_interop::take_bridge_popup_rescue() {
-            // Windows rejected rollback to the original Explorer parent. Keep
-            // the widget visible as a standalone popup with consistent state.
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.embedded = false;
-                s.drag_reparenting = false;
-            }
-            diagnose::log(
-                "taskbar detached-bridge popup rescue: embedded=false; restart app after the experiment"
-            );
-        }
         if focus_cycle_enabled() {
             FOCUS_CYCLE_ARMED.with(|cell| cell.set(true));
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
@@ -1095,10 +1083,9 @@ fn attach_to_taskbar_window(
         }
         log_explorer_activation_snapshot("reparent-failed", source_taskbar, Some(taskbar.hwnd));
         diagnose::log(format!(
-            "taskbar switch aborted: target hwnd={:?} monitor={} actual_parent={:?}",
+            "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
             taskbar.hwnd,
-            taskbar.monitor_device.as_deref().unwrap_or("<unknown>"),
-            unsafe { GetAncestor(hwnd, GA_PARENT) }
+            taskbar.monitor_device.as_deref().unwrap_or("<unknown>")
         ));
         return false;
     }
