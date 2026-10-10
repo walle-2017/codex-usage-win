@@ -1043,6 +1043,7 @@ fn attach_to_taskbar_window(
     observe_taskbar_activation_edge("before-reparent", true);
     log_taskbar_zorder_snapshot("before-reparent", Some(taskbar.hwnd));
     let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+    log_cursor_foreground_snapshot("before-reparent", None, Some(taskbar.hwnd), false);
     log_external_click_context("before-reparent");
     log_reparent_window_state("before-reparent", hwnd, source_taskbar, taskbar.hwnd);
     let handoff_attempt = if explorer_active_state_verify_enabled()
@@ -1069,6 +1070,7 @@ fn attach_to_taskbar_window(
         }
         log_drag_input_snapshot("reparent-failed", hwnd);
         log_external_click_context("reparent-failed");
+        log_cursor_foreground_snapshot("reparent-failed", None, Some(taskbar.hwnd), false);
         log_reparent_window_state("reparent-failed", hwnd, source_taskbar, taskbar.hwnd);
         observe_taskbar_activation_edge("reparent-failed", true);
         log_taskbar_zorder_snapshot("reparent-failed", Some(taskbar.hwnd));
@@ -1090,6 +1092,7 @@ fn attach_to_taskbar_window(
 
     sample_explorer_active_state("reparent-success", true);
     log_external_click_context("reparent-success");
+    log_cursor_foreground_snapshot("reparent-success", None, Some(taskbar.hwnd), false);
     log_reparent_window_state("reparent-success", hwnd, source_taskbar, taskbar.hwnd);
     observe_taskbar_activation_edge("reparent-success", true);
     log_taskbar_zorder_snapshot("reparent-success", Some(taskbar.hwnd));
@@ -2350,6 +2353,11 @@ pub fn run() {
         }
         if external_mouse_diagnostic_enabled() {
             SetTimer(hwnd, TIMER_EXTERNAL_MOUSE_DIAGNOSTIC, 50, None);
+        }
+        if cursor_foreground_verify_enabled() {
+            SetTimer(hwnd, TIMER_CURSOR_FOREGROUND_VERIFY, 50, None);
+            diagnose::log("taskbar cursor-foreground observer started interval_ms=50 read_only=true");
+            log_cursor_foreground_snapshot("startup", None, None, false);
         }
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
@@ -5283,6 +5291,145 @@ fn log_reparent_window_state(stage: &str, widget: HWND, source: Option<HWND>, ta
     }
 }
 
+// Opt-in cursor/foreground correlation. Only reads the existing cursor
+// position and window topology; never changes tracking, focus or parenting.
+const TIMER_CURSOR_FOREGROUND_VERIFY: usize = 0xF055;
+
+#[derive(Clone, Copy)]
+struct LastExternalForegroundCursor {
+    observed: Instant,
+    event_time_ms: u32,
+    event_hwnd: isize,
+    cursor_x: i32,
+    cursor_y: i32,
+    cursor_in_source_rect: bool,
+    source_hwnd: isize,
+}
+
+thread_local! {
+    static LAST_SOURCE_CURSOR_REGION: std::cell::Cell<(isize, i8)> =
+        const { std::cell::Cell::new((0, -1)) };
+    static LAST_EXTERNAL_FOREGROUND_CURSOR: std::cell::RefCell<Option<LastExternalForegroundCursor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn cursor_foreground_verify_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_CURSOR_FOREGROUND_VERIFY").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn cursor_window_rect(hwnd: HWND) -> Option<RECT> {
+    if hwnd == HWND::default() { return None; }
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect).ok().map(|_| rect) }
+}
+
+fn cursor_rect_text(rect: Option<RECT>) -> String {
+    rect.map(|r| format!("({},{},{},{})", r.left, r.top, r.right, r.bottom))
+        .unwrap_or_else(|| "<none>".into())
+}
+
+fn cursor_in_rect(pt: POINT, rect: Option<RECT>) -> bool {
+    rect.is_some_and(|r|
+        pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom)
+}
+
+/// Foreground events are delivered asynchronously. Mouse positions are taken
+/// at callback delivery, not reconstructed at the historical event timestamp.
+fn log_cursor_foreground_snapshot(
+    stage: &str,
+    event: Option<(HWND, u32)>,
+    target: Option<HWND>,
+    transition_only: bool,
+) {
+    if !cursor_foreground_verify_enabled() { return; }
+    unsafe {
+        let (source, widget) = {
+            let s = lock_state();
+            (s.as_ref().and_then(|x| x.taskbar_hwnd).unwrap_or_default(),
+             s.as_ref().map(|x| x.hwnd.to_hwnd()).unwrap_or_default())
+        };
+        let mut cursor = POINT::default();
+        let cursor_ok = GetCursorPos(&mut cursor).is_ok();
+        let source_rect = cursor_window_rect(source);
+        let widget_rect = cursor_window_rect(widget);
+        let target_hwnd = target.unwrap_or_default();
+        let target_rect = cursor_window_rect(target_hwnd);
+        let in_source = cursor_ok && cursor_in_rect(cursor, source_rect);
+        let in_widget = cursor_ok && cursor_in_rect(cursor, widget_rect);
+        let in_target = cursor_ok && cursor_in_rect(cursor, target_rect);
+        let cursor_hit = if cursor_ok { WindowFromPoint(cursor) } else { HWND::default() };
+        let cursor_root = if cursor_hit != HWND::default() {
+            GetAncestor(cursor_hit, GA_ROOT)
+        } else { HWND::default() };
+        let fg_now = GetForegroundWindow();
+        let source_tid = GetWindowThreadProcessId(source, None);
+        let mut shell_gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let shell_gui_ok = source_tid != 0 && GetGUIThreadInfo(source_tid, &mut shell_gui).is_ok();
+
+        let region = if !cursor_ok || source_rect.is_none() { -1 }
+            else if in_source { 1 } else { 0 };
+        let changed = LAST_SOURCE_CURSOR_REGION.with(|c| {
+            let previous = c.get();
+            let new = (source.0 as isize, region);
+            if new == previous { false } else { c.set(new); true }
+        });
+        if transition_only && !changed { return; }
+
+        if let Some((event_hwnd, event_time_ms)) = event {
+            let event_root = if event_hwnd != HWND::default() {
+                GetAncestor(event_hwnd, GA_ROOT)
+            } else { HWND::default() };
+            if source != HWND::default()
+                && event_root != HWND::default()
+                && event_root != source
+                && event_root != GetAncestor(widget, GA_ROOT)
+            {
+                LAST_EXTERNAL_FOREGROUND_CURSOR.with(|c| {
+                    *c.borrow_mut() = Some(LastExternalForegroundCursor {
+                        observed: Instant::now(), event_time_ms,
+                        event_hwnd: event_hwnd.0 as isize,
+                        cursor_x: cursor.x, cursor_y: cursor.y,
+                        cursor_in_source_rect: in_source,
+                        source_hwnd: source.0 as isize,
+                    });
+                });
+            }
+        }
+        let recent = LAST_EXTERNAL_FOREGROUND_CURSOR.with(|c| {
+            c.borrow().map(|v| format!(
+                "last_external_event_hwnd={:?} last_external_class={} last_external_event_time_ms={} last_external_age_ms={} last_external_cursor=({}, {}) last_external_in_source={} last_external_source={:?}",
+                HWND(v.event_hwnd as *mut _),
+                explorer_activation_event_class(HWND(v.event_hwnd as *mut _)),
+                v.event_time_ms, v.observed.elapsed().as_millis(),
+                v.cursor_x, v.cursor_y, v.cursor_in_source_rect,
+                HWND(v.source_hwnd as *mut _)
+            )).unwrap_or_else(|| "last_external=<none>".into())
+        });
+        let event_text = event.map(|(hwnd,t)| format!(
+            "event_hwnd={:?} event_class={} event_time_ms={}",
+            hwnd, explorer_activation_event_class(hwnd), t
+        )).unwrap_or_else(|| "event_hwnd=<none> event_time_ms=<none>".into());
+        diagnose::log(format!(
+            "taskbar cursor-foreground stage={} transition={} source={:?} source_tid={} source_rect={} target={:?} target_rect={} widget={:?} widget_rect={} cursor_ok={} cursor=({}, {}) region={} in_source={} in_widget={} in_target={} hit={:?} hit_class={} hit_root={:?} hit_root_class={} hit_root_equals_source={} foreground_now={:?} foreground_class={} shell_gui_ok={} shell_active={:?} shell_focus={:?} shell_capture={:?} {} {}",
+            stage, changed, source, source_tid,
+            cursor_rect_text(source_rect), target_hwnd,
+            cursor_rect_text(target_rect), widget,
+            cursor_rect_text(widget_rect), cursor_ok,
+            cursor.x, cursor.y, region, in_source, in_widget, in_target,
+            cursor_hit, explorer_activation_event_class(cursor_hit),
+            cursor_root, explorer_activation_event_class(cursor_root),
+            cursor_root == source, fg_now, explorer_activation_event_class(fg_now),
+            shell_gui_ok, shell_gui.hwndActive, shell_gui.hwndFocus, shell_gui.hwndCapture,
+            event_text, recent
+        ));
+    }
+}
+
 fn explorer_activation_events_enabled() -> bool {
     diagnose::is_enabled()
         && std::env::var_os("CODEX_TASKBAR_EXPLORER_EVENTS_EXPERIMENT").as_deref()
@@ -5334,7 +5481,8 @@ unsafe extern "system" fn on_explorer_activation_event(
 ) {
     if !explorer_activation_events_enabled()
         && !zorder_diagnostic_enabled()
-        && !taskbar_activation_edge_verify_enabled() { return; }
+        && !taskbar_activation_edge_verify_enabled()
+        && !cursor_foreground_verify_enabled() { return; }
     let (taskbar, widget) = {
         let state = lock_state();
         (state.as_ref().and_then(|s| s.taskbar_hwnd),
@@ -5373,6 +5521,9 @@ unsafe extern "system" fn on_explorer_activation_event(
         return;
     }
     if event == EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC {
+        log_cursor_foreground_snapshot(
+            "foreground-event", Some((event_hwnd, event_time_ms)), None, false
+        );
         observe_taskbar_activation_edge("foreground-event", true);
     }
     if !explorer_activation_events_enabled() { return; }
@@ -5403,7 +5554,8 @@ unsafe extern "system" fn on_explorer_activation_event(
 
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
     let mut ranges = Vec::new();
-    if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled() {
+    if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled()
+        || cursor_foreground_verify_enabled() {
         ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
     }
     if explorer_activation_events_enabled() {
@@ -5510,6 +5662,9 @@ unsafe extern "system" fn wnd_proc(
                 }
                 TIMER_EXTERNAL_MOUSE_DIAGNOSTIC => {
                     drain_external_clicks("timer");
+                }
+                TIMER_CURSOR_FOREGROUND_VERIFY => {
+                    log_cursor_foreground_snapshot("cursor-region-change", None, None, true);
                 }
                 TIMER_FOCUS_EXPERIMENT => {
                     if focus_experiment_enabled() {
@@ -5674,6 +5829,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_MOUSEACTIVATE => {
+            log_cursor_foreground_snapshot("widget-mouseactivate", None, None, false);
             // Preserve Windows default activation behavior. This is logging only.
             if diagnose::is_enabled() {
                 diagnose::log(format!(
@@ -5684,6 +5840,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            log_cursor_foreground_snapshot("widget-mouse-down", None, None, false);
             observe_taskbar_activation_edge("mouse-down", true);
             sample_explorer_active_state("mouse-down", true);
             log_explorer_activation_snapshot("mouse-down", None, None);
@@ -5954,6 +6111,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
+            log_cursor_foreground_snapshot("widget-mouseleave", None, None, false);
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
