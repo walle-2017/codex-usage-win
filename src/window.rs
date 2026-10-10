@@ -1043,6 +1043,8 @@ fn attach_to_taskbar_window(
     observe_taskbar_activation_edge("before-reparent", true);
     log_taskbar_zorder_snapshot("before-reparent", Some(taskbar.hwnd));
     let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+    log_external_click_context("before-reparent");
+    log_reparent_window_state("before-reparent", hwnd, source_taskbar, taskbar.hwnd);
     let handoff_attempt = if explorer_active_state_verify_enabled()
         && source_taskbar.is_some() && source_taskbar != Some(taskbar.hwnd)
     {
@@ -1066,6 +1068,8 @@ fn attach_to_taskbar_window(
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
         }
         log_drag_input_snapshot("reparent-failed", hwnd);
+        log_external_click_context("reparent-failed");
+        log_reparent_window_state("reparent-failed", hwnd, source_taskbar, taskbar.hwnd);
         observe_taskbar_activation_edge("reparent-failed", true);
         log_taskbar_zorder_snapshot("reparent-failed", Some(taskbar.hwnd));
         sample_explorer_active_state("reparent-failed", true);
@@ -1085,6 +1089,8 @@ fn attach_to_taskbar_window(
     }
 
     sample_explorer_active_state("reparent-success", true);
+    log_external_click_context("reparent-success");
+    log_reparent_window_state("reparent-success", hwnd, source_taskbar, taskbar.hwnd);
     observe_taskbar_activation_edge("reparent-success", true);
     log_taskbar_zorder_snapshot("reparent-success", Some(taskbar.hwnd));
     if handoff_attempt != 0 {
@@ -2301,6 +2307,23 @@ pub fn run() {
 
         // Separate diagnostic hooks; the event callback uses this UI message loop.
         let explorer_activation_hooks = install_explorer_activation_hooks();
+        let external_mouse_hook = if external_mouse_diagnostic_enabled() {
+            match SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(on_external_mouse_click),
+                Some(HINSTANCE(hinstance.0)),
+                0,
+            ) {
+                Ok(hook) => {
+                    diagnose::log("taskbar external-click hook installed read_only=true left_only=true");
+                    Some(hook)
+                }
+                Err(error) => {
+                    diagnose::log(format!("taskbar external-click hook install failed error={error:?}"));
+                    None
+                }
+            }
+        } else { None };
 
         // Poll timer: 15 minutes
         let initial_poll_ms = {
@@ -2324,6 +2347,9 @@ pub fn run() {
             SetTimer(hwnd, TIMER_TASKBAR_ACTIVATION_EDGE, 50, None);
             diagnose::log("taskbar activation-edge observer started interval_ms=50 read_only=true");
             observe_taskbar_activation_edge("startup", true);
+        }
+        if external_mouse_diagnostic_enabled() {
+            SetTimer(hwnd, TIMER_EXTERNAL_MOUSE_DIAGNOSTIC, 50, None);
         }
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
@@ -2351,6 +2377,10 @@ pub fn run() {
         }
         for hook in explorer_activation_hooks {
             native_interop::unhook_win_event(hook);
+        }
+        if let Some(hook) = external_mouse_hook {
+            let result = UnhookWindowsHookEx(hook);
+            diagnose::log(format!("taskbar external-click hook cleanup={result:?}"));
         }
     }
 }
@@ -5135,6 +5165,124 @@ fn observe_taskbar_activation_edge(stage: &str, force: bool) {
     }
 }
 
+// Experimental external-click observer. The WH_MOUSE_LL callback only stores
+// a short bounded event; it never logs, synthesizes or suppresses input.
+const TIMER_EXTERNAL_MOUSE_DIAGNOSTIC: usize = 0xF054;
+const EXTERNAL_CLICK_QUEUE_CAPACITY: usize = 12;
+
+#[derive(Clone, Copy)]
+struct ExternalClickDiagnostic {
+    observed_at: Instant,
+    input_time_ms: u32,
+    hit_root: isize,
+    foreground_before: isize,
+    flags: u32,
+}
+
+thread_local! {
+    static EXTERNAL_CLICK_PENDING: std::cell::RefCell<Vec<ExternalClickDiagnostic>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static LAST_EXTERNAL_CLICK: std::cell::RefCell<Option<ExternalClickDiagnostic>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn external_mouse_diagnostic_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_EXTERNAL_MOUSE_DIAGNOSTIC").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+unsafe extern "system" fn on_external_mouse_click(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN && lparam.0 != 0 {
+        let details = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        let hit = WindowFromPoint(details.pt);
+        let root = if hit == HWND::default() { hit } else { GetAncestor(hit, GA_ROOT) };
+        let event = ExternalClickDiagnostic {
+            observed_at: Instant::now(),
+            input_time_ms: details.time,
+            hit_root: root.0 as isize,
+            foreground_before: GetForegroundWindow().0 as isize,
+            flags: details.flags,
+        };
+        EXTERNAL_CLICK_PENDING.with(|q| {
+            let mut q = q.borrow_mut();
+            if q.len() >= EXTERNAL_CLICK_QUEUE_CAPACITY { q.remove(0); }
+            q.push(event);
+        });
+    }
+    // Never consume the event: preserve the input chain and original click.
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+fn drain_external_clicks(stage: &str) {
+    if !external_mouse_diagnostic_enabled() { return; }
+    let events = EXTERNAL_CLICK_PENDING.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    for event in events {
+        let root = HWND(event.hit_root as *mut _);
+        let class = explorer_activation_event_class(root);
+        if class.starts_with("Shell_") || class == "CodexUsageWin" { continue; }
+        let mut pid = 0u32;
+        let tid = unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
+        diagnose::log(format!(
+            "taskbar external-click stage={} button=left input_time_ms={} hit_root={:?} hit_class={} hit_tid={} hit_pid={} foreground_before={:?} flags={:#x} injected={} age_ms={}",
+            stage, event.input_time_ms, root, class, tid, pid,
+            HWND(event.foreground_before as *mut _), event.flags,
+            (event.flags & 1) != 0, event.observed_at.elapsed().as_millis()
+        ));
+        LAST_EXTERNAL_CLICK.with(|c| *c.borrow_mut() = Some(event));
+    }
+}
+
+fn log_external_click_context(stage: &str) {
+    if !external_mouse_diagnostic_enabled() { return; }
+    drain_external_clicks(stage);
+    LAST_EXTERNAL_CLICK.with(|c| {
+        let click = *c.borrow();
+        if let Some(click) = click {
+            let root = HWND(click.hit_root as *mut _);
+            diagnose::log(format!(
+                "taskbar external-click context stage={} last_input_time_ms={} last_root={:?} last_class={} last_age_ms={} injected={}",
+                stage, click.input_time_ms, root,
+                explorer_activation_event_class(root),
+                click.observed_at.elapsed().as_millis(), (click.flags & 1) != 0
+            ));
+        } else {
+            diagnose::log(format!("taskbar external-click context stage={} last=<none>",stage));
+        }
+    });
+}
+
+fn log_reparent_window_state(stage: &str, widget: HWND, source: Option<HWND>, target: HWND) {
+    if !external_mouse_diagnostic_enabled() { return; }
+    unsafe {
+        let parent = GetAncestor(widget, GA_PARENT);
+        let root = GetAncestor(widget, GA_ROOT);
+        let raw_parent = GetWindowLongPtrW(widget, GWLP_HWNDPARENT);
+        let style = GetWindowLongW(widget, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongW(widget, GWL_EXSTYLE) as u32;
+        let source_hwnd = source.unwrap_or_default();
+        let source_style = if source_hwnd != HWND::default() {
+            GetWindowLongW(source_hwnd, GWL_STYLE) as u32
+        } else { 0 };
+        let target_style = GetWindowLongW(target, GWL_STYLE) as u32;
+        let mut widget_pid = 0u32;
+        let widget_tid = GetWindowThreadProcessId(widget, Some(&mut widget_pid));
+        diagnose::log(format!(
+            "taskbar window-state stage={} widget={:?} parent={:?} root={:?} raw_parent={:#x} widget_tid={} widget_pid={} widget_style={:#x} widget_ex_style={:#x} child={} popup={} widget_visible={} widget_enabled={} source={:?} source_valid={} source_style={:#x} target={:?} target_valid={} target_style={:#x} foreground={:?} capture={:?}",
+            stage, widget, parent, root, raw_parent, widget_tid, widget_pid,
+            style, ex_style, style & WS_CHILD.0 != 0, style & WS_POPUP.0 != 0,
+            IsWindowVisible(widget).as_bool(), IsWindowEnabled(widget).as_bool(),
+            source_hwnd, IsWindow(source_hwnd).as_bool(), source_style, target,
+            IsWindow(target).as_bool(), target_style,
+            GetForegroundWindow(), GetCapture()
+        ));
+    }
+}
+
 fn explorer_activation_events_enabled() -> bool {
     diagnose::is_enabled()
         && std::env::var_os("CODEX_TASKBAR_EXPLORER_EVENTS_EXPERIMENT").as_deref()
@@ -5359,6 +5507,9 @@ unsafe extern "system" fn wnd_proc(
                 }
                 TIMER_TASKBAR_ACTIVATION_EDGE => {
                     observe_taskbar_activation_edge("poll", false);
+                }
+                TIMER_EXTERNAL_MOUSE_DIAGNOSTIC => {
+                    drain_external_clicks("timer");
                 }
                 TIMER_FOCUS_EXPERIMENT => {
                     if focus_experiment_enabled() {
