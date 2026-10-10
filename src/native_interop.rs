@@ -11,7 +11,7 @@ use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::System::StationsAndDesktops::GetThreadDesktop;
-use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetCapture, GetFocus};
 
 thread_local! {
     static REPARENT_DIAGNOSTIC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -314,6 +314,97 @@ pub fn get_window_rect_safe(hwnd: HWND) -> Option<RECT> {
     }
 }
 
+// Diagnostic-only, read-only input/capture handoff timeline.  No window
+// mutation, queue attachment, input injection, or retries are permitted here.
+thread_local! {
+    static HANDOFF_DEEP_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn handoff_deep_verify_enabled() -> bool {
+    crate::diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_HANDOFF_DEEP_VERIFY").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn window_rect_diagnostic(hwnd: HWND) -> String {
+    match get_window_rect_safe(hwnd) {
+        Some(rect) => format!("({},{},{},{})", rect.left, rect.top, rect.right, rect.bottom),
+        None => "<unavailable>".to_owned(),
+    }
+}
+
+/// Snapshot widget, Explorer source/target, and each distinct GUI thread.
+/// A matching GetGUIThreadInfo result does NOT establish queue attachment:
+/// Windows exposes no such read-only relationship query here.
+pub fn log_handoff_deep_snapshot(stage: &str, widget: HWND, target: HWND) {
+    if !handoff_deep_verify_enabled() { return; }
+    unsafe {
+        let now = std::time::Instant::now();
+        let elapsed = HANDOFF_DEEP_START.with(|cell| {
+            if stage == "drag-before-release" {
+                cell.set(Some(now));
+            }
+            cell.get().map(|start| now.saturating_duration_since(start).as_micros())
+        });
+        let source = GetAncestor(widget, GA_PARENT);
+        let foreground = GetForegroundWindow();
+        let mut cursor = windows::Win32::Foundation::POINT::default();
+        let cursor_ok = GetCursorPos(&mut cursor).is_ok();
+        let hit = if cursor_ok { WindowFromPoint(cursor) } else { HWND::default() };
+        let hit_root = if hit != HWND::default() { GetAncestor(hit, GA_ROOT) }
+            else { HWND::default() };
+        let widget_tid = GetWindowThreadProcessId(widget, None);
+        let source_tid = GetWindowThreadProcessId(source, None);
+        let target_tid = GetWindowThreadProcessId(target, None);
+        crate::diagnose::log(format!(
+            "taskbar handoff-deep stage={} elapsed_us={:?} widget={:?} source={:?} target={:?} foreground={:?} local_active={:?} local_focus={:?} local_capture={:?} cursor_ok={} cursor=({}, {}) cursor_hit={:?} cursor_root={:?} cursor_in_source={} cursor_in_target={} widget_tid={} source_tid={} target_tid={} source_target_same_thread={}",
+            stage, elapsed, widget, source, target, foreground,
+            GetActiveWindow(), GetFocus(), GetCapture(),
+            cursor_ok, cursor.x, cursor.y, hit, hit_root,
+            cursor_ok && get_window_rect_safe(source).is_some_and(|r| {
+                cursor.x >= r.left && cursor.x < r.right && cursor.y >= r.top && cursor.y < r.bottom
+            }),
+            cursor_ok && get_window_rect_safe(target).is_some_and(|r| {
+                cursor.x >= r.left && cursor.x < r.right && cursor.y >= r.top && cursor.y < r.bottom
+            }),
+            widget_tid, source_tid, target_tid, source_tid != 0 && source_tid == target_tid
+        ));
+        for (role, hwnd) in [("widget", widget), ("source", source), ("target", target)] {
+            if hwnd == HWND::default() { continue; }
+            let mut pid = 0;
+            let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            crate::diagnose::log(format!(
+                "taskbar handoff-deep window stage={} role={} hwnd={:?} valid={} tid={} pid={} parent={:?} root={:?} raw_parent={:#x} style={:#x} ex_style={:#x} rect={} dpi_context={:?}",
+                stage, role, hwnd, IsWindow(hwnd).as_bool(), tid, pid,
+                GetAncestor(hwnd, GA_PARENT), GetAncestor(hwnd, GA_ROOT),
+                GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT),
+                GetWindowLongW(hwnd, GWL_STYLE) as u32,
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
+                window_rect_diagnostic(hwnd), GetWindowDpiAwarenessContext(hwnd)
+            ));
+        }
+        // For source/target Explorer windows the TIDs are commonly identical.
+        // Avoid duplicating the same thread snapshot.
+        let mut seen = Vec::new();
+        for (role, tid) in [("widget", widget_tid), ("source", source_tid),
+                            ("target", target_tid)] {
+            if tid == 0 || seen.contains(&tid) { continue; }
+            seen.push(tid);
+            let mut gui = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            let ok = GetGUIThreadInfo(tid, &mut gui).is_ok();
+            crate::diagnose::log(format!(
+                "taskbar handoff-deep gui stage={} role={} tid={} ok={} flags={:#x} active={:?} focus={:?} capture={:?} menu_owner={:?} move_size={:?} caret={:?}",
+                stage, role, tid, ok, gui.flags.0, gui.hwndActive, gui.hwndFocus,
+                gui.hwndCapture, gui.hwndMenuOwner, gui.hwndMoveSize, gui.hwndCaret
+            ));
+        }
+    }
+}
+
 /// Embed our window as a child of the taskbar
 pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
     unsafe {
@@ -398,6 +489,7 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             IsWindow(taskbar_hwnd).as_bool(), IsWindow(hwnd).as_bool(),
             target_depth, target_contains_widget, GetAncestor(taskbar_hwnd, GA_ROOT)
         ));
+        log_handoff_deep_snapshot("native-before-setparent", hwnd, taskbar_hwnd);
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
         crate::diagnose::log("taskbar SetParent begin");
         let mut set_parent_result = SetParent(hwnd, taskbar_hwnd);
@@ -407,6 +499,7 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
             None
         };
         REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
+        log_handoff_deep_snapshot("native-after-setparent", hwnd, taskbar_hwnd);
         // Optional controlled input-queue experiment. Attach only the widget
         // thread to the Explorer taskbar thread, retry once, always detach.
         // This is NOT used in normal operation.

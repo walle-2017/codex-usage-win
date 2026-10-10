@@ -5994,7 +5994,13 @@ unsafe extern "system" fn wnd_proc(
                                 s.drag_reparenting = true;
                             }
                         }
+                        native_interop::log_handoff_deep_snapshot(
+                            "drag-before-release", hwnd, hovered_taskbar.hwnd
+                        );
                         let _ = ReleaseCapture();
+                        native_interop::log_handoff_deep_snapshot(
+                            "drag-after-release", hwnd, hovered_taskbar.hwnd
+                        );
 
                         let switched = if embedded {
                             attach_to_taskbar_window(
@@ -6018,6 +6024,9 @@ unsafe extern "system" fn wnd_proc(
                                 }
                             }
                             SetCapture(hwnd);
+                            native_interop::log_handoff_deep_snapshot(
+                                "drag-after-recapture-success", hwnd, hovered_taskbar.hwnd
+                            );
                             switched_taskbar = true;
                         } else {
                             CURRENT_DPI.store(previous_dpi, Ordering::Relaxed);
@@ -6027,6 +6036,9 @@ unsafe extern "system" fn wnd_proc(
                                 s.failed_drag_target = Some(hovered_taskbar.hwnd);
                             }
                             SetCapture(hwnd);
+                            native_interop::log_handoff_deep_snapshot(
+                                "drag-after-recapture-failure", hwnd, hovered_taskbar.hwnd
+                            );
                             // The widget is still a child of the old taskbar.
                             // Its client coordinates must not follow the pointer
                             // into another monitor or it will be clipped away.
