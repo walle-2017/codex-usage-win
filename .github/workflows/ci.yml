@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -68,6 +69,9 @@ jobs:
       - name: Verify deep handoff read-only diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-handoff-deep.ps1
+      - name: Verify lazy per-taskbar replica safeguards
+        shell: pwsh
+        run: ./scripts/assert-taskbar-lazy-replica.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
