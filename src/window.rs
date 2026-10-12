@@ -1225,6 +1225,7 @@ fn try_taskbar_replica_handoff(
         { Some(primary) } else { None }
     });
     let mut newly_created = false;
+    let mut resource_baseline = None;
     let next = if let Some(existing) = target_hwnd {
         existing
     } else {
@@ -1234,6 +1235,7 @@ fn try_taskbar_replica_handoff(
             return Some(false);
         }
         let before = replica_resources();
+        resource_baseline = before;
         let class = native_interop::wide_str("CodexUsageWinReplica");
         let title = native_interop::wide_str("Codex usage replica");
         let created = unsafe {
@@ -1299,7 +1301,14 @@ fn try_taskbar_replica_handoff(
         let _ = ShowWindow(next, SW_SHOWNOACTIVATE);
     }
     render_layered();
-    let shown = unsafe {
+    // Capture the layered bitmap and USER/GDI allocations as well as the bare
+    // HWND. A cheap window alone does not imply cheap compositing resources.
+    let after_render_ok = !newly_created ||
+        replica_resources_acceptable(resource_baseline, replica_resources());
+    if !after_render_ok {
+        diagnose::log("taskbar replica post-render resource guard rejected new window");
+    }
+    let shown = after_render_ok && unsafe {
         IsWindow(next).as_bool() && IsWindowVisible(next).as_bool()
             && GetAncestor(next, GA_PARENT) == taskbar.hwnd
     };
