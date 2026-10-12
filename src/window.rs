@@ -1095,9 +1095,12 @@ fn taskbar_replica_enabled() -> bool {
 fn replica_resources() -> Option<ReplicaResources> {
     unsafe {
         let process = replica_current_process();
-        let mut counters = ReplicaProcessMemory::default();
-        counters.cb = std::mem::size_of::<ReplicaProcessMemory>() as u32;
-        if replica_process_memory(process, &mut counters, counters.cb) == 0 {
+        let mut counters = ReplicaProcessMemory {
+            cb: std::mem::size_of::<ReplicaProcessMemory>() as u32,
+            ..Default::default()
+        };
+        let cb = counters.cb;
+        if replica_process_memory(process, &mut counters, cb) == 0 {
             return None;
         }
         Some(ReplicaResources {
@@ -1182,7 +1185,8 @@ fn try_taskbar_replica_handoff(
     taskbar: &native_interop::TaskbarWindow,
 ) -> Option<bool> {
     if !taskbar_replica_enabled() { return None; }
-    let (parent, embedded, frosted, dragging, anchor, width, height) = {
+    let (parent, embedded, frosted, dragging, anchor, width, height,
+         old_index, old_monitor, old_tray_notify) = {
         let state = lock_state();
         let s = state.as_ref()?;
         (
@@ -1190,7 +1194,8 @@ fn try_taskbar_replica_handoff(
             s.composition_blur_active ||
                 s.styles.active(s.is_dark).panel_frosted_strength > 0,
             s.dragging, s.drag_anchor_logical_x,
-            total_widget_width_for_state(s), widget_height_for_state(s)
+            total_widget_width_for_state(s), widget_height_for_state(s),
+            s.taskbar_index, s.taskbar_monitor.clone(), s.tray_notify_hwnd
         )
     };
     if !embedded || !dragging || parent == taskbar.hwnd {
@@ -1305,6 +1310,9 @@ fn try_taskbar_replica_handoff(
             if let Some(s) = state.as_mut() {
                 s.hwnd = SendHwnd::from_hwnd(source_hwnd);
                 s.taskbar_hwnd = Some(parent);
+                s.taskbar_index = old_index;
+                s.taskbar_monitor = old_monitor;
+                s.tray_notify_hwnd = old_tray_notify;
             }
         }
         unsafe { let _ = ShowWindow(next, SW_HIDE); }
