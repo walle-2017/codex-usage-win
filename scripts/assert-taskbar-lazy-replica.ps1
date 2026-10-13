@@ -12,7 +12,10 @@ foreach($needle in @(
  'taskbar replica resource delta',
  'taskbar replica switch success',
  'CreateWindowExW(',
- 'WS_CHILD | WS_CLIPSIBLINGS',
+ 'taskbar replica popup created hwnd='
+ 'taskbar replica initial-embed target='
+ 'taskbar replica initial embed refused, source window unchanged'
+ 'WS_POPUP',
  'taskbar replica show failed, original HWND restored',
  'native_interop::set_tray_event_hook(thread_id, on_tray_location_changed)',
  'if let Some(switched) = try_taskbar_replica_handoff(hwnd, index, taskbar)',
@@ -27,6 +30,13 @@ foreach($unsafePath in @('SetParent\s*\(', 'AttachThreadInput\s*\(', 'SetForegro
 }
 if ($method -notmatch 'if !embedded \|\| !dragging \|\| parent == taskbar.hwnd' -or $method -notmatch 'if frosted') {
  throw 'Replica handoff must be restricted to embedded non-frosted cross-monitor drag.'
+}
+if ($method -notmatch 'native_interop::embed_in_taskbar\(created, taskbar.hwnd\)'
+    -or $method -notmatch 'DestroyWindow\(created\)') {
+ throw 'A new popup must be initially embedded or destroyed; source cannot be reparented.'
+}
+if ($src -notmatch 'SetCapture\(active_hwnd\)' -or $src -notmatch 'move_window_without_repaint\(\s*drag_hwnd,') {
+ throw 'Replica handoff must transfer capture and drag position to the active HWND.'
 }
 if ($src -notmatch 'if !taskbar_replica_enabled\(\) \{ return None; \}') {
  throw 'Replica must be opt-in.'

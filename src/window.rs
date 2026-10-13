@@ -1135,6 +1135,12 @@ fn replica_resources_acceptable(before: Option<ReplicaResources>, after: Option<
 unsafe extern "system" fn replica_wnd_proc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
+    if diagnose::is_enabled() && (msg == 0x0081 || msg == 0x0001) {
+        diagnose::log(format!(
+            "taskbar replica creation-message hwnd={:?} msg={:#x} parent={:?}",
+            hwnd, msg, GetAncestor(hwnd, GA_PARENT)
+        ));
+    }
     if msg == WM_NCDESTROY {
         TASKBAR_REPLICA_WINDOWS.with(|cache|
             cache.borrow_mut().retain(|slot| slot.child.to_hwnd() != hwnd));
@@ -1238,28 +1244,49 @@ fn try_taskbar_replica_handoff(
         resource_baseline = before;
         let class = native_interop::wide_str("CodexUsageWinReplica");
         let title = native_interop::wide_str("Codex usage replica");
+        // A direct WS_CHILD CreateWindowExW against Explorer's HWND failed
+        // repeatedly with ERROR_SUCCESS in the first field test. Instead use
+        // exactly the startup path of the primary window: create a *new* hidden
+        // top-level popup in our process and attach only that new HWND to its
+        // target taskbar once. Never detach or reparent the source widget.
         let created = unsafe {
             let module = GetModuleHandleW(PCWSTR::null()).ok()?;
             CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
                 PCWSTR::from_raw(class.as_ptr()), PCWSTR::from_raw(title.as_ptr()),
-                WS_CHILD | WS_CLIPSIBLINGS,
+                WS_POPUP,
                 0, 0, width.max(1), height.max(1),
-                taskbar.hwnd, HMENU::default(), module, None
+                HWND::default(), HMENU::default(), module, None
             )
         };
         let created = match created {
-            Ok(hwnd) if unsafe { GetAncestor(hwnd, GA_PARENT) == taskbar.hwnd } => hwnd,
             Ok(hwnd) => {
-                diagnose::log(format!("taskbar replica created with unexpected parent={:?}; discarding", unsafe { GetAncestor(hwnd, GA_PARENT) }));
-                unsafe { let _ = DestroyWindow(hwnd); }
-                return Some(false);
-            },
+                diagnose::log(format!(
+                    "taskbar replica popup created hwnd={:?} parent={:?}",
+                    hwnd, unsafe { GetAncestor(hwnd, GA_PARENT) }
+                ));
+                hwnd
+            }
             Err(error) => {
-                diagnose::log(format!("taskbar replica CreateWindowExW failed={error:?}"));
+                diagnose::log(format!(
+                    "taskbar replica popup CreateWindowExW failed={error:?}"
+                ));
                 return Some(false);
             },
         };
+        // This is a one-time initial embed of a NEW popup, not a transfer of
+        // an existing child between two Explorer taskbar HWNDs.
+        let embedded = native_interop::embed_in_taskbar(created, taskbar.hwnd);
+        let actual_parent = unsafe { GetAncestor(created, GA_PARENT) };
+        diagnose::log(format!(
+            "taskbar replica initial-embed target={:?} result={} actual_parent={:?}",
+            taskbar.hwnd, embedded, actual_parent
+        ));
+        if !embedded || actual_parent != taskbar.hwnd {
+            unsafe { let _ = DestroyWindow(created); }
+            diagnose::log("taskbar replica initial embed refused, source window unchanged");
+            return Some(false);
+        }
         if !replica_resources_acceptable(before, replica_resources()) {
             unsafe { let _ = DestroyWindow(created); }
             diagnose::log("taskbar replica resource guard rejected new window");
@@ -6372,9 +6399,16 @@ unsafe extern "system" fn wnd_proc(
                                     s.failed_drag_target = None;
                                 }
                             }
-                            SetCapture(hwnd);
+                            // After a replica switch the active HWND changes.
+                            // Re-capturing the parked/hidden old HWND would leave
+                            // the new visible widget unresponsive to dragging.
+                            let active_hwnd = lock_state()
+                                .as_ref()
+                                .map(|s| s.hwnd.to_hwnd())
+                                .unwrap_or(hwnd);
+                            SetCapture(active_hwnd);
                             native_interop::log_handoff_deep_snapshot(
-                                "drag-after-recapture-success", hwnd, hovered_taskbar.hwnd
+                                "drag-after-recapture-success", active_hwnd, hovered_taskbar.hwnd
                             );
                             switched_taskbar = true;
                         } else {
@@ -6443,11 +6477,17 @@ unsafe extern "system" fn wnd_proc(
                             (taskbar_rect.left + drag_left, anchor_y)
                         };
 
+                        // Use the current visible HWND, not the old source HWND
+                        // whose WM_MOUSEMOVE initiated this cross-monitor switch.
+                        let drag_hwnd = lock_state()
+                            .as_ref()
+                            .map(|s| s.hwnd.to_hwnd())
+                            .unwrap_or(hwnd);
                         // Embedded mode uses taskbar-client coordinates; Composition blur popup
                         // mode uses absolute screen coordinates.
                         if blur_active {
                             move_frosted_pair(
-                                hwnd,
+                                drag_hwnd,
                                 window_x,
                                 window_y,
                                 widget_width,
@@ -6455,7 +6495,7 @@ unsafe extern "system" fn wnd_proc(
                             );
                         } else {
                             move_window_without_repaint(
-                                hwnd,
+                                drag_hwnd,
                                 window_x,
                                 window_y,
                                 widget_width,
