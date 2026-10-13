@@ -814,6 +814,7 @@ fn collect_low_quota_alerts(state: &mut AppState, data: &AppUsageData) -> Vec<Qu
 }
 
 fn notify_quota_alerts(hwnd: HWND, alerts: &[QuotaAlert]) {
+    let hwnd = taskbar_replica_service_hwnd(hwnd);
     let Some(first) = alerts.first() else {
         return;
     };
@@ -965,7 +966,7 @@ fn tray_icon_data_from_state() -> Option<tray_icon::TrayIconData> {
 
 fn sync_tray_icons(hwnd: HWND) {
     let icon = tray_icon_data_from_state();
-    tray_icon::sync(hwnd, icon.as_ref());
+    tray_icon::sync(taskbar_replica_service_hwnd(hwnd), icon.as_ref());
 }
 
 fn select_preferred_taskbar(
@@ -1090,6 +1091,21 @@ fn taskbar_replica_enabled() -> bool {
     diagnose::is_enabled()
         && std::env::var_os("CODEX_TASKBAR_LAZY_REPLICA_EXPERIMENT").as_deref()
             == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Stable message, timer, and notification owner. Extra taskbar HWNDs handle
+/// interaction and painting; the primary HWND alone runs polling, timers,
+/// settings dialogs, updater callbacks and the tray icon.
+fn taskbar_replica_service_hwnd(fallback: HWND) -> HWND {
+    if !taskbar_replica_enabled() { return fallback; }
+    TASKBAR_PRIMARY_WINDOW.with(|cell| {
+        let primary = HWND(cell.get() as *mut _);
+        if primary != HWND::default() && unsafe { IsWindow(primary).as_bool() } {
+            primary
+        } else {
+            fallback
+        }
+    })
 }
 
 fn replica_resources() -> Option<ReplicaResources> {
@@ -1221,8 +1237,24 @@ fn try_taskbar_replica_handoff(
             return Some(false);
         }
     }
+    // Explorer can recreate a secondary taskbar while its parked replica
+    // remains cached. Drop invalid HWND/parent pairs before choosing a target
+    // or counting against the bounded cache.
     let target_hwnd = TASKBAR_REPLICA_WINDOWS.with(|cache| {
-        cache.borrow().iter().find(|slot| slot.parent.to_hwnd() == taskbar.hwnd)
+        let mut slots = cache.borrow_mut();
+        let before = slots.len();
+        slots.retain(|slot| unsafe {
+            IsWindow(slot.parent.to_hwnd()).as_bool()
+                && IsWindow(slot.child.to_hwnd()).as_bool()
+                && GetAncestor(slot.child.to_hwnd(), GA_PARENT) == slot.parent.to_hwnd()
+        });
+        if slots.len() != before {
+            diagnose::log(format!(
+                "taskbar replica cache pruned stale_slots={}",
+                before - slots.len()
+            ));
+        }
+        slots.iter().find(|slot| slot.parent.to_hwnd() == taskbar.hwnd)
             .map(|slot| slot.child.to_hwnd())
     }).or_else(|| {
         let primary = TASKBAR_PRIMARY_WINDOW.with(|cell| HWND(cell.get() as *mut _));
@@ -1380,6 +1412,13 @@ fn try_taskbar_replica_handoff(
         "taskbar replica switch success source={:?} target={:?} parent={:?} created={} total_windows={} old_hidden=true",
         source_hwnd, next, taskbar.hwnd, newly_created, count
     ));
+    if let Some(resources) = replica_resources() {
+        diagnose::log(format!(
+            "taskbar replica health active={:?} total_windows={} private_bytes={} working_set_bytes={} user_objects={} gdi_objects={}",
+            next, count, resources.private, resources.working,
+            resources.user, resources.gdi
+        ));
+    }
     Some(true)
 }
 
@@ -2702,7 +2741,7 @@ pub fn run() {
                 .map(|s| s.poll_interval_ms)
                 .unwrap_or(POLL_15_MIN)
         };
-        SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
+        SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, initial_poll_ms, None);
         if focus_experiment_enabled() {
             SetTimer(hwnd, TIMER_FOCUS_EXPERIMENT, 100, None);
             diagnose::log("taskbar focus experiment started interval_ms=100");
@@ -4130,7 +4169,7 @@ fn do_poll(send_hwnd: SendHwnd) {
                 }
                 if !poller::app_is_past_reset(&data) {
                     unsafe {
-                        let _ = KillTimer(hwnd, TIMER_RESET_POLL);
+                        let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_RESET_POLL);
                     }
                 }
                 quota_alerts = collect_low_quota_alerts(s, &data);
@@ -4140,7 +4179,7 @@ fn do_poll(send_hwnd: SendHwnd) {
                 if s.retry_count > 0 {
                     s.retry_count = 0;
                     unsafe {
-                        SetTimer(hwnd, TIMER_POLL, s.poll_interval_ms, None);
+                        SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, s.poll_interval_ms, None);
                     }
                 }
                 s.force_notify_auth_error = false;
@@ -4184,10 +4223,10 @@ fn do_poll(send_hwnd: SendHwnd) {
                         s.codex_weekly_text = "!".to_string();
                         s.retry_count = s.retry_count.saturating_add(1);
                         unsafe {
-                            let _ = KillTimer(hwnd, TIMER_POLL);
-                            let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                            let _ = KillTimer(hwnd, TIMER_COUNTDOWN);
-                            SetTimer(hwnd, TIMER_POLL, s.poll_interval_ms, None);
+                            let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL);
+                            let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_RESET_POLL);
+                            let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_COUNTDOWN);
+                            SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, s.poll_interval_ms, None);
                         }
                     } else {
                         s.force_notify_auth_error = false;
@@ -4202,8 +4241,8 @@ fn do_poll(send_hwnd: SendHwnd) {
                             1u32.checked_shl(s.retry_count - 1).unwrap_or(u32::MAX),
                         );
                         unsafe {
-                            let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                            SetTimer(hwnd, TIMER_POLL, backoff.min(s.poll_interval_ms), None);
+                            let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_RESET_POLL);
+                            SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, backoff.min(s.poll_interval_ms), None);
                         }
                     }
                 }
@@ -4234,11 +4273,11 @@ fn schedule_countdown_timer() {
         None => return,
     };
 
-    let hwnd = s.hwnd.to_hwnd();
+    let hwnd = taskbar_replica_service_hwnd(s.hwnd.to_hwnd());
     if !s.last_poll_ok {
         unsafe {
-            let _ = KillTimer(hwnd, TIMER_COUNTDOWN);
-            let _ = KillTimer(hwnd, TIMER_RESET_POLL);
+            let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_COUNTDOWN);
+            let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_RESET_POLL);
         }
         return;
     }
@@ -4251,7 +4290,7 @@ fn schedule_countdown_timer() {
     // If a reset time has passed, poll every 5s to pick up fresh data
     if poller::app_is_past_reset(data) {
         unsafe {
-            SetTimer(hwnd, TIMER_RESET_POLL, 5_000, None);
+            SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_RESET_POLL, 5_000, None);
         }
     }
 
@@ -4271,7 +4310,7 @@ fn schedule_countdown_timer() {
         .max(1000) as u32;
 
     unsafe {
-        SetTimer(hwnd, TIMER_COUNTDOWN, ms, None);
+        SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_COUNTDOWN, ms, None);
     }
 }
 
@@ -6883,7 +6922,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     render_layered();
-                    let sh = SendHwnd::from_hwnd(hwnd);
+                    let sh = SendHwnd::from_hwnd(taskbar_replica_service_hwnd(hwnd));
                     std::thread::spawn(move || {
                         do_poll(sh);
                     });
@@ -6904,7 +6943,7 @@ unsafe extern "system" fn wnd_proc(
                     #[cfg(feature = "github-update")]
                     {
                         diagnose::log("update command requested");
-                        let _ = updater::start_update(hwnd);
+                        let _ = updater::start_update(taskbar_replica_service_hwnd(hwnd));
                     }
                 }
                 IDM_OPEN_RELEASES => {
@@ -6958,7 +6997,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                     // Reset the poll timer with the new interval
-                    SetTimer(hwnd, TIMER_POLL, new_interval, None);
+                    SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, new_interval, None);
                 }
                 IDM_SHOW_SESSION_WINDOW | IDM_SHOW_WEEKLY_WINDOW => {
                     {
@@ -7052,7 +7091,10 @@ unsafe extern "system" fn wnd_proc(
                 }
                 IDM_STYLE_SETTINGS => {
                     close_style_editors();
-                    style_window::open_or_focus(hwnd, style_settings_snapshot());
+                    style_window::open_or_focus(
+                        taskbar_replica_service_hwnd(hwnd),
+                        style_settings_snapshot(),
+                    );
                 }
                 IDM_STYLE_PANEL_BACKGROUND
                 | IDM_STYLE_PANEL_BORDER
@@ -7272,7 +7314,7 @@ unsafe extern "system" fn wnd_proc(
                 }
                 save_state_settings();
                 unsafe {
-                    SetTimer(hwnd, TIMER_POLL, interval, None);
+                    SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, interval, None);
                 }
                 style_window::sync(style_settings_snapshot());
             }
@@ -8025,7 +8067,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     set_startup_enabled(startup_enabled);
     save_state_settings();
     unsafe {
-        SetTimer(hwnd, TIMER_POLL, poll_interval_ms, None);
+        SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, poll_interval_ms, None);
     }
     hide_minimal_usage_tooltip();
     position_at_taskbar();
