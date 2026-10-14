@@ -1600,6 +1600,7 @@ fn select_taskbar_for_popup_window(
             bind_popup_windows_to_taskbar_owner(foreground_hwnd);
         }
     }
+    remember_popup_visited_taskbar(taskbar);
     true
 }
 
@@ -1650,6 +1651,75 @@ fn replica_taskbar_targets_from_existing_windows() -> Vec<native_interop::Taskba
     result
 }
 
+// Unlike embedded replica windows, the frosted popup has no parked taskbar
+// child HWNDs. Remember only taskbars that have been positively identified
+// during this process lifetime, so a Start-menu enumeration gap cannot make
+// the previously visited taskbar an unreachable return target.
+const POPUP_VISITED_TASKBAR_LIMIT: usize = 4;
+thread_local! {
+    static POPUP_VISITED_TASKBARS:
+        std::cell::RefCell<Vec<native_interop::TaskbarWindow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn remember_popup_visited_taskbar(taskbar: &native_interop::TaskbarWindow) {
+    if !taskbar_replica_enabled() || !native_interop::is_taskbar_window(taskbar.hwnd) {
+        return;
+    }
+    POPUP_VISITED_TASKBARS.with(|cache| {
+        let mut targets = cache.borrow_mut();
+        if let Some(previous) = targets.iter_mut().find(|t| t.hwnd == taskbar.hwnd) {
+            *previous = taskbar.clone();
+        } else if targets.len() < POPUP_VISITED_TASKBAR_LIMIT {
+            targets.push(taskbar.clone());
+            diagnose::log(format!(
+                "taskbar popup visited target cached hwnd={:?} monitor={} rect=({}, {}, {}, {})",
+                taskbar.hwnd,
+                taskbar.monitor_device.as_deref().unwrap_or("<unknown>"),
+                taskbar.rect.left, taskbar.rect.top,
+                taskbar.rect.right, taskbar.rect.bottom
+            ));
+        }
+    });
+}
+
+/// Read-only exact-rectangle lookup: never extrapolate outside a taskbar,
+/// alter popup ownership/z-order or reparent an HWND. Discard cached handles
+/// if Explorer has replaced the window or the window changed monitors.
+fn popup_visited_taskbar_at_point(pt: POINT) -> Option<native_interop::TaskbarWindow> {
+    if !taskbar_replica_enabled()
+        || !lock_state().as_ref().is_some_and(|s| !s.embedded) {
+        return None;
+    }
+    POPUP_VISITED_TASKBARS.with(|cache| {
+        let mut targets = cache.borrow_mut();
+        targets.retain_mut(|entry| {
+            if !native_interop::is_taskbar_window(entry.hwnd) {
+                return false;
+            }
+            let Some(rect) = native_interop::get_taskbar_rect(entry.hwnd)
+                .or_else(|| native_interop::get_window_rect_safe(entry.hwnd)) else {
+                return false;
+            };
+            if rect.right <= rect.left || rect.bottom <= rect.top {
+                return false;
+            }
+            let monitor = native_interop::monitor_device_name(entry.hwnd);
+            if entry.monitor_device.is_some() && monitor != entry.monitor_device {
+                return false;
+            }
+            entry.rect = rect;
+            entry.monitor_device = monitor;
+            true
+        });
+        targets.iter().find(|entry| point_is_in_taskbar_rect(pt, entry.rect)).cloned()
+    })
+}
+
+fn popup_visited_taskbars_for_diagnostics() -> Vec<native_interop::TaskbarWindow> {
+    POPUP_VISITED_TASKBARS.with(|cache| cache.borrow().clone())
+}
+
 fn point_is_in_taskbar_rect(pt: POINT, rect: RECT) -> bool {
     pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
 }
@@ -1659,6 +1729,9 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
     if let Some((index, found)) = enumerated.iter().enumerate()
         .find(|(_, taskbar)| point_is_in_taskbar_rect(pt, taskbar.rect))
     {
+        if lock_state().as_ref().is_some_and(|s| !s.embedded) {
+            remember_popup_visited_taskbar(found);
+        }
         return Some((index, found.clone()));
     }
 
@@ -1689,6 +1762,30 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
             }
         });
         return Some((index, found.clone()));
+    }
+
+    // A frosted/standalone popup has no parked child windows, unlike the
+    // embedded replica mode. Use exact geometry from a previously visited
+    // Explorer taskbar while Start temporarily hides it from enumeration.
+    if let Some(visited) = popup_visited_taskbar_at_point(pt) {
+        if !enumerated.iter().any(|taskbar| taskbar.hwnd == visited.hwnd) {
+            enumerated.push(visited.clone());
+        }
+        enumerated.sort_by_key(|taskbar| (
+            taskbar.rect.top, taskbar.rect.left,
+            taskbar.rect.bottom, taskbar.rect.right
+        ));
+        if let Some((index, found)) = enumerated.iter().enumerate()
+            .find(|(_, taskbar)| taskbar.hwnd == visited.hwnd)
+        {
+            diagnose::log(format!(
+                "taskbar popup recovered visited target hwnd={:?} monitor={} cursor=({}, {}) rect=({}, {}, {}, {})",
+                found.hwnd, found.monitor_device.as_deref().unwrap_or("<unknown>"),
+                pt.x, pt.y, found.rect.left, found.rect.top,
+                found.rect.right, found.rect.bottom
+            ));
+            return Some((index, found.clone()));
+        }
     }
 
     // Opening Start or another shell surface can transiently omit the taskbar
@@ -6722,13 +6819,17 @@ unsafe extern "system" fn wnd_proc(
                 let release_taskbar = taskbar_at_point(pt);
                 if release_taskbar.is_none() && taskbar_replica_enabled() {
                     diagnose::log(format!(
-                        "taskbar replica drop-miss cursor=({}, {}) live_targets={:?} parked_targets={:?}",
+                        "taskbar replica drop-miss cursor=({}, {}) live_targets={:?} parked_targets={:?} popup_visited_targets={:?}",
                         pt.x, pt.y,
                         native_interop::find_taskbars().iter().map(|t| (
                             t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
                             t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
                         )).collect::<Vec<_>>(),
                         replica_taskbar_targets_from_existing_windows().iter().map(|t| (
+                            t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
+                            t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
+                        )).collect::<Vec<_>>(),
+                        popup_visited_taskbars_for_diagnostics().iter().map(|t| (
                             t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
                             t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
                         )).collect::<Vec<_>>()
