@@ -1528,6 +1528,10 @@ fn attach_to_taskbar_window(
         s.taskbar_monitor = taskbar.monitor_device.clone();
         s.embedded = true;
     }
+    drop(state);
+    // Seed the initially selected taskbar before frosted popup mode detaches
+    // its child HWND. Start can temporarily hide this taskbar from enumeration.
+    remember_popup_visited_taskbar(taskbar);
     true
 }
 
