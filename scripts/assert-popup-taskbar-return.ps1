@@ -16,6 +16,17 @@ foreach ($needle in @(
 )) {
     if (-not $source.Contains($needle)) { throw "Missing popup return-target safeguard: $needle" }
 }
+# The initial taskbar must be saved before a frosted popup detaches.
+# This covers return drags when Start hides the original Explorer taskbar.
+$initialAttach = [regex]::Match($source, '(?s)fn attach_to_taskbar_window\(.*?\n\}')
+if (-not $initialAttach.Success) { throw 'Initial taskbar attachment function missing.' }
+$attach = $initialAttach.Value
+$stateInitialized = $attach.IndexOf('s.embedded = true;')
+$lockReleased = $attach.IndexOf('drop(state);', $stateInitialized)
+$cached = $attach.IndexOf('remember_popup_visited_taskbar(taskbar);', $lockReleased)
+if ($stateInitialized -lt 0 -or $lockReleased -le $stateInitialized -or $cached -le $lockReleased) {
+    throw 'Initial taskbar must be cached after attachment and releasing state lock.'
+}
 $finder = [regex]::Match($source, '(?s)fn popup_visited_taskbar_at_point\(.*?\n\}')
 if (-not $finder.Success) { throw 'Popup return-taskbar locator missing.' }
 $locator = $finder.Value
