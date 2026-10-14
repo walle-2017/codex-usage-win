@@ -609,29 +609,6 @@ pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
     }
 }
 
-/// Keep shell-owned floating widget surfaces in the ordinary z-order band.
-/// Unlike set_popup_owner(), this must not force HWND_TOPMOST across the
-/// Windows Start menu / search surface. The owner relationship retains their
-/// relative position over the taskbar without raising them above the shell UI.
-pub fn set_popup_owner_regular_band(hwnd: HWND, owner: Option<HWND>) {
-    unsafe {
-        let owner_value = owner.map(|h| h.0 as isize).unwrap_or(0);
-        let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
-        let result = SetWindowPos(
-            hwnd,
-            HWND_NOTOPMOST,
-            0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        if result.is_err() {
-            crate::diagnose::log(format!(
-                "taskbar regular-band owner assignment failed hwnd={:?} owner={:?} result={:?}",
-                hwnd, owner, result
-            ));
-        }
-    }
-}
-
 /// Toggle WS_EX_LAYERED without changing the other extended window styles.
 pub fn set_layered_style(hwnd: HWND, enabled: bool) {
     unsafe {

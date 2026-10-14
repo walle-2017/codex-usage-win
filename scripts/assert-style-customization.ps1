@@ -451,12 +451,12 @@ $bindOwnerBlock = [regex]::Match(
     $windowProduction,
     '(?s)fn\s+bind_popup_windows_to_taskbar_owner\s*\(.*?\n\}'
 ).Value
-$backdropOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner_regular_band(backdrop_hwnd')
-$foregroundOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner_regular_band(foreground_hwnd')
+$backdropOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner(backdrop_hwnd')
+$foregroundOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner(foreground_hwnd')
 if ($backdropOwnerIndex -lt 0 -or
     $foregroundOwnerIndex -lt 0 -or
     $backdropOwnerIndex -ge $foregroundOwnerIndex) {
-    throw 'Taskbar owner rebinding must place the blur backdrop before the foreground without forcing topmost over Start.'
+    throw 'Taskbar owner rebinding must promote the blur backdrop before the foreground.'
 }
 $popupTaskbarSwitchBlock = [regex]::Match(
     $windowProduction,

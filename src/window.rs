@@ -1603,108 +1603,49 @@ fn select_taskbar_for_popup_window(
     true
 }
 
-// Cache every independently identified taskbar, not just the current parent.
-// Windows 11 Start/search can temporarily obscure a secondary taskbar from
-// EnumWindows. A validated cached HWND lets an in-progress drag still find
-// that target monitor. This cache lives only on the UI thread.
-thread_local! {
-    static DRAG_TASKBAR_TARGETS: std::cell::RefCell<Vec<native_interop::TaskbarWindow>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    static DRAG_LAST_NEAR_EDGE: std::cell::Cell<isize> =
-        const { std::cell::Cell::new(0) };
-}
-
-fn refreshed_drag_taskbar_targets() -> Vec<native_interop::TaskbarWindow> {
-    let enumerated = native_interop::find_taskbars();
-    DRAG_TASKBAR_TARGETS.with(|targets| {
-        let mut cache = targets.borrow_mut();
-        cache.retain(|target| native_interop::is_taskbar_window(target.hwnd));
-        for target in enumerated {
-            if let Some(existing) = cache.iter_mut().find(|item| item.hwnd == target.hwnd) {
-                *existing = target;
-            } else {
-                cache.push(target);
-            }
-        }
-        for target in cache.iter_mut() {
-            // Preserve the last known rectangular area if an Explorer query
-            // temporarily fails, but never trust an invalid HWND/class.
-            if let Some(rect) = native_interop::get_taskbar_rect(target.hwnd)
-                .or_else(|| native_interop::get_window_rect_safe(target.hwnd))
-            {
-                if rect.right > rect.left && rect.bottom > rect.top {
-                    target.rect = rect;
-                }
-            }
-        }
-        cache.sort_by_key(|t| (t.rect.top, t.rect.left, t.rect.bottom, t.rect.right));
-        cache.clone()
-    })
-}
-
-fn point_near_other_taskbar_top(pt: POINT, rect: RECT, is_other_taskbar: bool) -> bool {
-    let height = (rect.bottom - rect.top).max(0);
-    // Less than one taskbar's height. Only used after exact hit-testing fails.
-    let extra = height.clamp(24, 56);
-    is_other_taskbar
-        && pt.x >= rect.left && pt.x < rect.right
-        && pt.y >= rect.top - extra && pt.y < rect.top
-}
-
 fn point_is_in_taskbar_rect(pt: POINT, rect: RECT) -> bool {
     pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
 }
 
 fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)> {
-    let targets = refreshed_drag_taskbar_targets();
-    if let Some((index, found)) = targets.iter().enumerate()
+    if let Some(found) = native_interop::find_taskbars()
+        .into_iter()
+        .enumerate()
         .find(|(_, taskbar)| point_is_in_taskbar_rect(pt, taskbar.rect))
     {
-        DRAG_LAST_NEAR_EDGE.with(|last| last.set(0));
-        return Some((index, found.clone()));
+        return Some(found);
     }
 
-    // With a Start/search surface open, users may release just above the
-    // visible taskbar edge. Permit a narrow band over a DIFFERENT taskbar only
-    // during the explicitly enabled multi-window experiment; never infer a
-    // target elsewhere on the desktop or move a parked window there.
-    if taskbar_replica_enabled() {
-        let active_parent = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
-        if let Some((index, target)) = targets.iter().enumerate().find(|(_, taskbar)| {
-            point_near_other_taskbar_top(
-                pt, taskbar.rect, active_parent != Some(taskbar.hwnd)
-            )
-        }) {
-            DRAG_LAST_NEAR_EDGE.with(|last| {
-                if last.replace(target.hwnd.0 as isize) != target.hwnd.0 as isize {
-                    diagnose::log(format!(
-                        "taskbar drag near-edge target={:?} monitor={} cursor=({}, {}) rect=({}, {}, {}, {})",
-                        target.hwnd, target.monitor_device.as_deref().unwrap_or("<unknown>"),
-                        pt.x, pt.y, target.rect.left, target.rect.top,
-                        target.rect.right, target.rect.bottom
-                    ));
-                }
-            });
-            return Some((index, target.clone()));
-        }
-    }
-
-    DRAG_LAST_NEAR_EDGE.with(|last| last.set(0));
-    // Legacy fallback when no cached HWND survived enumeration. This does not
-    // extend the current taskbar's hit area beyond its actual rectangle.
+    // Opening Start or another shell surface can transiently omit the taskbar
+    // from EnumWindows. Dragging must still work on the current taskbar while
+    // its persisted HWND/class remains valid.
     let (index, hwnd, monitor_device) = {
         let state = lock_state();
         let state = state.as_ref()?;
-        (state.taskbar_index, state.taskbar_hwnd?, state.taskbar_monitor.clone())
+        (
+            state.taskbar_index,
+            state.taskbar_hwnd?,
+            state.taskbar_monitor.clone(),
+        )
     };
+
     if !native_interop::is_taskbar_window(hwnd) {
         return None;
     }
+
     let rect = native_interop::get_taskbar_rect(hwnd)
         .or_else(|| native_interop::get_window_rect_safe(hwnd))?;
-    point_is_in_taskbar_rect(pt, rect).then_some((
+    if !point_is_in_taskbar_rect(pt, rect) {
+        return None;
+    }
+
+    Some((
         index,
-        native_interop::TaskbarWindow { hwnd, rect, monitor_device },
+        native_interop::TaskbarWindow {
+            hwnd,
+            rect,
+            monitor_device,
+        },
     ))
 }
 
@@ -2710,17 +2651,6 @@ pub fn run() {
             });
         }
 
-        // Seed both taskbar identities before a user opens Start on either
-        // monitor. A later partial EnumWindows pass cannot erase the other HWND.
-        let initial_taskbars = refreshed_drag_taskbar_targets();
-        diagnose::log(format!(
-            "taskbar drag targets cached count={} identities={:?}",
-            initial_taskbars.len(),
-            initial_taskbars.iter().map(|t| (
-                t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>")
-            )).collect::<Vec<_>>()
-        ));
-
         // Prefer the stable monitor identity. taskbar_index is retained only
         // as a compatibility fallback for settings written by older versions.
         if attach_to_preferred_taskbar(
@@ -2904,13 +2834,13 @@ fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
         state.as_ref().and_then(|s| s.taskbar_hwnd)
     };
     if let Some(taskbar_hwnd) = taskbar_hwnd {
-        // Both shell-owned popup surfaces stay in the normal z-order band:
-        // HWND_TOPMOST would put the blur/widget over the open Start menu.
-        // Restore backdrop first and widget last to preserve their layering.
+        // set_popup_owner() also promotes the popup to HWND_TOPMOST. Bind the
+        // backdrop first and the layered foreground last so owner changes can
+        // never leave the blur surface above text/progress content.
         if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
-            native_interop::set_popup_owner_regular_band(backdrop_hwnd, Some(taskbar_hwnd));
+            native_interop::set_popup_owner(backdrop_hwnd, Some(taskbar_hwnd));
         }
-        native_interop::set_popup_owner_regular_band(foreground_hwnd, Some(taskbar_hwnd));
+        native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
     }
 }
 
@@ -3139,7 +3069,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     unsafe {
         let _ = SetWindowPos(
             backdrop_hwnd,
-            HWND_NOTOPMOST,
+            HWND_TOPMOST,
             rect.left,
             rect.top,
             width,
@@ -3148,7 +3078,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         );
         let _ = SetWindowPos(
             foreground_hwnd,
-            HWND_NOTOPMOST,
+            HWND_TOPMOST,
             0,
             0,
             0,
@@ -3318,7 +3248,7 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
             unsafe {
                 let _ = SetWindowPos(
                     hwnd,
-                    HWND_NOTOPMOST,
+                    HWND_TOPMOST,
                     0,
                     0,
                     0,
@@ -6715,16 +6645,6 @@ unsafe extern "system" fn wnd_proc(
 
             if let Some((current_taskbar_hwnd, anchor_logical_x, embedded, failed_target)) = drag_result {
                 let release_taskbar = taskbar_at_point(pt);
-                if release_taskbar.is_none() && taskbar_replica_enabled() {
-                    let targets = refreshed_drag_taskbar_targets();
-                    diagnose::log(format!(
-                        "taskbar drag drop-miss cursor=({}, {}) candidates={:?}",
-                        pt.x, pt.y,
-                        targets.iter().map(|t| (
-                            t.hwnd, t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
-                        )).collect::<Vec<_>>()
-                    ));
-                }
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
                         let switched = if embedded {
@@ -7554,11 +7474,10 @@ fn refresh_widget_after_style_editor_close() {
         if frosted_active {
             sync_blur_backdrop_zorder(hwnd);
         } else if !embedded {
-            bind_popup_windows_to_taskbar_owner(hwnd);
             unsafe {
                 let _ = SetWindowPos(
                     hwnd,
-                    HWND_NOTOPMOST,
+                    HWND_TOPMOST,
                     0,
                     0,
                     0,
