@@ -28,8 +28,9 @@ if (-not $zorder.Success -or $zorder.Value.Contains('HWND_TOPMOST')) {
     throw 'Frosted popup must not force HWND_TOPMOST over Start.'
 }
 $bounds = [regex]::Match($window, '(?s)fn point_near_other_taskbar_top\(.*?\n\}')
-if (-not $bounds.Success -or -not $bounds.Value.Contains('is_other_taskbar')
-    -or -not $bounds.Value.Contains('pt.y < rect.top')) {
+if ((-not $bounds.Success) -or
+    (-not $bounds.Value.Contains('is_other_taskbar')) -or
+    (-not $bounds.Value.Contains('pt.y < rect.top'))) {
     throw 'Drop tolerance must be restricted to the other taskbar upper edge.'
 }
 $hit = [regex]::Match($window, '(?s)fn taskbar_at_point\(.*?\n\}')
