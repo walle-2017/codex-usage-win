@@ -24,11 +24,14 @@ if ($body -match 'drag_start_mouse_x\s*-\s*pt\.x') { throw 'Live dragging still 
 $taskbarAtPoint = [regex]::Match($source, '(?s)fn\s+taskbar_at_point\s*\(.*?\n\}')
 if (-not $taskbarAtPoint.Success) { throw 'Unable to locate taskbar_at_point.' }
 $taskbarBody = $taskbarAtPoint.Value
-if ($taskbarBody -notmatch 'native_interop::find_taskbars' -or
-    $taskbarBody -notmatch 'native_interop::is_taskbar_window' -or
+$cachedTargets = [regex]::Match($source, '(?s)fn\s+refreshed_drag_taskbar_targets\s*\(\).*?\n\}')
+$sourceOfTargets = if ($cachedTargets.Success) { $cachedTargets.Value } else { $taskbarBody }
+if ($sourceOfTargets -notmatch 'native_interop::find_taskbars' -or
+    $sourceOfTargets -notmatch 'native_interop::is_taskbar_window' -or
     $taskbarBody -notmatch 'state\.taskbar_hwnd' -or
-    $taskbarBody -notmatch 'get_taskbar_rect') {
-    throw 'Dragging must fall back to the persisted valid taskbar when EnumWindows temporarily omits it.'
+    $taskbarBody -notmatch 'get_taskbar_rect' -or
+    ($cachedTargets.Success -and $taskbarBody -notmatch 'refreshed_drag_taskbar_targets')) {
+    throw 'Dragging must enumerate, validate cached taskbars, and fall back to the persisted valid HWND.'
 }
 
 $up = [regex]::Match($source, '(?s)WM_LBUTTONUP\s*=>\s*\{(?<body>.*?)\n\s*WM_RBUTTONUP\s*=>')
