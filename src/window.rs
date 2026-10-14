@@ -1603,17 +1603,92 @@ fn select_taskbar_for_popup_window(
     true
 }
 
+// A Start-menu activation can temporarily omit the *previous* taskbar from
+// EnumWindows even though its original (now parked) widget is still parented
+// to that live Explorer taskbar. The current-only fallback below cannot
+// recover that return direction. Reuse existing HWNDs as read-only locators;
+// never create, detach, reparent, show, or raise any window in this code.
+thread_local! {
+    static LAST_RECOVERED_REPLICA_TARGET: std::cell::Cell<isize> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn replica_taskbar_targets_from_existing_windows() -> Vec<native_interop::TaskbarWindow> {
+    if !taskbar_replica_enabled() { return Vec::new(); }
+    let primary = TASKBAR_PRIMARY_WINDOW.with(|cell| HWND(cell.get() as *mut _));
+    let replicas = TASKBAR_REPLICA_WINDOWS.with(|cache| {
+        cache.borrow().iter().map(|slot| {
+            (slot.child.to_hwnd(), Some(slot.parent.to_hwnd()))
+        }).collect::<Vec<_>>()
+    });
+    let mut result = Vec::new();
+    for (child, expected_parent) in std::iter::once((primary, None)).chain(replicas) {
+        unsafe {
+            if child == HWND::default() || !IsWindow(child).as_bool() {
+                continue;
+            }
+            let parent = GetAncestor(child, GA_PARENT);
+            if expected_parent.is_some_and(|expected| expected != parent)
+                || !native_interop::is_taskbar_window(parent)
+                || result.iter().any(|t: &native_interop::TaskbarWindow| t.hwnd == parent)
+            {
+                continue;
+            }
+            let Some(rect) = native_interop::get_taskbar_rect(parent)
+                .or_else(|| native_interop::get_window_rect_safe(parent)) else {
+                continue;
+            };
+            if rect.right <= rect.left || rect.bottom <= rect.top {
+                continue;
+            }
+            result.push(native_interop::TaskbarWindow {
+                hwnd: parent, rect,
+                monitor_device: native_interop::monitor_device_name(parent),
+            });
+        }
+    }
+    result
+}
+
 fn point_is_in_taskbar_rect(pt: POINT, rect: RECT) -> bool {
     pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
 }
 
 fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)> {
-    if let Some(found) = native_interop::find_taskbars()
-        .into_iter()
-        .enumerate()
+    let mut enumerated = native_interop::find_taskbars();
+    if let Some((index, found)) = enumerated.iter().enumerate()
         .find(|(_, taskbar)| point_is_in_taskbar_rect(pt, taskbar.rect))
     {
-        return Some(found);
+        return Some((index, found.clone()));
+    }
+
+    // Only after an exact ordinary taskbar enumeration MISS, resolve the
+    // parked primary/replica HWND's actual Explorer parent. Keep this limited
+    // to the opt-in replica architecture. NO edge tolerance or z-order edits.
+    let existing = replica_taskbar_targets_from_existing_windows();
+    for target in existing {
+        if !enumerated.iter().any(|item| item.hwnd == target.hwnd) {
+            enumerated.push(target);
+        }
+    }
+    enumerated.sort_by_key(|item| (
+        item.rect.top, item.rect.left, item.rect.bottom, item.rect.right
+    ));
+    if let Some((index, found)) = enumerated.iter().enumerate()
+        .find(|(_, taskbar)| point_is_in_taskbar_rect(pt, taskbar.rect))
+    {
+        LAST_RECOVERED_REPLICA_TARGET.with(|last| {
+            if last.replace(found.hwnd.0 as isize) != found.hwnd.0 as isize {
+                diagnose::log(format!(
+                    "taskbar replica recovered missed target from parked HWND parent={:?} monitor={} cursor=({}, {}) rect=({}, {}, {}, {})",
+                    found.hwnd,
+                    found.monitor_device.as_deref().unwrap_or("<unknown>"),
+                    pt.x, pt.y, found.rect.left, found.rect.top,
+                    found.rect.right, found.rect.bottom
+                ));
+            }
+        });
+        return Some((index, found.clone()));
     }
 
     // Opening Start or another shell surface can transiently omit the taskbar
@@ -6645,6 +6720,20 @@ unsafe extern "system" fn wnd_proc(
 
             if let Some((current_taskbar_hwnd, anchor_logical_x, embedded, failed_target)) = drag_result {
                 let release_taskbar = taskbar_at_point(pt);
+                if release_taskbar.is_none() && taskbar_replica_enabled() {
+                    diagnose::log(format!(
+                        "taskbar replica drop-miss cursor=({}, {}) live_targets={:?} parked_targets={:?}",
+                        pt.x, pt.y,
+                        native_interop::find_taskbars().iter().map(|t| (
+                            t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
+                            t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
+                        )).collect::<Vec<_>>(),
+                        replica_taskbar_targets_from_existing_windows().iter().map(|t| (
+                            t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
+                            t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
+                        )).collect::<Vec<_>>()
+                    ));
+                }
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
                         let switched = if embedded {

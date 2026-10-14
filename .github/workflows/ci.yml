@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -71,6 +72,9 @@ jobs:
       - name: Verify lazy per-taskbar replica safeguards
         shell: pwsh
         run: ./scripts/assert-taskbar-lazy-replica.ps1
+      - name: Verify parked taskbar return-path locator
+        shell: pwsh
+        run: ./scripts/assert-taskbar-return-locator.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
