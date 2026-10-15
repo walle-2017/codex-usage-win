@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -80,6 +81,9 @@ jobs:
       - name: Verify bounded frosted popup owner retry experiment
         shell: pwsh
         run: ./scripts/assert-popup-owner-retry.ps1
+      - name: Verify DWM visual inspection is read-only
+        shell: pwsh
+        run: ./scripts/assert-popup-visual-diagnostic.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
