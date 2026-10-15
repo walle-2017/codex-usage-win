@@ -6193,7 +6193,7 @@ unsafe extern "system" fn on_explorer_activation_event(
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
     let mut ranges = Vec::new();
     if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled()
-        || popup_owner_diagnostic_enabled() || cursor_foreground_verify_enabled() {
+        || cursor_foreground_verify_enabled() || popup_owner_diagnostic_enabled() {
         ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
     }
     if explorer_activation_events_enabled() {
