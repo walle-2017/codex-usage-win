@@ -1717,6 +1717,7 @@ thread_local! {
 fn popup_owner_retry_experiment_enabled() -> bool {
     diagnose::is_enabled()
         && taskbar_replica_enabled()
+        && !popup_ownerless_frosted_experiment_enabled()
         && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_RETRY_EXPERIMENT").as_deref()
             == Some(std::ffi::OsStr::new("1"))
 }
@@ -3493,11 +3494,29 @@ fn register_blur_backdrop_class() {
     }
 }
 
+// Opt-in architectural experiment: avoid transferring ownership between
+// two Explorer taskbar HWNDs. The foreground and Composition backdrop remain
+// top-level tool popups while the active taskbar/geometry changes.
+fn popup_ownerless_frosted_experiment_enabled() -> bool {
+    diagnose::is_enabled()
+        && taskbar_replica_enabled()
+        && std::env::var_os("CODEX_TASKBAR_FROSTED_OWNERLESS_EXPERIMENT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
 fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
-    let taskbar_hwnd = {
+    let (taskbar_hwnd, popup_session) = {
         let state = lock_state();
-        state.as_ref().and_then(|s| s.taskbar_hwnd)
+        state.as_ref().map(|s| (s.taskbar_hwnd, s.frosted_popup_session))
+            .unwrap_or((None, false))
     };
+    if popup_session && popup_ownerless_frosted_experiment_enabled() {
+        if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
+            let _ = native_interop::clear_popup_owner_if_present(backdrop_hwnd);
+        }
+        let _ = native_interop::clear_popup_owner_if_present(foreground_hwnd);
+        return;
+    }
     if let Some(taskbar_hwnd) = taskbar_hwnd {
         // set_popup_owner() also promotes the popup to HWND_TOPMOST. Bind the
         // backdrop first and the layered foreground last so owner changes can
@@ -3699,7 +3718,9 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
             *state = Some(SendHwnd::from_hwnd(hwnd));
         }
 
-        let owner = {
+        let owner = if popup_ownerless_frosted_experiment_enabled() {
+            None
+        } else {
             let state = lock_state();
             state.as_ref().and_then(|s| s.taskbar_hwnd)
         };
