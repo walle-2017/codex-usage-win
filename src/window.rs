@@ -1813,6 +1813,175 @@ fn poll_popup_owner_retry(hwnd: HWND) {
     }
 }
 
+// Opt-in experiment: correct only an observed popup-vs-taskbar z-order
+// inversion. Keep ownership unchanged and never activate other windows.
+// Do not use the former unconditional global z-order workaround.
+const TIMER_POPUP_ZORDER_REPAIR: usize = 0xF05B;
+const POPUP_ZORDER_REPAIR_INTERVAL_MS: u32 = 250;
+const POPUP_ZORDER_REPAIR_MAX_CHECKS: u8 = 16;
+const POPUP_ZORDER_REPAIR_MAX_ACTIONS: u8 = 3;
+
+#[derive(Clone, Copy)]
+struct PopupZorderRepair {
+    foreground: isize,
+    target: isize,
+    checks: u8,
+    actions: u8,
+}
+
+thread_local! {
+    static POPUP_ZORDER_REPAIR: std::cell::Cell<Option<PopupZorderRepair>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn popup_zorder_repair_experiment_enabled() -> bool {
+    diagnose::is_enabled()
+        && taskbar_replica_enabled()
+        && std::env::var_os("CODEX_TASKBAR_POPUP_ZORDER_REPAIR_EXPERIMENT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn stop_popup_zorder_repair(hwnd: HWND) {
+    POPUP_ZORDER_REPAIR.with(|cell| cell.set(None));
+    unsafe { let _ = KillTimer(hwnd, TIMER_POPUP_ZORDER_REPAIR); }
+}
+
+fn arm_popup_zorder_repair() {
+    if !popup_zorder_repair_experiment_enabled() {
+        return;
+    }
+    let (foreground, taskbar, blur_active, embedded) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return; };
+        (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded)
+    };
+    if !blur_active || embedded || widget_hidden_for_taskbar_space() {
+        return;
+    }
+    let Some(target) = taskbar else { return; };
+    if blur_backdrop_hwnd().is_none() {
+        return;
+    }
+    let prior = POPUP_ZORDER_REPAIR.with(|cell| cell.get());
+    if prior.is_some_and(|p|
+        p.foreground == foreground.0 as isize && p.target == target.0 as isize)
+    {
+        return;
+    }
+    POPUP_ZORDER_REPAIR.with(|cell| cell.set(Some(PopupZorderRepair {
+        foreground: foreground.0 as isize,
+        target: target.0 as isize,
+        checks: 0,
+        actions: 0,
+    })));
+    unsafe {
+        let timer = SetTimer(foreground, TIMER_POPUP_ZORDER_REPAIR,
+            POPUP_ZORDER_REPAIR_INTERVAL_MS, None);
+        if timer == 0 {
+            diagnose::log("taskbar popup zorder repair timer failed");
+            stop_popup_zorder_repair(foreground);
+        } else {
+            diagnose::log(format!(
+                "taskbar popup zorder repair armed foreground={:?} taskbar={:?}",
+                foreground, target
+            ));
+        }
+    }
+}
+
+fn poll_popup_zorder_repair(hwnd: HWND) {
+    let Some(mut pending) = POPUP_ZORDER_REPAIR.with(|cell| cell.get()) else {
+        stop_popup_zorder_repair(hwnd);
+        return;
+    };
+    let (foreground, taskbar, blur_active, embedded, dragging) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            stop_popup_zorder_repair(hwnd);
+            return;
+        };
+        (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded, s.dragging)
+    };
+    if !popup_zorder_repair_experiment_enabled() || !blur_active || embedded
+        || foreground.0 as isize != pending.foreground
+        || taskbar.map(|h| h.0 as isize) != Some(pending.target)
+        || widget_hidden_for_taskbar_space()
+    {
+        stop_popup_zorder_repair(hwnd);
+        return;
+    }
+    let target = HWND(pending.target as *mut _);
+    let Some(backdrop) = blur_backdrop_hwnd() else {
+        stop_popup_zorder_repair(hwnd);
+        return;
+    };
+    unsafe {
+        if !IsWindow(foreground).as_bool() || !IsWindow(backdrop).as_bool()
+            || !IsWindow(target).as_bool()
+        {
+            stop_popup_zorder_repair(hwnd);
+            return;
+        }
+    }
+    pending.checks += 1;
+    let before_foreground = zorder_above_relation(foreground, target);
+    let before_backdrop = zorder_above_relation(backdrop, target);
+    if before_foreground == "above" && before_backdrop == "above"
+        && zorder_above_relation(foreground, backdrop) == "above"
+    {
+        diagnose::log(format!(
+            "taskbar popup zorder repair already-correct taskbar={:?} checks={} actions={}",
+            target, pending.checks, pending.actions
+        ));
+        stop_popup_zorder_repair(hwnd);
+        return;
+    }
+    // A running drag or Shell menu is a moving target. Observe but do not
+    // raise either popup while the menu is active.
+    let foreground_class = explorer_activation_event_class(unsafe { GetForegroundWindow() });
+    let shell_menu = matches!(
+        foreground_class.as_str(),
+        "Windows.UI.Core.CoreWindow" | "TopLevelWindowForOverflowXamlIsland"
+            | "CodexUsagePopupMenuV1"
+    );
+    if !dragging && !shell_menu && pending.actions < POPUP_ZORDER_REPAIR_MAX_ACTIONS
+        && (before_foreground == "below" || before_backdrop == "below")
+    {
+        let (backdrop_result, foreground_result) = unsafe {
+            // Reorder the *two* existing top-level popups as a pair. Do not
+            // change owner, location, visibility or foreground focus.
+            let back = SetWindowPos(backdrop, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let front = SetWindowPos(foreground, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            (back, front)
+        };
+        pending.actions += 1;
+        diagnose::log(format!(
+            "taskbar popup zorder repair attempt={} taskbar={:?} before_foreground={} before_backdrop={} backdrop_result={:?} foreground_result={:?} after_foreground={} after_backdrop={} foreground_vs_backdrop={}",
+            pending.actions, target, before_foreground, before_backdrop,
+            backdrop_result, foreground_result,
+            zorder_above_relation(foreground, target),
+            zorder_above_relation(backdrop, target),
+            zorder_above_relation(foreground, backdrop)
+        ));
+        log_popup_visual_snapshot("zorder-repair-attempt");
+    }
+    if pending.checks >= POPUP_ZORDER_REPAIR_MAX_CHECKS
+        || pending.actions >= POPUP_ZORDER_REPAIR_MAX_ACTIONS
+    {
+        diagnose::log(format!(
+            "taskbar popup zorder repair finished checks={} actions={} front={} back={}",
+            pending.checks, pending.actions,
+            zorder_above_relation(foreground, target),
+            zorder_above_relation(backdrop, target)
+        ));
+        stop_popup_zorder_repair(hwnd);
+    } else {
+        POPUP_ZORDER_REPAIR.with(|cell| cell.set(Some(pending)));
+    }
+}
+
 fn select_taskbar_for_popup_window(
     index: usize,
     taskbar: &native_interop::TaskbarWindow,
@@ -1857,6 +2026,7 @@ fn select_taskbar_for_popup_window(
             log_popup_owner_snapshot("popup-switch-after-owner", Some(taskbar.hwnd));
             log_popup_visual_snapshot("popup-switch-after-owner");
             arm_popup_owner_retry(foreground_hwnd, taskbar.hwnd);
+            arm_popup_zorder_repair();
             diagnose::log("popup taskbar switched; reasserted blur backdrop behind foreground");
         } else {
             bind_popup_windows_to_taskbar_owner(foreground_hwnd);
@@ -6322,6 +6492,7 @@ unsafe extern "system" fn on_explorer_activation_event(
         && !zorder_diagnostic_enabled()
         && !popup_owner_diagnostic_enabled()
         && !popup_visual_diagnostic_enabled()
+        && !popup_zorder_repair_experiment_enabled()
         && !taskbar_activation_edge_verify_enabled()
         && !cursor_foreground_verify_enabled() { return; }
     let (taskbar, widget) = {
@@ -6370,6 +6541,7 @@ unsafe extern "system" fn on_explorer_activation_event(
     if matches!(event, EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC | EVENT_SYSTEM_MENUEND_DIAGNOSTIC) {
         log_popup_owner_snapshot("shell-foreground-or-menuend", taskbar);
         log_popup_visual_snapshot("shell-foreground-or-menuend");
+        arm_popup_zorder_repair();
     }
     if !explorer_activation_events_enabled() { return; }
     // Explorer focus only, to avoid logging unrelated accessibility events.
@@ -6401,7 +6573,7 @@ fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
     let mut ranges = Vec::new();
     if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled()
         || cursor_foreground_verify_enabled() || popup_owner_diagnostic_enabled()
-        || popup_visual_diagnostic_enabled() {
+        || popup_visual_diagnostic_enabled() || popup_zorder_repair_experiment_enabled() {
         ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
     }
     if explorer_activation_events_enabled() {
@@ -6510,6 +6682,9 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_POPUP_ZORDER_REPAIR => {
+                    poll_popup_zorder_repair(hwnd);
+                }
                 TIMER_POPUP_OWNER_RETRY => {
                     poll_popup_owner_retry(hwnd);
                 }
