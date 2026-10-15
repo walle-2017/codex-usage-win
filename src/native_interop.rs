@@ -656,6 +656,32 @@ pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
 /// Compare both Win32's effective owner and its raw GWLP_HWNDPARENT field.
 /// The two values can diverge temporarily while the Start-menu shell surface
 /// moves top-level windows between z-order bands.
+/// Experimental shell-independent frosted popup: remove the top-level owner
+/// only when one exists. Preserve all styles, geometry, z-order and activation.
+/// A normal cross-monitor popup move then never has to transfer taskbar owner.
+pub fn clear_popup_owner_if_present(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsWindow(hwnd).as_bool() { return false; }
+        let before_raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+        let before_effective = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
+        if before_raw == 0 && before_effective == HWND::default() {
+            return true;
+        }
+        windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+        let previous = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+        let error = windows::Win32::Foundation::GetLastError();
+        let after_raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+        let after_effective = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
+        let cleared = after_raw == 0 && after_effective == HWND::default();
+        crate::diagnose::log(format!(
+            "taskbar frosted ownerless clear hwnd={:?} before_raw={:#x} before_owner={:?} prior={:#x} error={:?} after_raw={:#x} after_owner={:?} cleared={}",
+            hwnd, before_raw, before_effective, previous, error, after_raw,
+            after_effective, cleared
+        ));
+        cleared
+    }
+}
+
 pub fn popup_owner_matches(hwnd: HWND, taskbar: HWND) -> bool {
     unsafe {
         IsWindow(hwnd).as_bool()
