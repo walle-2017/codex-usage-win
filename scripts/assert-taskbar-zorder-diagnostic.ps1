@@ -36,4 +36,46 @@ foreach ($forbidden in @('SetWindowPos\s*\(', 'SetForegroundWindow\s*\(', 'SetPa
 if ($window -notmatch 'diagnose::is_enabled\(\)\s*&&\s*std::env::var_os\("CODEX_TASKBAR_ZORDER_DIAGNOSTIC"\)') {
     throw 'Must require --diagnose and explicit opt-in.'
 }
+# Popup owner investigation must remain opt-in and have no repair side effects.
+$native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
+foreach ($required in @(
+    'CODEX_TASKBAR_POPUP_OWNER_DIAGNOSTIC',
+    'fn popup_owner_diagnostic_enabled()',
+    'fn log_popup_owner_snapshot(',
+    'popup-switch-before-owner',
+    'popup-switch-after-owner',
+    'shell-foreground-or-menuend',
+    'foreground_vs_backdrop=',
+    'owner_matches_target=',
+    'log_popup_owner_snapshot("shell-foreground-or-menuend", taskbar)'
+)) {
+    Assert-Term $required
+}
+foreach ($required in @(
+    'taskbar popup owner transition',
+    'before_owner={:?}',
+    'after_owner={:?}',
+    'set_last_error={:?}',
+    'owner_matches={}',
+    'raw_matches={}',
+    'topmost_result={:?}'
+)) {
+    if (-not $native.Contains($required)) {
+        throw "Missing native popup owner transition diagnostic: $required"
+    }
+}
+$popupObserver = [regex]::Match($window, '(?s)fn log_popup_owner_snapshot\(.*?\n\}')
+if (-not $popupObserver.Success) { throw 'Missing popup owner observer.' }
+foreach ($forbidden in @(
+    'SetWindowPos\s*\(', 'SetForegroundWindow\s*\(',
+    'SetParent\s*\(', 'SetWindowLongPtrW\s*\(',
+    'AttachThreadInput\s*\(', 'SendInput\s*\('
+)) {
+    if ($popupObserver.Value -match $forbidden) {
+        throw "Popup owner snapshot must be read-only: $forbidden"
+    }
+}
+if ($window -notmatch 'diagnose::is_enabled\(\)\s*&&\s*std::env::var_os\("CODEX_TASKBAR_POPUP_OWNER_DIAGNOSTIC"\)') {
+    throw 'Popup owner diagnostic must require --diagnose and explicit opt-in.'
+}
 Write-Host 'PASS: taskbar/tooltip z-order is opt-in, read-only and correlated with SetParent.'
