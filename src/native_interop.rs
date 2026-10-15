@@ -653,6 +653,47 @@ pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
     }
 }
 
+/// Compare both Win32's effective owner and its raw GWLP_HWNDPARENT field.
+/// The two values can diverge temporarily while the Start-menu shell surface
+/// moves top-level windows between z-order bands.
+pub fn popup_owner_matches(hwnd: HWND, taskbar: HWND) -> bool {
+    unsafe {
+        IsWindow(hwnd).as_bool()
+            && IsWindow(taskbar).as_bool()
+            && get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC) == taskbar
+            && GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT) == taskbar.0 as isize
+    }
+}
+
+/// Retry only the owner assignment; in particular do not raise either popup
+/// when Windows rejects the change with ERROR_INVALID_PARAMETER (87).
+/// Caller restores foreground-over-backdrop z-order once *both* owners match.
+pub fn try_rebind_popup_owner(hwnd: HWND, taskbar: HWND) -> bool {
+    if popup_owner_matches(hwnd, taskbar) {
+        return true;
+    }
+    if !is_taskbar_window(taskbar) {
+        crate::diagnose::log(format!(
+            "taskbar popup owner retry skipped invalid taskbar={:?} hwnd={:?}",
+            taskbar, hwnd
+        ));
+        return false;
+    }
+    unsafe {
+        windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+        let previous = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, taskbar.0 as isize);
+        let error = windows::Win32::Foundation::GetLastError();
+        let effective = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
+        let raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+        let matched = effective == taskbar && raw == taskbar.0 as isize;
+        crate::diagnose::log(format!(
+            "taskbar popup owner retry hwnd={:?} requested={:?} prior={:#x} error={:?} effective={:?} raw={:#x} matched={}",
+            hwnd, taskbar, previous, error, effective, raw, matched
+        ));
+        matched
+    }
+}
+
 /// Toggle WS_EX_LAYERED without changing the other extended window styles.
 pub fn set_layered_style(hwnd: HWND, enabled: bool) {
     unsafe {
