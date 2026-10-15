@@ -1818,7 +1818,9 @@ fn poll_popup_owner_retry(hwnd: HWND) {
 // Do not use the former unconditional global z-order workaround.
 const TIMER_POPUP_ZORDER_REPAIR: usize = 0xF05B;
 const POPUP_ZORDER_REPAIR_INTERVAL_MS: u32 = 250;
-const POPUP_ZORDER_REPAIR_MAX_CHECKS: u8 = 16;
+// Continue observing beyond a transient Start-menu foreground transition.
+// The bounded window is 120 * 250ms = 30 seconds; max corrective actions stays 3.
+const POPUP_ZORDER_REPAIR_MAX_CHECKS: u8 = 120;
 const POPUP_ZORDER_REPAIR_MAX_ACTIONS: u8 = 3;
 
 #[derive(Clone, Copy)]
@@ -1944,6 +1946,16 @@ fn poll_popup_zorder_repair(hwnd: HWND) {
         "Windows.UI.Core.CoreWindow" | "TopLevelWindowForOverflowXamlIsland"
             | "CodexUsagePopupMenuV1"
     );
+    if (before_foreground == "below" || before_backdrop == "below")
+        && (dragging || shell_menu)
+        && (pending.checks == 1 || pending.checks % 4 == 0)
+    {
+        diagnose::log(format!(
+            "taskbar popup zorder repair deferred check={} foreground={} backdrop={} dragging={} shell_menu={} active_class={} action_count={}",
+            pending.checks, before_foreground, before_backdrop, dragging,
+            shell_menu, foreground_class, pending.actions
+        ));
+    }
     if !dragging && !shell_menu && pending.actions < POPUP_ZORDER_REPAIR_MAX_ACTIONS
         && (before_foreground == "below" || before_backdrop == "below")
     {
@@ -1971,10 +1983,11 @@ fn poll_popup_zorder_repair(hwnd: HWND) {
         || pending.actions >= POPUP_ZORDER_REPAIR_MAX_ACTIONS
     {
         diagnose::log(format!(
-            "taskbar popup zorder repair finished checks={} actions={} front={} back={}",
+            "taskbar popup zorder repair finished checks={} actions={} front={} back={} active_class={} dragging={} shell_menu={}",
             pending.checks, pending.actions,
             zorder_above_relation(foreground, target),
-            zorder_above_relation(backdrop, target)
+            zorder_above_relation(backdrop, target),
+            foreground_class, dragging, shell_menu
         ));
         stop_popup_zorder_repair(hwnd);
     } else {
