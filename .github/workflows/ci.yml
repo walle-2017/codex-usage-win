@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -83,6 +84,9 @@ jobs:
       - name: Verify DWM visual inspection is read-only
         shell: pwsh
         run: ./scripts/assert-popup-visual-diagnostic.ps1
+      - name: Verify conditional popup z-order repair isolation
+        shell: pwsh
+        run: ./scripts/assert-popup-zorder-repair.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
