@@ -1610,6 +1610,124 @@ fn attach_to_preferred_taskbar(
     attach_to_taskbar_window(hwnd, index, &taskbar)
 }
 
+// Experimental, bounded recovery for Start-menu-induced ERROR_INVALID_PARAMETER
+// when changing an existing frosted popup's taskbar owner. Unlike the prior
+// broad z-order experiment, retries do not activate or raise any window until
+// both owner assignments are verified. Default behavior stays unchanged.
+const TIMER_POPUP_OWNER_RETRY: usize = 0xF05A;
+const POPUP_OWNER_RETRY_INTERVAL_MS: u32 = 400;
+const POPUP_OWNER_RETRY_MAX_ATTEMPTS: u8 = 24;
+
+#[derive(Clone, Copy)]
+struct PopupOwnerRetry {
+    foreground: isize,
+    target: isize,
+    attempts: u8,
+}
+
+thread_local! {
+    static POPUP_OWNER_RETRY: std::cell::Cell<Option<PopupOwnerRetry>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn popup_owner_retry_experiment_enabled() -> bool {
+    diagnose::is_enabled()
+        && taskbar_replica_enabled()
+        && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_RETRY_EXPERIMENT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+fn stop_popup_owner_retry(hwnd: HWND) {
+    POPUP_OWNER_RETRY.with(|cell| cell.set(None));
+    unsafe {
+        let _ = KillTimer(hwnd, TIMER_POPUP_OWNER_RETRY);
+    }
+}
+
+fn arm_popup_owner_retry(foreground: HWND, target: HWND) {
+    if !popup_owner_retry_experiment_enabled() {
+        return;
+    }
+    let Some(backdrop) = blur_backdrop_hwnd() else { return; };
+    if native_interop::popup_owner_matches(foreground, target)
+        && native_interop::popup_owner_matches(backdrop, target)
+    {
+        stop_popup_owner_retry(foreground);
+        return;
+    }
+    POPUP_OWNER_RETRY.with(|cell| cell.set(Some(PopupOwnerRetry {
+        foreground: foreground.0 as isize,
+        target: target.0 as isize,
+        attempts: 0,
+    })));
+    unsafe {
+        let timer = SetTimer(
+            foreground, TIMER_POPUP_OWNER_RETRY, POPUP_OWNER_RETRY_INTERVAL_MS, None,
+        );
+        if timer == 0 {
+            diagnose::log("taskbar popup owner retry timer installation failed");
+            stop_popup_owner_retry(foreground);
+        } else {
+            diagnose::log(format!(
+                "taskbar popup owner retry armed foreground={:?} target={:?}",
+                foreground, target
+            ));
+        }
+    }
+}
+
+fn poll_popup_owner_retry(hwnd: HWND) {
+    let Some(mut pending) = POPUP_OWNER_RETRY.with(|cell| cell.get()) else {
+        stop_popup_owner_retry(hwnd);
+        return;
+    };
+    let (foreground, taskbar, blur_active, embedded, dragging) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            stop_popup_owner_retry(hwnd);
+            return;
+        };
+        (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded, s.dragging)
+    };
+    if !popup_owner_retry_experiment_enabled() || !blur_active || embedded
+        || foreground.0 as isize != pending.foreground
+        || taskbar.map(|h| h.0 as isize) != Some(pending.target)
+    {
+        diagnose::log("taskbar popup owner retry cancelled due to changed window or target");
+        stop_popup_owner_retry(hwnd);
+        return;
+    }
+    if dragging {
+        return;
+    }
+    let target = HWND(pending.target as *mut _);
+    let Some(backdrop) = blur_backdrop_hwnd() else {
+        stop_popup_owner_retry(hwnd);
+        return;
+    };
+    let backdrop_ok = native_interop::try_rebind_popup_owner(backdrop, target);
+    let foreground_ok = native_interop::try_rebind_popup_owner(foreground, target);
+    pending.attempts += 1;
+    if backdrop_ok && foreground_ok {
+        stop_popup_owner_retry(hwnd);
+        // One final existing ordering pass, only after both owner changes
+        // have succeeded. Never run this while Win32 rejects an owner change.
+        sync_blur_backdrop_zorder(foreground);
+        diagnose::log(format!(
+            "taskbar popup owner retry recovered target={:?} attempts={}",
+            target, pending.attempts
+        ));
+    } else if pending.attempts >= POPUP_OWNER_RETRY_MAX_ATTEMPTS {
+        stop_popup_owner_retry(hwnd);
+        diagnose::log(format!(
+            "taskbar popup owner retry exhausted target={:?} attempts={}",
+            target, pending.attempts
+        ));
+    } else {
+        POPUP_OWNER_RETRY.with(|cell| cell.set(Some(pending)));
+    }
+}
+
 fn select_taskbar_for_popup_window(
     index: usize,
     taskbar: &native_interop::TaskbarWindow,
@@ -1652,6 +1770,7 @@ fn select_taskbar_for_popup_window(
             log_popup_owner_snapshot("popup-switch-before-owner", Some(taskbar.hwnd));
             sync_blur_backdrop_zorder(foreground_hwnd);
             log_popup_owner_snapshot("popup-switch-after-owner", Some(taskbar.hwnd));
+            arm_popup_owner_retry(foreground_hwnd, taskbar.hwnd);
             diagnose::log("popup taskbar switched; reasserted blur backdrop behind foreground");
         } else {
             bind_popup_windows_to_taskbar_owner(foreground_hwnd);
@@ -6302,6 +6421,9 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_POPUP_OWNER_RETRY => {
+                    poll_popup_owner_retry(hwnd);
+                }
                 TIMER_EXPLORER_STATE_VERIFY => {
                     sample_explorer_active_state("poll", false);
                 }
