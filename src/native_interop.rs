@@ -590,7 +590,7 @@ pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
     }
 }
 
-/// Read-only owner query used only by the opt-in popup transition diagnostic.
+// Read-only owner query used only by the opt-in popup transition diagnostic.
 #[link(name = "user32")]
 unsafe extern "system" {
     #[link_name = "GetWindow"]
