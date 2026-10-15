@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -77,6 +78,9 @@ jobs:
       - name: Verify frosted popup visited-taskbar return fallback
         shell: pwsh
         run: ./scripts/assert-popup-taskbar-return.ps1
+      - name: Verify bounded frosted popup owner retry experiment
+        shell: pwsh
+        run: ./scripts/assert-popup-owner-retry.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
