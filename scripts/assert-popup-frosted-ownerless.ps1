@@ -26,7 +26,7 @@ if (-not $predicate.Success -or
 $binding = [regex]::Match($win, '(?s)fn\s+bind_popup_windows_to_taskbar_owner\(.*?\n\}')
 if (-not $binding.Success -or
     $binding.Value.IndexOf('clear_popup_owner_if_present') -gt
-    $binding.Value.IndexOf('native_interop::set_popup_owner(backdrop_hwnd')) -or
+    $binding.Value.IndexOf('native_interop::set_popup_owner(backdrop_hwnd') -or
     $binding.Value -notmatch '(?s)popup_session && popup_ownerless_frosted_experiment_enabled\(\).*?return;') {
     throw 'Ownerless branch must return before taskbar owner assignments.'
 }
