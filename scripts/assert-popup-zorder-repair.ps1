@@ -40,4 +40,12 @@ if ($callback.Value -notmatch 'SetWindowPos\(backdrop, HWND_TOPMOST' -or
     $callback.Value -notmatch 'SetWindowPos\(foreground, HWND_TOPMOST') {
   throw 'Repair must restore both backdrop and foreground in that order.'
 }
+if ($callback.Value -notmatch 'taskbar popup zorder repair deferred check=' -or
+    $callback.Value -notmatch 'active_class=') {
+  throw 'Blocked repairs must explain active window and drag/menu gates.'
+}
+if ($source -notmatch 'const POPUP_ZORDER_REPAIR_MAX_CHECKS: u8 = 120;' -or
+    $source -notmatch 'const POPUP_ZORDER_REPAIR_MAX_ACTIONS: u8 = 3;') {
+  throw 'Observation must be bounded and correction cap must not increase.'
+}
 Write-Host 'PASS: popup z-order repair is bounded, opt-in, and limited to observed inversions.'
