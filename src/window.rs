@@ -1829,6 +1829,7 @@ struct PopupZorderRepair {
     target: isize,
     checks: u8,
     actions: u8,
+    unknown_hit_checks: u8,
 }
 
 thread_local! {
@@ -1875,6 +1876,7 @@ fn arm_popup_zorder_repair() {
         target: target.0 as isize,
         checks: 0,
         actions: 0,
+        unknown_hit_checks: 0,
     })));
     unsafe {
         let timer = SetTimer(foreground, TIMER_POPUP_ZORDER_REPAIR,
@@ -1889,6 +1891,33 @@ fn arm_popup_zorder_repair() {
             ));
         }
     }
+}
+
+/// Secondary evidence for shell band separation: when neither popup can be
+/// compared to the taskbar using GW_HWNDPREV, require at least two interior
+/// sample points to hit the active taskbar itself. This may also happen in
+/// transparent pixels, so it is NEVER sufficient without repeated samples,
+/// unknown z-order for BOTH popups, and the other safety gates.
+fn popup_unknown_order_hit_taskbar(foreground: HWND, taskbar: HWND) -> (bool, usize) {
+    let Some(r) = native_interop::get_window_rect_safe(foreground) else { return (false, 0); };
+    let Some(t) = native_interop::get_window_rect_safe(taskbar) else { return (false, 0); };
+    let width = r.right - r.left;
+    let height = r.bottom - r.top;
+    if width < 4 || height < 4 {
+        return (false, 0);
+    }
+    // Three interior points avoid relying on one transparent widget pixel.
+    let y = r.top + height / 2;
+    let mut hits = 0usize;
+    for numerator in [1, 2, 3] {
+        let x = r.left + width * numerator / 4;
+        if x < t.left || x >= t.right || y < t.top || y >= t.bottom {
+            return (false, hits);
+        }
+        let root = unsafe { GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT) };
+        if root == taskbar { hits += 1; }
+    }
+    (hits >= 2, hits)
 }
 
 fn poll_popup_zorder_repair(hwnd: HWND) {
@@ -1928,6 +1957,24 @@ fn poll_popup_zorder_repair(hwnd: HWND) {
     pending.checks += 1;
     let before_foreground = zorder_above_relation(foreground, target);
     let before_backdrop = zorder_above_relation(backdrop, target);
+    let (hit_taskbar, hit_count) = if before_foreground == "unknown"
+        && before_backdrop == "unknown"
+    {
+        popup_unknown_order_hit_taskbar(foreground, target)
+    } else { (false, 0) };
+    pending.unknown_hit_checks = if hit_taskbar {
+        pending.unknown_hit_checks.saturating_add(1)
+    } else { 0 };
+    let stable_unknown_occlusion = pending.unknown_hit_checks >= 2;
+    if hit_taskbar && (pending.checks == 1 || pending.unknown_hit_checks == 2
+        || pending.checks % 8 == 0)
+    {
+        diagnose::log(format!(
+            "taskbar popup zorder repair unknown-hit check={} stable_hits={} sample_hits={} taskbar={:?} foreground={} backdrop={}",
+            pending.checks, pending.unknown_hit_checks, hit_count,
+            target, before_foreground, before_backdrop
+        ));
+    }
     if before_foreground == "above" && before_backdrop == "above"
         && zorder_above_relation(foreground, backdrop) == "above"
     {
@@ -1957,7 +2004,8 @@ fn poll_popup_zorder_repair(hwnd: HWND) {
         ));
     }
     if !dragging && !shell_menu && pending.actions < POPUP_ZORDER_REPAIR_MAX_ACTIONS
-        && (before_foreground == "below" || before_backdrop == "below")
+        && (before_foreground == "below" || before_backdrop == "below"
+            || stable_unknown_occlusion)
     {
         let (backdrop_result, foreground_result) = unsafe {
             // Reorder the *two* existing top-level popups as a pair. Do not
@@ -1970,9 +2018,9 @@ fn poll_popup_zorder_repair(hwnd: HWND) {
         };
         pending.actions += 1;
         diagnose::log(format!(
-            "taskbar popup zorder repair attempt={} taskbar={:?} before_foreground={} before_backdrop={} backdrop_result={:?} foreground_result={:?} after_foreground={} after_backdrop={} foreground_vs_backdrop={}",
+            "taskbar popup zorder repair attempt={} taskbar={:?} before_foreground={} before_backdrop={} unknown_occlusion={} sample_hits={} backdrop_result={:?} foreground_result={:?} after_foreground={} after_backdrop={} foreground_vs_backdrop={}",
             pending.actions, target, before_foreground, before_backdrop,
-            backdrop_result, foreground_result,
+            stable_unknown_occlusion, hit_count, backdrop_result, foreground_result,
             zorder_above_relation(foreground, target),
             zorder_above_relation(backdrop, target),
             zorder_above_relation(foreground, backdrop)
