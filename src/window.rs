@@ -238,6 +238,57 @@ fn zorder_diagnostic_enabled() -> bool {
             == Some(std::ffi::OsStr::new("1"))
 }
 
+fn popup_owner_diagnostic_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_DIAGNOSTIC").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Read-only foreground/backdrop/Explorer owner and z-order correlation.
+/// Only logs in the explicit opt-in test; never changes a window or its owner.
+fn log_popup_owner_snapshot(stage: &str, requested: Option<HWND>) {
+    if !popup_owner_diagnostic_enabled() {
+        return;
+    }
+    let (foreground, taskbar, blur_active, embedded) = {
+        let state = lock_state();
+        match state.as_ref() {
+            Some(s) => (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded),
+            None => return,
+        }
+    };
+    if !blur_active || embedded {
+        return;
+    }
+    let backdrop = blur_backdrop_hwnd().unwrap_or_default();
+    let current = taskbar.unwrap_or_default();
+    let describe = |label: &str, hwnd: HWND| -> String {
+        unsafe {
+            if hwnd == HWND::default() || !IsWindow(hwnd).as_bool() {
+                return format!("{label}=<none>");
+            }
+            let owner = get_window_zorder_diagnostic(hwnd, GW_OWNER_ZORDER_DIAGNOSTIC);
+            let raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+            let prev = get_window_zorder_diagnostic(hwnd, GW_PREV_ZORDER_DIAGNOSTIC);
+            let next = get_window_zorder_diagnostic(hwnd, GW_NEXT_ZORDER_DIAGNOSTIC);
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            format!(
+                "{label}={:?} owner={:?} raw={:#x} owner_matches_target={} visible={} topmost={} prev={:?} next={:?} versus_taskbar={}",
+                hwnd, owner, raw, owner == current, IsWindowVisible(hwnd).as_bool(),
+                ex_style & WS_EX_TOPMOST.0 != 0, prev, next,
+                zorder_above_relation(hwnd, current)
+            )
+        }
+    };
+    diagnose::log(format!(
+        "taskbar popup owner snapshot stage={} target={:?} requested={:?} foreground_vs_backdrop={} | {} | {} | {}",
+        stage, taskbar, requested, zorder_above_relation(foreground, backdrop),
+        describe("foreground", foreground),
+        describe("backdrop", backdrop),
+        describe("taskbar", current)
+    ));
+}
+
 /// Single-variable experiment: only change the *tooltip foreground* popup owner.
 /// Do not change taskbar focus, the embedded widget or the SetParent path.
 fn tooltip_owner_experiment_enabled() -> bool {
@@ -1598,7 +1649,9 @@ fn select_taskbar_for_popup_window(
     };
     if let Some(foreground_hwnd) = foreground_hwnd {
         if blur_active {
+            log_popup_owner_snapshot("popup-switch-before-owner", Some(taskbar.hwnd));
             sync_blur_backdrop_zorder(foreground_hwnd);
+            log_popup_owner_snapshot("popup-switch-after-owner", Some(taskbar.hwnd));
             diagnose::log("popup taskbar switched; reasserted blur backdrop behind foreground");
         } else {
             bind_popup_windows_to_taskbar_owner(foreground_hwnd);
@@ -6062,6 +6115,7 @@ unsafe extern "system" fn on_explorer_activation_event(
 ) {
     if !explorer_activation_events_enabled()
         && !zorder_diagnostic_enabled()
+        && !popup_owner_diagnostic_enabled()
         && !taskbar_activation_edge_verify_enabled()
         && !cursor_foreground_verify_enabled() { return; }
     let (taskbar, widget) = {
@@ -6107,6 +6161,9 @@ unsafe extern "system" fn on_explorer_activation_event(
         );
         observe_taskbar_activation_edge("foreground-event", true);
     }
+    if matches!(event, EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC | EVENT_SYSTEM_MENUEND_DIAGNOSTIC) {
+        log_popup_owner_snapshot("shell-foreground-or-menuend", taskbar);
+    }
     if !explorer_activation_events_enabled() { return; }
     // Explorer focus only, to avoid logging unrelated accessibility events.
     // System foreground/menu events from all apps reveal focus transitions.
@@ -6136,7 +6193,7 @@ unsafe extern "system" fn on_explorer_activation_event(
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
     let mut ranges = Vec::new();
     if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled()
-        || cursor_foreground_verify_enabled() {
+        || popup_owner_diagnostic_enabled() || cursor_foreground_verify_enabled() {
         ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
     }
     if explorer_activation_events_enabled() {
