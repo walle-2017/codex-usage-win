@@ -48,4 +48,21 @@ if ($source -notmatch 'const POPUP_ZORDER_REPAIR_MAX_CHECKS: u8 = 120;' -or
     $source -notmatch 'const POPUP_ZORDER_REPAIR_MAX_ACTIONS: u8 = 3;') {
   throw 'Observation must be bounded and correction cap must not increase.'
 }
+$unknownHit = [regex]::Match($source, '(?s)fn\s+popup_unknown_order_hit_taskbar\(.*?\n\}')
+if (-not $unknownHit.Success -or
+    -not $unknownHit.Value.Contains('WindowFromPoint') -or
+    -not $unknownHit.Value.Contains('root == taskbar') -or
+    -not $unknownHit.Value.Contains('hits >= 2')) {
+  throw 'Unknown-order fallback must use multiple observed taskbar root hits.'
+}
+if ($callback.Value -notmatch 'before_foreground == "unknown"' -or
+    $callback.Value -notmatch 'before_backdrop == "unknown"' -or
+    $callback.Value -notmatch 'stable_unknown_occlusion = pending.unknown_hit_checks >= 2' -or
+    $callback.Value -notmatch '\|\| stable_unknown_occlusion') {
+  throw 'Unknown-order fallback must require both popup relations unknown and repeated hits.'
+}
+if ($callback.Value -notmatch 'taskbar popup zorder repair unknown-hit' -or
+    $callback.Value -notmatch 'unknown_occlusion=') {
+  throw 'Unknown-order recovery must provide precise diagnostic evidence.'
+}
 Write-Host 'PASS: popup z-order repair is bounded, opt-in, and limited to observed inversions.'
