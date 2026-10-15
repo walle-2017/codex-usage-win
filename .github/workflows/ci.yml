@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -86,6 +87,9 @@ jobs:
       - name: Verify conditional popup z-order repair isolation
         shell: pwsh
         run: ./scripts/assert-popup-zorder-repair.ps1
+      - name: Verify ownerless frosted popup experiment isolation
+        shell: pwsh
+        run: ./scripts/assert-popup-frosted-ownerless.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
