@@ -244,6 +244,90 @@ fn popup_owner_diagnostic_enabled() -> bool {
             == Some(std::ffi::OsStr::new("1"))
 }
 
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    #[link_name = "DwmGetWindowAttribute"]
+    fn dwm_get_window_attribute_popup_visual(
+        hwnd: HWND, attribute: u32, value: *mut std::ffi::c_void, size: u32,
+    ) -> i32;
+}
+
+const DWMWA_CLOAKED_POPUP_VISUAL: u32 = 14;
+const DWMWA_EXTENDED_FRAME_BOUNDS_POPUP_VISUAL: u32 = 9;
+
+fn popup_visual_diagnostic_enabled() -> bool {
+    diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_POPUP_VISUAL_DIAGNOSTIC").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Observe DWM cloaking and window hit-testing separately from Win32 z-order.
+/// This is intentionally read-only: no activation, reparenting, owner update,
+/// rendering or SetWindowPos. A hit-test alone cannot establish visual
+/// occlusion for alpha-layered/transparent pixels, so log it as correlation.
+fn log_popup_visual_snapshot(stage: &str) {
+    if !popup_visual_diagnostic_enabled() {
+        return;
+    }
+    let (foreground, taskbar, blur_active, embedded) = {
+        let state = lock_state();
+        match state.as_ref() {
+            Some(s) => (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded),
+            None => return,
+        }
+    };
+    if !blur_active || embedded {
+        return;
+    }
+    let backdrop = blur_backdrop_hwnd().unwrap_or_default();
+    let describe = |label: &str, hwnd: HWND| -> String {
+        unsafe {
+            if hwnd == HWND::default() || !IsWindow(hwnd).as_bool() {
+                return format!("{label}=<none>");
+            }
+            let mut cloaked = 0u32;
+            let cloak_result = dwm_get_window_attribute_popup_visual(
+                hwnd, DWMWA_CLOAKED_POPUP_VISUAL,
+                (&mut cloaked as *mut u32).cast(), std::mem::size_of::<u32>() as u32,
+            );
+            let mut frame = RECT::default();
+            let frame_result = dwm_get_window_attribute_popup_visual(
+                hwnd, DWMWA_EXTENDED_FRAME_BOUNDS_POPUP_VISUAL,
+                (&mut frame as *mut RECT).cast(), std::mem::size_of::<RECT>() as u32,
+            );
+            let rect = native_interop::get_window_rect_safe(hwnd);
+            let (hit, root, hit_class) = if let Some(bounds) = rect {
+                let point = POINT {
+                    x: bounds.left + (bounds.right - bounds.left) / 2,
+                    y: bounds.top + (bounds.bottom - bounds.top) / 2,
+                };
+                let hit = WindowFromPoint(point);
+                let root = GetAncestor(hit, GA_ROOT);
+                (hit, root, explorer_activation_event_class(root))
+            } else {
+                (HWND::default(), HWND::default(), "<none>".into())
+            };
+            format!(
+                "{label}={:?} visible={} cloak_hr={:#x} cloak_flags={:#x} frame_hr={:#x} frame=({},{},{},{}) rect={:?} center_hit={:?} center_root={:?} center_root_class={}",
+                hwnd, IsWindowVisible(hwnd).as_bool(), cloak_result, cloaked,
+                frame_result, frame.left, frame.top, frame.right, frame.bottom,
+                rect.map(|r| (r.left, r.top, r.right, r.bottom)),
+                hit, root, hit_class
+            )
+        }
+    };
+    diagnose::log(format!(
+        "taskbar popup visual snapshot stage={} foreground_above_taskbar={} backdrop_above_taskbar={} foreground_above_backdrop={} | {} | {} | {}",
+        stage,
+        zorder_above_relation(foreground, taskbar.unwrap_or_default()),
+        zorder_above_relation(backdrop, taskbar.unwrap_or_default()),
+        zorder_above_relation(foreground, backdrop),
+        describe("foreground", foreground),
+        describe("backdrop", backdrop),
+        describe("taskbar", taskbar.unwrap_or_default())
+    ));
+}
+
 /// Read-only foreground/backdrop/Explorer owner and z-order correlation.
 /// Only logs in the explicit opt-in test; never changes a window or its owner.
 fn log_popup_owner_snapshot(stage: &str, requested: Option<HWND>) {
@@ -1713,6 +1797,7 @@ fn poll_popup_owner_retry(hwnd: HWND) {
         // One final existing ordering pass, only after both owner changes
         // have succeeded. Never run this while Win32 rejects an owner change.
         sync_blur_backdrop_zorder(foreground);
+        log_popup_visual_snapshot("owner-retry-recovered");
         diagnose::log(format!(
             "taskbar popup owner retry recovered target={:?} attempts={}",
             target, pending.attempts
@@ -1770,6 +1855,7 @@ fn select_taskbar_for_popup_window(
             log_popup_owner_snapshot("popup-switch-before-owner", Some(taskbar.hwnd));
             sync_blur_backdrop_zorder(foreground_hwnd);
             log_popup_owner_snapshot("popup-switch-after-owner", Some(taskbar.hwnd));
+            log_popup_visual_snapshot("popup-switch-after-owner");
             arm_popup_owner_retry(foreground_hwnd, taskbar.hwnd);
             diagnose::log("popup taskbar switched; reasserted blur backdrop behind foreground");
         } else {
@@ -6235,6 +6321,7 @@ unsafe extern "system" fn on_explorer_activation_event(
     if !explorer_activation_events_enabled()
         && !zorder_diagnostic_enabled()
         && !popup_owner_diagnostic_enabled()
+        && !popup_visual_diagnostic_enabled()
         && !taskbar_activation_edge_verify_enabled()
         && !cursor_foreground_verify_enabled() { return; }
     let (taskbar, widget) = {
@@ -6282,6 +6369,7 @@ unsafe extern "system" fn on_explorer_activation_event(
     }
     if matches!(event, EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC | EVENT_SYSTEM_MENUEND_DIAGNOSTIC) {
         log_popup_owner_snapshot("shell-foreground-or-menuend", taskbar);
+        log_popup_visual_snapshot("shell-foreground-or-menuend");
     }
     if !explorer_activation_events_enabled() { return; }
     // Explorer focus only, to avoid logging unrelated accessibility events.
@@ -6312,7 +6400,8 @@ unsafe extern "system" fn on_explorer_activation_event(
 fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
     let mut ranges = Vec::new();
     if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled()
-        || cursor_foreground_verify_enabled() || popup_owner_diagnostic_enabled() {
+        || cursor_foreground_verify_enabled() || popup_owner_diagnostic_enabled()
+        || popup_visual_diagnostic_enabled() {
         ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
     }
     if explorer_activation_events_enabled() {
