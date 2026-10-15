@@ -590,14 +590,48 @@ pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
     }
 }
 
+/// Read-only owner query used only by the opt-in popup transition diagnostic.
+#[link(name = "user32")]
+unsafe extern "system" {
+    #[link_name = "GetWindow"]
+    fn get_popup_owner_diagnostic(hwnd: HWND, command: u32) -> HWND;
+}
+
+const GW_OWNER_POPUP_DIAGNOSTIC: u32 = 4;
+
+fn popup_owner_diagnostic_enabled() -> bool {
+    crate::diagnose::is_enabled()
+        && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_DIAGNOSTIC").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Assign an owner to a top-level popup without turning it into a child window.
 /// Owned popups remain above their owner in z-order, which keeps taskbar overlays
 /// visible when Explorer re-activates the taskbar.
 pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
     unsafe {
+        let diagnostic = popup_owner_diagnostic_enabled();
+        let before_owner = if diagnostic {
+            get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC)
+        } else {
+            HWND::default()
+        };
+        let before_raw = if diagnostic {
+            GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)
+        } else {
+            0
+        };
         let owner_value = owner.map(|h| h.0 as isize).unwrap_or(0);
-        let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
-        let _ = SetWindowPos(
+        if diagnostic {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+        }
+        let previous_value = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
+        let set_last_error = if diagnostic {
+            Some(windows::Win32::Foundation::GetLastError())
+        } else {
+            None
+        };
+        let position_result = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
             0,
@@ -606,6 +640,16 @@ pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
         );
+        if diagnostic {
+            let after_owner = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
+            let after_raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+            crate::diagnose::log(format!(
+                "taskbar popup owner transition hwnd={:?} requested={:?} before_owner={:?} after_owner={:?} before_raw={:#x} after_raw={:#x} prior_value={:#x} set_last_error={:?} owner_matches={} raw_matches={} topmost_result={:?}",
+                hwnd, owner, before_owner, after_owner, before_raw, after_raw,
+                previous_value, set_last_error, after_owner == owner.unwrap_or_default(),
+                after_raw == owner_value, position_result
+            ));
+        }
     }
 }
 
