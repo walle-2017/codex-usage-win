@@ -960,12 +960,6 @@ fn replica_resources_acceptable(before: Option<ReplicaResources>, after: Option<
 unsafe extern "system" fn replica_wnd_proc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
-    if diagnose::is_enabled() && (msg == 0x0081 || msg == 0x0001) {
-        diagnose::log(format!(
-            "taskbar replica creation-message hwnd={:?} msg={:#x} parent={:?}",
-            hwnd, msg, GetAncestor(hwnd, GA_PARENT)
-        ));
-    }
     if msg == WM_NCDESTROY {
         TASKBAR_REPLICA_WINDOWS.with(|cache|
             cache.borrow_mut().retain(|slot| slot.child.to_hwnd() != hwnd));
@@ -2942,13 +2936,11 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
             unsafe {
                 // The HWNDs share the taskbar parent. Put the blur directly
                 // behind the layered foreground in child-window z-order.
-                let result = SetWindowPos(backdrop_hwnd, foreground_hwnd,
+                if let Err(error) = SetWindowPos(backdrop_hwnd, foreground_hwnd,
                     rect.left - tr.left, rect.top - tr.top, width, height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                diagnose::log(format!(
-                    "taskbar embedded blur child sync result={:?} parent={:?} front={:?} backdrop={:?}",
-                    result, target, foreground_hwnd, backdrop_hwnd
-                ));
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW) {
+                    diagnose::log(format!("taskbar embedded blur sibling position failed parent={:?} error={:?}", target, error));
+                }
             }
         }
     }
@@ -5245,16 +5237,6 @@ unsafe extern "system" fn wnd_proc(
 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        WM_MOUSEACTIVATE => {
-            // Preserve the normal Windows activation behavior.
-            if diagnose::is_enabled() {
-                diagnose::log(format!(
-                    "taskbar mouse activation observed foreground={:?} widget={:?} wparam={:#x} lparam={:#x}",
-                    GetForegroundWindow(), hwnd, wparam.0, lparam.0
-                ));
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
         WM_LBUTTONDOWN => {
 
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -5496,16 +5478,6 @@ unsafe extern "system" fn wnd_proc(
             hide_minimal_usage_tooltip();
             render_layered();
             LRESULT(0)
-        }
-        WM_ACTIVATE | WM_ACTIVATEAPP | WM_NCACTIVATE | WM_SETFOCUS | WM_KILLFOCUS => {
-            if diagnose::is_enabled() {
-                diagnose::log(format!(
-                    "taskbar mouse noactivate experiment activation_message={:#x} wparam={:#x} lparam={:#x} foreground={:?}",
-                    msg, wparam.0, lparam.0, GetForegroundWindow()
-                ));
-            }
-            
-            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CANCELMODE => {
             
