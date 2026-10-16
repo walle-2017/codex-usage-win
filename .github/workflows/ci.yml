@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/adaptive-taskbar-placement
   pull_request:
     branches:
       - main
@@ -95,6 +96,9 @@ jobs:
       - name: Verify embedded frosted replica handoff safeguards
         shell: pwsh
         run: ./scripts/assert-taskbar-embedded-frosted-handoff.ps1
+      - name: Verify parked taskbar blur cache lifecycle
+        shell: pwsh
+        run: ./scripts/assert-taskbar-frosted-blur-cache.ps1
       - name: Verify taskbar z-order diagnostics
         shell: pwsh
         run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
