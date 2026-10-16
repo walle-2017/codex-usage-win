@@ -3690,7 +3690,7 @@ fn destroy_blur_backdrop() {
 // Only the UI thread parks and restores the active backdrop. Keep the HWND
 // and its Composition target intact: reparenting either is not allowed.
 fn park_embedded_blur_backdrop() {
-    let (Some(hwnd), Some(context)) = (blur_backdrop_hwnd(), blur_backdrop_context()) else {
+    let (Some(hwnd), Some(_context)) = (blur_backdrop_hwnd(), blur_backdrop_context()) else {
         destroy_blur_backdrop();
         return;
     };
@@ -3701,7 +3701,7 @@ fn park_embedded_blur_backdrop() {
         return;
     }
     let mut cache = PARKED_BLUR_BACKDROPS.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.len() >= TASKBAR_REPLICA_MAX_WINDOWS ||
+    if cache.len() >= TASKBAR_REPLICA_MAX_WINDOWS.saturating_sub(1) ||
         cache.iter().any(|entry| entry.parent.to_hwnd() == parent)
     {
         drop(cache);
@@ -3713,27 +3713,29 @@ fn park_embedded_blur_backdrop() {
     let held_hwnd = BLUR_BACKDROP_HWND.lock().unwrap_or_else(|e| e.into_inner()).take();
     let held_context = BLUR_BACKDROP_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()).take();
     let params = BLUR_BACKDROP_PARAMS.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let (Some(held_hwnd), Some(held_context)) = (held_hwnd, held_context) {
-        cache.push(ParkedBlurBackdrop {
-            parent: SendHwnd::from_hwnd(parent),
-            hwnd: held_hwnd,
-            context: held_context,
-            params,
-        });
-        diagnose::log(format!(
-            "taskbar embedded blur cache parked parent={:?} backdrop={:?} entries={}",
-            parent, hwnd, cache.len()
-        ));
-    } else {
-        drop(cache);
-        if let Some(context) = held_context {
-            native_interop::destroy_composition_blur(context);
+    match (held_hwnd, held_context) {
+        (Some(held_hwnd), Some(held_context)) => {
+            cache.push(ParkedBlurBackdrop {
+                parent: SendHwnd::from_hwnd(parent),
+                hwnd: held_hwnd,
+                context: held_context,
+                params,
+            });
+            diagnose::log(format!(
+                "taskbar embedded blur cache parked parent={:?} backdrop={:?} entries={}",
+                parent, hwnd, cache.len()
+            ));
         }
-        if let Some(hwnd) = held_hwnd {
-            unsafe { let _ = DestroyWindow(hwnd.to_hwnd()); }
+        (held_hwnd, held_context) => {
+            drop(cache);
+            if let Some(context) = held_context {
+                native_interop::destroy_composition_blur(context);
+            }
+            if let Some(hwnd) = held_hwnd {
+                unsafe { let _ = DestroyWindow(hwnd.to_hwnd()); }
+            }
         }
     }
-    let _ = context;
 }
 
 fn restore_parked_embedded_blur_backdrop(parent: HWND) -> bool {
