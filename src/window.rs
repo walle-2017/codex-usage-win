@@ -3279,60 +3279,90 @@ fn paint_vertical_widget_content(
         }
         let _ = DeleteObject(handle_brush);
 
-        let (session_top, weekly_top) = vertical_row_tops(height, show_session, show_weekly);
-        for (top, percent, label) in [
-            (session_top, session_pct, "5H"),
-            (weekly_top, weekly_pct, "7D"),
-        ] {
-            let Some(y) = top else { continue };
-            let track_rect = RECT {
-                left: sc(4),
-                top: y + sc(31),
-                right: width - sc(4),
-                bottom: y + sc(34),
-            };
-            if track_rect.right <= track_rect.left { continue; }
-            let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
-            FillRect(hdc, &track_rect, track_brush);
-            let _ = DeleteObject(track_brush);
-            let displayed = percent.clamp(0.0, 100.0);
-            let fill_width = ((track_rect.right - track_rect.left) as f64
-                * displayed / 100.0).round() as i32;
-            if fill_width > 0 && last_poll_ok {
-                let accent = quota_bar_color(displayed).blend_over(track);
-                let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-                let fill = RECT { right: track_rect.left + fill_width, ..track_rect };
-                FillRect(hdc, &fill, brush);
-                let _ = DeleteObject(brush);
-            }
+        // The layered renderer composites rings and text with DirectWrite.
+        // GDI is only needed for the compact fallback popup (when embedding
+        // into Explorer is unavailable), not for the normal embedded path.
+        if paint_text {
+            let (session_top, weekly_top) = vertical_row_tops(height, show_session, show_weekly);
+            let radius = ((width - sc(7)) / 2).min(sc(17)).max(1);
+            let font_name = native_interop::wide_str(
+                fonts::face(fonts::FontRole::Taskbar, None),
+            );
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            for (top, percent, label) in [
+                (session_top, session_pct, "5H"),
+                (weekly_top, weekly_pct, "7D"),
+            ] {
+                let Some(top) = top else { continue };
+                let cx = width / 2;
+                let cy = top + sc(26);
+                let bounds = RECT {
+                    left: cx - radius, top: cy - radius,
+                    right: cx + radius + 1, bottom: cy + radius + 1,
+                };
+                let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+                let pen = CreatePen(PS_SOLID, sc(3), COLORREF(track.to_colorref()));
+                let old_pen = SelectObject(hdc, pen);
+                let _ = Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+                let _ = SelectObject(hdc, old_pen);
+                let _ = DeleteObject(pen);
+                if last_poll_ok && percent > 0.0 {
+                    let accent = quota_bar_color(percent).blend_over(track);
+                    let pen = CreatePen(PS_SOLID, sc(3), COLORREF(accent.to_colorref()));
+                    let old_pen = SelectObject(hdc, pen);
+                    if percent >= 99.5 {
+                        let _ = Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+                    } else {
+                        let angle = 2.0 * std::f64::consts::PI * percent.clamp(0.0, 100.0) / 100.0;
+                        let end_x = cx + (radius as f64 * angle.sin()).round() as i32;
+                        let end_y = cy - (radius as f64 * angle.cos()).round() as i32;
+                        let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                            cx, cy - radius, end_x, end_y);
+                    }
+                    let _ = SelectObject(hdc, old_pen);
+                    let _ = DeleteObject(pen);
+                }
+                let _ = SelectObject(hdc, old_brush);
 
-            if paint_text {
-                let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
-                let font = CreateFontW(
-                    sc(12), 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
-                    DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
-                    CLIP_DEFAULT_PRECIS.0 as u32, gdi_text_quality(),
-                    (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                    PCWSTR::from_raw(font_name.as_ptr()),
-                );
-                let previous = SelectObject(hdc, font);
-                let _ = SetBkMode(hdc, TRANSPARENT);
-                for (line, text, color) in [
-                    (y, label.to_string(), quota_type_color),
-                    (y + sc(13), vertical_quota_text(displayed, last_poll_ok), primary_color),
+                let (reset, _) = {
+                    let state = lock_state();
+                    let codex = state.as_ref().and_then(|s| s.data.as_ref())
+                        .and_then(|data| data.codex.as_ref());
+                    (
+                        vertical_reset_label(codex.and_then(|c| if label == "5H" {
+                            c.session.resets_at
+                        } else {
+                            c.weekly.resets_at
+                        }), label == "7D"),
+                        (),
+                    )
+                };
+                for (text, y, font_height, color) in [
+                    (label.to_string(), top, sc(10), quota_type_color),
+                    (vertical_quota_text(percent, last_poll_ok), cy - sc(6), sc(10), primary_color),
+                    (reset, top + sc(41), sc(9), primary_color),
                 ] {
+                    let font = CreateFontW(
+                        font_height, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+                        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+                        CLIP_DEFAULT_PRECIS.0 as u32, gdi_text_quality(),
+                        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                        PCWSTR::from_raw(font_name.as_ptr()),
+                    );
+                    let old_font = SelectObject(hdc, font);
                     let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
                     let mut chars: Vec<u16> = text.encode_utf16().collect();
                     let mut bounds = RECT {
-                        left: sc(1), top: line, right: width - sc(1), bottom: line + sc(15),
+                        left: sc(1), top: y, right: width - sc(1),
+                        bottom: y + sc(14),
                     };
                     let _ = DrawTextW(
                         hdc, &mut chars, &mut bounds,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
                     );
+                    let _ = SelectObject(hdc, old_font);
+                    let _ = DeleteObject(font);
                 }
-                let _ = SelectObject(hdc, previous);
-                let _ = DeleteObject(font);
             }
         }
         if hovered {
