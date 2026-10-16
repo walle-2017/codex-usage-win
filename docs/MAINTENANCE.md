@@ -4,7 +4,7 @@ This document records the maintained product constraints for **Codex Usage Win**
 
 ## Current baseline
 
-- Current release: `v1.0.5`
+- Current release: `v1.0.6`
 - Repository: `walle-2017/codex-usage-win`
 - Product name: `Codex Usage Win`
 - Standalone executable: `codex-usage-win.exe`
