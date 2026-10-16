@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - refactor/stable-taskbar-frosted
   pull_request:
     branches:
       - main
