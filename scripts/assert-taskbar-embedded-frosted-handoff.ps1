@@ -31,8 +31,9 @@ foreach ($forbidden in @('SetParent\s*\(', 'AttachThreadInput\s*\(', 'SetForegro
 $ensure = [regex]::Match($source, '(?s)fn\s+ensure_blur_backdrop\(.*?\n\}')
 if (-not $ensure.Success -or
     -not $ensure.Value.Contains('if parent != target') -or
-    -not $ensure.Value.Contains('destroy_blur_backdrop();')) {
-    throw 'Blur backdrop must be recreated under the new taskbar rather than reparented.'
+    -not $ensure.Value.Contains('park_embedded_blur_backdrop();') -or
+    -not $ensure.Value.Contains('restore_parked_embedded_blur_backdrop(target)')) {
+    throw 'Blur backdrop must be parked and restored under its original taskbar.'
 }
 if ($handoff.IndexOf('s.hwnd = SendHwnd::from_hwnd(source_hwnd)') -gt
     $handoff.IndexOf('sync_blur_backdrop_zorder(source_hwnd);')) {
