@@ -6751,7 +6751,6 @@ unsafe fn paint_preset_gallery(
             primary,
             snapshot.vertical_taskbar_mode,
             snapshot.appearance_preset == AppearancePreset::Minimal,
-            snapshot.language,
         );
     }
 
@@ -6771,7 +6770,6 @@ unsafe fn paint_preset_gallery(
             primary,
             snapshot.vertical_taskbar_mode,
             snapshot.appearance_preset == AppearancePreset::Minimal,
-            snapshot.language,
         );
     }
 }
@@ -6980,7 +6978,6 @@ unsafe fn paint_style_preview_card(
     primary: Color,
     vertical: bool,
     minimal: bool,
-    language: LanguageId,
 ) {
     fill_rounded_rect(hdc, r, surface, scale(hwnd, SETTINGS_CARD_RADIUS));
     draw_rounded_outline_rect(
