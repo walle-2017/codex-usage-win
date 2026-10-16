@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -21,8 +22,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
+      - name: Verify release tag matches Cargo version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -Raw Cargo.toml
+          $package = [regex]::Match($manifest, '(?ms)^\[package\]\s*.*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"')
+          if (-not $package.Success) { throw 'Cannot parse Cargo package version.' }
+          $expectedTag = 'v' + $package.Groups['version'].Value
+          if ('${{ github.ref_type }}' -ne 'tag' -or '${{ github.ref_name }}' -ne $expectedTag) {
+            throw "Release requires tag $expectedTag, got ${{ github.ref_type }}:${{ github.ref_name }}."
+          }
+
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Prepare release assets
         shell: pwsh
