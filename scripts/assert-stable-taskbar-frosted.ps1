@@ -26,7 +26,6 @@ foreach ($pattern in @(
   }
 }
 foreach ($token in @(
-  'fn taskbar_replica_enabled() -> bool',
   'fn try_taskbar_replica_handoff(',
   'fn replica_taskbar_targets_from_existing_windows()',
   'fn taskbar_at_point(',
@@ -56,10 +55,13 @@ foreach ($token in @(
     throw "Reset-time tooltip/taskbar ownership invariant missing: $token"
   }
 }
-$replica = [regex]::Match($src, '(?s)fn\s+taskbar_replica_enabled\(\).*?\n\}')
-if (-not $replica.Success -or -not ($replica.Value -match '\btrue\b') -or
-    $replica.Value.Contains('diagnose::is_enabled()')) {
-  throw 'Taskbar replica must be enabled without --diagnose.'
+if ($src -match '\btaskbar_replica_enabled\s*\(' -or
+    $src -match '\bCODEX_TASKBAR_[A-Z_]+') {
+  throw 'Permanent taskbar replicas must not depend on runtime feature gates.'
+}
+if ($src -notmatch 'if !register_taskbar_replica_class\(\)' -or
+    $src -notmatch 'if lock_state\(\)\.as_ref\(\)\.is_some_and\(\|s\| s\.hwnd\.to_hwnd\(\) != hwnd\)') {
+  throw 'Always-on replica registration and parked-foreground guards must remain active.'
 }
 $activate = [regex]::Match($src, '(?s)fn\s+activate_blur_backdrop\(.*?\n\}')
 if (-not $activate.Success -or -not $activate.Value.Contains('ensure_blur_backdrop(') -or
