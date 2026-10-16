@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix/tooltip-start-menu-zorder
   pull_request:
     branches:
       - main
