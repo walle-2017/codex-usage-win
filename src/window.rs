@@ -1977,6 +1977,16 @@ fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
     }
 }
 
+// Adaptive uses the normal ring layout in portrait orientation unless the
+// user explicitly selected Minimal. Horizontal adaptive width stays untouched.
+fn vertical_effective_preset(preset: AppearancePreset) -> AppearancePreset {
+    if preset == AppearancePreset::Adaptive {
+        AppearancePreset::Default
+    } else {
+        preset
+    }
+}
+
 fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
     sc(if preset == AppearancePreset::Minimal {
         VERTICAL_MINIMAL_WIDGET_HEIGHT
@@ -1987,7 +1997,7 @@ fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
 
 fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
-        return vertical_widget_height_for_preset(effective_appearance_preset(state));
+        return vertical_widget_height_for_preset(vertical_effective_preset(state.appearance_preset));
     }
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
@@ -4018,7 +4028,7 @@ fn position_vertical_taskbar(
     };
     let height = {
         let state = lock_state();
-        state.as_ref().map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
+        state.as_ref().map(|s| vertical_widget_height_for_preset(vertical_effective_preset(s.appearance_preset)))
             .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
     };
     let desired_top = lock_state()
@@ -4040,6 +4050,7 @@ fn position_vertical_taskbar(
         s.hidden_for_taskbar_space = false;
         s.taskbar_space_warning_shown = false;
         s.vertical_taskbar_mode = true;
+        s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
         s.vertical_widget_width = width;
         s.small_taskbar_mode = false;
         was_hidden
@@ -4114,6 +4125,7 @@ fn position_at_taskbar() {
         position_vertical_taskbar(
             hwnd, embedded, taskbar_hwnd, taskbar_rect, blur_active, language,
         );
+        style_window::set_preview_orientation(true);
         return;
     }
     // The horizontal placement path remains unchanged. Restore its native
@@ -4124,6 +4136,7 @@ fn position_at_taskbar() {
             s.vertical_taskbar_mode = false;
         }
     }
+    style_window::set_preview_orientation(false);
     let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
     let small_mode = is_small_taskbar_height(taskbar_height);
     {
@@ -5584,7 +5597,7 @@ unsafe extern "system" fn wnd_proc(
                                 let height = {
                                     let state = lock_state();
                                     state.as_ref()
-                                        .map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
+                                        .map(|s| vertical_widget_height_for_preset(vertical_effective_preset(s.appearance_preset)))
                                         .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
                                 };
                                 let desired_top = drag_top_from_cursor(
@@ -5901,7 +5914,7 @@ unsafe extern "system" fn wnd_proc(
                                 let desired_bottom = taskbar_rect.bottom - taskbar_rect.top;
                                 let top = nearest_free_top_offset(
                                     taskbar_rect, &spans,
-                                    vertical_widget_height_for_preset(effective_appearance_preset(s)),
+                                    vertical_widget_height_for_preset(vertical_effective_preset(s.appearance_preset)),
                                     desired_bottom,
                                 )?;
                                 return Some((TaskbarAxis::Vertical, top));
@@ -6945,6 +6958,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             theme_mode: s.theme_mode,
             is_dark: s.is_dark,
             appearance_preset: s.appearance_preset,
+            vertical_taskbar_mode: s.vertical_taskbar_mode,
             active_style: s.styles.active(s.is_dark).clone(),
             editable_settings: editable_settings_from_state(s, startup_enabled),
         }
@@ -6954,6 +6968,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             theme_mode: ThemeMode::System,
             is_dark: true,
             appearance_preset: AppearancePreset::Default,
+            vertical_taskbar_mode: false,
             active_style: ThemeStyle::dark_default(),
             editable_settings: default_editable_settings(),
         }
