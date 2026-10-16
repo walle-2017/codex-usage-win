@@ -9,7 +9,7 @@
 
 # Codex Usage Win
 
-A lightweight native Windows taskbar monitor for **Codex usage**. Current release: **v1.0.5**.
+A lightweight native Windows taskbar monitor for **Codex usage**. Current release: **v1.0.6**.
 
 ## Features
 

@@ -1,0 +1,89 @@
+# One-time publication bridge for v1.0.6.
+# GitHub's GITHUB_TOKEN-created tag does not trigger on: push: tags.
+# Therefore we explicitly dispatch the normal Release workflow at the tag.
+# Remove this file after the release is published and verified.
+name: Publish v1.0.6 once
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Verify exact main commit and both successful Windows workflows
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          echo "Evaluating v1.0.6 publication at $SHA"
+          current="$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')"
+          if [[ "$current" != "$SHA" ]]; then
+            echo "main changed since verified CI; do not publish an older commit."
+            exit 0
+          fi
+
+          version="$(gh api "repos/$REPO/contents/Cargo.toml?ref=$SHA" --jq '.content' | base64 --decode | sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' | head -1)"
+          if [[ "$version" != "1.0.6" ]]; then
+            echo "Cargo version $version is not v1.0.6; skip publication."
+            exit 0
+          fi
+
+          store="pending"
+          for attempt in $(seq 1 40); do
+            store="$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" --jq '[.workflow_runs[] | select(.name == "Store MSIX Build" and .event == "push")] | sort_by(.run_number) | last | .conclusion // "pending"')"
+            echo "Store MSIX result at attempt $attempt: $store"
+            if [[ "$store" == "success" ]]; then
+              break
+            fi
+            if [[ "$store" == "failure" || "$store" == "cancelled" || "$store" == "timed_out" ]]; then
+              echo "Store MSIX did not pass; publication blocked."
+              exit 1
+            fi
+            sleep 30
+          done
+          if [[ "$store" != "success" ]]; then
+            echo "Store MSIX has not passed within the allowed wait period."
+            exit 1
+          fi
+
+          # Ensure that the reference being tagged is still the tested main.
+          current="$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')"
+          if [[ "$current" != "$SHA" ]]; then
+            echo "main advanced during verification; refuse to tag the old commit."
+            exit 1
+          fi
+
+          if gh api "repos/$REPO/git/ref/tags/v1.0.6" > tag.json 2>/dev/null; then
+            tag_sha="$(jq -r '.object.sha' tag.json)"
+            if [[ "$tag_sha" != "$SHA" ]]; then
+              echo "Existing v1.0.6 tag points to $tag_sha, expected $SHA."
+              exit 1
+            fi
+          else
+            echo "Creating immutable release tag v1.0.6 at $SHA"
+            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/v1.0.6" -f sha="$SHA" >/dev/null
+          fi
+
+          if gh release view v1.0.6 --repo "$REPO" >/dev/null 2>&1; then
+            echo "v1.0.6 GitHub Release already exists; no second publication."
+            exit 0
+          fi
+
+          echo "Dispatching the normal, version-checked Release workflow on v1.0.6."
+          gh workflow run release.yml --repo "$REPO" --ref v1.0.6
