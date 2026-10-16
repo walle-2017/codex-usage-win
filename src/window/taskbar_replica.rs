@@ -63,16 +63,10 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-pub(super) fn taskbar_replica_enabled() -> bool {
-    // Stable taskbar placement is a normal product feature, not diagnostic mode.
-    true
-}
-
 /// Stable message, timer, and notification owner. Extra taskbar HWNDs handle
 /// interaction and painting; the primary HWND alone runs polling, timers,
 /// settings dialogs, updater callbacks and the tray icon.
 pub(super) fn taskbar_replica_service_hwnd(fallback: HWND) -> HWND {
-    if !taskbar_replica_enabled() { return fallback; }
     TASKBAR_PRIMARY_WINDOW.with(|cell| {
         let primary = HWND(cell.get() as *mut _);
         if primary != HWND::default() && unsafe { IsWindow(primary).as_bool() } {
@@ -175,7 +169,6 @@ pub(super) fn try_taskbar_replica_handoff(
     index: usize,
     taskbar: &native_interop::TaskbarWindow,
 ) -> Option<bool> {
-    if !taskbar_replica_enabled() { return None; }
     let (parent, embedded, frosted, dragging, anchor, width, height,
          old_index, old_monitor, old_tray_notify) = {
         let state = lock_state();
