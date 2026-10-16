@@ -5513,7 +5513,7 @@ unsafe extern "system" fn wnd_proc(
                     s.dragging = false;
                     let failed_target = s.failed_drag_target.take();
                     if was_dragging {
-                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, s.embedded, failed_target))
+                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, failed_target))
                     } else {
                         None
                     }
@@ -5547,7 +5547,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_hwnd, anchor_logical_x, embedded, failed_target)) = drag_result {
+            if let Some((current_taskbar_hwnd, anchor_logical_x, failed_target)) = drag_result {
                 let release_taskbar = taskbar_at_point(pt);
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
