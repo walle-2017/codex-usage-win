@@ -835,7 +835,7 @@ fn select_preferred_taskbar(
     }
 }
 
-// Opt-in, lazy, per-taskbar child-window cache. Each window is created with
+// Bounded, lazy, per-taskbar child-window cache. Each window is created with
 // its final Explorer parent, avoiding SetParent between taskbars entirely.
 // A single AppState, poller, timer owner, tray registration and renderer remain.
 const TASKBAR_REPLICA_MAX_WINDOWS: usize = 4;
@@ -1411,9 +1411,8 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
         return Some((index, found.clone()));
     }
 
-    // Only after an exact ordinary taskbar enumeration MISS, resolve the
-    // parked primary/replica HWND's actual Explorer parent. Keep this limited
-    // to the opt-in replica architecture. NO edge tolerance or z-order edits.
+    // On enumeration miss, resolve parked primary/replica HWNDs using their
+    // actual Explorer parents. No edge tolerance or z-order edits.
     let existing = replica_taskbar_targets_from_existing_windows();
     for target in existing {
         if !enumerated.iter().any(|item| item.hwnd == target.hwnd) {
@@ -5364,13 +5363,9 @@ unsafe extern "system" fn wnd_proc(
                                 s.drag_reparenting = true;
                             }
                         }
-                        native_interop::log_handoff_deep_snapshot(
-                            "drag-before-release", hwnd, hovered_taskbar.hwnd
-                        );
+                        
                         let _ = ReleaseCapture();
-                        native_interop::log_handoff_deep_snapshot(
-                            "drag-after-release", hwnd, hovered_taskbar.hwnd
-                        );
+                        
 
                         let switched = if embedded {
                             attach_to_taskbar_window(
@@ -5398,9 +5393,7 @@ unsafe extern "system" fn wnd_proc(
                                 .map(|s| s.hwnd.to_hwnd())
                                 .unwrap_or(hwnd);
                             SetCapture(active_hwnd);
-                            native_interop::log_handoff_deep_snapshot(
-                                "drag-after-recapture-success", active_hwnd, hovered_taskbar.hwnd
-                            );
+                            
                             switched_taskbar = true;
                         } else {
                             CURRENT_DPI.store(previous_dpi, Ordering::Relaxed);
@@ -5410,9 +5403,7 @@ unsafe extern "system" fn wnd_proc(
                                 s.failed_drag_target = Some(hovered_taskbar.hwnd);
                             }
                             SetCapture(hwnd);
-                            native_interop::log_handoff_deep_snapshot(
-                                "drag-after-recapture-failure", hwnd, hovered_taskbar.hwnd
-                            );
+                            
                             // The widget is still a child of the old taskbar.
                             // Its client coordinates must not follow the pointer
                             // into another monitor or it will be clipped away.
