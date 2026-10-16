@@ -107,9 +107,13 @@ struct AppState {
     taskbar_index: usize,
     taskbar_monitor: Option<String>,
     taskbar_left_offset: i32,
+    taskbar_top_offset: i32,
+    vertical_taskbar_mode: bool,
+    vertical_widget_width: i32,
     legacy_tray_offset: Option<i32>,
     dragging: bool,
     drag_anchor_logical_x: i32,
+    drag_anchor_logical_y: i32,
     drag_reparenting: bool,
     failed_drag_target: Option<HWND>,
 }
@@ -473,6 +477,8 @@ struct SettingsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_left_offset: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    taskbar_top_offset: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_monitor: Option<String>,
     #[serde(default = "default_poll_interval")]
     poll_interval_ms: u32,
@@ -500,6 +506,7 @@ impl Default for SettingsFile {
             tray_offset: 0,
             taskbar_index: 0,
             taskbar_left_offset: None,
+            taskbar_top_offset: None,
             taskbar_monitor: None,
             poll_interval_ms: default_poll_interval(),
             language: None,
@@ -588,6 +595,7 @@ fn save_state_settings() {
             tray_offset: 0,
             taskbar_index: s.taskbar_index,
             taskbar_left_offset: Some(s.taskbar_left_offset),
+            taskbar_top_offset: Some(s.taskbar_top_offset),
             taskbar_monitor: s.taskbar_monitor.clone(),
             poll_interval_ms: s.poll_interval_ms,
             language: s
@@ -1755,8 +1763,23 @@ const DRAG_HANDLE_HIT_W: i32 = 12;
 const SMALL_TASKBAR_THRESHOLD: i32 = 34;
 const SMALL_WIDGET_HEIGHT: i32 = 28;
 const DRAG_HANDLE_HIT_H: i32 = 24;
+const VERTICAL_WIDGET_MIN_WIDTH: i32 = 32;
+const VERTICAL_WIDGET_MAX_WIDTH: i32 = 68;
+const VERTICAL_WIDGET_HEIGHT: i32 = 104;
+const VERTICAL_WIDGET_INSET: i32 = 2;
+const VERTICAL_DRAG_HANDLE_H: i32 = 17;
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
+    let vertical_mode = lock_state()
+        .as_ref()
+        .is_some_and(|s| s.vertical_taskbar_mode);
+    if vertical_mode {
+        let widget_width = total_widget_width();
+        return client_x >= 0
+            && client_x < widget_width
+            && client_y >= 0
+            && client_y < sc(VERTICAL_DRAG_HANDLE_H);
+    }
     let hit_h = sc(DRAG_HANDLE_HIT_H);
     let widget_height = {
         let state = lock_state();
@@ -1799,6 +1822,9 @@ fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
 }
 
 fn widget_height_for_state(state: &AppState) -> i32 {
+    if state.vertical_taskbar_mode {
+        return sc(VERTICAL_WIDGET_HEIGHT);
+    }
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
     } else {
@@ -1884,18 +1910,19 @@ fn total_widget_width_for(language: LanguageId) -> i32 {
 }
 
 fn total_widget_width_for_state(state: &AppState) -> i32 {
-    total_widget_width_for_preset(state.language, effective_appearance_preset(state))
+    if state.vertical_taskbar_mode {
+        state.vertical_widget_width
+    } else {
+        total_widget_width_for_preset(state.language, effective_appearance_preset(state))
+    }
 }
 
 fn total_widget_width() -> i32 {
-    let (language, preset) = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| (s.language, effective_appearance_preset(s)))
-            .unwrap_or((LanguageId::English, AppearancePreset::Default))
-    };
-    total_widget_width_for_preset(language, preset)
+    let state = lock_state();
+    state
+        .as_ref()
+        .map(total_widget_width_for_state)
+        .unwrap_or_else(|| total_widget_width_for(LanguageId::English))
 }
 
 fn quota_bar_color(displayed_percent: f64) -> Color {
@@ -2081,12 +2108,16 @@ pub fn run() {
                 taskbar_index: settings.taskbar_index,
                 taskbar_monitor: settings.taskbar_monitor.clone(),
                 taskbar_left_offset: settings.taskbar_left_offset.unwrap_or(0),
+                taskbar_top_offset: settings.taskbar_top_offset.unwrap_or(0),
+                vertical_taskbar_mode: false,
+                vertical_widget_width: sc(VERTICAL_WIDGET_MIN_WIDTH),
                 legacy_tray_offset: settings
                     .taskbar_left_offset
                     .is_none()
                     .then_some(settings.tray_offset),
                 dragging: false,
                 drag_anchor_logical_x: 0,
+                drag_anchor_logical_y: 0,
                 drag_reparenting: false,
         failed_drag_target: None,
             });
@@ -4463,12 +4494,14 @@ unsafe extern "system" fn wnd_proc(
             }
             .max(1);
             let anchor_logical_x = (client_x as f64 * 96.0 / dpi as f64).round() as i32;
+            let anchor_logical_y = (client_y as f64 * 96.0 / dpi as f64).round() as i32;
 
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 s.dragging = true;
                 s.drag_handle_hovered = true;
                 s.drag_anchor_logical_x = anchor_logical_x;
+                s.drag_anchor_logical_y = anchor_logical_y;
                 s.failed_drag_target = None;
             }
             {
