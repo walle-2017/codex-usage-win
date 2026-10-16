@@ -1900,23 +1900,37 @@ const SMALL_WIDGET_HEIGHT: i32 = 28;
 const DRAG_HANDLE_HIT_H: i32 = 24;
 const VERTICAL_WIDGET_MIN_WIDTH: i32 = 32;
 const VERTICAL_WIDGET_MAX_WIDTH: i32 = 68;
-const VERTICAL_WIDGET_HEIGHT: i32 = 112;
+// All vertical positions are measured from the start of a quota row.
+const VERTICAL_WIDGET_HEIGHT: i32 = 168;
 const VERTICAL_WIDGET_INSET: i32 = 2;
-const VERTICAL_DRAG_HANDLE_H: i32 = 17;
+const VERTICAL_DRAG_HANDLE_H: i32 = 18;
+const VERTICAL_FIRST_ROW_TOP: i32 = 20;
+const VERTICAL_QUOTA_ROW_HEIGHT: i32 = 70;
+const VERTICAL_QUOTA_ROW_GAP: i32 = 4;
+const VERTICAL_LABEL_CENTER_Y: i32 = 9;
+const VERTICAL_RING_CENTER_Y: i32 = 35;
+const VERTICAL_RESET_CENTER_Y: i32 = 61;
+const VERTICAL_RING_MAX_RADIUS: i32 = 13;
+// A 36-degree open gap straddles 12 o'clock; progress sweeps clockwise.
+const VERTICAL_RING_GAP_HALF_RADIANS: f32 = std::f32::consts::PI / 10.0;
+
+fn vertical_drag_handle_hit(x: i32, y: i32, width: i32, height: i32) -> bool {
+    x >= 0 && x < width && y >= 0 && y < sc(VERTICAL_DRAG_HANDLE_H).min(height)
+}
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
     let vertical_mode = lock_state()
         .as_ref()
         .is_some_and(|s| s.vertical_taskbar_mode);
     if vertical_mode {
-        // The original 17px grip was difficult to capture inside Explorer.
-        // Make the full compact panel draggable; hover remains non-activating.
+        // Only the dedicated top grip starts a drag. Quota content stays
+        // available for hover tooltips without moving the component.
         let state = lock_state();
         let Some(state) = state.as_ref() else { return false };
-        return client_x >= 0
-            && client_x < total_widget_width_for_state(state)
-            && client_y >= 0
-            && client_y < widget_height_for_state(state);
+        return vertical_drag_handle_hit(
+            client_x, client_y,
+            total_widget_width_for_state(state), widget_height_for_state(state),
+        );
     }
     let hit_h = sc(DRAG_HANDLE_HIT_H);
     let widget_height = {
@@ -2940,21 +2954,22 @@ unsafe fn render_taskbar_text(
         let (session_top, weekly_top) = vertical_row_tops(
             height, show_session_window, show_weekly_window,
         );
-        let radius = (((width - sc(7)) as f32) * 0.5).min(sc(15) as f32).max(1.0);
+        let radius = (((width - sc(7)) as f32) * 0.5)
+            .min(sc(VERTICAL_RING_MAX_RADIUS) as f32).max(1.0);
         for (top, label, pct, reset) in [
             (session_top, "5H", codex_session_pct, session_reset),
             (weekly_top, "7D", codex_weekly_pct, weekly_reset),
         ] {
             let Some(top) = top else { continue };
             let cx = width / 2;
-            let cy = top + sc(24);
+            let cy = top + sc(VERTICAL_RING_CENTER_Y);
             render_vertical_ring(
                 pixels, width, height, cx, cy, radius, pct,
                 track, quota_bar_color(pct.clamp(0.0, 100.0)).blend_over(track),
                 last_poll_ok,
             );
             render_vertical_centered_text(
-                pixels, width, height, cx, top + sc(5),
+                pixels, width, height, cx, top + sc(VERTICAL_LABEL_CENTER_Y),
                 label, sc(10), FW_MEDIUM.0 as i32, label_color,
             );
             let percent = vertical_quota_text(pct, last_poll_ok);
@@ -2964,7 +2979,7 @@ unsafe fn render_taskbar_text(
                 &percent, percent_size, FW_SEMIBOLD.0 as i32, value_color,
             );
             render_vertical_centered_text(
-                pixels, width, height, cx, top + sc(42),
+                pixels, width, height, cx, top + sc(VERTICAL_RESET_CENTER_Y),
                 &reset, sc(9), FW_NORMAL.0 as i32, reset_color,
             );
         }
@@ -3122,13 +3137,14 @@ unsafe fn render_taskbar_text(
 
 fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
     let first = if show_session && show_weekly {
-        sc(12)
+        sc(VERTICAL_FIRST_ROW_TOP)
     } else {
-        ((height - sc(46)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
+        ((height - sc(VERTICAL_QUOTA_ROW_HEIGHT)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
     };
+    let second = first + sc(VERTICAL_QUOTA_ROW_HEIGHT + VERTICAL_QUOTA_ROW_GAP);
     (
         show_session.then_some(first),
-        show_weekly.then_some(if show_session { sc(60) } else { first }),
+        show_weekly.then_some(if show_session { second } else { first }),
     )
 }
 
@@ -3258,6 +3274,7 @@ fn paint_vertical_widget_content(
     last_poll_ok: bool,
     quota_type_color: Color,
     primary_color: Color,
+    reset_color: Color,
     track: Color,
     drag_color: Color,
     hovered: bool,
@@ -3284,7 +3301,7 @@ fn paint_vertical_widget_content(
         // into Explorer is unavailable), not for the normal embedded path.
         if paint_text {
             let (session_top, weekly_top) = vertical_row_tops(height, show_session, show_weekly);
-            let radius = ((width - sc(7)) / 2).min(sc(17)).max(1);
+            let radius = ((width - sc(7)) / 2).min(sc(VERTICAL_RING_MAX_RADIUS)).max(1);
             let font_name = native_interop::wide_str(
                 fonts::face(fonts::FontRole::Taskbar, None),
             );
@@ -3295,7 +3312,7 @@ fn paint_vertical_widget_content(
             ] {
                 let Some(top) = top else { continue };
                 let cx = width / 2;
-                let cy = top + sc(24);
+                let cy = top + sc(VERTICAL_RING_CENTER_Y);
                 let bounds = RECT {
                     left: cx - radius, top: cy - radius,
                     right: cx + radius + 1, bottom: cy + radius + 1,
@@ -3335,9 +3352,10 @@ fn paint_vertical_widget_content(
                     }), label == "7D")
                 };
                 for (text, y, font_height, color) in [
-                    (label.to_string(), top, sc(10), quota_type_color),
-                    (vertical_quota_text(percent, last_poll_ok), cy - sc(6), sc(10), primary_color),
-                    (reset, top + sc(41), sc(9), primary_color),
+                    (label.to_string(), top + sc(VERTICAL_LABEL_CENTER_Y), sc(10), quota_type_color),
+                    (vertical_quota_text(percent, last_poll_ok), cy,
+                        if percent >= 99.5 { sc(8) } else { sc(11) }, primary_color),
+                    (reset, top + sc(VERTICAL_RESET_CENTER_Y), sc(9), reset_color),
                 ] {
                     let font = CreateFontW(
                         font_height, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
@@ -3350,8 +3368,8 @@ fn paint_vertical_widget_content(
                     let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
                     let mut chars: Vec<u16> = text.encode_utf16().collect();
                     let mut bounds = RECT {
-                        left: sc(1), top: y, right: width - sc(1),
-                        bottom: y + sc(14),
+                        left: sc(1), top: y - sc(9), right: width - sc(1),
+                        bottom: y + sc(9),
                     };
                     let _ = DrawTextW(
                         hdc, &mut chars, &mut bounds,
@@ -3462,7 +3480,7 @@ fn paint_content(
             paint_vertical_widget_content(
                 hdc, width, height, codex_session_pct, codex_weekly_pct,
                 show_session_window, show_weekly_window, last_poll_ok,
-                quota_type_color, primary_color, track, drag_color,
+                quota_type_color, primary_color, reset_color, track, drag_color,
                 drag_handle_hovered, paint_background,
             );
             return;
@@ -4840,7 +4858,7 @@ fn usage_hover_hit(
                 left: sc(2),
                 top: y_top,
                 right: client.right - sc(2),
-                bottom: y_top + sc(47),
+                bottom: y_top + sc(VERTICAL_QUOTA_ROW_HEIGHT),
             };
             if point_in_rect(region, x, y) {
                 return Some((target, region));
@@ -4887,8 +4905,8 @@ unsafe extern "system" fn wnd_proc(
     }
     match msg {
         WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) => {
-            // In vertical layout the entire panel is an explicit mouse client
-            // area, not just the tiny painted grip.
+            // Quota content remains a client area for tooltips, while only the
+            // top grip starts a drag on WM_LBUTTONDOWN.
             LRESULT(1) // HTCLIENT
         }
         WM_PAINT => {
