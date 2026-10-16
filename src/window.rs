@@ -5009,12 +5009,12 @@ unsafe extern "system" fn wnd_proc(
                     let state = lock_state();
                     state.as_ref().and_then(|s| {
                         s.taskbar_hwnd.map(|taskbar_hwnd| {
-                            (taskbar_hwnd, s.drag_anchor_logical_x, s.embedded)
+                            (taskbar_hwnd, s.drag_anchor_logical_x, s.drag_anchor_logical_y, s.embedded)
                         })
                     })
                 };
 
-                if let Some((taskbar_hwnd, anchor_logical_x, embedded)) = drag_context {
+                if let Some((taskbar_hwnd, anchor_logical_x, anchor_logical_y, embedded)) = drag_context {
                     if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
                         let dpi = GetDpiForWindow(taskbar_hwnd);
                         if dpi > 0 {
@@ -5022,8 +5022,10 @@ unsafe extern "system" fn wnd_proc(
                         }
                         let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
                         let anchor_px = drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
+                        let anchor_y_px = drag_anchor_px_for_dpi(anchor_logical_y, effective_dpi);
                         let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
-                        let small_mode = is_small_taskbar_height(taskbar_height);
+                        let vertical = taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical;
+                        let small_mode = !vertical && is_small_taskbar_height(taskbar_height);
 
                         let (widget_width, widget_height, small_mode_changed) = {
                             let mut state = lock_state();
@@ -5031,9 +5033,16 @@ unsafe extern "system" fn wnd_proc(
                                 Some(s) => s,
                                 None => return LRESULT(0),
                             };
-                            let changed = s.small_taskbar_mode != small_mode;
+                            let changed = s.small_taskbar_mode != small_mode
+                                || s.vertical_taskbar_mode != vertical;
                             if changed {
+                                s.vertical_taskbar_mode = vertical;
                                 s.small_taskbar_mode = small_mode;
+                                if vertical {
+                                    if let Some(width) = vertical_widget_width(taskbar_rect) {
+                                        s.vertical_widget_width = width;
+                                    }
+                                }
                                 if small_mode {
                                     s.small_show_weekly = false;
                                 }
@@ -5044,15 +5053,27 @@ unsafe extern "system" fn wnd_proc(
                                 changed,
                             )
                         };
-                        let drag_left = drag_left_for_pointer(
-                            taskbar_rect, pt, anchor_px, widget_width,
-                        );
-                        let anchor_y =
-                            compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
-                        let (window_x, window_y) = if embedded {
-                            (drag_left, anchor_y - taskbar_rect.top)
+                        let (window_x, window_y) = if vertical {
+                            let left = (taskbar_rect.right - taskbar_rect.left - widget_width) / 2;
+                            let top = drag_top_for_pointer(
+                                taskbar_rect, pt, anchor_y_px, widget_height,
+                            );
+                            if embedded {
+                                (left, top)
+                            } else {
+                                (taskbar_rect.left + left, taskbar_rect.top + top)
+                            }
                         } else {
-                            (taskbar_rect.left + drag_left, anchor_y)
+                            let drag_left = drag_left_for_pointer(
+                                taskbar_rect, pt, anchor_px, widget_width,
+                            );
+                            let anchor_y =
+                                compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
+                            if embedded {
+                                (drag_left, anchor_y - taskbar_rect.top)
+                            } else {
+                                (taskbar_rect.left + drag_left, anchor_y)
+                            }
                         };
 
                         // Use the current visible HWND, not the old source HWND
@@ -5136,7 +5157,7 @@ unsafe extern "system" fn wnd_proc(
                     s.dragging = false;
                     let failed_target = s.failed_drag_target.take();
                     if was_dragging {
-                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, failed_target))
+                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, s.drag_anchor_logical_y, failed_target))
                     } else {
                         None
                     }
@@ -5170,7 +5191,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_hwnd, anchor_logical_x, failed_target)) = drag_result {
+            if let Some((current_taskbar_hwnd, anchor_logical_x, anchor_logical_y, failed_target)) = drag_result {
                 // Releasing over the desktop commits the last horizontal
                 // drag position on the current taskbar instead of reverting.
                 // An actual hit on another taskbar still takes precedence.
@@ -5205,6 +5226,34 @@ unsafe extern "system" fn wnd_proc(
                                 CURRENT_DPI.store(dpi, Ordering::Relaxed);
                             }
                             let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
+                            if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
+                                let anchor_y_px = drag_anchor_px_for_dpi(anchor_logical_y, effective_dpi);
+                                let height = sc(VERTICAL_WIDGET_HEIGHT);
+                                let desired_top = drag_top_from_cursor(
+                                    taskbar_rect, pt, anchor_y_px,
+                                );
+                                let clamped_top = clamp_left_offset(
+                                    desired_top,
+                                    (taskbar_rect.bottom - taskbar_rect.top - height).max(0),
+                                );
+                                let safe_top = taskbar_free_vertical_spans(taskbar_hwnd, taskbar_rect)
+                                    .and_then(|spans| nearest_free_top_offset(
+                                        taskbar_rect, &spans, height, clamped_top,
+                                    ));
+                                if let Some(top) = safe_top {
+                                    let mut state = lock_state();
+                                    if let Some(s) = state.as_mut() {
+                                        s.taskbar_top_offset = top;
+                                        s.legacy_tray_offset = None;
+                                    }
+                                } else {
+                                    diagnose::log("drag release found no safe vertical gap");
+                                }
+                                position_at_taskbar();
+                                render_layered();
+                                save_state_settings();
+                                return LRESULT(0);
+                            }
                             let anchor_px =
                                 drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
                             let final_drag_left =
