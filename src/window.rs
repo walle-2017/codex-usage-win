@@ -1977,13 +1977,17 @@ fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
     }
 }
 
+fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
+    sc(if preset == AppearancePreset::Minimal {
+        VERTICAL_MINIMAL_WIDGET_HEIGHT
+    } else {
+        VERTICAL_WIDGET_HEIGHT
+    })
+}
+
 fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
-        return sc(if effective_appearance_preset(state) == AppearancePreset::Minimal {
-            VERTICAL_MINIMAL_WIDGET_HEIGHT
-        } else {
-            VERTICAL_WIDGET_HEIGHT
-        });
+        return vertical_widget_height_for_preset(effective_appearance_preset(state));
     }
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
@@ -3950,7 +3954,8 @@ fn position_vertical_taskbar(
     };
     let height = {
         let state = lock_state();
-        state.as_ref().map(widget_height_for_state).unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
+        state.as_ref().map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
+            .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
     };
     let desired_top = lock_state()
         .as_ref()
@@ -5481,7 +5486,12 @@ unsafe extern "system" fn wnd_proc(
                             let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
                             if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
                                 let anchor_y_px = drag_anchor_px_for_dpi(anchor_logical_y, effective_dpi);
-                                let height = sc(VERTICAL_WIDGET_HEIGHT);
+                                let height = {
+                                    let state = lock_state();
+                                    state.as_ref()
+                                        .map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
+                                        .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
+                                };
                                 let desired_top = drag_top_from_cursor(
                                     taskbar_rect, pt, anchor_y_px,
                                 );
@@ -5795,7 +5805,9 @@ unsafe extern "system" fn wnd_proc(
                                 let spans = taskbar_free_vertical_spans(taskbar_hwnd, taskbar_rect)?;
                                 let desired_bottom = taskbar_rect.bottom - taskbar_rect.top;
                                 let top = nearest_free_top_offset(
-                                    taskbar_rect, &spans, sc(VERTICAL_WIDGET_HEIGHT), desired_bottom,
+                                    taskbar_rect, &spans,
+                                    vertical_widget_height_for_preset(effective_appearance_preset(s)),
+                                    desired_bottom,
                                 )?;
                                 return Some((TaskbarAxis::Vertical, top));
                             }
