@@ -48,7 +48,7 @@ foreach ($token in @(
 # taskbar-embedded foreground replica or blur-sibling ownership.
 foreach ($token in @(
   'fn sync_minimal_tooltip_owner(hwnd: HWND, taskbar_owner: Option<HWND>)',
-  'GetWindow(hwnd, GW_OWNER) != owner',
+  'GetWindow(hwnd, GW_OWNER).ok() != Some(owner)',
   'sync_minimal_tooltip_owner(tooltip, taskbar_owner)',
   'sync_minimal_tooltip_owner(backdrop, taskbar_owner)'
 )) {
