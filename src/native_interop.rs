@@ -587,11 +587,6 @@ pub struct Color {
 }
 
 impl Color {
-    #[allow(dead_code)]
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
-    }
-
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
