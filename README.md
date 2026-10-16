@@ -27,6 +27,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 - Chinese and English settings UI, with legacy-language migration compatibility
 - Multi-monitor taskbar placement that avoids occupied taskbar controls, temporarily hides when no safe gap is wide enough, and restores automatically when space returns
 - High-DPI rendering and DPI-aware dragging
+- Taskbar-local foreground replicas and cached DirectComposition frosted backdrops support cross-monitor dragging, including when Start is open; no experimental environment variables or diagnostic mode are required
 - Explorer restart recovery and single-instance protection
 - Windows manual system-proxy support
 - GitHub standalone build with stable Release discovery, SHA256-verified in-app update flow, and direct GitHub Releases access
