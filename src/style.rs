@@ -394,6 +394,18 @@ impl ThemeStyle {
         self.tooltip_frosted_strength.unwrap_or(self.panel_frosted_strength)
     }
 
+    /// A fully opaque background cannot show the Composition backdrop.
+    /// Keep the configured intensity unchanged so transparency restores it.
+    pub fn panel_frosted_active(&self) -> bool {
+        self.panel_frosted_strength > 0
+            && self.color(StyleColorTarget::PanelBackground).a < u8::MAX
+    }
+
+    pub fn tooltip_frosted_active(&self) -> bool {
+        self.tooltip_frosted_strength() > 0
+            && self.color(StyleColorTarget::TooltipBackground).a < u8::MAX
+    }
+
     fn ensure_tooltip_override(&mut self) {
         if self.tooltip_background.is_none()
             && self.tooltip_border.is_none()
@@ -472,6 +484,53 @@ fn normalize_color(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frosted_strength_only_renders_under_transparent_backgrounds() {
+        use super::{StyleColorTarget, ThemeStyle};
+        use crate::native_interop::Color;
+
+        let mut style = ThemeStyle::dark_default();
+        style.panel_frosted_strength = 60;
+        style.set_tooltip_frosted_strength(75);
+        assert!(!style.panel_frosted_active());
+        assert!(!style.tooltip_frosted_active());
+
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(20, 40, 60, 200));
+        assert!(style.panel_frosted_active());
+        assert!(!style.tooltip_frosted_active());
+
+        style.set_color(StyleColorTarget::TooltipBackground, Color::rgba(20, 40, 60, 0));
+        assert!(style.tooltip_frosted_active());
+
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(20, 40, 60, 255));
+        assert!(!style.panel_frosted_active());
+        assert_eq!(style.panel_frosted_strength, 60);
+
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(20, 40, 60, 128));
+        assert!(style.panel_frosted_active());
+        style.panel_frosted_strength = 0;
+        assert!(!style.panel_frosted_active());
+
+        style.set_tooltip_frosted_strength(0);
+        assert!(!style.tooltip_frosted_active());
+    }
+
+    #[test]
+    fn tooltip_frosted_uses_inherited_settings_when_not_overridden() {
+        use super::{StyleColorTarget, ThemeStyle};
+        use crate::native_interop::Color;
+
+        let mut style = ThemeStyle::dark_default();
+        style.panel_frosted_strength = 40;
+        style.tooltip_frosted_strength = None;
+        style.tooltip_background = None;
+
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(1, 2, 3, 255));
+        assert!(!style.tooltip_frosted_active());
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(1, 2, 3, 180));
+        assert!(style.tooltip_frosted_active());
+    }
+
     use super::*;
 
     #[test]
