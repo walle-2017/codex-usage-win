@@ -1900,7 +1900,7 @@ const SMALL_WIDGET_HEIGHT: i32 = 28;
 const DRAG_HANDLE_HIT_H: i32 = 24;
 const VERTICAL_WIDGET_MIN_WIDTH: i32 = 32;
 const VERTICAL_WIDGET_MAX_WIDTH: i32 = 68;
-const VERTICAL_WIDGET_HEIGHT: i32 = 104;
+const VERTICAL_WIDGET_HEIGHT: i32 = 128;
 const VERTICAL_WIDGET_INSET: i32 = 2;
 const VERTICAL_DRAG_HANDLE_H: i32 = 17;
 
@@ -1909,11 +1909,14 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
         .as_ref()
         .is_some_and(|s| s.vertical_taskbar_mode);
     if vertical_mode {
-        let widget_width = total_widget_width();
+        // The original 17px grip was difficult to capture inside Explorer.
+        // Make the full compact panel draggable; hover remains non-activating.
+        let state = lock_state();
+        let Some(state) = state.as_ref() else { return false };
         return client_x >= 0
-            && client_x < widget_width
+            && client_x < total_widget_width_for_state(state)
             && client_y >= 0
-            && client_y < sc(VERTICAL_DRAG_HANDLE_H);
+            && client_y < widget_height_for_state(state);
     }
     let hit_h = sc(DRAG_HANDLE_HIT_H);
     let widget_height = {
@@ -3107,13 +3110,13 @@ unsafe fn render_taskbar_text(
 
 fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
     let first = if show_session && show_weekly {
-        sc(20)
+        sc(16)
     } else {
-        (height - sc(39)).max(sc(VERTICAL_DRAG_HANDLE_H)) / 2 + sc(4)
+        ((height - sc(52)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
     };
     (
         show_session.then_some(first),
-        show_weekly.then_some(if show_session { sc(62) } else { first }),
+        show_weekly.then_some(if show_session { sc(68) } else { first }),
     )
 }
 
@@ -4353,7 +4356,7 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
         MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
-    if effective_appearance_preset(s) == AppearancePreset::Minimal {
+    if s.vertical_taskbar_mode || effective_appearance_preset(s) == AppearancePreset::Minimal {
         let reset = format_precise_reset_time(section.resets_at)
             .unwrap_or_else(|| "--".to_string());
         return Some(format!("{label} · {reset}"));
@@ -4738,6 +4741,11 @@ unsafe extern "system" fn wnd_proc(
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     match msg {
+        WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) => {
+            // In vertical layout the entire panel is an explicit mouse client
+            // area, not just the tiny painted grip.
+            LRESULT(1) // HTCLIENT
+        }
         WM_PAINT => {
             let (embedded, frosted_active) = {
                 let state = lock_state();
@@ -4916,6 +4924,13 @@ unsafe extern "system" fn wnd_proc(
                 *last = None;
             }
             SetCapture(hwnd);
+            diagnose::log_lazy(|| format!(
+                "drag start hwnd={:?} vertical={} client=({}, {}) capture={:?}",
+                hwnd,
+                lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode),
+                client_x, client_y,
+                GetCapture(),
+            ));
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
@@ -5131,6 +5146,12 @@ unsafe extern "system" fn wnd_proc(
                             );
                         }
 
+                        if vertical {
+                            diagnose::log_lazy(|| format!(
+                                "vertical drag move hwnd={:?} pointer=({}, {}) new=({}, {}) size=({}, {})",
+                                drag_hwnd, pt.x, pt.y, window_x, window_y, widget_width, widget_height,
+                            ));
+                        }
                         if switched_taskbar || small_mode_changed {
                             render_layered();
                         }
@@ -5270,6 +5291,9 @@ unsafe extern "system" fn wnd_proc(
                                         taskbar_rect, &spans, height, clamped_top,
                                     ));
                                 if let Some(top) = safe_top {
+                                    diagnose::log_lazy(|| format!(
+                                        "vertical drag released y={} committed_top={}", pt.y, top,
+                                    ));
                                     let mut state = lock_state();
                                     if let Some(s) = state.as_mut() {
                                         s.taskbar_top_offset = top;
