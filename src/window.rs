@@ -7374,6 +7374,65 @@ mod tests {
     }
 
     #[test]
+    fn left_and_right_taskbars_select_vertical_axis() {
+        let left = RECT { left: 0, top: 0, right: 48, bottom: 1080 };
+        let right = RECT { left: 1920, top: -100, right: 1980, bottom: 980 };
+        let horizontal = RECT { left: -1920, top: 1040, right: 0, bottom: 1080 };
+        assert_eq!(taskbar_axis(left), TaskbarAxis::Vertical);
+        assert_eq!(taskbar_axis(right), TaskbarAxis::Vertical);
+        assert_eq!(taskbar_axis(horizontal), TaskbarAxis::Horizontal);
+        assert!(vertical_widget_width(left).is_some());
+        assert!(vertical_widget_width(right).is_some());
+        assert_eq!(vertical_widget_width(RECT { right: 28, ..left }), None);
+    }
+
+    #[test]
+    fn vertical_taskbar_free_gaps_exclude_pinned_icons_and_tray() {
+        let taskbar = RECT { left: 1880, top: -100, right: 1928, bottom: 980 };
+        let controls = [
+            RECT { left: 1880, top: -100, right: 1928, bottom: 20 },
+            RECT { left: 1880, top: 120, right: 1928, bottom: 340 },
+            RECT { left: 1880, top: 860, right: 1928, bottom: 980 },
+            // A window outside the taskbar's horizontal footprint is not an obstacle.
+            RECT { left: 0, top: 400, right: 60, bottom: 500 },
+        ];
+        let gaps = free_vertical_spans_from_occupied(taskbar, 860, &controls, 4);
+        assert_eq!(gaps, vec![
+            VerticalSpan { top: 24, bottom: 116 },
+            VerticalSpan { top: 344, bottom: 856 },
+        ]);
+        assert_eq!(nearest_free_top_offset(taskbar, &gaps, 104, -100), Some(444));
+        assert_eq!(nearest_free_top_offset(taskbar, &gaps, 104, 900), Some(852));
+    }
+
+    #[test]
+    fn vertical_drag_tracks_y_outside_taskbar_without_leaving_parent() {
+        let taskbar = RECT { left: 1900, top: -200, right: 1950, bottom: 800 };
+        let anchor = 12;
+        let height = 104;
+        // Keep ordinary tracking when cursor is inside the vertical taskbar.
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1920, y: 240 }, anchor, height), 428);
+        // Outside left/right keeps using Y and clamps to the current taskbar.
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1800, y: 240 }, anchor, height), 428);
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1990, y: -500 }, anchor, height), 0);
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1990, y: 1000 }, anchor, height), 896);
+    }
+
+    #[test]
+    fn taskbar_top_offset_remains_compatible_with_legacy_settings() {
+        let old = r#"{"taskbar_index":0,"taskbar_left_offset":123}"#;
+        let parsed: SettingsFile = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.taskbar_left_offset, Some(123));
+        assert_eq!(parsed.taskbar_top_offset, None);
+        let mut new = parsed;
+        new.taskbar_top_offset = Some(415);
+        let serialized = serde_json::to_string(&new).unwrap();
+        let decoded: SettingsFile = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(decoded.taskbar_top_offset, Some(415));
+        assert_eq!(decoded.taskbar_left_offset, Some(123));
+    }
+
+    #[test]
     fn free_taskbar_spans_exclude_occupied_controls_and_tray() {
         let taskbar = RECT {
             left: 0,
