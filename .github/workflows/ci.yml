@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - refactor/stable-taskbar-frosted
   pull_request:
     branches:
       - main
@@ -47,63 +48,6 @@ jobs:
       - name: Verify live drag anchor handling
         shell: pwsh
         run: ./scripts/assert-live-drag-anchor.ps1
-      - name: Verify taskbar mouse noactivate experiment
-        shell: pwsh
-        run: ./scripts/assert-taskbar-mouse-noactivate.ps1
-      - name: Verify Explorer activation event diagnostics
-        shell: pwsh
-        run: ./scripts/assert-explorer-activation-events.ps1
-      - name: Verify taskbar activation state correlation
-        shell: pwsh
-        run: ./scripts/assert-taskbar-active-state-verify.ps1
-      - name: Verify Explorer activation edge observer
-        shell: pwsh
-        run: ./scripts/assert-taskbar-activation-edge.ps1
-      - name: Verify external click and reparent observation
-        shell: pwsh
-        run: ./scripts/assert-taskbar-external-click-diagnostic.ps1
-      - name: Verify foreground cursor-position correlation
-        shell: pwsh
-        run: ./scripts/assert-taskbar-cursor-foreground.ps1
-      - name: Verify deep handoff read-only diagnostics
-        shell: pwsh
-        run: ./scripts/assert-taskbar-handoff-deep.ps1
-      - name: Verify lazy per-taskbar replica safeguards
-        shell: pwsh
-        run: ./scripts/assert-taskbar-lazy-replica.ps1
-      - name: Verify parked taskbar return-path locator
-        shell: pwsh
-        run: ./scripts/assert-taskbar-return-locator.ps1
-      - name: Verify frosted popup visited-taskbar return fallback
-        shell: pwsh
-        run: ./scripts/assert-popup-taskbar-return.ps1
-      - name: Verify bounded frosted popup owner retry experiment
-        shell: pwsh
-        run: ./scripts/assert-popup-owner-retry.ps1
-      - name: Verify DWM visual inspection is read-only
-        shell: pwsh
-        run: ./scripts/assert-popup-visual-diagnostic.ps1
-      - name: Verify conditional popup z-order repair isolation
-        shell: pwsh
-        run: ./scripts/assert-popup-zorder-repair.ps1
-      - name: Verify ownerless frosted popup experiment isolation
-        shell: pwsh
-        run: ./scripts/assert-popup-frosted-ownerless.ps1
-      - name: Verify embedded frosted taskbar child experiment isolation
-        shell: pwsh
-        run: ./scripts/assert-taskbar-embedded-frosted.ps1
-      - name: Verify embedded frosted replica handoff safeguards
-        shell: pwsh
-        run: ./scripts/assert-taskbar-embedded-frosted-handoff.ps1
-      - name: Verify parked taskbar blur cache lifecycle
-        shell: pwsh
-        run: ./scripts/assert-taskbar-frosted-blur-cache.ps1
-      - name: Verify taskbar z-order diagnostics
-        shell: pwsh
-        run: ./scripts/assert-taskbar-zorder-diagnostic.ps1
-      - name: Verify tooltip owner isolation and reorder events
-        shell: pwsh
-        run: ./scripts/assert-taskbar-tooltip-owner-experiment.ps1
       - name: Verify adaptive taskbar free-space placement
         shell: pwsh
         run: ./scripts/assert-taskbar-free-space.ps1
@@ -128,6 +72,10 @@ jobs:
       - name: Verify persistent runtime logging contract
         shell: pwsh
         run: ./scripts/assert-runtime-log.ps1
+
+      - name: Verify permanent embedded taskbar architecture
+        shell: pwsh
+        run: ./scripts/assert-stable-taskbar-frosted.ps1
 
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
