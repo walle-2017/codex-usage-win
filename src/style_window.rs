@@ -6761,6 +6761,155 @@ unsafe fn paint_preset_gallery(
     }
 }
 
+// Match the vertical widget's 36-degree bottom opening and clockwise
+// remaining-quota fill. Angles are measured from 12 o'clock.
+const PREVIEW_RING_GAP_HALF_RADIANS: f32 = std::f32::consts::PI / 10.0;
+
+fn preview_ring_angles(remaining: f32) -> (f32, f32, f32) {
+    let start = std::f32::consts::PI + PREVIEW_RING_GAP_HALF_RADIANS;
+    let sweep = std::f32::consts::TAU - 2.0 * PREVIEW_RING_GAP_HALF_RADIANS;
+    (start, start + sweep, start + sweep * (remaining / 100.0).clamp(0.0, 1.0))
+}
+
+fn preview_remaining_color(remaining: f32) -> StyleColorTarget {
+    if remaining > 50.0 {
+        StyleColorTarget::ProgressHigh
+    } else if remaining > 20.0 {
+        StyleColorTarget::ProgressMedium
+    } else {
+        StyleColorTarget::ProgressLow
+    }
+}
+
+fn preview_arc_point(cx: i32, cy: i32, radius: i32, angle: f32) -> (i32, i32) {
+    (
+        cx + (radius as f32 * angle.sin()).round() as i32,
+        cy - (radius as f32 * angle.cos()).round() as i32,
+    )
+}
+
+unsafe fn paint_preview_remaining_ring(
+    hdc: HDC, hwnd: HWND, cx: i32, cy: i32, remaining: f32, style: &ThemeStyle,
+) {
+    let radius = scale(hwnd, 12).max(3);
+    let diameter = radius * 2;
+    let bounds = RECT {
+        left: cx - radius, top: cy - radius,
+        right: cx + radius, bottom: cy + radius,
+    };
+    let (start, end, filled) = preview_ring_angles(remaining);
+    let (sx, sy) = preview_arc_point(cx, cy, radius, start);
+    let (ex, ey) = preview_arc_point(cx, cy, radius, end);
+    let track_pen = CreatePen(
+        PS_SOLID, scale(hwnd, 2).max(1),
+        COLORREF(style.color(StyleColorTarget::ProgressConsumed).to_colorref()),
+    );
+    let old_pen = SelectObject(hdc, track_pen);
+    // Win32 Arc draws counterclockwise; reverse start/end to draw clockwise.
+    let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, ex, ey, sx, sy);
+    let _ = SelectObject(hdc, old_pen);
+    let _ = DeleteObject(track_pen);
+    if remaining > 0.0 {
+        let accent_pen = CreatePen(
+            PS_SOLID, scale(hwnd, 2).max(1),
+            COLORREF(style.color(preview_remaining_color(remaining)).to_colorref()),
+        );
+        let old_pen = SelectObject(hdc, accent_pen);
+        let (px, py) = preview_arc_point(cx, cy, radius, filled);
+        let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, px, py, sx, sy);
+        let _ = SelectObject(hdc, old_pen);
+        let _ = DeleteObject(accent_pen);
+    }
+    let _ = diameter;
+}
+
+unsafe fn paint_vertical_style_preview(
+    hdc: HDC, hwnd: HWND, preview: RECT, style: &ThemeStyle, minimal: bool,
+) {
+    // A miniature portrait taskbar is centered in the existing preset card.
+    // Two quota rows fit without overlapping; the tooltip example remains
+    // outside the taskbar strip and retains preset-specific colors.
+    let strip = RECT {
+        left: preview.left + scale(hwnd, 7),
+        top: preview.top + scale(hwnd, 2),
+        right: preview.left + scale(hwnd, 69),
+        bottom: preview.bottom - scale(hwnd, 2),
+    };
+    let radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min(((strip.right - strip.left) / 2).max(0));
+    fill_rounded_rect(hdc, strip, style.color(StyleColorTarget::PanelBackground), radius);
+    draw_rounded_outline_rect(hdc, strip, style.color(StyleColorTarget::PanelBorder), radius, 1);
+    let cx = (strip.left + strip.right) / 2;
+    let small_font = CreateFontW(
+        -scale(hwnd, 9).max(1), 0, 0, 0, FW_MEDIUM.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+        PCWSTR::from_raw(native_interop::wide_str(
+            fonts::face(fonts::FontRole::Taskbar, None),
+        ).as_ptr()),
+    );
+    let old_font = SelectObject(hdc, small_font);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    for (index, (label, remaining, reset)) in [
+        ("5H", 82.0, "03:49"),
+        ("7D", 37.0, "10/22"),
+    ].iter().enumerate() {
+        let row_top = preview.top + scale(hwnd, 1 + index as i32 * 50);
+        if minimal {
+            let center_y = row_top + scale(hwnd, 25);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+            draw_text(hdc, &format!("{remaining:.0}%"), RECT {
+                left: strip.left + scale(hwnd, 3), top: center_y - scale(hwnd, 8),
+                right: strip.right - scale(hwnd, 3), bottom: center_y + scale(hwnd, 8),
+            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
+            draw_text(hdc, label, RECT {
+                left: strip.left + scale(hwnd, 3), top: row_top + scale(hwnd, 1),
+                right: strip.right - scale(hwnd, 3), bottom: row_top + scale(hwnd, 14),
+            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let ring_cy = row_top + scale(hwnd, 25);
+            paint_preview_remaining_ring(hdc, hwnd, cx, ring_cy, *remaining, style);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+            draw_text(hdc, &format!("{remaining:.0}%"), RECT {
+                left: cx - scale(hwnd, 11), top: ring_cy - scale(hwnd, 9),
+                right: cx + scale(hwnd, 11), bottom: ring_cy + scale(hwnd, 9),
+            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+            draw_text(hdc, reset, RECT {
+                left: strip.left + scale(hwnd, 3), top: row_top + scale(hwnd, 38),
+                right: strip.right - scale(hwnd, 3), bottom: row_top + scale(hwnd, 49),
+            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    let tooltip = RECT {
+        left: strip.right + scale(hwnd, 8),
+        top: preview.top + scale(hwnd, 28),
+        right: preview.right - scale(hwnd, 6),
+        bottom: preview.top + scale(hwnd, 71),
+    };
+    let tooltip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+        .min(((tooltip.bottom - tooltip.top) / 2).max(0));
+    fill_rounded_rect(hdc, tooltip, style.color(StyleColorTarget::TooltipBackground), tooltip_radius);
+    draw_rounded_outline_rect(
+        hdc, tooltip, style.color(StyleColorTarget::TooltipBorder), tooltip_radius, 1,
+    );
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+    draw_text(hdc, "2026-10-22", RECT {
+        left: tooltip.left + scale(hwnd, 2), top: tooltip.top + scale(hwnd, 4),
+        right: tooltip.right - scale(hwnd, 2), bottom: tooltip.top + scale(hwnd, 23),
+    }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, "21:30", RECT {
+        left: tooltip.left + scale(hwnd, 2), top: tooltip.top + scale(hwnd, 22),
+        right: tooltip.right - scale(hwnd, 2), bottom: tooltip.bottom - scale(hwnd, 2),
+    }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    let _ = SelectObject(hdc, old_font);
+    let _ = DeleteObject(small_font);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_style_preview_card(
     hdc: HDC,
@@ -7964,6 +8113,23 @@ unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORM
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+
+    #[test]
+    fn vertical_preset_preview_ring_has_bottom_gap_and_remaining_quota_palette() {
+        let (start, end, progress) = preview_ring_angles(82.0);
+        assert!((start - (std::f32::consts::PI + std::f32::consts::PI / 10.0)).abs() < 0.0001);
+        assert!((end - (std::f32::consts::PI * 3.0 - std::f32::consts::PI / 10.0)).abs() < 0.0001);
+        assert!(progress > start && progress < end);
+        assert_eq!(preview_ring_angles(0.0).2, start);
+        assert_eq!(preview_ring_angles(100.0).2, end);
+        assert_eq!(preview_remaining_color(82.0), StyleColorTarget::ProgressHigh);
+        assert_eq!(preview_remaining_color(37.0), StyleColorTarget::ProgressMedium);
+        assert_eq!(preview_remaining_color(12.0), StyleColorTarget::ProgressLow);
+        let (sx, sy) = preview_arc_point(30, 30, 12, start);
+        let (ex, ey) = preview_arc_point(30, 30, 12, end);
+        assert!(sy > 30 && ey > 30, "ring opening must point down");
+        assert!(sx < 30 && ex > 30);
+    }
 
     #[test]
     fn hex_input_accepts_rgb_rgba_and_transient_partial_values() {
