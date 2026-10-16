@@ -44,6 +44,18 @@ foreach ($token in @(
 )) {
   if (-not $src.Contains($token)) { throw "Stable taskbar invariant missing: $token" }
 }
+# Both tooltip windows must follow the active taskbar without changing the
+# taskbar-embedded foreground replica or blur-sibling ownership.
+foreach ($token in @(
+  'fn sync_minimal_tooltip_owner(hwnd: HWND, taskbar_owner: Option<HWND>)',
+  'GetWindow(hwnd, GW_OWNER) != owner',
+  'sync_minimal_tooltip_owner(tooltip, taskbar_owner)',
+  'sync_minimal_tooltip_owner(backdrop, taskbar_owner)'
+)) {
+  if (-not $src.Contains($token)) {
+    throw "Reset-time tooltip/taskbar ownership invariant missing: $token"
+  }
+}
 $replica = [regex]::Match($src, '(?s)fn\s+taskbar_replica_enabled\(\).*?\n\}')
 if (-not $replica.Success -or -not ($replica.Value -match '\btrue\b') -or
     $replica.Value.Contains('diagnose::is_enabled()')) {
