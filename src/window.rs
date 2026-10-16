@@ -229,307 +229,6 @@ static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
 
-// Temporary read-only Windows z-order and tooltip ownership diagnostics.
-#[link(name = "user32")]
-unsafe extern "system" {
-    #[link_name = "GetWindow"]
-    fn get_window_zorder_diagnostic(hwnd: HWND, command: u32) -> HWND;
-}
-const GW_NEXT_ZORDER_DIAGNOSTIC: u32 = 2;
-const GW_PREV_ZORDER_DIAGNOSTIC: u32 = 3;
-const GW_OWNER_ZORDER_DIAGNOSTIC: u32 = 4;
-thread_local! {
-    static LAST_TOOLTIP_ZORDER_TRACE: std::cell::RefCell<Option<Instant>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn zorder_diagnostic_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_ZORDER_DIAGNOSTIC").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn popup_owner_diagnostic_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_DIAGNOSTIC").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-#[link(name = "dwmapi")]
-unsafe extern "system" {
-    #[link_name = "DwmGetWindowAttribute"]
-    fn dwm_get_window_attribute_popup_visual(
-        hwnd: HWND, attribute: u32, value: *mut std::ffi::c_void, size: u32,
-    ) -> i32;
-}
-
-const DWMWA_CLOAKED_POPUP_VISUAL: u32 = 14;
-const DWMWA_EXTENDED_FRAME_BOUNDS_POPUP_VISUAL: u32 = 9;
-
-fn popup_visual_diagnostic_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_POPUP_VISUAL_DIAGNOSTIC").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-/// Observe DWM cloaking and window hit-testing separately from Win32 z-order.
-/// This is intentionally read-only: no activation, reparenting, owner update,
-/// rendering or SetWindowPos. A hit-test alone cannot establish visual
-/// occlusion for alpha-layered/transparent pixels, so log it as correlation.
-fn log_popup_visual_snapshot(stage: &str) {
-    if !popup_visual_diagnostic_enabled() {
-        return;
-    }
-    let (foreground, taskbar, blur_active, embedded) = {
-        let state = lock_state();
-        match state.as_ref() {
-            Some(s) => (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded),
-            None => return,
-        }
-    };
-    if !blur_active || embedded {
-        return;
-    }
-    let backdrop = blur_backdrop_hwnd().unwrap_or_default();
-    let describe = |label: &str, hwnd: HWND| -> String {
-        unsafe {
-            if hwnd == HWND::default() || !IsWindow(hwnd).as_bool() {
-                return format!("{label}=<none>");
-            }
-            let mut cloaked = 0u32;
-            let cloak_result = dwm_get_window_attribute_popup_visual(
-                hwnd, DWMWA_CLOAKED_POPUP_VISUAL,
-                (&mut cloaked as *mut u32).cast(), std::mem::size_of::<u32>() as u32,
-            );
-            let mut frame = RECT::default();
-            let frame_result = dwm_get_window_attribute_popup_visual(
-                hwnd, DWMWA_EXTENDED_FRAME_BOUNDS_POPUP_VISUAL,
-                (&mut frame as *mut RECT).cast(), std::mem::size_of::<RECT>() as u32,
-            );
-            let rect = native_interop::get_window_rect_safe(hwnd);
-            let (hit, root, hit_class) = if let Some(bounds) = rect {
-                let point = POINT {
-                    x: bounds.left + (bounds.right - bounds.left) / 2,
-                    y: bounds.top + (bounds.bottom - bounds.top) / 2,
-                };
-                let hit = WindowFromPoint(point);
-                let root = GetAncestor(hit, GA_ROOT);
-                (hit, root, explorer_activation_event_class(root))
-            } else {
-                (HWND::default(), HWND::default(), "<none>".into())
-            };
-            format!(
-                "{label}={:?} visible={} cloak_hr={:#x} cloak_flags={:#x} frame_hr={:#x} frame=({},{},{},{}) rect={:?} center_hit={:?} center_root={:?} center_root_class={}",
-                hwnd, IsWindowVisible(hwnd).as_bool(), cloak_result, cloaked,
-                frame_result, frame.left, frame.top, frame.right, frame.bottom,
-                rect.map(|r| (r.left, r.top, r.right, r.bottom)),
-                hit, root, hit_class
-            )
-        }
-    };
-    diagnose::log(format!(
-        "taskbar popup visual snapshot stage={} foreground_above_taskbar={} backdrop_above_taskbar={} foreground_above_backdrop={} | {} | {} | {}",
-        stage,
-        zorder_above_relation(foreground, taskbar.unwrap_or_default()),
-        zorder_above_relation(backdrop, taskbar.unwrap_or_default()),
-        zorder_above_relation(foreground, backdrop),
-        describe("foreground", foreground),
-        describe("backdrop", backdrop),
-        describe("taskbar", taskbar.unwrap_or_default())
-    ));
-}
-
-/// Read-only foreground/backdrop/Explorer owner and z-order correlation.
-/// Only logs in the explicit opt-in test; never changes a window or its owner.
-fn log_popup_owner_snapshot(stage: &str, requested: Option<HWND>) {
-    if !popup_owner_diagnostic_enabled() {
-        return;
-    }
-    let (foreground, taskbar, blur_active, embedded) = {
-        let state = lock_state();
-        match state.as_ref() {
-            Some(s) => (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded),
-            None => return,
-        }
-    };
-    if !blur_active || embedded {
-        return;
-    }
-    let backdrop = blur_backdrop_hwnd().unwrap_or_default();
-    let current = taskbar.unwrap_or_default();
-    let describe = |label: &str, hwnd: HWND| -> String {
-        unsafe {
-            if hwnd == HWND::default() || !IsWindow(hwnd).as_bool() {
-                return format!("{label}=<none>");
-            }
-            let owner = get_window_zorder_diagnostic(hwnd, GW_OWNER_ZORDER_DIAGNOSTIC);
-            let raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-            let prev = get_window_zorder_diagnostic(hwnd, GW_PREV_ZORDER_DIAGNOSTIC);
-            let next = get_window_zorder_diagnostic(hwnd, GW_NEXT_ZORDER_DIAGNOSTIC);
-            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            format!(
-                "{label}={:?} owner={:?} raw={:#x} owner_matches_target={} visible={} topmost={} prev={:?} next={:?} versus_taskbar={}",
-                hwnd, owner, raw, owner == current, IsWindowVisible(hwnd).as_bool(),
-                ex_style & WS_EX_TOPMOST.0 != 0, prev, next,
-                zorder_above_relation(hwnd, current)
-            )
-        }
-    };
-    diagnose::log(format!(
-        "taskbar popup owner snapshot stage={} target={:?} requested={:?} foreground_vs_backdrop={} | {} | {} | {}",
-        stage, taskbar, requested, zorder_above_relation(foreground, backdrop),
-        describe("foreground", foreground),
-        describe("backdrop", backdrop),
-        describe("taskbar", current)
-    ));
-}
-
-/// Single-variable experiment: only change the *tooltip foreground* popup owner.
-/// Do not change taskbar focus, the embedded widget or the SetParent path.
-fn tooltip_owner_experiment_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_TOOLTIP_OWNER_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-// The requested owner is tracked by popup lifetime. Avoid retrying an
-// unexpected GW_OWNER value on every WM_MOUSEMOVE / tooltip redraw.
-thread_local! {
-    static LAST_TOOLTIP_OWNER_ATTEMPT: std::cell::Cell<isize> =
-        const { std::cell::Cell::new(0) };
-}
-
-fn tooltip_disable_experiment_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_DISABLE_RESET_TOOLTIP").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-/// Opt-in owner experiment: prefer CreateWindowExW(hwndParent=taskbar) and
-/// only adjust GWLP_HWNDPARENT when the widget switches to a new taskbar.
-/// Never activate other windows or change the embedded widget's parent.
-fn experiment_bind_tooltip_owner(tooltip: HWND) {
-    if !tooltip_owner_experiment_enabled() { return; }
-    let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
-    let Some(owner) = taskbar else { return; };
-    unsafe {
-        if !IsWindow(owner).as_bool() { return; }
-        let raw_before = GetWindowLongPtrW(tooltip, GWLP_HWNDPARENT);
-        let gw_before = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
-        if raw_before == owner.0 as isize { return; }
-        // Limit mutations to one attempt per new taskbar HWND for this popup.
-        let already_attempted = LAST_TOOLTIP_OWNER_ATTEMPT.with(|c| {
-            if c.get() == owner.0 as isize { true }
-            else { c.set(owner.0 as isize); false }
-        });
-        if already_attempted { return; }
-        SetLastError(WIN32_ERROR(0));
-        let prior = SetWindowLongPtrW(tooltip, GWLP_HWNDPARENT, owner.0 as isize);
-        let set_error = GetLastError();
-        let raw_after = GetWindowLongPtrW(tooltip, GWLP_HWNDPARENT);
-        let gw_after = get_window_zorder_diagnostic(tooltip, GW_OWNER_ZORDER_DIAGNOSTIC);
-        diagnose::log(format!(
-            "taskbar tooltip owner transition requested={:?} gw_before={:?} gw_after={:?} raw_before={:#x} raw_after={:#x} prior_value={:#x} set_last_error={:?} raw_matches={} gw_matches={}",
-            owner, gw_before, gw_after, raw_before, raw_after, prior, set_error,
-            raw_after == owner.0 as isize, gw_after == owner
-        ));
-        log_taskbar_zorder_snapshot("tooltip-owner-transition", None);
-    }
-}
-
-fn zorder_window_description(label: &str, hwnd: HWND) -> String {
-    if hwnd == HWND::default() {
-        return format!("{label}=<none>");
-    }
-    unsafe {
-        let valid = IsWindow(hwnd).as_bool();
-        if !valid { return format!("{label}={:?} valid=false", hwnd); }
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let owner = get_window_zorder_diagnostic(hwnd, GW_OWNER_ZORDER_DIAGNOSTIC);
-        let prev = get_window_zorder_diagnostic(hwnd, GW_PREV_ZORDER_DIAGNOSTIC);
-        let next = get_window_zorder_diagnostic(hwnd, GW_NEXT_ZORDER_DIAGNOSTIC);
-        let bounds = native_interop::get_window_rect_safe(hwnd);
-        let rect_text = bounds.map(|r| format!("({},{},{},{})",r.left,r.top,r.right,r.bottom))
-            .unwrap_or_else(|| "<unknown>".to_string());
-        format!(
-            "{label}={:?} class={} valid={} visible={} owner={:?} raw_parent_owner={:#x} root={:?} prev={:?} prev_class={} next={:?} ex_style={:#x} topmost={} rect={}",
-            hwnd, explorer_activation_event_class(hwnd), valid, IsWindowVisible(hwnd).as_bool(),
-            owner, GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT), GetAncestor(hwnd, GA_ROOT),
-            prev, explorer_activation_event_class(prev), next, ex_style,
-            ex_style & WS_EX_TOPMOST.0 != 0, rect_text
-        )
-    }
-}
-
-/// Some modern shell surfaces occupy separate window bands. Only claim order
-/// when walking the same GetWindow predecessor chain finds the other HWND.
-fn zorder_above_relation(candidate: HWND, baseline: HWND) -> &'static str {
-    if candidate == HWND::default() || baseline == HWND::default() { return "unknown"; }
-    if candidate == baseline { return "same"; }
-    unsafe {
-        for (start, match_hwnd, verdict) in [
-            (baseline, candidate, "above"),
-            (candidate, baseline, "below"),
-        ] {
-            let mut cursor = start;
-            for _ in 0..256 {
-                let next = get_window_zorder_diagnostic(cursor, GW_PREV_ZORDER_DIAGNOSTIC);
-                if next == HWND::default() || next == cursor { break; }
-                if next == match_hwnd { return verdict; }
-                cursor = next;
-            }
-        }
-    }
-    "unknown"
-}
-
-fn log_taskbar_zorder_snapshot(stage: &str, target: Option<HWND>) {
-    if !zorder_diagnostic_enabled() { return; }
-    let (widget, taskbar) = {
-        let state = lock_state();
-        (state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default(),
-         state.as_ref().and_then(|s| s.taskbar_hwnd).unwrap_or_default())
-    };
-    let tooltip = MINIMAL_TOOLTIP_HWND.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().map(|h| h.to_hwnd()).unwrap_or_default();
-    let blur = TOOLTIP_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().map(|h| h.to_hwnd()).unwrap_or_default();
-    let fg = unsafe { GetForegroundWindow() };
-    diagnose::log(format!(
-        "taskbar zorder snapshot stage={} tooltip_vs_taskbar={} blur_vs_taskbar={} tooltip_vs_foreground={} target={:?} | {} | {} | {} | {} | {} | {}",
-        stage, zorder_above_relation(tooltip, taskbar),
-        zorder_above_relation(blur, taskbar), zorder_above_relation(tooltip, fg), target,
-        zorder_window_description("tooltip", tooltip),
-        zorder_window_description("blur", blur),
-        zorder_window_description("widget", widget),
-        zorder_window_description("taskbar", taskbar),
-        zorder_window_description("foreground", fg),
-        zorder_window_description("target", target.unwrap_or_default())
-    ));
-}
-
-fn log_tooltip_zorder_show(tooltip_placement_ok: bool, backdrop_placement_ok: Option<bool>) {
-    if !zorder_diagnostic_enabled() { return; }
-    let now = Instant::now();
-    let should_log = LAST_TOOLTIP_ZORDER_TRACE.with(|cell| {
-        let mut last = cell.borrow_mut();
-        let due = last.map(|old| now.duration_since(old) >= Duration::from_millis(600))
-            .unwrap_or(true);
-        if due || !tooltip_placement_ok || backdrop_placement_ok == Some(false) {
-            *last = Some(now);
-            true
-        } else { false }
-    });
-    if should_log {
-        diagnose::log(format!(
-            "taskbar zorder tooltip_show tooltip_setwindowpos_ok={} backdrop_setwindowpos_ok={:?}",
-            tooltip_placement_ok, backdrop_placement_ok
-        ));
-        log_taskbar_zorder_snapshot("tooltip-shown", None);
-    }
-}
-
-
 #[derive(Clone, Debug)]
 struct TaskbarLayoutSnapshot {
     taskbar_hwnd_raw: isize,
@@ -1137,40 +836,6 @@ fn select_preferred_taskbar(
     }
 }
 
-fn log_drag_input_snapshot(stage: &str, hwnd: HWND) {
-    if !diagnose::is_enabled() {
-        return;
-    }
-    unsafe {
-        let foreground = GetForegroundWindow();
-        let active = GetActiveWindow();
-        let focus = GetFocus();
-        let capture = GetCapture();
-        let fg_thread = GetWindowThreadProcessId(foreground, None);
-        let widget_thread = GetWindowThreadProcessId(hwnd, None);
-        let mut explorer_gui = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        let gui_result = if fg_thread != 0 {
-            GetGUIThreadInfo(fg_thread, &mut explorer_gui)
-        } else {
-            Err(windows::core::Error::from_win32())
-        };
-        let foreground_root = if foreground != HWND::default() {
-            GetAncestor(foreground, GA_ROOT)
-        } else {
-            HWND::default()
-        };
-        diagnose::log(format!(
-            "drag input snapshot stage={} foreground={:?} foreground_root={:?} foreground_thread={} active={:?} focus={:?} capture={:?} widget={:?} widget_thread={} gui_ok={} gui_flags={:#x} gui_active={:?} gui_focus={:?} gui_capture={:?} gui_menu_owner={:?} gui_move_size={:?}",
-            stage, foreground, foreground_root, fg_thread, active, focus, capture, hwnd, widget_thread,
-            gui_result.is_ok(), explorer_gui.flags.0, explorer_gui.hwndActive, explorer_gui.hwndFocus,
-            explorer_gui.hwndCapture, explorer_gui.hwndMenuOwner, explorer_gui.hwndMoveSize
-        ));
-    }
-}
-
 // Opt-in, lazy, per-taskbar child-window cache. Each window is created with
 // its final Explorer parent, avoiding SetParent between taskbars entirely.
 // A single AppState, poller, timer owner, tray registration and renderer remain.
@@ -1623,13 +1288,13 @@ fn attach_to_taskbar_window(
     if let Some(switched) = try_taskbar_replica_handoff(hwnd, index, taskbar) {
         return switched;
     }
-    log_drag_input_snapshot("before-reparent", hwnd);
-    observe_taskbar_activation_edge("before-reparent", true);
-    log_taskbar_zorder_snapshot("before-reparent", Some(taskbar.hwnd));
+    
+    
+    
     let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
-    log_cursor_foreground_snapshot("before-reparent", None, Some(taskbar.hwnd), false);
-    log_external_click_context("before-reparent");
-    log_reparent_window_state("before-reparent", hwnd, source_taskbar, taskbar.hwnd);
+    
+    
+    
     let handoff_attempt = if explorer_active_state_verify_enabled()
         && source_taskbar.is_some() && source_taskbar != Some(taskbar.hwnd)
     {
@@ -1645,27 +1310,27 @@ fn attach_to_taskbar_window(
             handoff_attempt, source_taskbar, taskbar.hwnd
         ));
     }
-    sample_explorer_active_state("before-reparent", true);
-    log_explorer_activation_snapshot("before-reparent", source_taskbar, Some(taskbar.hwnd));
+    
+    
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
         if focus_cycle_enabled() {
             FOCUS_CYCLE_ARMED.with(|cell| cell.set(true));
             diagnose::log("taskbar focus cycle experiment armed by failed reparent");
         }
-        log_drag_input_snapshot("reparent-failed", hwnd);
-        log_external_click_context("reparent-failed");
-        log_cursor_foreground_snapshot("reparent-failed", None, Some(taskbar.hwnd), false);
-        log_reparent_window_state("reparent-failed", hwnd, source_taskbar, taskbar.hwnd);
-        observe_taskbar_activation_edge("reparent-failed", true);
-        log_taskbar_zorder_snapshot("reparent-failed", Some(taskbar.hwnd));
-        sample_explorer_active_state("reparent-failed", true);
+        
+        
+        
+        
+        
+        
+        
         if handoff_attempt != 0 {
             diagnose::log(format!(
                 "taskbar active-state verify handoff_result attempt={} success=false source={:?} target={:?}",
                 handoff_attempt, source_taskbar, taskbar.hwnd
             ));
         }
-        log_explorer_activation_snapshot("reparent-failed", source_taskbar, Some(taskbar.hwnd));
+        
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
             taskbar.hwnd,
@@ -1674,19 +1339,19 @@ fn attach_to_taskbar_window(
         return false;
     }
 
-    sample_explorer_active_state("reparent-success", true);
-    log_external_click_context("reparent-success");
-    log_cursor_foreground_snapshot("reparent-success", None, Some(taskbar.hwnd), false);
-    log_reparent_window_state("reparent-success", hwnd, source_taskbar, taskbar.hwnd);
-    observe_taskbar_activation_edge("reparent-success", true);
-    log_taskbar_zorder_snapshot("reparent-success", Some(taskbar.hwnd));
+    
+    
+    
+    
+    
+    
     if handoff_attempt != 0 {
         diagnose::log(format!(
             "taskbar active-state verify handoff_result attempt={} success=true source={:?} target={:?}",
             handoff_attempt, source_taskbar, taskbar.hwnd
         ));
     }
-    log_explorer_activation_snapshot("reparent-success", source_taskbar, Some(taskbar.hwnd));
+    
     // Only release the old event hook after the window actually moves.
     let old_hook = {
         let mut state = lock_state();
@@ -1740,410 +1405,6 @@ fn attach_to_preferred_taskbar(
         ));
     }
     attach_to_taskbar_window(hwnd, index, &taskbar)
-}
-
-// Experimental, bounded recovery for Start-menu-induced ERROR_INVALID_PARAMETER
-// when changing an existing frosted popup's taskbar owner. Unlike the prior
-// broad z-order experiment, retries do not activate or raise any window until
-// both owner assignments are verified. Default behavior stays unchanged.
-const TIMER_POPUP_OWNER_RETRY: usize = 0xF05A;
-const POPUP_OWNER_RETRY_INTERVAL_MS: u32 = 400;
-const POPUP_OWNER_RETRY_MAX_ATTEMPTS: u8 = 24;
-
-#[derive(Clone, Copy)]
-struct PopupOwnerRetry {
-    foreground: isize,
-    target: isize,
-    attempts: u8,
-}
-
-thread_local! {
-    static POPUP_OWNER_RETRY: std::cell::Cell<Option<PopupOwnerRetry>> =
-        const { std::cell::Cell::new(None) };
-}
-
-fn popup_owner_retry_experiment_enabled() -> bool {
-    diagnose::is_enabled()
-        && taskbar_replica_enabled()
-        && !popup_ownerless_frosted_experiment_enabled()
-        && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_RETRY_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn stop_popup_owner_retry(hwnd: HWND) {
-    POPUP_OWNER_RETRY.with(|cell| cell.set(None));
-    unsafe {
-        let _ = KillTimer(hwnd, TIMER_POPUP_OWNER_RETRY);
-    }
-}
-
-fn arm_popup_owner_retry(foreground: HWND, target: HWND) {
-    if !popup_owner_retry_experiment_enabled() {
-        return;
-    }
-    let Some(backdrop) = blur_backdrop_hwnd() else { return; };
-    if native_interop::popup_owner_matches(foreground, target)
-        && native_interop::popup_owner_matches(backdrop, target)
-    {
-        stop_popup_owner_retry(foreground);
-        return;
-    }
-    POPUP_OWNER_RETRY.with(|cell| cell.set(Some(PopupOwnerRetry {
-        foreground: foreground.0 as isize,
-        target: target.0 as isize,
-        attempts: 0,
-    })));
-    unsafe {
-        let timer = SetTimer(
-            foreground, TIMER_POPUP_OWNER_RETRY, POPUP_OWNER_RETRY_INTERVAL_MS, None,
-        );
-        if timer == 0 {
-            diagnose::log("taskbar popup owner retry timer installation failed");
-            stop_popup_owner_retry(foreground);
-        } else {
-            diagnose::log(format!(
-                "taskbar popup owner retry armed foreground={:?} target={:?}",
-                foreground, target
-            ));
-        }
-    }
-}
-
-fn poll_popup_owner_retry(hwnd: HWND) {
-    let Some(mut pending) = POPUP_OWNER_RETRY.with(|cell| cell.get()) else {
-        stop_popup_owner_retry(hwnd);
-        return;
-    };
-    let (foreground, taskbar, blur_active, embedded, dragging) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else {
-            stop_popup_owner_retry(hwnd);
-            return;
-        };
-        (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded, s.dragging)
-    };
-    if !popup_owner_retry_experiment_enabled() || !blur_active || embedded
-        || foreground.0 as isize != pending.foreground
-        || taskbar.map(|h| h.0 as isize) != Some(pending.target)
-    {
-        diagnose::log("taskbar popup owner retry cancelled due to changed window or target");
-        stop_popup_owner_retry(hwnd);
-        return;
-    }
-    if dragging {
-        return;
-    }
-    let target = HWND(pending.target as *mut _);
-    let Some(backdrop) = blur_backdrop_hwnd() else {
-        stop_popup_owner_retry(hwnd);
-        return;
-    };
-    let backdrop_ok = native_interop::try_rebind_popup_owner(backdrop, target);
-    let foreground_ok = native_interop::try_rebind_popup_owner(foreground, target);
-    pending.attempts += 1;
-    if backdrop_ok && foreground_ok {
-        stop_popup_owner_retry(hwnd);
-        // One final existing ordering pass, only after both owner changes
-        // have succeeded. Never run this while Win32 rejects an owner change.
-        sync_blur_backdrop_zorder(foreground);
-        log_popup_visual_snapshot("owner-retry-recovered");
-        diagnose::log(format!(
-            "taskbar popup owner retry recovered target={:?} attempts={}",
-            target, pending.attempts
-        ));
-    } else if pending.attempts >= POPUP_OWNER_RETRY_MAX_ATTEMPTS {
-        stop_popup_owner_retry(hwnd);
-        diagnose::log(format!(
-            "taskbar popup owner retry exhausted target={:?} attempts={}",
-            target, pending.attempts
-        ));
-    } else {
-        POPUP_OWNER_RETRY.with(|cell| cell.set(Some(pending)));
-    }
-}
-
-// Opt-in experiment: correct only an observed popup-vs-taskbar z-order
-// inversion. Keep ownership unchanged and never activate other windows.
-// Do not use the former unconditional global z-order workaround.
-const TIMER_POPUP_ZORDER_REPAIR: usize = 0xF05B;
-const POPUP_ZORDER_REPAIR_INTERVAL_MS: u32 = 250;
-// Continue observing beyond a transient Start-menu foreground transition.
-// The bounded window is 120 * 250ms = 30 seconds; max corrective actions stays 3.
-const POPUP_ZORDER_REPAIR_MAX_CHECKS: u8 = 120;
-const POPUP_ZORDER_REPAIR_MAX_ACTIONS: u8 = 3;
-
-#[derive(Clone, Copy)]
-struct PopupZorderRepair {
-    foreground: isize,
-    target: isize,
-    checks: u8,
-    actions: u8,
-    unknown_hit_checks: u8,
-}
-
-thread_local! {
-    static POPUP_ZORDER_REPAIR: std::cell::Cell<Option<PopupZorderRepair>> =
-        const { std::cell::Cell::new(None) };
-}
-
-fn popup_zorder_repair_experiment_enabled() -> bool {
-    diagnose::is_enabled()
-        && taskbar_replica_enabled()
-        && std::env::var_os("CODEX_TASKBAR_POPUP_ZORDER_REPAIR_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn stop_popup_zorder_repair(hwnd: HWND) {
-    POPUP_ZORDER_REPAIR.with(|cell| cell.set(None));
-    unsafe { let _ = KillTimer(hwnd, TIMER_POPUP_ZORDER_REPAIR); }
-}
-
-fn arm_popup_zorder_repair() {
-    if !popup_zorder_repair_experiment_enabled() {
-        return;
-    }
-    let (foreground, taskbar, blur_active, embedded) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else { return; };
-        (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded)
-    };
-    if !blur_active || embedded || widget_hidden_for_taskbar_space() {
-        return;
-    }
-    let Some(target) = taskbar else { return; };
-    if blur_backdrop_hwnd().is_none() {
-        return;
-    }
-    let prior = POPUP_ZORDER_REPAIR.with(|cell| cell.get());
-    if prior.is_some_and(|p|
-        p.foreground == foreground.0 as isize && p.target == target.0 as isize)
-    {
-        return;
-    }
-    POPUP_ZORDER_REPAIR.with(|cell| cell.set(Some(PopupZorderRepair {
-        foreground: foreground.0 as isize,
-        target: target.0 as isize,
-        checks: 0,
-        actions: 0,
-        unknown_hit_checks: 0,
-    })));
-    unsafe {
-        let timer = SetTimer(foreground, TIMER_POPUP_ZORDER_REPAIR,
-            POPUP_ZORDER_REPAIR_INTERVAL_MS, None);
-        if timer == 0 {
-            diagnose::log("taskbar popup zorder repair timer failed");
-            stop_popup_zorder_repair(foreground);
-        } else {
-            diagnose::log(format!(
-                "taskbar popup zorder repair armed foreground={:?} taskbar={:?}",
-                foreground, target
-            ));
-        }
-    }
-}
-
-/// Secondary evidence for shell band separation: when neither popup can be
-/// compared to the taskbar using GW_HWNDPREV, require at least two interior
-/// sample points to hit the active taskbar itself. This may also happen in
-/// transparent pixels, so it is NEVER sufficient without repeated samples,
-/// unknown z-order for BOTH popups, and the other safety gates.
-fn popup_unknown_order_hit_taskbar(foreground: HWND, taskbar: HWND) -> (bool, usize) {
-    let Some(r) = native_interop::get_window_rect_safe(foreground) else { return (false, 0); };
-    let Some(t) = native_interop::get_window_rect_safe(taskbar) else { return (false, 0); };
-    let width = r.right - r.left;
-    let height = r.bottom - r.top;
-    if width < 4 || height < 4 {
-        return (false, 0);
-    }
-    // Three interior points avoid relying on one transparent widget pixel.
-    let y = r.top + height / 2;
-    let mut hits = 0usize;
-    for numerator in [1, 2, 3] {
-        let x = r.left + width * numerator / 4;
-        if x < t.left || x >= t.right || y < t.top || y >= t.bottom {
-            return (false, hits);
-        }
-        let root = unsafe { GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT) };
-        if root == taskbar { hits += 1; }
-    }
-    (hits >= 2, hits)
-}
-
-fn poll_popup_zorder_repair(hwnd: HWND) {
-    let Some(mut pending) = POPUP_ZORDER_REPAIR.with(|cell| cell.get()) else {
-        stop_popup_zorder_repair(hwnd);
-        return;
-    };
-    let (foreground, taskbar, blur_active, embedded, dragging) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else {
-            stop_popup_zorder_repair(hwnd);
-            return;
-        };
-        (s.hwnd.to_hwnd(), s.taskbar_hwnd, s.composition_blur_active, s.embedded, s.dragging)
-    };
-    if !popup_zorder_repair_experiment_enabled() || !blur_active || embedded
-        || foreground.0 as isize != pending.foreground
-        || taskbar.map(|h| h.0 as isize) != Some(pending.target)
-        || widget_hidden_for_taskbar_space()
-    {
-        stop_popup_zorder_repair(hwnd);
-        return;
-    }
-    let target = HWND(pending.target as *mut _);
-    let Some(backdrop) = blur_backdrop_hwnd() else {
-        stop_popup_zorder_repair(hwnd);
-        return;
-    };
-    unsafe {
-        if !IsWindow(foreground).as_bool() || !IsWindow(backdrop).as_bool()
-            || !IsWindow(target).as_bool()
-        {
-            stop_popup_zorder_repair(hwnd);
-            return;
-        }
-    }
-    pending.checks += 1;
-    let before_foreground = zorder_above_relation(foreground, target);
-    let before_backdrop = zorder_above_relation(backdrop, target);
-    let (hit_taskbar, hit_count) = if before_foreground == "unknown"
-        && before_backdrop == "unknown"
-    {
-        popup_unknown_order_hit_taskbar(foreground, target)
-    } else { (false, 0) };
-    pending.unknown_hit_checks = if hit_taskbar {
-        pending.unknown_hit_checks.saturating_add(1)
-    } else { 0 };
-    let stable_unknown_occlusion = pending.unknown_hit_checks >= 2;
-    if hit_taskbar && (pending.checks == 1 || pending.unknown_hit_checks == 2
-        || pending.checks % 8 == 0)
-    {
-        diagnose::log(format!(
-            "taskbar popup zorder repair unknown-hit check={} stable_hits={} sample_hits={} taskbar={:?} foreground={} backdrop={}",
-            pending.checks, pending.unknown_hit_checks, hit_count,
-            target, before_foreground, before_backdrop
-        ));
-    }
-    if before_foreground == "above" && before_backdrop == "above"
-        && zorder_above_relation(foreground, backdrop) == "above"
-    {
-        diagnose::log(format!(
-            "taskbar popup zorder repair already-correct taskbar={:?} checks={} actions={}",
-            target, pending.checks, pending.actions
-        ));
-        stop_popup_zorder_repair(hwnd);
-        return;
-    }
-    // A running drag or Shell menu is a moving target. Observe but do not
-    // raise either popup while the menu is active.
-    let foreground_class = explorer_activation_event_class(unsafe { GetForegroundWindow() });
-    let shell_menu = matches!(
-        foreground_class.as_str(),
-        "Windows.UI.Core.CoreWindow" | "TopLevelWindowForOverflowXamlIsland"
-            | "CodexUsagePopupMenuV1"
-    );
-    if (before_foreground == "below" || before_backdrop == "below")
-        && (dragging || shell_menu)
-        && (pending.checks == 1 || pending.checks % 4 == 0)
-    {
-        diagnose::log(format!(
-            "taskbar popup zorder repair deferred check={} foreground={} backdrop={} dragging={} shell_menu={} active_class={} action_count={}",
-            pending.checks, before_foreground, before_backdrop, dragging,
-            shell_menu, foreground_class, pending.actions
-        ));
-    }
-    if !dragging && !shell_menu && pending.actions < POPUP_ZORDER_REPAIR_MAX_ACTIONS
-        && (before_foreground == "below" || before_backdrop == "below"
-            || stable_unknown_occlusion)
-    {
-        let (backdrop_result, foreground_result) = unsafe {
-            // Reorder the *two* existing top-level popups as a pair. Do not
-            // change owner, location, visibility or foreground focus.
-            let back = SetWindowPos(backdrop, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            let front = SetWindowPos(foreground, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            (back, front)
-        };
-        pending.actions += 1;
-        diagnose::log(format!(
-            "taskbar popup zorder repair attempt={} taskbar={:?} before_foreground={} before_backdrop={} unknown_occlusion={} sample_hits={} backdrop_result={:?} foreground_result={:?} after_foreground={} after_backdrop={} foreground_vs_backdrop={}",
-            pending.actions, target, before_foreground, before_backdrop,
-            stable_unknown_occlusion, hit_count, backdrop_result, foreground_result,
-            zorder_above_relation(foreground, target),
-            zorder_above_relation(backdrop, target),
-            zorder_above_relation(foreground, backdrop)
-        ));
-        log_popup_visual_snapshot("zorder-repair-attempt");
-    }
-    if pending.checks >= POPUP_ZORDER_REPAIR_MAX_CHECKS
-        || pending.actions >= POPUP_ZORDER_REPAIR_MAX_ACTIONS
-    {
-        diagnose::log(format!(
-            "taskbar popup zorder repair finished checks={} actions={} front={} back={} active_class={} dragging={} shell_menu={}",
-            pending.checks, pending.actions,
-            zorder_above_relation(foreground, target),
-            zorder_above_relation(backdrop, target),
-            foreground_class, dragging, shell_menu
-        ));
-        stop_popup_zorder_repair(hwnd);
-    } else {
-        POPUP_ZORDER_REPAIR.with(|cell| cell.set(Some(pending)));
-    }
-}
-
-fn select_taskbar_for_popup_window(
-    index: usize,
-    taskbar: &native_interop::TaskbarWindow,
-) -> bool {
-    let old_hook = {
-        let mut state = lock_state();
-        state.as_mut().and_then(|s| s.win_event_hook.take())
-    };
-    if let Some(hook) = old_hook {
-        native_interop::unhook_win_event(hook);
-    }
-
-    let tray_notify = native_interop::find_child_window(taskbar.hwnd, "TrayNotifyWnd");
-    let hook = tray_notify.and_then(|tray_hwnd| {
-        let thread_id = native_interop::get_window_thread_id(tray_hwnd);
-        native_interop::set_tray_event_hook(thread_id, on_tray_location_changed)
-    });
-
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.taskbar_hwnd = Some(taskbar.hwnd);
-            s.tray_notify_hwnd = tray_notify;
-            s.win_event_hook = hook;
-            s.taskbar_index = index;
-            s.taskbar_monitor = taskbar.monitor_device.clone();
-            s.embedded = false;
-        }
-    }
-
-    let (foreground_hwnd, blur_active) = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| (Some(s.hwnd.to_hwnd()), s.composition_blur_active))
-            .unwrap_or((None, false))
-    };
-    if let Some(foreground_hwnd) = foreground_hwnd {
-        if blur_active {
-            log_popup_owner_snapshot("popup-switch-before-owner", Some(taskbar.hwnd));
-            sync_blur_backdrop_zorder(foreground_hwnd);
-            log_popup_owner_snapshot("popup-switch-after-owner", Some(taskbar.hwnd));
-            log_popup_visual_snapshot("popup-switch-after-owner");
-            arm_popup_owner_retry(foreground_hwnd, taskbar.hwnd);
-            arm_popup_zorder_repair();
-            diagnose::log("popup taskbar switched; reasserted blur backdrop behind foreground");
-        } else {
-            bind_popup_windows_to_taskbar_owner(foreground_hwnd);
-        }
-    }
-    remember_popup_visited_taskbar(taskbar);
-    true
 }
 
 // A Start-menu activation can temporarily omit the *previous* taskbar from
@@ -3427,26 +2688,6 @@ pub fn run() {
             updater::start_startup_update_check(hwnd, update_success_notified);
         }
 
-        // Separate diagnostic hooks; the event callback uses this UI message loop.
-        let explorer_activation_hooks = install_explorer_activation_hooks();
-        let external_mouse_hook = if external_mouse_diagnostic_enabled() {
-            match SetWindowsHookExW(
-                WH_MOUSE_LL,
-                Some(on_external_mouse_click),
-                HINSTANCE(hinstance.0),
-                0,
-            ) {
-                Ok(hook) => {
-                    diagnose::log("taskbar external-click hook installed read_only=true left_only=true");
-                    Some(hook)
-                }
-                Err(error) => {
-                    diagnose::log(format!("taskbar external-click hook install failed error={error:?}"));
-                    None
-                }
-            }
-        } else { None };
-
         // Poll timer: 15 minutes
         let initial_poll_ms = {
             let state = lock_state();
@@ -3456,29 +2697,6 @@ pub fn run() {
                 .unwrap_or(POLL_15_MIN)
         };
         SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, initial_poll_ms, None);
-        if focus_experiment_enabled() {
-            SetTimer(hwnd, TIMER_FOCUS_EXPERIMENT, 100, None);
-            diagnose::log("taskbar focus experiment started interval_ms=100");
-        }
-        if explorer_active_state_verify_enabled() {
-            SetTimer(hwnd, TIMER_EXPLORER_STATE_VERIFY, 50, None);
-            diagnose::log("taskbar active-state verify started interval_ms=50 read_only=true");
-            sample_explorer_active_state("startup", true);
-        }
-        if taskbar_activation_edge_verify_enabled() {
-            SetTimer(hwnd, TIMER_TASKBAR_ACTIVATION_EDGE, 50, None);
-            diagnose::log("taskbar activation-edge observer started interval_ms=50 read_only=true");
-            observe_taskbar_activation_edge("startup", true);
-        }
-        if external_mouse_diagnostic_enabled() {
-            SetTimer(hwnd, TIMER_EXTERNAL_MOUSE_DIAGNOSTIC, 50, None);
-        }
-        if cursor_foreground_verify_enabled() {
-            SetTimer(hwnd, TIMER_CURSOR_FOREGROUND_VERIFY, 50, None);
-            diagnose::log("taskbar cursor-foreground observer started interval_ms=50 read_only=true");
-            log_cursor_foreground_snapshot("startup", None, None, false);
-        }
-
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
         // icon (the shell discards tray registrations when it restarts). This
         // runs on a dedicated thread, NOT a window timer: once explorer destroys
@@ -3501,13 +2719,6 @@ pub fn run() {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
-        }
-        for hook in explorer_activation_hooks {
-            native_interop::unhook_win_event(hook);
-        }
-        if let Some(hook) = external_mouse_hook {
-            let result = UnhookWindowsHookEx(hook);
-            diagnose::log(format!("taskbar external-click hook cleanup={result:?}"));
         }
     }
 }
@@ -5971,7 +5182,7 @@ fn hide_minimal_usage_tooltip() {
             let was_visible = IsWindowVisible(hwnd).as_bool();
             let _ = ShowWindow(hwnd, SW_HIDE);
             if was_visible {
-                log_taskbar_zorder_snapshot("tooltip-hidden", None);
+                
             }
         }
     }
@@ -6112,7 +5323,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         ).is_ok();
         render_minimal_tooltip_layered(tooltip, width, height, frosted_active);
-        log_tooltip_zorder_show(tooltip_placement_ok, backdrop_placement_ok);
+        
     }
 }
 
@@ -6282,662 +5493,6 @@ fn update_minimal_hover(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
-// Opt-in, read-only foreground transition monitor. It deliberately never
-// activates another window, sends input, or changes taskbar parenting.
-const TIMER_FOCUS_EXPERIMENT: usize = 0xF051;
-thread_local! {
-    static LAST_FOCUS_EXPERIMENT_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(-1) };
-    static LAST_EXTERNAL_FOREGROUND_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
-}
-fn focus_experiment_enabled() -> bool {
-    diagnose::is_enabled() &&
-        std::env::var_os("CODEX_TASKBAR_FOCUS_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-// A single opt-in focus-cycle attempt is armed only by a failed reparent.
-// The previous non-Explorer foreground HWND is observed, never fabricated.
-thread_local! {
-    static FOCUS_CYCLE_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static FOCUS_CYCLE_CANDIDATE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
-}
-fn focus_cycle_enabled() -> bool {
-    diagnose::is_enabled() &&
-    std::env::var_os("CODEX_TASKBAR_FOCUS_CYCLE_EXPERIMENT").as_deref()
-      == Some(std::ffi::OsStr::new("1"))
-}
-
-// Opt-in, read-only Explorer foreground/menu/focus event tracing.
-const EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC: u32 = 0x0003;
-const EVENT_SYSTEM_MENUSTART_DIAGNOSTIC: u32 = 0x0004;
-const EVENT_SYSTEM_MENUEND_DIAGNOSTIC: u32 = 0x0005;
-const EVENT_OBJECT_FOCUS_DIAGNOSTIC: u32 = 0x8005;
-const EVENT_OBJECT_SHOW_ZORDER: u32 = 0x8002;
-const EVENT_OBJECT_HIDE_ZORDER: u32 = 0x8003;
-const EVENT_OBJECT_REORDER_ZORDER: u32 = 0x8004;
-
-// Samples the Explorer taskbar GUI thread without changing activation/capture.
-const TIMER_EXPLORER_STATE_VERIFY: usize = 0xF052;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ExplorerActiveSample {
-    taskbar: isize,
-    explorer_thread: u32,
-    foreground: isize,
-    active: isize,
-    focus: isize,
-    flags: u32,
-    gui_ok: bool,
-}
-
-struct ExplorerActiveTrack {
-    sample: ExplorerActiveSample,
-    observed_since: Instant,
-    previous_poll: Instant,
-    consecutive_samples: u32,
-}
-
-thread_local! {
-    static EXPLORER_ACTIVE_TRACK: std::cell::RefCell<Option<ExplorerActiveTrack>> =
-        const { std::cell::RefCell::new(None) };
-    static EXPLORER_HANDOFF_ATTEMPT: std::cell::Cell<u32> =
-        const { std::cell::Cell::new(0) };
-}
-
-fn explorer_active_state_verify_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_ACTIVE_STATE_VERIFY").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn sample_explorer_active_state(stage: &str, force: bool) {
-    if !explorer_active_state_verify_enabled() { return; }
-    unsafe {
-        let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd).unwrap_or_default();
-        let tid = if taskbar != HWND::default() {
-            GetWindowThreadProcessId(taskbar, None)
-        } else { 0 };
-        let foreground = GetForegroundWindow();
-        let mut gui = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        let gui_ok = tid != 0 && GetGUIThreadInfo(tid, &mut gui).is_ok();
-        let sample = ExplorerActiveSample {
-            taskbar: taskbar.0 as isize,
-            explorer_thread: tid,
-            foreground: foreground.0 as isize,
-            active: gui.hwndActive.0 as isize,
-            focus: gui.hwndFocus.0 as isize,
-            flags: gui.flags.0,
-            gui_ok,
-        };
-        let now = Instant::now();
-        EXPLORER_ACTIVE_TRACK.with(|cell| {
-            let mut track = cell.borrow_mut();
-            let changed = track.as_ref().map(|old| old.sample != sample).unwrap_or(true);
-            let prior_gap_ms = track.as_ref()
-                .map(|old| now.duration_since(old.previous_poll).as_millis()).unwrap_or(0);
-            if changed {
-                *track = Some(ExplorerActiveTrack {
-                    sample, observed_since: now, previous_poll: now, consecutive_samples: 1,
-                });
-            } else if let Some(old) = track.as_mut() {
-                old.previous_poll = now;
-                old.consecutive_samples = old.consecutive_samples.saturating_add(1);
-            }
-            let Some(current) = track.as_ref() else { return; };
-            if changed || force {
-                diagnose::log(format!(
-                    "taskbar active-state verify stage={} changed={} taskbar={:?} shell_tid={} foreground={:?} shell_active={:?} shell_focus={:?} shell_gui_ok={} flags={:#x} observed_same_ms={} consecutive_samples={} last_sample_gap_ms={}",
-                    stage, changed, taskbar, tid, foreground, gui.hwndActive, gui.hwndFocus,
-                    gui_ok, gui.flags.0, now.duration_since(current.observed_since).as_millis(),
-                    current.consecutive_samples, prior_gap_ms
-                ));
-            }
-        });
-    }
-}
-
-
-// Read-only transition monitor. Observe *edges* on the Explorer GUI thread
-// rather than inferring a state transition from a single SetParent snapshot.
-const TIMER_TASKBAR_ACTIVATION_EDGE: usize = 0xF053;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TaskbarActivationPhase {
-    Unknown,
-    Active,
-    Inactive,
-}
-
-struct TaskbarActivationEdgeTrack {
-    explorer_tid: u32,
-    phase: TaskbarActivationPhase,
-    phase_since: Instant,
-    observed_loss_at: Option<Instant>,
-    observed_return_at: Option<Instant>,
-    last_inactive_duration_ms: Option<u128>,
-    lost_count: u32,
-    returned_count: u32,
-    handoff_count: u32,
-    last_failed_returned_count: Option<u32>,
-}
-
-thread_local! {
-    static TASKBAR_ACTIVATION_EDGE_TRACK: std::cell::RefCell<Option<TaskbarActivationEdgeTrack>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn taskbar_activation_edge_verify_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_ACTIVATION_EDGE_VERIFY").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn observe_taskbar_activation_edge(stage: &str, force: bool) {
-    if !taskbar_activation_edge_verify_enabled() { return; }
-    unsafe {
-        let source_taskbar = lock_state().as_ref()
-            .and_then(|s| s.taskbar_hwnd).unwrap_or_default();
-        let tid = if source_taskbar != HWND::default() {
-            GetWindowThreadProcessId(source_taskbar, None)
-        } else { 0 };
-        let foreground = GetForegroundWindow();
-        let mut fg_pid = 0u32;
-        let fg_tid = GetWindowThreadProcessId(foreground, Some(&mut fg_pid));
-        let mut gui = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        let gui_ok = tid != 0 && GetGUIThreadInfo(tid, &mut gui).is_ok();
-        let phase = if !gui_ok {
-            TaskbarActivationPhase::Unknown
-        } else if gui.hwndActive == HWND::default() && gui.hwndFocus == HWND::default() {
-            TaskbarActivationPhase::Inactive
-        } else {
-            TaskbarActivationPhase::Active
-        };
-        let now = Instant::now();
-        TASKBAR_ACTIVATION_EDGE_TRACK.with(|state| {
-            let mut state = state.borrow_mut();
-            if state.as_ref().map(|v| v.explorer_tid != tid).unwrap_or(true) {
-                *state = Some(TaskbarActivationEdgeTrack {
-                    explorer_tid: tid,
-                    phase, phase_since: now,
-                    observed_loss_at: None, observed_return_at: None,
-                    last_inactive_duration_ms: None,
-                    lost_count: 0, returned_count: 0, handoff_count: 0,
-                    last_failed_returned_count: None,
-                });
-            }
-            let Some(track) = state.as_mut() else { return; };
-            let previous = track.phase;
-            let changed = previous != phase;
-            if changed {
-                if previous == TaskbarActivationPhase::Active
-                    && phase == TaskbarActivationPhase::Inactive
-                {
-                    track.lost_count = track.lost_count.saturating_add(1);
-                    track.observed_loss_at = Some(now);
-                }
-                if previous == TaskbarActivationPhase::Inactive
-                    && phase == TaskbarActivationPhase::Active
-                {
-                    track.returned_count = track.returned_count.saturating_add(1);
-                    track.observed_return_at = Some(now);
-                    track.last_inactive_duration_ms = track.observed_loss_at
-                        .map(|lost| now.duration_since(lost).as_millis());
-                }
-                track.phase = phase;
-                track.phase_since = now;
-            }
-            if stage == "before-reparent" {
-                track.handoff_count = track.handoff_count.saturating_add(1);
-            }
-            let since_failed_cycle = track.last_failed_returned_count.map(|last| {
-                track.returned_count.saturating_sub(last)
-            });
-            if stage == "reparent-failed" {
-                track.last_failed_returned_count = Some(track.returned_count);
-            }
-            if changed || force {
-                diagnose::log(format!(
-                    "taskbar activation-edge stage={} attempt={} prev={:?} phase={:?} changed={} shell_tid={} taskbar={:?} foreground={:?} fg_tid={} fg_pid={} fg_class={} shell_active={:?} shell_focus={:?} shell_capture={:?} gui_ok={} phase_age_ms={} lost_count={} returned_count={} since_failed_returned={:?} last_loss_age_ms={:?} last_return_age_ms={:?} last_inactive_duration_ms={:?}",
-                    stage, track.handoff_count, previous, phase, changed, tid, source_taskbar,
-                    foreground, fg_tid, fg_pid, explorer_activation_event_class(foreground),
-                    gui.hwndActive, gui.hwndFocus, gui.hwndCapture, gui_ok,
-                    now.duration_since(track.phase_since).as_millis(),
-                    track.lost_count, track.returned_count, since_failed_cycle,
-                    track.observed_loss_at.map(|v| now.duration_since(v).as_millis()),
-                    track.observed_return_at.map(|v| now.duration_since(v).as_millis()),
-                    track.last_inactive_duration_ms
-                ));
-            }
-        });
-    }
-}
-
-// Experimental external-click observer. The WH_MOUSE_LL callback only stores
-// a short bounded event; it never logs, synthesizes or suppresses input.
-const TIMER_EXTERNAL_MOUSE_DIAGNOSTIC: usize = 0xF054;
-const EXTERNAL_CLICK_QUEUE_CAPACITY: usize = 12;
-
-#[derive(Clone, Copy)]
-struct ExternalClickDiagnostic {
-    observed_at: Instant,
-    input_time_ms: u32,
-    hit_root: isize,
-    foreground_before: isize,
-    flags: u32,
-}
-
-thread_local! {
-    static EXTERNAL_CLICK_PENDING: std::cell::RefCell<Vec<ExternalClickDiagnostic>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    static LAST_EXTERNAL_CLICK: std::cell::RefCell<Option<ExternalClickDiagnostic>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn external_mouse_diagnostic_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_EXTERNAL_MOUSE_DIAGNOSTIC").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-unsafe extern "system" fn on_external_mouse_click(
-    code: i32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN && lparam.0 != 0 {
-        let details = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-        let hit = WindowFromPoint(details.pt);
-        let root = if hit == HWND::default() { hit } else { GetAncestor(hit, GA_ROOT) };
-        let event = ExternalClickDiagnostic {
-            observed_at: Instant::now(),
-            input_time_ms: details.time,
-            hit_root: root.0 as isize,
-            foreground_before: GetForegroundWindow().0 as isize,
-            flags: details.flags,
-        };
-        EXTERNAL_CLICK_PENDING.with(|q| {
-            let mut q = q.borrow_mut();
-            if q.len() >= EXTERNAL_CLICK_QUEUE_CAPACITY { q.remove(0); }
-            q.push(event);
-        });
-    }
-    // Never consume the event: preserve the input chain and original click.
-    CallNextHookEx(None, code, wparam, lparam)
-}
-
-fn drain_external_clicks(stage: &str) {
-    if !external_mouse_diagnostic_enabled() { return; }
-    let events = EXTERNAL_CLICK_PENDING.with(|q| std::mem::take(&mut *q.borrow_mut()));
-    for event in events {
-        let root = HWND(event.hit_root as *mut _);
-        let class = explorer_activation_event_class(root);
-        if class.starts_with("Shell_") || class == "CodexUsageWin" { continue; }
-        let mut pid = 0u32;
-        let tid = unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
-        diagnose::log(format!(
-            "taskbar external-click stage={} button=left input_time_ms={} hit_root={:?} hit_class={} hit_tid={} hit_pid={} foreground_before={:?} flags={:#x} injected={} age_ms={}",
-            stage, event.input_time_ms, root, class, tid, pid,
-            HWND(event.foreground_before as *mut _), event.flags,
-            (event.flags & 1) != 0, event.observed_at.elapsed().as_millis()
-        ));
-        LAST_EXTERNAL_CLICK.with(|c| *c.borrow_mut() = Some(event));
-    }
-}
-
-fn log_external_click_context(stage: &str) {
-    if !external_mouse_diagnostic_enabled() { return; }
-    drain_external_clicks(stage);
-    LAST_EXTERNAL_CLICK.with(|c| {
-        let click = *c.borrow();
-        if let Some(click) = click {
-            let root = HWND(click.hit_root as *mut _);
-            diagnose::log(format!(
-                "taskbar external-click context stage={} last_input_time_ms={} last_root={:?} last_class={} last_age_ms={} injected={}",
-                stage, click.input_time_ms, root,
-                explorer_activation_event_class(root),
-                click.observed_at.elapsed().as_millis(), (click.flags & 1) != 0
-            ));
-        } else {
-            diagnose::log(format!("taskbar external-click context stage={} last=<none>",stage));
-        }
-    });
-}
-
-fn log_reparent_window_state(stage: &str, widget: HWND, source: Option<HWND>, target: HWND) {
-    if !external_mouse_diagnostic_enabled() { return; }
-    unsafe {
-        let parent = GetAncestor(widget, GA_PARENT);
-        let root = GetAncestor(widget, GA_ROOT);
-        let raw_parent = GetWindowLongPtrW(widget, GWLP_HWNDPARENT);
-        let style = GetWindowLongW(widget, GWL_STYLE) as u32;
-        let ex_style = GetWindowLongW(widget, GWL_EXSTYLE) as u32;
-        let source_hwnd = source.unwrap_or_default();
-        let source_style = if source_hwnd != HWND::default() {
-            GetWindowLongW(source_hwnd, GWL_STYLE) as u32
-        } else { 0 };
-        let target_style = GetWindowLongW(target, GWL_STYLE) as u32;
-        let mut widget_pid = 0u32;
-        let widget_tid = GetWindowThreadProcessId(widget, Some(&mut widget_pid));
-        diagnose::log(format!(
-            "taskbar window-state stage={} widget={:?} parent={:?} root={:?} raw_parent={:#x} widget_tid={} widget_pid={} widget_style={:#x} widget_ex_style={:#x} child={} popup={} is_widget_shown={} widget_enabled={} source={:?} source_valid={} source_style={:#x} target={:?} target_valid={} target_style={:#x} foreground={:?} capture={:?}",
-            stage, widget, parent, root, raw_parent, widget_tid, widget_pid,
-            style, ex_style, style & WS_CHILD.0 != 0, style & WS_POPUP.0 != 0,
-            IsWindowVisible(widget).as_bool(), style & WS_DISABLED.0 == 0,
-            source_hwnd, IsWindow(source_hwnd).as_bool(), source_style, target,
-            IsWindow(target).as_bool(), target_style,
-            GetForegroundWindow(), GetCapture()
-        ));
-    }
-}
-
-// Opt-in cursor/foreground correlation. Only reads the existing cursor
-// position and window topology; never changes tracking, focus or parenting.
-const TIMER_CURSOR_FOREGROUND_VERIFY: usize = 0xF055;
-
-#[derive(Clone, Copy)]
-struct LastExternalForegroundCursor {
-    observed: Instant,
-    event_time_ms: u32,
-    event_hwnd: isize,
-    cursor_x: i32,
-    cursor_y: i32,
-    cursor_in_source_rect: bool,
-    source_hwnd: isize,
-}
-
-thread_local! {
-    static LAST_SOURCE_CURSOR_REGION: std::cell::Cell<(isize, i8)> =
-        const { std::cell::Cell::new((0, -1)) };
-    static LAST_EXTERNAL_FOREGROUND_CURSOR: std::cell::RefCell<Option<LastExternalForegroundCursor>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn cursor_foreground_verify_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_CURSOR_FOREGROUND_VERIFY").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn cursor_window_rect(hwnd: HWND) -> Option<RECT> {
-    if hwnd == HWND::default() { return None; }
-    let mut rect = RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut rect).ok().map(|_| rect) }
-}
-
-fn cursor_rect_text(rect: Option<RECT>) -> String {
-    rect.map(|r| format!("({},{},{},{})", r.left, r.top, r.right, r.bottom))
-        .unwrap_or_else(|| "<none>".into())
-}
-
-fn cursor_in_rect(pt: POINT, rect: Option<RECT>) -> bool {
-    rect.is_some_and(|r|
-        pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom)
-}
-
-/// Foreground events are delivered asynchronously. Mouse positions are taken
-/// at callback delivery, not reconstructed at the historical event timestamp.
-fn log_cursor_foreground_snapshot(
-    stage: &str,
-    event: Option<(HWND, u32)>,
-    target: Option<HWND>,
-    transition_only: bool,
-) {
-    if !cursor_foreground_verify_enabled() { return; }
-    unsafe {
-        let (source, widget) = {
-            let s = lock_state();
-            (s.as_ref().and_then(|x| x.taskbar_hwnd).unwrap_or_default(),
-             s.as_ref().map(|x| x.hwnd.to_hwnd()).unwrap_or_default())
-        };
-        let mut cursor = POINT::default();
-        let cursor_ok = GetCursorPos(&mut cursor).is_ok();
-        let source_rect = cursor_window_rect(source);
-        let widget_rect = cursor_window_rect(widget);
-        let target_hwnd = target.unwrap_or_default();
-        let target_rect = cursor_window_rect(target_hwnd);
-        let in_source = cursor_ok && cursor_in_rect(cursor, source_rect);
-        let in_widget = cursor_ok && cursor_in_rect(cursor, widget_rect);
-        let in_target = cursor_ok && cursor_in_rect(cursor, target_rect);
-        let cursor_hit = if cursor_ok { WindowFromPoint(cursor) } else { HWND::default() };
-        let cursor_root = if cursor_hit != HWND::default() {
-            GetAncestor(cursor_hit, GA_ROOT)
-        } else { HWND::default() };
-        let fg_now = GetForegroundWindow();
-        let source_tid = GetWindowThreadProcessId(source, None);
-        let mut shell_gui = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        let shell_gui_ok = source_tid != 0 && GetGUIThreadInfo(source_tid, &mut shell_gui).is_ok();
-
-        let region = if !cursor_ok || source_rect.is_none() { -1 }
-            else if in_source { 1 } else { 0 };
-        let changed = LAST_SOURCE_CURSOR_REGION.with(|c| {
-            let previous = c.get();
-            let new = (source.0 as isize, region);
-            if new == previous { false } else { c.set(new); true }
-        });
-        if transition_only && !changed { return; }
-
-        if let Some((event_hwnd, event_time_ms)) = event {
-            let event_root = if event_hwnd != HWND::default() {
-                GetAncestor(event_hwnd, GA_ROOT)
-            } else { HWND::default() };
-            if source != HWND::default()
-                && event_root != HWND::default()
-                && event_root != source
-                && event_root != GetAncestor(widget, GA_ROOT)
-            {
-                LAST_EXTERNAL_FOREGROUND_CURSOR.with(|c| {
-                    *c.borrow_mut() = Some(LastExternalForegroundCursor {
-                        observed: Instant::now(), event_time_ms,
-                        event_hwnd: event_hwnd.0 as isize,
-                        cursor_x: cursor.x, cursor_y: cursor.y,
-                        cursor_in_source_rect: in_source,
-                        source_hwnd: source.0 as isize,
-                    });
-                });
-            }
-        }
-        let recent = LAST_EXTERNAL_FOREGROUND_CURSOR.with(|c| {
-            c.borrow().map(|v| format!(
-                "last_external_event_hwnd={:?} last_external_class={} last_external_event_time_ms={} last_external_age_ms={} last_external_cursor=({}, {}) last_external_in_source={} last_external_source={:?}",
-                HWND(v.event_hwnd as *mut _),
-                explorer_activation_event_class(HWND(v.event_hwnd as *mut _)),
-                v.event_time_ms, v.observed.elapsed().as_millis(),
-                v.cursor_x, v.cursor_y, v.cursor_in_source_rect,
-                HWND(v.source_hwnd as *mut _)
-            )).unwrap_or_else(|| "last_external=<none>".into())
-        });
-        let event_text = event.map(|(hwnd,t)| format!(
-            "event_hwnd={:?} event_class={} event_time_ms={}",
-            hwnd, explorer_activation_event_class(hwnd), t
-        )).unwrap_or_else(|| "event_hwnd=<none> event_time_ms=<none>".into());
-        diagnose::log(format!(
-            "taskbar cursor-foreground stage={} transition={} source={:?} source_tid={} source_rect={} target={:?} target_rect={} widget={:?} widget_rect={} cursor_ok={} cursor=({}, {}) region={} in_source={} in_widget={} in_target={} hit={:?} hit_class={} hit_root={:?} hit_root_class={} hit_root_equals_source={} foreground_now={:?} foreground_class={} shell_gui_ok={} shell_active={:?} shell_focus={:?} shell_capture={:?} {} {}",
-            stage, changed, source, source_tid,
-            cursor_rect_text(source_rect), target_hwnd,
-            cursor_rect_text(target_rect), widget,
-            cursor_rect_text(widget_rect), cursor_ok,
-            cursor.x, cursor.y, region, in_source, in_widget, in_target,
-            cursor_hit, explorer_activation_event_class(cursor_hit),
-            cursor_root, explorer_activation_event_class(cursor_root),
-            cursor_root == source, fg_now, explorer_activation_event_class(fg_now),
-            shell_gui_ok, shell_gui.hwndActive, shell_gui.hwndFocus, shell_gui.hwndCapture,
-            event_text, recent
-        ));
-    }
-}
-
-fn explorer_activation_events_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_EXPLORER_EVENTS_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn explorer_activation_event_class(hwnd: HWND) -> String {
-    if hwnd == HWND::default() { return "<none>".into(); }
-    let mut buf = [0u16; 96];
-    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
-    if len > 0 { String::from_utf16_lossy(&buf[..len as usize]) }
-    else { "<unknown>".into() }
-}
-
-// Observe the Explorer GUI thread even when an unrelated app is foreground.
-fn log_explorer_activation_snapshot(stage: &str, source: Option<HWND>, target: Option<HWND>) {
-    if !explorer_activation_events_enabled() { return; }
-    unsafe {
-        let shell_hwnd = source.or_else(|| lock_state().as_ref().and_then(|s| s.taskbar_hwnd));
-        let shell_tid = shell_hwnd.map(|h| GetWindowThreadProcessId(h, None)).unwrap_or(0);
-        let target_tid = target.map(|h| GetWindowThreadProcessId(h, None)).unwrap_or(0);
-        let fg = GetForegroundWindow();
-        let mut fg_pid = 0u32;
-        let fg_tid = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-        let mut gui = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        let gui_ok = shell_tid != 0 && GetGUIThreadInfo(shell_tid, &mut gui).is_ok();
-        diagnose::log(format!(
-            "taskbar explorer activation snapshot stage={} source={:?} target={:?} shell_tid={} target_tid={} foreground={:?} fg_tid={} fg_pid={} shell_gui_ok={} flags={:#x} active={:?} focus={:?} capture={:?} menu_owner={:?} move_size={:?}",
-            stage, shell_hwnd, target, shell_tid, target_tid, fg, fg_tid, fg_pid,
-            gui_ok, gui.flags.0, gui.hwndActive, gui.hwndFocus, gui.hwndCapture,
-            gui.hwndMenuOwner, gui.hwndMoveSize
-        ));
-    }
-}
-
-// WINEVENT_OUTOFCONTEXT: delivered on the installing UI message-loop thread.
-// Intentionally read-only; do not send input or alter window activation/parenting.
-unsafe extern "system" fn on_explorer_activation_event(
-    _hook: HWINEVENTHOOK,
-    event: u32,
-    event_hwnd: HWND,
-    object_id: i32,
-    child_id: i32,
-    event_tid: u32,
-    event_time_ms: u32,
-) {
-    if !explorer_activation_events_enabled()
-        && !zorder_diagnostic_enabled()
-        && !popup_owner_diagnostic_enabled()
-        && !popup_visual_diagnostic_enabled()
-        && !popup_zorder_repair_experiment_enabled()
-        && !taskbar_activation_edge_verify_enabled()
-        && !cursor_foreground_verify_enabled() { return; }
-    let (taskbar, widget) = {
-        let state = lock_state();
-        (state.as_ref().and_then(|s| s.taskbar_hwnd),
-         state.as_ref().map(|s| s.hwnd.to_hwnd()))
-    };
-    let mut event_pid = 0u32;
-    GetWindowThreadProcessId(event_hwnd, Some(&mut event_pid));
-    let mut explorer_pid = 0u32;
-    if let Some(h) = taskbar { GetWindowThreadProcessId(h, Some(&mut explorer_pid)); }
-    let root = if event_hwnd != HWND::default() {
-        GetAncestor(event_hwnd, GA_ROOT)
-    } else { HWND::default() };
-    if matches!(event, EVENT_OBJECT_SHOW_ZORDER | EVENT_OBJECT_HIDE_ZORDER | EVENT_OBJECT_REORDER_ZORDER) {
-        if !zorder_diagnostic_enabled() || object_id != 0 || child_id != 0 { return; }
-        let tooltip = MINIMAL_TOOLTIP_HWND.lock().unwrap_or_else(|e| e.into_inner())
-            .as_ref().map(|h| h.to_hwnd()).unwrap_or_default();
-        let root_class = explorer_activation_event_class(root);
-        let relevant = event_hwnd == tooltip
-            || widget == Some(event_hwnd)
-            || (explorer_pid != 0 && event_pid == explorer_pid
-                && (root == taskbar.unwrap_or_default()
-                    || root_class.starts_with("Shell_")))
-            || root_class == "Windows.UI.Core.CoreWindow";
-        if !relevant { return; }
-        let name = match event {
-            EVENT_OBJECT_SHOW_ZORDER => "EVENT_OBJECT_SHOW",
-            EVENT_OBJECT_HIDE_ZORDER => "EVENT_OBJECT_HIDE",
-            _ => "EVENT_OBJECT_REORDER",
-        };
-        diagnose::log(format!(
-            "taskbar zorder event={} event_time_ms={} hwnd={:?} root={:?} class={} event_pid={} explorer_pid={} foreground={:?}",
-            name, event_time_ms, event_hwnd, root, root_class, event_pid, explorer_pid,
-            GetForegroundWindow()
-        ));
-        log_taskbar_zorder_snapshot("win-event-zorder", None);
-        return;
-    }
-    if event == EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC {
-        log_cursor_foreground_snapshot(
-            "foreground-event", Some((event_hwnd, event_time_ms)), None, false
-        );
-        observe_taskbar_activation_edge("foreground-event", true);
-    }
-    if matches!(event, EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC | EVENT_SYSTEM_MENUEND_DIAGNOSTIC) {
-        log_popup_owner_snapshot("shell-foreground-or-menuend", taskbar);
-        log_popup_visual_snapshot("shell-foreground-or-menuend");
-        arm_popup_zorder_repair();
-    }
-    if !explorer_activation_events_enabled() { return; }
-    // Explorer focus only, to avoid logging unrelated accessibility events.
-    // System foreground/menu events from all apps reveal focus transitions.
-    if event == EVENT_OBJECT_FOCUS_DIAGNOSTIC
-        && (explorer_pid == 0 || event_pid != explorer_pid) {
-        return;
-    }
-    let label = match event {
-        EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC => "EVENT_SYSTEM_FOREGROUND",
-        EVENT_SYSTEM_MENUSTART_DIAGNOSTIC => "EVENT_SYSTEM_MENUSTART",
-        EVENT_SYSTEM_MENUEND_DIAGNOSTIC => "EVENT_SYSTEM_MENUEND",
-        EVENT_OBJECT_FOCUS_DIAGNOSTIC => "EVENT_OBJECT_FOCUS",
-        _ => return,
-    };
-    diagnose::log(format!(
-        "taskbar explorer activation event={} event_time_ms={} hwnd={:?} root={:?} class={} event_tid={} event_pid={} explorer_pid={} object={} child={} foreground={:?} widget={:?}",
-        label, event_time_ms, event_hwnd, root, explorer_activation_event_class(root),
-        event_tid, event_pid, explorer_pid, object_id, child_id,
-        GetForegroundWindow(), widget
-    ));
-    log_explorer_activation_snapshot("win-event", taskbar, None);
-    if event == EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC {
-        log_taskbar_zorder_snapshot("win-event-foreground", None);
-    }
-}
-
-fn install_explorer_activation_hooks() -> Vec<HWINEVENTHOOK> {
-    let mut ranges = Vec::new();
-    if explorer_activation_events_enabled() || taskbar_activation_edge_verify_enabled()
-        || cursor_foreground_verify_enabled() || popup_owner_diagnostic_enabled()
-        || popup_visual_diagnostic_enabled() || popup_zorder_repair_experiment_enabled() {
-        ranges.push((EVENT_SYSTEM_FOREGROUND_DIAGNOSTIC, EVENT_SYSTEM_MENUEND_DIAGNOSTIC));
-    }
-    if explorer_activation_events_enabled() {
-        ranges.push((EVENT_OBJECT_FOCUS_DIAGNOSTIC, EVENT_OBJECT_FOCUS_DIAGNOSTIC));
-    }
-    if zorder_diagnostic_enabled() {
-        ranges.push((EVENT_OBJECT_SHOW_ZORDER, EVENT_OBJECT_REORDER_ZORDER));
-    }
-    let requested = ranges.len();
-    let mut hooks = Vec::new();
-    for (first, last) in ranges {
-        // WinEvent out-of-context, on the existing GUI message-loop thread.
-        let hook = unsafe {
-            SetWinEventHook(first, last, None, Some(on_explorer_activation_event), 0, 0, 0)
-        };
-        if hook.is_invalid() {
-            diagnose::log(format!("taskbar explorer activation hook failed first={:#x} last={:#x}", first, last));
-        } else { hooks.push(hook); }
-    }
-    if requested > 0 {
-        diagnose::log(format!(
-            "taskbar explorer activation hooks installed={} requested={}",
-            hooks.len(), requested
-        ));
-    }
-    hooks
-}
-
 /// Main window procedure
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -6954,29 +5509,6 @@ unsafe extern "system" fn wnd_proc(
             | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_CANCELMODE | WM_CAPTURECHANGED)
     {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
-    }
-    if native_interop::reparent_diagnostic_active() {
-        let message_name = match msg {
-            WM_WINDOWPOSCHANGING => Some("WM_WINDOWPOSCHANGING"),
-            WM_WINDOWPOSCHANGED => Some("WM_WINDOWPOSCHANGED"),
-            WM_STYLECHANGING => Some("WM_STYLECHANGING"),
-            WM_STYLECHANGED => Some("WM_STYLECHANGED"),
-            WM_PARENTNOTIFY => Some("WM_PARENTNOTIFY"),
-            WM_CHILDACTIVATE => Some("WM_CHILDACTIVATE"),
-            WM_ACTIVATE => Some("WM_ACTIVATE"),
-            WM_SETFOCUS => Some("WM_SETFOCUS"),
-            WM_KILLFOCUS => Some("WM_KILLFOCUS"),
-            WM_CAPTURECHANGED => Some("WM_CAPTURECHANGED"),
-            WM_CANCELMODE => Some("WM_CANCELMODE"),
-            WM_DPICHANGED => Some("WM_DPICHANGED"),
-            _ => None,
-        };
-        if let Some(name) = message_name {
-            diagnose::log(format!(
-                "taskbar SetParent synchronous message={} hwnd={:?} wparam={:#x} lparam={:#x}",
-                name, hwnd, wparam.0, lparam.0
-            ));
-        }
     }
     match msg {
         WM_PAINT => {
@@ -7018,77 +5550,6 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
-                TIMER_POPUP_ZORDER_REPAIR => {
-                    poll_popup_zorder_repair(hwnd);
-                }
-                TIMER_POPUP_OWNER_RETRY => {
-                    poll_popup_owner_retry(hwnd);
-                }
-                TIMER_EXPLORER_STATE_VERIFY => {
-                    sample_explorer_active_state("poll", false);
-                }
-                TIMER_TASKBAR_ACTIVATION_EDGE => {
-                    observe_taskbar_activation_edge("poll", false);
-                }
-                TIMER_EXTERNAL_MOUSE_DIAGNOSTIC => {
-                    drain_external_clicks("timer");
-                }
-                TIMER_CURSOR_FOREGROUND_VERIFY => {
-                    log_cursor_foreground_snapshot("cursor-region-change", None, None, true);
-                }
-                TIMER_FOCUS_EXPERIMENT => {
-                    if focus_experiment_enabled() {
-                        let fg = GetForegroundWindow();
-                        let changed = LAST_FOCUS_EXPERIMENT_HWND.with(|cell| {
-                            if cell.get() == fg.0 as isize { false }
-                            else { cell.set(fg.0 as isize); true }
-                        });
-                        if changed {
-                            let fg_thread = GetWindowThreadProcessId(fg, None);
-                            let (taskbar_hwnd, widget_hwnd) = {
-                                let state = lock_state();
-                                (state.as_ref().and_then(|s| s.taskbar_hwnd), hwnd)
-                            };
-                            let taskbar_root = taskbar_hwnd.map(|h| GetAncestor(h, GA_ROOT));
-                            // Retain only a visible, unrelated application window.
-                            // Never target Explorer's own shell windows or this process.
-                            let mut fg_pid = 0u32;
-                            let mut taskbar_pid = 0u32;
-                            let mut widget_pid = 0u32;
-                            GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-                            if let Some(taskbar) = taskbar_hwnd {
-                                GetWindowThreadProcessId(taskbar, Some(&mut taskbar_pid));
-                            }
-                            GetWindowThreadProcessId(widget_hwnd, Some(&mut widget_pid));
-                            if fg != HWND::default() && IsWindowVisible(fg).as_bool()
-                                && fg_pid != 0 && fg_pid != taskbar_pid && fg_pid != widget_pid
-                                && GetAncestor(fg, GA_ROOT) == fg
-                            {
-                                LAST_EXTERNAL_FOREGROUND_HWND.with(|cell| cell.set(fg.0 as isize));
-                                diagnose::log(format!("taskbar focus switch experiment candidate={:?} pid={}", fg, fg_pid));
-                            }
-                            diagnose::log(format!(
-                                "taskbar focus experiment foreground_change foreground={:?} root={:?} thread={} taskbar={:?} taskbar_root={:?} taskbar_is_foreground={} ",
-                                fg, GetAncestor(fg, GA_ROOT), fg_thread, taskbar_hwnd,
-                                taskbar_root, taskbar_root == Some(fg) || taskbar_hwnd == Some(fg)
-                            ));
-                            if focus_cycle_enabled() && fg != HWND::default()
-                                && taskbar_root != Some(fg) && taskbar_hwnd != Some(fg)
-                            {
-                                let mut fg_pid = 0u32;
-                                GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-                                let mut shell_pid = 0u32;
-                                if let Some(taskbar) = taskbar_hwnd {
-                                    GetWindowThreadProcessId(taskbar, Some(&mut shell_pid));
-                                }
-                                if fg_pid != 0 && shell_pid != 0 && fg_pid != shell_pid {
-                                    FOCUS_CYCLE_CANDIDATE.with(|cell| cell.set(fg.0 as isize));
-                                }
-                            }
-                            log_drag_input_snapshot("foreground-transition", widget_hwnd);
-                        }
-                    }
-                }
                 TIMER_POLL => {
                     let auth_watch = {
                         let state = lock_state();
@@ -7199,8 +5660,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_MOUSEACTIVATE => {
-            log_cursor_foreground_snapshot("widget-mouseactivate", None, None, false);
-            // Preserve Windows default activation behavior. This is logging only.
+            // Preserve the normal Windows activation behavior.
             if diagnose::is_enabled() {
                 diagnose::log(format!(
                     "taskbar mouse activation observed foreground={:?} widget={:?} wparam={:#x} lparam={:#x}",
@@ -7210,10 +5670,10 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
-            log_cursor_foreground_snapshot("widget-mouse-down", None, None, false);
-            observe_taskbar_activation_edge("mouse-down", true);
-            sample_explorer_active_state("mouse-down", true);
-            log_explorer_activation_snapshot("mouse-down", None, None);
+            
+            
+            
+            
             if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
             if focus_cycle_enabled() && FOCUS_CYCLE_ARMED.with(|cell| cell.replace(false)) {
                 let candidate = FOCUS_CYCLE_CANDIDATE.with(|cell| cell.get());
@@ -7229,7 +5689,7 @@ unsafe extern "system" fn wnd_proc(
                 // Never send synthetic button events or move the pointer.
                 // If foreground permission is denied, drag continues unchanged.
             }
-            log_drag_input_snapshot("mouse-down", hwnd);
+            
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             if !is_drag_handle_point(client_x, client_y) {
@@ -7506,7 +5966,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
-            log_cursor_foreground_snapshot("widget-mouseleave", None, None, false);
+            
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -7525,11 +5985,11 @@ unsafe extern "system" fn wnd_proc(
                     msg, wparam.0, lparam.0, GetForegroundWindow()
                 ));
             }
-            log_drag_input_snapshot("activation-or-focus-message", hwnd);
+            
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CANCELMODE => {
-            log_drag_input_snapshot("cancel-mode", hwnd);
+            
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -7541,7 +6001,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
-            log_drag_input_snapshot("capture-changed", hwnd);
+            
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 if !s.drag_reparenting {
@@ -7551,9 +6011,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            observe_taskbar_activation_edge("mouse-up", true);
-            sample_explorer_active_state("mouse-up", true);
-            log_drag_input_snapshot("mouse-up", hwnd);
+            
+            
+            
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let drag_result = {
