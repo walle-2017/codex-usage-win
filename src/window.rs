@@ -971,6 +971,40 @@ fn point_is_in_taskbar_rect(pt: POINT, rect: RECT) -> bool {
     pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
 }
 
+/// When the pointer leaves all taskbars during a captured drag, keep using
+/// the already-embedded foreground's actual Explorer parent. This is a
+/// placement fallback only: cross-taskbar handoff still requires a real hit
+/// in taskbar_at_point().
+fn current_drag_taskbar() -> Option<(usize, native_interop::TaskbarWindow)> {
+    let (index, parent, foreground, monitor_device, embedded) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        (s.taskbar_index, s.taskbar_hwnd?, s.hwnd.to_hwnd(), s.taskbar_monitor.clone(), s.embedded)
+    };
+    if !embedded || !native_interop::is_taskbar_window(parent) {
+        return None;
+    }
+    unsafe {
+        if !IsWindow(foreground).as_bool() || GetAncestor(foreground, GA_PARENT) != parent {
+            return None;
+        }
+    }
+    let rect = native_interop::get_taskbar_rect(parent)
+        .or_else(|| native_interop::get_window_rect_safe(parent))?;
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return None;
+    }
+    Some((index, native_interop::TaskbarWindow {
+        hwnd: parent,
+        rect,
+        monitor_device,
+    }))
+}
+
+fn taskbar_for_drag_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)> {
+    taskbar_at_point(pt).or_else(current_drag_taskbar)
+}
+
 fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)> {
     let mut enumerated = native_interop::find_taskbars();
     if let Some((index, found)) = enumerated.iter().enumerate()
@@ -1392,6 +1426,23 @@ fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
 
 fn drag_left_from_cursor(taskbar_rect: RECT, pt: POINT, anchor_px: i32) -> i32 {
     pt.x - taskbar_rect.left - anchor_px
+}
+
+/// Outside the taskbar, use the pointer's X position but keep the entire
+/// widget within the current taskbar. In-taskbar movement is unchanged.
+fn drag_left_for_pointer(
+    taskbar_rect: RECT,
+    pt: POINT,
+    anchor_px: i32,
+    widget_width: i32,
+) -> i32 {
+    let desired = drag_left_from_cursor(taskbar_rect, pt, anchor_px);
+    if point_is_in_taskbar_rect(pt, taskbar_rect) {
+        desired
+    } else {
+        let taskbar_width = taskbar_rect.right - taskbar_rect.left;
+        clamp_left_offset(desired, (taskbar_width - widget_width).max(0))
+    }
 }
 
 fn left_offset_for_drag_left(
@@ -4462,7 +4513,9 @@ unsafe extern "system" fn wnd_proc(
                     return LRESULT(0);
                 }
                 let mut pt = POINT::default();
-                let _ = GetCursorPos(&mut pt);
+                if GetCursorPos(&mut pt).is_err() {
+                    return LRESULT(0);
+                }
 
                 let (current_taskbar_hwnd, blur_active) = {
                     let state = lock_state();
@@ -4472,13 +4525,10 @@ unsafe extern "system" fn wnd_proc(
                         .unwrap_or((None, false))
                 };
 
-                // A popup uses absolute screen coordinates. If the pointer has
-                // left every taskbar, combining its X coordinate with the old
-                // taskbar's Y coordinate can place the widget in the middle of
-                // another desktop (especially with vertically offset monitors).
-                // Freeze at the last valid taskbar position until the pointer
-                // enters a taskbar again.
-                let Some((hovered_taskbar_index, hovered_taskbar)) = taskbar_at_point(pt) else {
+                // Switching taskbars still requires a precise taskbar hit.
+                // If the cursor leaves all taskbars, keep moving the widget
+                // horizontally on its validated current parent instead.
+                let Some((hovered_taskbar_index, hovered_taskbar)) = taskbar_for_drag_point(pt) else {
                     return LRESULT(0);
                 };
 
@@ -4558,7 +4608,6 @@ unsafe extern "system" fn wnd_proc(
                         }
                         let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
                         let anchor_px = drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
-                        let drag_left = drag_left_from_cursor(taskbar_rect, pt, anchor_px);
                         let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
                         let small_mode = is_small_taskbar_height(taskbar_height);
 
@@ -4581,6 +4630,9 @@ unsafe extern "system" fn wnd_proc(
                                 changed,
                             )
                         };
+                        let drag_left = drag_left_for_pointer(
+                            taskbar_rect, pt, anchor_px, widget_width,
+                        );
                         let anchor_y =
                             compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
                         let (window_x, window_y) = if embedded {
@@ -4661,7 +4713,7 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONUP => {
 
             let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
+            let cursor_valid = GetCursorPos(&mut pt).is_ok();
             let drag_result = {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -4705,7 +4757,14 @@ unsafe extern "system" fn wnd_proc(
             }
 
             if let Some((current_taskbar_hwnd, anchor_logical_x, failed_target)) = drag_result {
-                let release_taskbar = taskbar_at_point(pt);
+                // Releasing over the desktop commits the last horizontal
+                // drag position on the current taskbar instead of reverting.
+                // An actual hit on another taskbar still takes precedence.
+                let release_taskbar = if cursor_valid {
+                    taskbar_for_drag_point(pt)
+                } else {
+                    None
+                };
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
                         let switched = attach_to_taskbar_window(hwnd, target_index, &target_taskbar);
@@ -4801,8 +4860,8 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                 } else {
-                    // Releasing over desktop is not a valid drop target. Keep the
-                    // current taskbar selection and restore its persisted offset.
+                    // Without a valid taskbar parent or cursor position, do
+                    // not persist an invented placement; restore the last one.
                     position_at_taskbar();
                     render_layered();
                     diagnose::log(
@@ -7009,6 +7068,36 @@ mod tests {
         let parsed: SettingsFile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.taskbar_left_offset, Some(0));
         assert_eq!(parsed.taskbar_monitor.as_deref(), Some(r"\\.\DISPLAY2"));
+    }
+
+    #[test]
+    fn drag_outside_taskbar_follows_pointer_x_with_fixed_taskbar_bounds() {
+        let taskbar = RECT {
+            left: 500, top: 1000, right: 1500, bottom: 1048,
+        };
+        let width = 200;
+        let anchor = 30;
+        // Y is above the taskbar, but horizontal movement still follows.
+        assert_eq!(drag_left_for_pointer(taskbar, POINT { x: 700, y: 900 }, anchor, width), 170);
+        assert_eq!(drag_left_for_pointer(taskbar, POINT { x: 900, y: 900 }, anchor, width), 370);
+        // The full widget stays inside the taskbar when X exceeds its edges.
+        assert_eq!(drag_left_for_pointer(taskbar, POINT { x: 100, y: 900 }, anchor, width), 0);
+        assert_eq!(drag_left_for_pointer(taskbar, POINT { x: 1800, y: 900 }, anchor, width), 800);
+        // Existing in-taskbar cursor positioning is unchanged.
+        assert_eq!(drag_left_for_pointer(taskbar, POINT { x: 900, y: 1020 }, anchor, width), 370);
+    }
+
+    #[test]
+    fn drag_outside_taskbar_handles_negative_screen_coordinates() {
+        let taskbar = RECT {
+            left: -1600, top: 500, right: -600, bottom: 548,
+        };
+        assert_eq!(drag_left_for_pointer(
+            taskbar, POINT { x: -1000, y: 300 }, 40, 200,
+        ), 560);
+        assert_eq!(drag_left_for_pointer(
+            taskbar, POINT { x: -2000, y: 300 }, 40, 200,
+        ), 0);
     }
 
     #[test]
