@@ -4,8 +4,10 @@ $src = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $interop = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $main = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\main.rs')
 
+if ($src.Contains('CODEX_TASKBAR_') -or $interop.Contains('CODEX_TASKBAR_')) {
+  throw 'Legacy taskbar environment variable remains in runtime source.'
+}
 foreach ($pattern in @(
-  'CODEX_TASKBAR_[A-Z_]+',
   'frosted_popup_session',
   'popup_owner_retry', 'popup_zorder_repair', 'popup_ownerless_frosted',
   'select_taskbar_for_popup_window', 'detach_from_taskbar_as_popup',
