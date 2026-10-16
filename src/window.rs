@@ -5325,12 +5325,12 @@ unsafe extern "system" fn wnd_proc(
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
 
-                let (current_taskbar_hwnd, embedded, blur_active) = {
+                let (current_taskbar_hwnd, blur_active) = {
                     let state = lock_state();
                     state
                         .as_ref()
-                        .map(|s| (s.taskbar_hwnd, s.embedded, s.composition_blur_active))
-                        .unwrap_or((None, false, false))
+                        .map(|s| (s.taskbar_hwnd, s.composition_blur_active))
+                        .unwrap_or((None, false))
                 };
 
                 // A popup uses absolute screen coordinates. If the pointer has
