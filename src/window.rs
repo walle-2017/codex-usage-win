@@ -4671,6 +4671,34 @@ fn usage_hover_hit(
     x: i32,
     y: i32,
 ) -> Option<(MinimalHoverTarget, RECT)> {
+    let (vertical, show_session, show_weekly) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        (s.vertical_taskbar_mode, s.show_session_window, s.show_weekly_window)
+    };
+    if vertical {
+        let mut client = RECT::default();
+        unsafe { let _ = GetClientRect(hwnd, &mut client); }
+        let (session, weekly) = vertical_row_tops(
+            client.bottom - client.top, show_session, show_weekly,
+        );
+        for (target, top) in [
+            (MinimalHoverTarget::Session, session),
+            (MinimalHoverTarget::Weekly, weekly),
+        ] {
+            let Some(y_top) = top else { continue };
+            let region = RECT {
+                left: sc(2),
+                top: y_top,
+                right: client.right - sc(2),
+                bottom: y_top + sc(34),
+            };
+            if point_in_rect(region, x, y) {
+                return Some((target, region));
+            }
+        }
+        return None;
+    }
     minimal_percent_hit(hwnd, x, y).or_else(|| default_reset_hit(hwnd, x, y))
 }
 
@@ -5535,6 +5563,14 @@ unsafe extern "system" fn wnd_proc(
                         state.as_ref().and_then(|s| {
                             let taskbar_hwnd = s.taskbar_hwnd?;
                             let taskbar_rect = native_interop::get_taskbar_rect(taskbar_hwnd)?;
+                            if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
+                                let spans = taskbar_free_vertical_spans(taskbar_hwnd, taskbar_rect)?;
+                                let desired_bottom = taskbar_rect.bottom - taskbar_rect.top;
+                                let top = nearest_free_top_offset(
+                                    taskbar_rect, &spans, sc(VERTICAL_WIDGET_HEIGHT), desired_bottom,
+                                )?;
+                                return Some((TaskbarAxis::Vertical, top));
+                            }
                             let free_spans = taskbar_free_spans(taskbar_hwnd, taskbar_rect)?;
                             let desired_right = taskbar_rect.right - taskbar_rect.left;
                             placement_for_free_spans(
@@ -5544,13 +5580,16 @@ unsafe extern "system" fn wnd_proc(
                                 &free_spans,
                                 desired_right,
                             )
-                            .map(|(_, _, left)| left)
+                            .map(|(_, _, left)| (TaskbarAxis::Horizontal, left))
                         })
                     };
-                    if let Some(target) = target {
+                    if let Some((axis, target)) = target {
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
-                            s.taskbar_left_offset = target;
+                            match axis {
+                                TaskbarAxis::Horizontal => s.taskbar_left_offset = target,
+                                TaskbarAxis::Vertical => s.taskbar_top_offset = target,
+                            }
                             s.legacy_tray_offset = None;
                         }
                     }
