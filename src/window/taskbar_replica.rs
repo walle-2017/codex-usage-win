@@ -169,22 +169,37 @@ pub(super) fn try_taskbar_replica_handoff(
     index: usize,
     taskbar: &native_interop::TaskbarWindow,
 ) -> Option<bool> {
-    let (parent, embedded, frosted, dragging, anchor, width, height,
-         old_index, old_monitor, old_tray_notify) = {
+    let (parent, embedded, frosted, dragging, anchor_x, anchor_y,
+         old_vertical, old_vertical_width, old_index, old_monitor, old_tray_notify,
+         language, preset) = {
         let state = lock_state();
         let s = state.as_ref()?;
         (
             s.taskbar_hwnd?, s.embedded,
             s.composition_blur_active ||
                 s.styles.active(s.is_dark).panel_frosted_active(),
-            s.dragging, s.drag_anchor_logical_x,
-            total_widget_width_for_state(s), widget_height_for_state(s),
-            s.taskbar_index, s.taskbar_monitor.clone(), s.tray_notify_hwnd
+            s.dragging, s.drag_anchor_logical_x, s.drag_anchor_logical_y,
+            s.vertical_taskbar_mode, s.vertical_widget_width,
+            s.taskbar_index, s.taskbar_monitor.clone(), s.tray_notify_hwnd,
+            s.language, effective_appearance_preset(s)
         )
     };
     if !embedded || !dragging || parent == taskbar.hwnd {
         return None;
     }
+    let target_vertical = taskbar_axis(taskbar.rect) == TaskbarAxis::Vertical;
+    let (width, height) = if target_vertical {
+        let Some(width) = vertical_widget_width(taskbar.rect) else {
+            diagnose::log("vertical target taskbar too narrow for replica");
+            return Some(false);
+        };
+        (width, sc(VERTICAL_WIDGET_HEIGHT))
+    } else {
+        (
+            total_widget_width_for_preset(language, preset),
+            sc(preset.metrics().widget_height),
+        )
+    };
     // Each replica is parented only once, at creation. A frosted handoff
     // reuses the target foreground and that taskbar's cached Composition blur.
     let embedded_blur_handoff = frosted
@@ -305,12 +320,22 @@ pub(super) fn try_taskbar_replica_handoff(
     let mut cursor = POINT::default();
     unsafe { let _ = GetCursorPos(&mut cursor); }
     let target_dpi = unsafe { GetDpiForWindow(taskbar.hwnd) }.max(1);
-    let anchor_px = drag_anchor_px_for_dpi(anchor, target_dpi);
+    let anchor_px = drag_anchor_px_for_dpi(anchor_x, target_dpi);
+    let anchor_y_px = drag_anchor_px_for_dpi(anchor_y, target_dpi);
     let width = width.max(1);
     let height = height.max(1);
-    let left = drag_left_from_cursor(taskbar.rect, cursor, anchor_px);
-    let height_of_tray = taskbar.rect.bottom - taskbar.rect.top;
-    let y = compute_anchor_y(taskbar.rect.top, height_of_tray, height) - taskbar.rect.top;
+    let (left, y) = if target_vertical {
+        (
+            (taskbar.rect.right - taskbar.rect.left - width) / 2,
+            drag_top_for_pointer(taskbar.rect, cursor, anchor_y_px, height),
+        )
+    } else {
+        let height_of_tray = taskbar.rect.bottom - taskbar.rect.top;
+        (
+            drag_left_from_cursor(taskbar.rect, cursor, anchor_px),
+            compute_anchor_y(taskbar.rect.top, height_of_tray, height) - taskbar.rect.top,
+        )
+    };
     unsafe {
         let _ = SetWindowPos(next, HWND::default(), left, y, width, height,
             SWP_NOACTIVATE | SWP_NOZORDER);
@@ -325,6 +350,11 @@ pub(super) fn try_taskbar_replica_handoff(
             s.taskbar_index = index;
             s.taskbar_monitor = taskbar.monitor_device.clone();
             s.tray_notify_hwnd = native_interop::find_child_window(taskbar.hwnd, "TrayNotifyWnd");
+            s.vertical_taskbar_mode = target_vertical;
+            s.vertical_widget_width = width;
+            if target_vertical {
+                s.small_taskbar_mode = false;
+            }
         }
     }
     unsafe {
@@ -368,6 +398,8 @@ pub(super) fn try_taskbar_replica_handoff(
                 s.taskbar_index = old_index;
                 s.taskbar_monitor = old_monitor;
                 s.tray_notify_hwnd = old_tray_notify;
+                s.vertical_taskbar_mode = old_vertical;
+                s.vertical_widget_width = old_vertical_width;
             }
         }
         unsafe { let _ = ShowWindow(next, SW_HIDE); }
