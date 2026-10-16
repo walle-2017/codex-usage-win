@@ -840,8 +840,10 @@ if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
     $styleWindow -notmatch 'if panel_radius > 0' -or
     $styleWindow -notmatch 'if tooltip_radius > 0' -or
     $styleWindow -notmatch 'if progress_radius > 0' -or
-    $styleWindow -notmatch 'fill\(hdc, preview, style\.color\(StyleColorTarget::PanelBackground\)\)') {
-    throw 'Preset component previews must render the exact configured numeric component radii, including 0 as square.'
+    $styleWindow -notmatch 'fill\(hdc, preview, canvas_fill\)' -or
+    $styleWindow -notmatch 'fill\(hdc, widget, style\.color\(StyleColorTarget::PanelBackground\)\)' -or
+    $styleWindow -notmatch 'draw_outline_rect\(hdc, widget, style\.color\(StyleColorTarget::PanelBorder\)\)') {
+    throw 'Preset component previews must render their themed panel, tooltip and progress radii with square-corner fallbacks; vertical widgets must use the actual themed fill and border.'
 }
 if ($settingsModel -notmatch 'panel_corner_radius:\s*u8' -or
     $settingsModel -notmatch 'tooltip_corner_radius:\s*u8' -or
