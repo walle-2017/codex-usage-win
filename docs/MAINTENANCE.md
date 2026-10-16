@@ -57,6 +57,14 @@ The DPI-aware multi-monitor drag implementation must preserve the logical pointe
 - Reject failed handoffs and roll back to the previous visible HWND and backdrop. Keep resource-count and memory safeguards, DPI-aware cursor anchors and the parked-replica fallback when Start temporarily hides taskbar enumeration.
 - Normal startup and `--diagnose` must have identical behavior; the flag controls logging only. No `CODEX_TASKBAR_*` environment flags are supported.
 
+## Source ownership
+
+- `src/window.rs` owns the shared UI state, event dispatch, drag gestures, positioning and layered rendering.
+- `src/window/taskbar_replica.rs` owns bounded taskbar-specific child window replicas, parent validation, the single service HWND and resource guards.
+- `src/window/blur_backdrop.rs` owns DirectComposition Gaussian blur lifecycle, target validation and taskbar-specific parked-context reuse.
+- These are Rust child modules, not runtime feature switches. A split must not change HWND parents, mouse capture or rendering order.
+- The cleanup build `0c65724` is the last user-verified baseline. The extraction branch requires separate manual regression testing before integration.
+
 ## Verification
 
 Run `cargo test`, `cargo clippy -- -D warnings`, and `cargo build --release` on Windows. Before merging, manually verify cross-taskbar round trips with Start open, settings/style changes, Explorer restart, sleep/resume, monitor reconfiguration and resource cleanup.

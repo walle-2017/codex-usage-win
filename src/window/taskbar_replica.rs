@@ -168,8 +168,8 @@ pub(super) fn register_taskbar_replica_class() -> bool {
     }
 }
 
-/// Returns Some(true/false) when the opt-in experiment owns this cross-screen
-/// attempt, otherwise None so normal non-experiment behavior remains unchanged.
+/// Returns Some(success) for a cross-taskbar replica handoff, or None
+/// when no handoff is required.
 pub(super) fn try_taskbar_replica_handoff(
     source_hwnd: HWND,
     index: usize,
@@ -337,9 +337,9 @@ pub(super) fn try_taskbar_replica_handoff(
     unsafe {
         let _ = ShowWindow(next, SW_SHOWNOACTIVATE);
     }
-    // render_layered() detects the old backdrop's parent mismatch, destroys
-    // that Composition target and creates a new taskbar-owned sibling under
-    // the TARGET taskbar. Never reparent an existing blur HWND.
+    // render_layered() parks the old backdrop under its original taskbar;
+    // the target restores its cached backdrop or creates one on first visit.
+    // Never reparent an existing blur HWND.
     render_layered();
     if embedded_blur_handoff {
         sync_blur_backdrop_zorder(next);
