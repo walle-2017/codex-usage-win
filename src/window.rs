@@ -846,7 +846,7 @@ fn attach_to_taskbar_window(
     index: usize,
     taskbar: &native_interop::TaskbarWindow,
 ) -> bool {
-    diagnose::log(format!(
+    diagnose::log_lazy(|| format!(
         "taskbar selected index={index} monitor={} hwnd={:?} rect=({}, {}, {}, {})",
         taskbar.monitor_device.as_deref().unwrap_or("<unknown>"),
         taskbar.hwnd,
@@ -1029,7 +1029,7 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
     {
         LAST_RECOVERED_REPLICA_TARGET.with(|last| {
             if last.replace(found.hwnd.0 as isize) != found.hwnd.0 as isize {
-                diagnose::log(format!(
+                diagnose::log_lazy(|| format!(
                     "taskbar replica recovered missed target from parked HWND parent={:?} monitor={} cursor=({}, {}) rect=({}, {}, {}, {})",
                     found.hwnd,
                     found.monitor_device.as_deref().unwrap_or("<unknown>"),
@@ -3558,7 +3558,7 @@ fn position_at_taskbar() {
         }
     }
 
-    diagnose::log(format!(
+    diagnose::log_lazy(|| format!(
         "positioned taskbar widget monitor={} configured={:?} effective={:?} desired_left={} actual_left={} free_spans={} w={} h={} restored={} layout_changed={}",
         taskbar_monitor.as_deref().unwrap_or("<unknown>"),
         configured_preset,
