@@ -932,7 +932,6 @@ thread_local! {
 }
 
 fn replica_taskbar_targets_from_existing_windows() -> Vec<native_interop::TaskbarWindow> {
-    if !taskbar_replica_enabled() { return Vec::new(); }
     let primary = TASKBAR_PRIMARY_WINDOW.with(|cell| HWND(cell.get() as *mut _));
     let replicas = TASKBAR_REPLICA_WINDOWS.with(|cache| {
         cache.borrow().iter().map(|slot| {
@@ -2025,7 +2024,7 @@ pub fn run() {
 
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
         TASKBAR_PRIMARY_WINDOW.with(|cell| cell.set(hwnd.0 as isize));
-        if taskbar_replica_enabled() && !register_taskbar_replica_class() {
+        if !register_taskbar_replica_class() {
             diagnose::log("taskbar replica class registration failed; cross-taskbar drag unavailable");
         }
 
@@ -4294,8 +4293,7 @@ unsafe extern "system" fn wnd_proc(
     // Main HWND still owns poll timers, tray callbacks and background updates,
     // but mouse messages from a parked main HWND must never affect the drag
     // state of an active replica.
-    if taskbar_replica_enabled()
-        && lock_state().as_ref().is_some_and(|s| s.hwnd.to_hwnd() != hwnd)
+    if lock_state().as_ref().is_some_and(|s| s.hwnd.to_hwnd() != hwnd)
         && matches!(msg, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP
             | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_CANCELMODE | WM_CAPTURECHANGED)
     {
