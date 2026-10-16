@@ -7600,7 +7600,8 @@ mod tests {
         let (session, weekly) = vertical_row_tops(height, true, true);
         let first = session.unwrap();
         let second = weekly.unwrap();
-        assert!(first >= sc(VERTICAL_DRAG_HANDLE_H) - sc(2));
+        // The visible grip dots end at about 12px, below the first label.
+        assert!(first >= sc(12));
         assert!(second - first >= sc(46));
         assert!(second + sc(42) + sc(8) <= height);
         assert_eq!(vertical_reset_label(None, false), "--");
