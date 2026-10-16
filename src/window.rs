@@ -3125,6 +3125,7 @@ fn vertical_quota_text(percentage: f64, last_poll_ok: bool) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_vertical_widget_content(
     hdc: HDC,
     width: i32,
