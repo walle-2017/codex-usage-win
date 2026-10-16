@@ -470,12 +470,28 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         state.as_ref().map(|s| s.hwnd.to_hwnd())
     };
     if let Some(hwnd) = existing {
-        sync(snapshot);
         unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(hwnd);
+            if IsWindow(hwnd).as_bool() {
+                // Never overwrite draft/JSON editor content when the user
+                // merely reopens an already-existing settings window.
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
+                // Raise within the normal-window band, never leave settings
+                // permanently TOPMOST. The popup that launched this request
+                // has already been dismissed by the deferred command.
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOP,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                );
+                let _ = SetForegroundWindow(hwnd);
+                return;
+            }
         }
-        return;
     }
 
     unsafe {
@@ -6554,6 +6570,10 @@ unsafe fn paint_appearance_page(
         }
     }
 
+    if matches!(section, Section::Panel | Section::Tooltip) {
+        paint_frosted_alpha_hint(hdc, hwnd, snapshot.language, secondary);
+    }
+
     paint_hex_edit_frames(
         hdc,
         hwnd,
@@ -7217,6 +7237,48 @@ fn section_label(section: Section, language: LanguageId) -> &'static str {
         Section::Json => {
             if zh { "JSON 配置" } else { "JSON config" }
         }
+    }
+}
+
+/// The final blur row ends at logical Y=410; the editor begins at Y=432.
+/// Render a small non-interactive hint inside that existing 22px gap.
+unsafe fn paint_frosted_alpha_hint(
+    hdc: HDC,
+    hwnd: HWND,
+    language: LanguageId,
+    secondary: Color,
+) {
+    let label = if language == LanguageId::SimplifiedChinese {
+        "仅当背景颜色含透明度（Alpha < 255）时，磨砂效果才会生效。"
+    } else {
+        "Frosted effect requires background transparency (Alpha < 255)."
+    };
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(language)));
+    let hint_font = CreateFontW(
+        -scale(hwnd, 11),
+        0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        CLEARTYPE_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+        PCWSTR::from_raw(face.as_ptr()),
+    );
+    let original = if !hint_font.0.is_null() {
+        Some(SelectObject(hdc, hint_font))
+    } else {
+        None
+    };
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+    draw_text(
+        hdc,
+        label,
+        rect(hwnd, 218, 410, 940, 431),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    if let Some(old_font) = original {
+        let _ = SelectObject(hdc, old_font);
+        let _ = DeleteObject(hint_font);
     }
 }
 
@@ -7922,6 +7984,7 @@ mod ui_smoke_tests {
                 },
             };
 
+            let reopen_snapshot = snapshot.clone();
             open_or_focus(HWND::default(), snapshot);
 
             let hwnd = {
@@ -7966,6 +8029,16 @@ mod ui_smoke_tests {
                     EditorSelection::Color(StyleColorTarget::PanelBackground)
                 );
                 assert_eq!(s.snapshot.active_style.panel_background, "#12345678");
+            }
+
+            // A second opening reuses the HWND and must not discard edits.
+            open_or_focus(HWND::default(), reopen_snapshot);
+            {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let s = state.as_ref().unwrap();
+                assert_eq!(s.hwnd.to_hwnd(), hwnd);
+                assert_eq!(s.snapshot.active_style.panel_background, "#12345678");
+                assert_eq!(s.section, Section::Panel);
             }
 
             let (_, _, _, _, show_rgba, show_blur, show_corner) =
