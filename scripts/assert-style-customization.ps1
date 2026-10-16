@@ -391,8 +391,43 @@ if ($windowProduction -notmatch 's\.taskbar_hwnd\.unwrap_or_else\(\|\| s\.hwnd\.
 if ($windowProduction -notmatch 'FROSTED_MAX_BLUR_PX:\s*f32\s*=\s*20\.0' -or
     $windowProduction -notmatch 'blur_amount_for_strength' -or
     $windowProduction -notmatch 'FROSTED_MAX_BLUR_PX\s*\*\s*f32::from\(strength' -or
-    $windowProduction -notmatch 'frosted_strength\s*>\s*0') {
+    $styleProduction -notmatch 'panel_frosted_strength\s*>\s*0') {
     throw 'Frosted intensity must map 0-100 linearly to a real Gaussian blur amount.'
+}
+# Fully opaque panel/tooltip backgrounds suppress the expensive blur
+# without resetting the configured intensity. Replica handoff must agree.
+foreach ($token in @(
+  'pub fn panel_frosted_active(&self) -> bool',
+  'pub fn tooltip_frosted_active(&self) -> bool',
+  'StyleColorTarget::PanelBackground).a < u8::MAX',
+  'StyleColorTarget::TooltipBackground).a < u8::MAX'
+)) {
+  if (-not $styleProduction.Contains($token)) {
+    throw "Alpha-gated frosted style invariant missing: $token"
+  }
+}
+foreach ($token in @(
+  'let blur_requested = style.panel_frosted_active();',
+  'style.tooltip_frosted_active()',
+  's.styles.active(s.is_dark).panel_frosted_active()',
+  'WM_APP_FOCUS_EXISTING_SETTINGS',
+  'style_window::open_or_focus('
+)) {
+  if (-not $windowProduction.Contains($token)) {
+    throw "Alpha-gated render, handoff, or deferred settings focus invariant missing: $token"
+  }
+}
+foreach ($token in @(
+  'paint_frosted_alpha_hint(hdc, hwnd, snapshot.language, secondary)',
+  'Alpha < 255',
+  'SW_RESTORE',
+  'SetWindowPos(',
+  'HWND_TOP,',
+  'SetForegroundWindow(hwnd)'
+)) {
+  if (-not $styleWindow.Contains($token)) {
+    throw "Settings focus or frosted-help UI invariant missing: $token"
+  }
 }
 if ($native -match 'SetWindowCompositionAttribute' -or
     $native -match 'ACCENT_ENABLE_ACRYLICBLURBEHIND' -or
