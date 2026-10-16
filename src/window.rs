@@ -1234,9 +1234,8 @@ unsafe extern "system" {
 }
 
 fn taskbar_replica_enabled() -> bool {
-    diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_LAZY_REPLICA_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
+    // Stable taskbar placement is a normal product feature, not diagnostic mode.
+    true
 }
 
 /// Stable message, timer, and notification owner. Extra taskbar HWNDs handle
@@ -1369,11 +1368,9 @@ fn try_taskbar_replica_handoff(
     if !embedded || !dragging || parent == taskbar.hwnd {
         return None;
     }
-    // Existing replicas are safe to hand off because each foreground HWND
-    // stays under the Explorer taskbar it was initially embedded into. For
-    // frosted mode this is only allowed with the *embedded* experiment; the
-    // old popup-based blur session must never take this route.
-    let embedded_blur_handoff = frosted && embedded_frosted_experiment_enabled()
+    // Each replica is parented only once, at creation. A frosted handoff
+    // reuses the target foreground and that taskbar's cached Composition blur.
+    let embedded_blur_handoff = frosted
         && lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
     if frosted && !embedded_blur_handoff {
         diagnose::log("taskbar replica skipped frosted mode; no cross-screen mutation");
@@ -3300,7 +3297,7 @@ pub fn run() {
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
         TASKBAR_PRIMARY_WINDOW.with(|cell| cell.set(hwnd.0 as isize));
         if taskbar_replica_enabled() && !register_taskbar_replica_class() {
-            diagnose::log("taskbar replica class creation failed; experiment cannot switch taskbars");
+            diagnose::log("taskbar replica class registration failed; cross-taskbar drag unavailable");
         }
 
         let system_is_dark = theme::is_dark_mode();
@@ -3545,16 +3542,10 @@ fn register_blur_backdrop_class() {
     }
 }
 
-// Opt-in architectural experiment: avoid transferring ownership between
-// two Explorer taskbar HWNDs. The foreground and Composition backdrop remain
-// top-level tool popups while the active taskbar/geometry changes.
-// Alternative frosted architecture: keep BOTH visuals inside the Explorer
-// taskbar child hierarchy. This path never detaches the layered foreground.
-fn embedded_frosted_experiment_enabled() -> bool {
-    diagnose::is_enabled()
-        && taskbar_replica_enabled()
-        && std::env::var_os("CODEX_TASKBAR_EMBEDDED_FROSTED_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
+// Normal frosted mode keeps both visual surfaces in the Explorer taskbar's
+// child-window hierarchy; it does not detach the foreground into a popup.
+fn embedded_frosted_enabled() -> bool {
+    true
 }
 
 fn popup_ownerless_frosted_experiment_enabled() -> bool {
@@ -3796,7 +3787,7 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
     // menu can temporarily make creation of a new child blur target fail; a
     // previously created sibling can be restored without a USER/DWM call to
     // create a new window or Composition target.
-    if embedded_frosted_experiment_enabled() {
+    if embedded_frosted_enabled() {
         let target = {
             let state = lock_state();
             state.as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)
@@ -3852,7 +3843,7 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
     unsafe {
         let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
         let title = native_interop::wide_str("");
-        let taskbar_parent = if embedded_frosted_experiment_enabled() {
+        let taskbar_parent = if embedded_frosted_enabled() {
             let state = lock_state();
             state.as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)
         } else { None };
@@ -3939,7 +3930,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     if widget_hidden_for_taskbar_space() {
         return;
     }
-    if !embedded_frosted_experiment_enabled() {
+    if !embedded_frosted_enabled() {
         bind_popup_windows_to_taskbar_owner(foreground_hwnd);
     }
     let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
@@ -3958,7 +3949,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         diagnose::log("composition blur bounds sync failed during z-order update");
     }
 
-    let embedded_target = if embedded_frosted_experiment_enabled() {
+    let embedded_target = if embedded_frosted_enabled() {
         let state = lock_state();
         state.as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)
     } else { None };
@@ -4016,7 +4007,7 @@ fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
     if !sync_composition_blur_bounds(width, height) {
         diagnose::log("composition blur bounds sync failed during geometry update");
     }
-    let parent_rect = if embedded_frosted_experiment_enabled() {
+    let parent_rect = if embedded_frosted_enabled() {
         let state = lock_state();
         state.as_ref().filter(|s| s.embedded)
             .and_then(|s| s.taskbar_hwnd)
@@ -4098,7 +4089,7 @@ fn activate_blur_popup(
 
     // Child-only experiment: keep the existing Explorer-embedded layered
     // widget and create a sibling DirectComposition blur HWND behind it.
-    if was_embedded && embedded_frosted_experiment_enabled() {
+    if was_embedded && embedded_frosted_enabled() {
         let Some(_) = ensure_blur_backdrop(blur_amount, tint) else {
             diagnose::log("taskbar embedded blur creation failed; retaining normal embedded widget");
             return false;
@@ -4177,7 +4168,7 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
         }
     }
 
-    if embedded_frosted_experiment_enabled() {
+    if embedded_frosted_enabled() {
         let embedded = lock_state().as_ref().is_some_and(|s| s.embedded);
         if embedded {
             position_at_taskbar();
