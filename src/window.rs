@@ -7751,21 +7751,21 @@ mod tests {
             track, accent, true,
         );
         let pixel = |x: i32, y: i32| pixels[(y * width + x) as usize];
-        // The top opening stays transparent (even when the ring reaches 100%).
-        assert_eq!(pixel(24, 25), 0);
-        // A 25% clockwise arc reaches 3 o'clock, but not 6 o'clock.
-        assert!((pixel(39, 40) & 0x0000FF00) > (pixel(24, 55) & 0x0000FF00));
+        // The bottom opening stays transparent; 25% begins at the lower left
+        // and advances clockwise to the left rather than representing usage.
+        assert_eq!(pixel(24, 55), 0);
+        assert!((pixel(9, 40) & 0x0000FF00) > (pixel(24, 25) & 0x0000FF00));
         assert_eq!(pixel(24, 40), 0);
-        assert_ne!(pixel(24, 55), 0);
-        assert_eq!(vertical_ring_fraction(0.0), None);
-        assert!(vertical_ring_fraction(std::f32::consts::PI).is_some());
+        assert_ne!(pixel(24, 25), 0);
+        assert!(vertical_ring_fraction(0.0).is_some());
+        assert_eq!(vertical_ring_fraction(std::f32::consts::PI), None);
         let mut complete_pixels = vec![0u32; (width * height) as usize];
         render_vertical_ring(
             &mut complete_pixels, width, height, 24, 40, 15.0, 100.0,
             track, accent, true,
         );
-        assert_eq!(complete_pixels[(25 * width + 24) as usize], 0);
-        assert_ne!(complete_pixels[(40 * width + 39) as usize], 0);
+        assert_eq!(complete_pixels[(55 * width + 24) as usize], 0);
+        assert_ne!(complete_pixels[(25 * width + 24) as usize], 0);
         assert_eq!(vertical_quota_text(2.0, true), "2%");
         assert_eq!(vertical_quota_text(100.0, true), "100%");
     }
@@ -7789,6 +7789,64 @@ mod tests {
         assert!(!vertical_drag_handle_hit(16, sc(18), sc(32), height));
         assert_eq!(vertical_reset_label(None, false), "--");
         assert_eq!(vertical_reset_label(None, true), "--");
+    }
+
+    #[test]
+    fn vertical_minimal_layout_shows_two_separate_remaining_percentages() {
+        let height = vertical_widget_height_for_preset(AppearancePreset::Minimal);
+        assert_eq!(height, sc(VERTICAL_MINIMAL_WIDGET_HEIGHT));
+        assert_eq!(vertical_widget_height_for_preset(AppearancePreset::Default), sc(VERTICAL_WIDGET_HEIGHT));
+        let (session, weekly) = vertical_minimal_percent_centers(height, true, true);
+        let session = session.unwrap();
+        let weekly = weekly.unwrap();
+        assert!(session - sc(12) >= sc(VERTICAL_DRAG_HANDLE_H));
+        assert!(weekly - session >= sc(24));
+        assert!(weekly + sc(12) < height);
+        assert_eq!(vertical_minimal_percent_centers(height, true, false).1, None);
+        assert_eq!(vertical_minimal_percent_centers(height, false, true).0, None);
+        // Stored percentages are USED; display is always REMAINING.
+        assert_eq!(usage_percent_for_display(LanguageId::English, 88.0), 12.0);
+        assert_eq!(usage_percent_for_display(LanguageId::English, 63.0), 37.0);
+        assert_eq!(vertical_quota_text(12.0, true), "12%");
+        assert_eq!(vertical_quota_text(37.0, true), "37%");
+    }
+
+    #[test]
+    fn vertical_default_tooltip_hits_only_reset_timestamp() {
+        let width = sc(48);
+        let height = sc(VERTICAL_WIDGET_HEIGHT);
+        let (session, weekly) = vertical_row_tops(height, true, true);
+        let first = session.unwrap();
+        let second = weekly.unwrap();
+        // Label, ring, center percentage and empty space do not trigger it.
+        for y in [first + sc(VERTICAL_LABEL_CENTER_Y),
+                  first + sc(VERTICAL_RING_CENTER_Y), second + sc(VERTICAL_RING_CENTER_Y)] {
+            assert!(vertical_usage_hover_hit(width, height, false, true, true, width / 2, y).is_none());
+        }
+        assert_eq!(vertical_usage_hover_hit(
+            width, height, false, true, true,
+            width / 2, first + sc(VERTICAL_RESET_CENTER_Y),
+        ).unwrap().0, MinimalHoverTarget::Session);
+        assert_eq!(vertical_usage_hover_hit(
+            width, height, false, true, true,
+            width / 2, second + sc(VERTICAL_RESET_CENTER_Y),
+        ).unwrap().0, MinimalHoverTarget::Weekly);
+        assert!(vertical_usage_hover_hit(width, height, false, true, true, sc(1),
+            first + sc(VERTICAL_RESET_CENTER_Y)).is_none());
+    }
+
+    #[test]
+    fn vertical_minimal_tooltip_hits_percentages_not_drag_grip() {
+        let width = sc(48);
+        let height = sc(VERTICAL_MINIMAL_WIDGET_HEIGHT);
+        let (session, weekly) = vertical_minimal_percent_centers(height, true, true);
+        assert!(vertical_usage_hover_hit(width, height, true, true, true, width / 2, sc(8)).is_none());
+        assert_eq!(vertical_usage_hover_hit(width, height, true, true, true,
+            width / 2, session.unwrap()).unwrap().0, MinimalHoverTarget::Session);
+        assert_eq!(vertical_usage_hover_hit(width, height, true, true, true,
+            width / 2, weekly.unwrap()).unwrap().0, MinimalHoverTarget::Weekly);
+        assert!(vertical_usage_hover_hit(width, height, true, true, true,
+            sc(1), session.unwrap()).is_none());
     }
 
     #[test]
