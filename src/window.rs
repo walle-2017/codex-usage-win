@@ -2945,6 +2945,11 @@ unsafe fn render_taskbar_text(
     last_poll_ok: bool,
 ) {
     if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) {
+        // Poller data stores used quota. Convert exactly once for the layered
+        // vertical renderer, matching the horizontal and GDI fallback paths.
+        let codex_session_pct = usage_percent_for_display(language, codex_session_pct);
+        let codex_weekly_pct = usage_percent_for_display(language, codex_weekly_pct);
+        let is_minimal = current_appearance_preset() == AppearancePreset::Minimal;
         let panel_base = style.color(StyleColorTarget::PanelBackground).blend_over(*bg);
         let label_color = style.color(StyleColorTarget::QuotaType).blend_over(panel_base);
         let value_color = style.color(if last_poll_ok {
@@ -2954,6 +2959,27 @@ unsafe fn render_taskbar_text(
         }).blend_over(panel_base);
         let reset_color = style.color(StyleColorTarget::ResetTime).blend_over(panel_base);
         let track = style.color(StyleColorTarget::ProgressConsumed).blend_over(panel_base);
+        if is_minimal {
+            // Compact vertical view renders only two remaining percentages:
+            // no rings, type captions or reset timestamps.
+            let (session_center, weekly_center) = vertical_minimal_percent_centers(
+                height, show_session_window, show_weekly_window,
+            );
+            let cx = width / 2;
+            for (center, pct) in [
+                (session_center, codex_session_pct),
+                (weekly_center, codex_weekly_pct),
+            ] {
+                let Some(cy) = center else { continue };
+                let value = vertical_quota_text(pct, last_poll_ok);
+                let size = if value.len() >= 4 { sc(9) } else { sc(12) };
+                render_vertical_centered_text(
+                    pixels, width, height, cx, cy, &value, size,
+                    FW_SEMIBOLD.0 as i32, value_color,
+                );
+            }
+            return;
+        }
         let (session_reset, weekly_reset) = {
             let state = lock_state();
             let codex = state.as_ref().and_then(|s| s.data.as_ref())
@@ -3316,6 +3342,7 @@ fn paint_vertical_widget_content(
     drag_color: Color,
     hovered: bool,
     paint_text: bool,
+    minimal: bool,
 ) {
     unsafe {
         let handle_brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
@@ -3336,7 +3363,43 @@ fn paint_vertical_widget_content(
         // The layered renderer composites rings and text with DirectWrite.
         // GDI is only needed for the compact fallback popup (when embedding
         // into Explorer is unavailable), not for the normal embedded path.
-        if paint_text {
+        if paint_text && minimal {
+            let (session_center, weekly_center) = vertical_minimal_percent_centers(
+                height, show_session, show_weekly,
+            );
+            let font_name = native_interop::wide_str(
+                fonts::face(fonts::FontRole::Taskbar, None),
+            );
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            for (center, percent) in [
+                (session_center, session_pct),
+                (weekly_center, weekly_pct),
+            ] {
+                let Some(cy) = center else { continue };
+                let label = vertical_quota_text(percent, last_poll_ok);
+                let font_size = if label.len() >= 4 { sc(9) } else { sc(12) };
+                let font = CreateFontW(
+                    font_size, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+                    DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+                    CLIP_DEFAULT_PRECIS.0 as u32, gdi_text_quality(),
+                    (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                    PCWSTR::from_raw(font_name.as_ptr()),
+                );
+                let old_font = SelectObject(hdc, font);
+                let _ = SetTextColor(hdc, COLORREF(primary_color.to_colorref()));
+                let mut wide: Vec<u16> = label.encode_utf16().collect();
+                let mut bounds = RECT {
+                    left: sc(1), top: cy - sc(10), right: width - sc(1),
+                    bottom: cy + sc(10),
+                };
+                let _ = DrawTextW(
+                    hdc, &mut wide, &mut bounds,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                let _ = SelectObject(hdc, old_font);
+                let _ = DeleteObject(font);
+            }
+        } else if paint_text {
             let (session_top, weekly_top) = vertical_row_tops(height, show_session, show_weekly);
             let radius = ((width - sc(7)) / 2).min(sc(VERTICAL_RING_MAX_RADIUS)).max(1);
             let font_name = native_interop::wide_str(
@@ -3524,6 +3587,7 @@ fn paint_content(
                 show_session_window, show_weekly_window, last_poll_ok,
                 quota_type_color, primary_color, reset_color, track, drag_color,
                 drag_handle_hovered, paint_background,
+                preset == AppearancePreset::Minimal,
             );
             return;
         }
