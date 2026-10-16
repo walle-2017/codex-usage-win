@@ -3556,6 +3556,60 @@ fn hide_widget_for_taskbar_space(
     }
 }
 
+fn position_vertical_taskbar(
+    hwnd: HWND,
+    embedded: bool,
+    taskbar_hwnd: HWND,
+    rect: RECT,
+    blur_active: bool,
+    language: LanguageId,
+) {
+    let Some(width) = vertical_widget_width(rect) else {
+        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar is too narrow", true);
+        return;
+    };
+    let height = sc(VERTICAL_WIDGET_HEIGHT);
+    let desired_top = lock_state()
+        .as_ref()
+        .map(|s| s.taskbar_top_offset)
+        .unwrap_or(0);
+    let Some(free) = taskbar_free_vertical_spans(taskbar_hwnd, rect) else {
+        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar layout cache is not ready", false);
+        return;
+    };
+    let Some(top) = nearest_free_top_offset(rect, &free, height, desired_top) else {
+        hide_widget_for_taskbar_space(hwnd, language, "no safe vertical space is available", true);
+        return;
+    };
+    let was_hidden = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return; };
+        let was_hidden = s.hidden_for_taskbar_space;
+        s.hidden_for_taskbar_space = false;
+        s.taskbar_space_warning_shown = false;
+        s.vertical_taskbar_mode = true;
+        s.vertical_widget_width = width;
+        s.small_taskbar_mode = false;
+        was_hidden
+    };
+    let x = rect.left + (rect.right - rect.left - width) / 2;
+    if embedded {
+        native_interop::move_window(hwnd, x - rect.left, top, width, height);
+    } else if blur_active {
+        move_frosted_pair(hwnd, x, rect.top + top, width, height);
+    } else {
+        native_interop::move_window(hwnd, x, rect.top + top, width, height);
+    }
+    if was_hidden {
+        unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+        if blur_active { sync_blur_backdrop_zorder(hwnd); }
+    }
+    diagnose::log_lazy(|| format!(
+        "vertical taskbar widget positioned top={} w={} h={} gaps={} restored={}",
+        top, width, height, free.len(), was_hidden
+    ));
+}
+
 fn position_at_taskbar() {
     refresh_dpi();
     let (
@@ -3604,6 +3658,20 @@ fn position_at_taskbar() {
             return;
         }
     };
+    if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
+        position_vertical_taskbar(
+            hwnd, embedded, taskbar_hwnd, taskbar_rect, blur_active, language,
+        );
+        return;
+    }
+    // The horizontal placement path remains unchanged. Restore its native
+    // dimensions when the widget returns from a vertical monitor.
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.vertical_taskbar_mode = false;
+        }
+    }
     let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
     let small_mode = is_small_taskbar_height(taskbar_height);
     {
