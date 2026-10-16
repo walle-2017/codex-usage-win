@@ -1,6 +1,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $src = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
+$src += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
+$src += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
+if ($src -notmatch 'mod taskbar_replica;' -or $src -notmatch 'mod blur_backdrop;') {
+  throw 'Permanent taskbar modules must be explicitly declared.'
+}
 $interop = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $main = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\main.rs')
 

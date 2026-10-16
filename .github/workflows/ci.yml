@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - refactor/taskbar-module-extraction
   pull_request:
     branches:
       - main

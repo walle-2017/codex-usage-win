@@ -10,6 +10,8 @@ $settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_mode
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 
 foreach ($mode in @('System', 'Dark', 'Light')) {
