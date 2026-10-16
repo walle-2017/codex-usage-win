@@ -1094,6 +1094,141 @@ impl HorizontalSpan {
     }
 }
 
+/// Explorer taskbars can be docked at the left or right edge of a monitor.
+/// Orientation is determined from geometry, including secondary taskbars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskbarAxis {
+    Horizontal,
+    Vertical,
+}
+
+fn taskbar_axis(rect: RECT) -> TaskbarAxis {
+    if rect.bottom > rect.top
+        && rect.right > rect.left
+        && rect.bottom - rect.top > rect.right - rect.left
+    {
+        TaskbarAxis::Vertical
+    } else {
+        TaskbarAxis::Horizontal
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VerticalSpan {
+    top: i32,
+    bottom: i32,
+}
+
+impl VerticalSpan {
+    fn height(self) -> i32 {
+        (self.bottom - self.top).max(0)
+    }
+}
+
+fn vertical_widget_width(taskbar_rect: RECT) -> Option<i32> {
+    let available = taskbar_rect.right - taskbar_rect.left - sc(VERTICAL_WIDGET_INSET) * 2;
+    (available >= sc(VERTICAL_WIDGET_MIN_WIDTH))
+        .then(|| available.min(sc(VERTICAL_WIDGET_MAX_WIDTH)))
+}
+
+fn free_vertical_spans_from_occupied(
+    taskbar_rect: RECT,
+    tray_top: i32,
+    occupied_rects: &[RECT],
+    margin: i32,
+) -> Vec<VerticalSpan> {
+    let start = taskbar_rect.top;
+    let end = tray_top.clamp(start, taskbar_rect.bottom);
+    if end <= start {
+        return Vec::new();
+    }
+    let margin = margin.max(0);
+    let mut occupied: Vec<VerticalSpan> = occupied_rects
+        .iter()
+        .filter(|rect| rect.right > taskbar_rect.left && rect.left < taskbar_rect.right)
+        .filter_map(|rect| {
+            let top = (rect.top - margin).max(start);
+            let bottom = (rect.bottom + margin).min(end);
+            (bottom > top).then_some(VerticalSpan { top, bottom })
+        })
+        .collect();
+    occupied.sort_by_key(|span| (span.top, span.bottom));
+    let mut merged: Vec<VerticalSpan> = Vec::new();
+    for span in occupied {
+        if let Some(last) = merged.last_mut() {
+            if span.top <= last.bottom {
+                last.bottom = last.bottom.max(span.bottom);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+    let mut free = Vec::new();
+    let mut cursor = start;
+    for span in merged {
+        if span.top > cursor {
+            free.push(VerticalSpan { top: cursor, bottom: span.top });
+        }
+        cursor = cursor.max(span.bottom);
+    }
+    if cursor < end {
+        free.push(VerticalSpan { top: cursor, bottom: end });
+    }
+    free
+}
+
+fn taskbar_free_vertical_spans(
+    taskbar_hwnd: HWND,
+    rect: RECT,
+) -> Option<Vec<VerticalSpan>> {
+    let controls = cached_taskbar_controls(taskbar_hwnd)?;
+    if controls.is_empty() {
+        diagnose::log("vertical taskbar layout cache is empty; failing closed");
+        return None;
+    }
+    let tray_top = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd")
+        .and_then(native_interop::get_window_rect_safe)
+        .filter(|tray| tray.top >= rect.top && tray.top < rect.bottom)
+        .map(|tray| tray.top)
+        .unwrap_or(rect.bottom);
+    Some(free_vertical_spans_from_occupied(
+        rect, tray_top, &controls, sc(TASKBAR_CONTROL_MARGIN_LOGICAL),
+    ))
+}
+
+fn nearest_free_top_offset(
+    taskbar_rect: RECT,
+    free_spans: &[VerticalSpan],
+    widget_height: i32,
+    desired_top_offset: i32,
+) -> Option<i32> {
+    free_spans
+        .iter()
+        .copied()
+        .filter(|span| span.height() >= widget_height)
+        .map(|span| {
+            let min_top = span.top - taskbar_rect.top;
+            let max_top = span.bottom - taskbar_rect.top - widget_height;
+            let offset = desired_top_offset.clamp(min_top, max_top);
+            ((offset - desired_top_offset).abs(), offset)
+        })
+        .min_by_key(|(distance, offset)| (*distance, *offset))
+        .map(|(_, offset)| offset)
+}
+
+fn drag_top_from_cursor(taskbar_rect: RECT, pt: POINT, anchor_px: i32) -> i32 {
+    pt.y - taskbar_rect.top - anchor_px
+}
+
+fn drag_top_for_pointer(rect: RECT, pt: POINT, anchor_px: i32, height: i32) -> i32 {
+    let desired = drag_top_from_cursor(rect, pt, anchor_px);
+    if point_is_in_taskbar_rect(pt, rect) {
+        desired
+    } else {
+        clamp_left_offset(desired, (rect.bottom - rect.top - height).max(0))
+    }
+}
+
 fn tray_left_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT) -> i32 {
     let mut tray_left = taskbar_rect.right;
     if let Some(tray_hwnd) = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd") {
