@@ -3595,6 +3595,18 @@ fn hide_tooltip_blur_backdrop() {
     }
 }
 
+/// Keep both top-level tooltip layers owned by the currently active Explorer
+/// taskbar. When Start raises that taskbar, an unowned topmost tooltip can
+/// otherwise be covered by it. This must never run on the embedded widget.
+fn sync_minimal_tooltip_owner(hwnd: HWND, taskbar_owner: Option<HWND>) {
+    let Some(owner) = taskbar_owner else { return };
+    unsafe {
+        if IsWindow(owner).as_bool() && GetWindow(hwnd, GW_OWNER) != owner {
+            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+        }
+    }
+}
+
 fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, height: i32) -> Option<HWND> {
     let params = BlurBackdropParams { blur_bits: blur_amount.to_bits(), tint };
     let (clip_inset_px, clip_radius_px) = {
@@ -3610,8 +3622,9 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
     };
     if let (Some(hwnd), Some(context)) = (tooltip_blur_hwnd(), tooltip_blur_context()) {
         let unchanged = *TOOLTIP_BLUR_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) == Some(params);
-        if unchanged || (native_interop::set_composition_blur_amount(context, blur_amount)
-            && native_interop::set_composition_blur_tint(context, tint)) {
+        if unsafe { IsWindow(hwnd).as_bool() }
+            && (unchanged || (native_interop::set_composition_blur_amount(context, blur_amount)
+                && native_interop::set_composition_blur_tint(context, tint))) {
             let _ = native_interop::set_composition_blur_bounds(
                 context,
                 width,
@@ -3830,11 +3843,15 @@ fn register_minimal_tooltip_class() {
 
 fn minimal_tooltip_hwnd() -> Option<HWND> {
     {
-        let state = MINIMAL_TOOLTIP_HWND
+        let mut state = MINIMAL_TOOLTIP_HWND
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(hwnd) = *state {
-            return Some(hwnd.to_hwnd());
+            if unsafe { IsWindow(hwnd.to_hwnd()).as_bool() } {
+                return Some(hwnd.to_hwnd());
+            }
+            // Explorer may destroy an owned popup when its taskbar restarts.
+            *state = None;
         }
     }
 
@@ -3951,6 +3968,8 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(tooltip) = minimal_tooltip_hwnd() else {
         return;
     };
+    let taskbar_owner = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
+    sync_minimal_tooltip_owner(tooltip, taskbar_owner);
     let measured_width = unsafe { measure_minimal_tooltip_width(&text) };
 
     {
@@ -4018,6 +4037,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
                 width,
                 height,
             ) {
+                sync_minimal_tooltip_owner(backdrop, taskbar_owner);
                 let _ = SetWindowPos(backdrop, HWND_TOPMOST, x, y, width, height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 true
