@@ -4629,21 +4629,15 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
         MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
-    if s.vertical_taskbar_mode || effective_appearance_preset(s) == AppearancePreset::Minimal {
-        let reset = format_precise_reset_time(section.resets_at)
-            .unwrap_or_else(|| "--".to_string());
-        return Some(format!("{label} · {reset}"));
+    let reset = format_precise_reset_time(section.resets_at)
+        .unwrap_or_else(|| "--".to_string());
+    if effective_appearance_preset(s) == AppearancePreset::Minimal {
+        Some(format!("{label} · {reset}"))
+    } else {
+        // Default view: hovering the displayed reset timestamp reveals only
+        // that quota's full local reset date and time.
+        Some(reset)
     }
-
-    let local = native_interop::system_time_to_local(section.resets_at?)?;
-    Some(match target {
-        MinimalHoverTarget::Session => {
-            format!("{:04}-{:02}-{:02}", local.wYear, local.wMonth, local.wDay)
-        }
-        MinimalHoverTarget::Weekly => {
-            format!("{:02}:{:02}", local.wHour, local.wMinute)
-        }
-    })
 }
 
 fn hide_minimal_usage_tooltip() {
@@ -4943,38 +4937,74 @@ fn default_reset_hit(
     None
 }
 
+fn vertical_usage_hover_hit(
+    width: i32, height: i32, minimal: bool,
+    show_session: bool, show_weekly: bool, x: i32, y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    if minimal {
+        let (session, weekly) = vertical_minimal_percent_centers(
+            height, show_session, show_weekly,
+        );
+        for (target, center) in [
+            (MinimalHoverTarget::Session, session),
+            (MinimalHoverTarget::Weekly, weekly),
+        ] {
+            let Some(cy) = center else { continue };
+            let rect = RECT {
+                left: sc(2), top: cy - sc(12),
+                right: width - sc(2), bottom: cy + sc(12),
+            };
+            if point_in_rect(rect, x, y) {
+                return Some((target, rect));
+            }
+        }
+    } else {
+        // Only the short, visible reset label is hoverable. The type, ring,
+        // percentage and empty space do not trigger the default tooltip.
+        let (session, weekly) = vertical_row_tops(height, show_session, show_weekly);
+        let reset_width = sc(36).min(width - sc(4)).max(1);
+        for (target, top) in [
+            (MinimalHoverTarget::Session, session),
+            (MinimalHoverTarget::Weekly, weekly),
+        ] {
+            let Some(top) = top else { continue };
+            let cy = top + sc(VERTICAL_RESET_CENTER_Y);
+            let rect = RECT {
+                left: (width - reset_width) / 2,
+                top: cy - sc(9),
+                right: (width + reset_width) / 2,
+                bottom: cy + sc(9),
+            };
+            if point_in_rect(rect, x, y) {
+                return Some((target, rect));
+            }
+        }
+    }
+    None
+}
+
 fn usage_hover_hit(
     hwnd: HWND,
     x: i32,
     y: i32,
 ) -> Option<(MinimalHoverTarget, RECT)> {
-    let (vertical, show_session, show_weekly) = {
+    let (vertical, minimal, show_session, show_weekly) = {
         let state = lock_state();
         let s = state.as_ref()?;
-        (s.vertical_taskbar_mode, s.show_session_window, s.show_weekly_window)
+        (
+            s.vertical_taskbar_mode,
+            effective_appearance_preset(s) == AppearancePreset::Minimal,
+            s.show_session_window,
+            s.show_weekly_window,
+        )
     };
     if vertical {
         let mut client = RECT::default();
         unsafe { let _ = GetClientRect(hwnd, &mut client); }
-        let (session, weekly) = vertical_row_tops(
-            client.bottom - client.top, show_session, show_weekly,
+        return vertical_usage_hover_hit(
+            client.right - client.left, client.bottom - client.top,
+            minimal, show_session, show_weekly, x, y,
         );
-        for (target, top) in [
-            (MinimalHoverTarget::Session, session),
-            (MinimalHoverTarget::Weekly, weekly),
-        ] {
-            let Some(y_top) = top else { continue };
-            let region = RECT {
-                left: sc(2),
-                top: y_top,
-                right: client.right - sc(2),
-                bottom: y_top + sc(VERTICAL_QUOTA_ROW_HEIGHT),
-            };
-            if point_in_rect(region, x, y) {
-                return Some((target, region));
-            }
-        }
-        return None;
     }
     minimal_percent_hit(hwnd, x, y).or_else(|| default_reset_hit(hwnd, x, y))
 }
