@@ -1902,6 +1902,7 @@ const VERTICAL_WIDGET_MIN_WIDTH: i32 = 32;
 const VERTICAL_WIDGET_MAX_WIDTH: i32 = 68;
 // All vertical positions are measured from the start of a quota row.
 const VERTICAL_WIDGET_HEIGHT: i32 = 168;
+const VERTICAL_MINIMAL_WIDGET_HEIGHT: i32 = 82;
 const VERTICAL_WIDGET_INSET: i32 = 2;
 const VERTICAL_DRAG_HANDLE_H: i32 = 18;
 const VERTICAL_FIRST_ROW_TOP: i32 = 20;
@@ -1911,8 +1912,11 @@ const VERTICAL_LABEL_CENTER_Y: i32 = 9;
 const VERTICAL_RING_CENTER_Y: i32 = 35;
 const VERTICAL_RESET_CENTER_Y: i32 = 61;
 const VERTICAL_RING_MAX_RADIUS: i32 = 13;
-// A 36-degree open gap straddles 12 o'clock; progress sweeps clockwise.
+// A 36-degree open gap straddles 6 o'clock; progress sweeps clockwise.
 const VERTICAL_RING_GAP_HALF_RADIANS: f32 = std::f32::consts::PI / 10.0;
+const VERTICAL_RING_START_RADIANS: f32 = std::f32::consts::PI + VERTICAL_RING_GAP_HALF_RADIANS;
+const VERTICAL_MINIMAL_FIRST_PERCENT_Y: i32 = 34;
+const VERTICAL_MINIMAL_SECOND_PERCENT_Y: i32 = 63;
 
 fn vertical_drag_handle_hit(x: i32, y: i32, width: i32, height: i32) -> bool {
     x >= 0 && x < width && y >= 0 && y < sc(VERTICAL_DRAG_HANDLE_H).min(height)
@@ -1975,7 +1979,11 @@ fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
 
 fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
-        return sc(VERTICAL_WIDGET_HEIGHT);
+        return sc(if effective_appearance_preset(state) == AppearancePreset::Minimal {
+            VERTICAL_MINIMAL_WIDGET_HEIGHT
+        } else {
+            VERTICAL_WIDGET_HEIGHT
+        });
     }
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
@@ -3148,6 +3156,17 @@ fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Opt
     )
 }
 
+fn vertical_minimal_percent_centers(
+    height: i32, show_session: bool, show_weekly: bool,
+) -> (Option<i32>, Option<i32>) {
+    let one_center = (height + sc(VERTICAL_DRAG_HANDLE_H)) / 2;
+    if show_session && show_weekly {
+        (Some(sc(VERTICAL_MINIMAL_FIRST_PERCENT_Y)), Some(sc(VERTICAL_MINIMAL_SECOND_PERCENT_Y)))
+    } else {
+        (show_session.then_some(one_center), show_weekly.then_some(one_center))
+    }
+}
+
 fn vertical_reset_label(reset_at: Option<SystemTime>, weekly: bool) -> String {
     let Some(local) = reset_at.and_then(native_interop::system_time_to_local) else {
         return "--".to_string();
@@ -3160,12 +3179,12 @@ fn vertical_reset_label(reset_at: Option<SystemTime>, weekly: bool) -> String {
 }
 
 /// Antialiased ring composited into the already-premultiplied layered bitmap.
-/// Progress follows a 324-degree clockwise arc from 18 to 342 degrees.
-/// The gap remains clear even at 100%, including on frosted backgrounds.
+/// Remaining quota follows a 324-degree clockwise arc, leaving a 36-degree
+/// gap at 6 o'clock, including when remaining quota is 100%.
 fn vertical_ring_fraction(angle: f32) -> Option<f32> {
-    let start = VERTICAL_RING_GAP_HALF_RADIANS;
-    let sweep = std::f32::consts::TAU - 2.0 * start;
-    let fraction = (angle - start) / sweep;
+    let sweep = std::f32::consts::TAU - 2.0 * VERTICAL_RING_GAP_HALF_RADIANS;
+    let offset = (angle - VERTICAL_RING_START_RADIANS).rem_euclid(std::f32::consts::TAU);
+    let fraction = offset / sweep;
     (0.0..=1.0).contains(&fraction).then_some(fraction)
 }
 
@@ -3202,8 +3221,10 @@ fn render_vertical_ring(
                 track
             };
             // Antialias the open ends as well as the radial edges.
-            let start_distance = (angle - VERTICAL_RING_GAP_HALF_RADIANS) * radius;
-            let end_distance = (std::f32::consts::TAU - VERTICAL_RING_GAP_HALF_RADIANS - angle) * radius;
+            let offset = (angle - VERTICAL_RING_START_RADIANS).rem_euclid(std::f32::consts::TAU);
+            let sweep = std::f32::consts::TAU - 2.0 * VERTICAL_RING_GAP_HALF_RADIANS;
+            let start_distance = offset * radius;
+            let end_distance = (sweep - offset) * radius;
             let end_coverage = (start_distance.min(end_distance) + 0.5).clamp(0.0, 1.0);
             let opacity = (coverage * end_coverage * 255.0).round() as u8;
             if opacity == 0 { continue; }
@@ -3329,8 +3350,8 @@ fn paint_vertical_widget_content(
                     left: cx - radius, top: cy - radius,
                     right: cx + radius + 1, bottom: cy + radius + 1,
                 };
-                let start = VERTICAL_RING_GAP_HALF_RADIANS;
-                let sweep = std::f32::consts::TAU - 2.0 * start;
+                let start = VERTICAL_RING_START_RADIANS;
+                let sweep = std::f32::consts::TAU - 2.0 * VERTICAL_RING_GAP_HALF_RADIANS;
                 let arc_point = |angle: f32| (
                     cx + (radius as f32 * angle.sin()).round() as i32,
                     cy - (radius as f32 * angle.cos()).round() as i32,
@@ -3927,7 +3948,10 @@ fn position_vertical_taskbar(
         hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar is too narrow", true);
         return;
     };
-    let height = sc(VERTICAL_WIDGET_HEIGHT);
+    let height = {
+        let state = lock_state();
+        state.as_ref().map(widget_height_for_state).unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
+    };
     let desired_top = lock_state()
         .as_ref()
         .map(|s| s.taskbar_top_offset)
