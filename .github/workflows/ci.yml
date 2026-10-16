@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix/drag-outside-taskbar
   pull_request:
     branches:
       - main
