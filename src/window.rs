@@ -3160,8 +3160,15 @@ fn vertical_reset_label(reset_at: Option<SystemTime>, weekly: bool) -> String {
 }
 
 /// Antialiased ring composited into the already-premultiplied layered bitmap.
-/// 12 o'clock is 0%; progress advances clockwise. No GDI hollow brush/alpha
-/// conversion is needed, including on transparent frosted backgrounds.
+/// Progress follows a 324-degree clockwise arc from 18 to 342 degrees.
+/// The gap remains clear even at 100%, including on frosted backgrounds.
+fn vertical_ring_fraction(angle: f32) -> Option<f32> {
+    let start = VERTICAL_RING_GAP_HALF_RADIANS;
+    let sweep = std::f32::consts::TAU - 2.0 * start;
+    let fraction = (angle - start) / sweep;
+    (0.0..=1.0).contains(&fraction).then_some(fraction)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_vertical_ring(
     pixels: &mut [u32],
@@ -3188,13 +3195,18 @@ fn render_vertical_ring(
             if coverage <= 0.0 { continue; }
             let mut angle = dx.atan2(-dy);
             if angle < 0.0 { angle += std::f32::consts::TAU; }
-            let fraction = angle / std::f32::consts::TAU;
+            let Some(fraction) = vertical_ring_fraction(angle) else { continue };
             let color = if completed > 0.0 && fraction <= completed {
                 accent
             } else {
                 track
             };
-            let opacity = (coverage * 255.0).round() as u8;
+            // Antialias the open ends as well as the radial edges.
+            let start_distance = (angle - VERTICAL_RING_GAP_HALF_RADIANS) * radius;
+            let end_distance = (std::f32::consts::TAU - VERTICAL_RING_GAP_HALF_RADIANS - angle) * radius;
+            let end_coverage = (start_distance.min(end_distance) + 0.5).clamp(0.0, 1.0);
+            let opacity = (coverage * end_coverage * 255.0).round() as u8;
+            if opacity == 0 { continue; }
             let index = (y * width + x) as usize;
             pixels[index] = composite_premultiplied_text(pixels[index], color, opacity);
         }
@@ -3317,29 +3329,34 @@ fn paint_vertical_widget_content(
                     left: cx - radius, top: cy - radius,
                     right: cx + radius + 1, bottom: cy + radius + 1,
                 };
-                let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+                let start = VERTICAL_RING_GAP_HALF_RADIANS;
+                let sweep = std::f32::consts::TAU - 2.0 * start;
+                let arc_point = |angle: f32| (
+                    cx + (radius as f32 * angle.sin()).round() as i32,
+                    cy - (radius as f32 * angle.cos()).round() as i32,
+                );
+                let (start_x, start_y) = arc_point(start);
+                let (end_x, end_y) = arc_point(start + sweep);
+                // GDI Arc runs counter-clockwise; reverse start/end coordinates
+                // to render the same clockwise fill as the layered bitmap.
                 let pen = CreatePen(PS_SOLID, sc(3), COLORREF(track.to_colorref()));
                 let old_pen = SelectObject(hdc, pen);
-                let _ = Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+                let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    end_x, end_y, start_x, start_y);
                 let _ = SelectObject(hdc, old_pen);
                 let _ = DeleteObject(pen);
                 if last_poll_ok && percent > 0.0 {
                     let accent = quota_bar_color(percent).blend_over(track);
                     let pen = CreatePen(PS_SOLID, sc(3), COLORREF(accent.to_colorref()));
                     let old_pen = SelectObject(hdc, pen);
-                    if percent >= 99.5 {
-                        let _ = Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
-                    } else {
-                        let angle = 2.0 * std::f64::consts::PI * percent.clamp(0.0, 100.0) / 100.0;
-                        let end_x = cx + (radius as f64 * angle.sin()).round() as i32;
-                        let end_y = cy - (radius as f64 * angle.cos()).round() as i32;
-                        let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom,
-                            cx, cy - radius, end_x, end_y);
-                    }
+                    let (progress_x, progress_y) = arc_point(
+                        start + sweep * (percent / 100.0).clamp(0.0, 1.0) as f32,
+                    );
+                    let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                        progress_x, progress_y, start_x, start_y);
                     let _ = SelectObject(hdc, old_pen);
                     let _ = DeleteObject(pen);
                 }
-                let _ = SelectObject(hdc, old_brush);
 
                 let reset = {
                     let state = lock_state();
@@ -7604,10 +7621,21 @@ mod tests {
             track, accent, true,
         );
         let pixel = |x: i32, y: i32| pixels[(y * width + x) as usize];
-        // Starts at 12 o'clock, advances clockwise, and leaves the center free for 100%.
-        assert!((pixel(24, 25) & 0x0000FF00) > (pixel(24, 55) & 0x0000FF00));
+        // The top opening stays transparent (even when the ring reaches 100%).
+        assert_eq!(pixel(24, 25), 0);
+        // A 25% clockwise arc reaches 3 o'clock, but not 6 o'clock.
+        assert!((pixel(39, 40) & 0x0000FF00) > (pixel(24, 55) & 0x0000FF00));
         assert_eq!(pixel(24, 40), 0);
         assert_ne!(pixel(24, 55), 0);
+        assert_eq!(vertical_ring_fraction(0.0), None);
+        assert!(vertical_ring_fraction(std::f32::consts::PI).is_some());
+        let mut complete_pixels = vec![0u32; (width * height) as usize];
+        render_vertical_ring(
+            &mut complete_pixels, width, height, 24, 40, 15.0, 100.0,
+            track, accent, true,
+        );
+        assert_eq!(complete_pixels[(25 * width + 24) as usize], 0);
+        assert_ne!(complete_pixels[(40 * width + 39) as usize], 0);
         assert_eq!(vertical_quota_text(2.0, true), "2%");
         assert_eq!(vertical_quota_text(100.0, true), "100%");
     }
@@ -7618,10 +7646,17 @@ mod tests {
         let (session, weekly) = vertical_row_tops(height, true, true);
         let first = session.unwrap();
         let second = weekly.unwrap();
-        // The visible grip dots end at about 12px, below the first label.
-        assert!(first >= sc(12));
-        assert!(second - first >= sc(46));
-        assert!(second + sc(42) + sc(8) <= height);
+        // The handle, text, ring, reset time and next row must be disjoint.
+        assert!(first >= sc(VERTICAL_DRAG_HANDLE_H));
+        assert!(second - first >= sc(VERTICAL_QUOTA_ROW_HEIGHT + VERTICAL_QUOTA_ROW_GAP));
+        let outer_radius = sc(VERTICAL_RING_MAX_RADIUS) + sc(2);
+        assert!(sc(VERTICAL_LABEL_CENTER_Y + 9) < sc(VERTICAL_RING_CENTER_Y) - outer_radius);
+        assert!(sc(VERTICAL_RING_CENTER_Y) + outer_radius < sc(VERTICAL_RESET_CENTER_Y - 9));
+        assert!(second + sc(VERTICAL_RESET_CENTER_Y + 9) <= height - sc(2));
+        assert!(vertical_drag_handle_hit(16, sc(8), sc(32), height));
+        assert!(!vertical_drag_handle_hit(16, first, sc(32), height));
+        assert!(!vertical_drag_handle_hit(16, second, sc(32), height));
+        assert!(!vertical_drag_handle_hit(16, sc(18), sc(32), height));
         assert_eq!(vertical_reset_label(None, false), "--");
         assert_eq!(vertical_reset_label(None, true), "--");
     }
