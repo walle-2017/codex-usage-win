@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - refactor/final-code-cleanup
   pull_request:
     branches:
       - main
@@ -56,6 +57,9 @@ jobs:
       - name: Verify v1.0.5 theme and style customization
         shell: pwsh
         run: ./scripts/assert-style-customization.ps1
+      - name: Verify settings focus and alpha-gated frosted rendering
+        shell: pwsh
+        run: ./scripts/assert-settings-and-frosted-alpha.ps1
       - name: Verify small-taskbar UI contract
         shell: pwsh
         run: ./scripts/assert-small-taskbar-ui.ps1
