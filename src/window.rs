@@ -1358,10 +1358,21 @@ fn try_taskbar_replica_handoff(
     if !embedded || !dragging || parent == taskbar.hwnd {
         return None;
     }
-    // Explicitly reject unsupported frosted/blur mode; never reparent it.
-    if frosted {
+    // Existing replicas are safe to hand off because each foreground HWND
+    // stays under the Explorer taskbar it was initially embedded into. For
+    // frosted mode this is only allowed with the *embedded* experiment; the
+    // old popup-based blur session must never take this route.
+    let embedded_blur_handoff = frosted && embedded_frosted_experiment_enabled()
+        && lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
+    if frosted && !embedded_blur_handoff {
         diagnose::log("taskbar replica skipped frosted mode; no cross-screen mutation");
         return Some(false);
+    }
+    if embedded_blur_handoff {
+        diagnose::log(format!(
+            "taskbar embedded frosted replica handoff begin source={:?} source_parent={:?} target_parent={:?}",
+            source_hwnd, parent, taskbar.hwnd
+        ));
     }
     unsafe {
         if !IsWindow(source_hwnd).as_bool()
@@ -1494,7 +1505,13 @@ fn try_taskbar_replica_handoff(
     unsafe {
         let _ = ShowWindow(next, SW_SHOWNOACTIVATE);
     }
+    // render_layered() detects the old backdrop's parent mismatch, destroys
+    // that Composition target and creates a new taskbar-owned sibling under
+    // the TARGET taskbar. Never reparent an existing blur HWND.
     render_layered();
+    if embedded_blur_handoff {
+        sync_blur_backdrop_zorder(next);
+    }
     // Capture the layered bitmap and USER/GDI allocations as well as the bare
     // HWND. A cheap window alone does not imply cheap compositing resources.
     let after_render_ok = !newly_created ||
@@ -1502,7 +1519,17 @@ fn try_taskbar_replica_handoff(
     if !after_render_ok {
         diagnose::log("taskbar replica post-render resource guard rejected new window");
     }
-    let shown = after_render_ok && unsafe {
+    let backdrop_ready = !embedded_blur_handoff || blur_backdrop_hwnd().is_some_and(|blur| unsafe {
+        IsWindow(blur).as_bool() && IsWindowVisible(blur).as_bool()
+            && GetAncestor(blur, GA_PARENT) == taskbar.hwnd
+    });
+    if embedded_blur_handoff {
+        diagnose::log(format!(
+            "taskbar embedded frosted replica backdrop ready={} target_parent={:?} backdrop={:?}",
+            backdrop_ready, taskbar.hwnd, blur_backdrop_hwnd()
+        ));
+    }
+    let shown = after_render_ok && backdrop_ready && unsafe {
         IsWindow(next).as_bool() && IsWindowVisible(next).as_bool()
             && GetAncestor(next, GA_PARENT) == taskbar.hwnd
     };
@@ -1523,6 +1550,13 @@ fn try_taskbar_replica_handoff(
             TASKBAR_REPLICA_WINDOWS.with(|cache|
                 cache.borrow_mut().retain(|slot| slot.child.to_hwnd() != next));
             unsafe { let _ = DestroyWindow(next); }
+        }
+        if embedded_blur_handoff {
+            // Restore both the original foreground bitmap and its original
+            // taskbar-owned blur sibling after a rejected target handoff.
+            render_layered();
+            sync_blur_backdrop_zorder(source_hwnd);
+            diagnose::log("taskbar embedded frosted replica rollback: original backdrop restored");
         }
         diagnose::log("taskbar replica show failed, original HWND restored");
         return Some(false);
@@ -1552,6 +1586,12 @@ fn try_taskbar_replica_handoff(
             "taskbar replica health active={:?} total_windows={} private_bytes={} working_set_bytes={} user_objects={} gdi_objects={}",
             next, count, resources.private, resources.working,
             resources.user, resources.gdi
+        ));
+    }
+    if embedded_blur_handoff {
+        diagnose::log(format!(
+            "taskbar embedded frosted replica handoff success active={:?} parent={:?} backdrop={:?}",
+            next, taskbar.hwnd, blur_backdrop_hwnd()
         ));
     }
     Some(true)
