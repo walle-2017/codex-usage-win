@@ -1900,7 +1900,7 @@ const SMALL_WIDGET_HEIGHT: i32 = 28;
 const DRAG_HANDLE_HIT_H: i32 = 24;
 const VERTICAL_WIDGET_MIN_WIDTH: i32 = 32;
 const VERTICAL_WIDGET_MAX_WIDTH: i32 = 68;
-const VERTICAL_WIDGET_HEIGHT: i32 = 128;
+const VERTICAL_WIDGET_HEIGHT: i32 = 112;
 const VERTICAL_WIDGET_INSET: i32 = 2;
 const VERTICAL_DRAG_HANDLE_H: i32 = 17;
 
@@ -2940,14 +2940,14 @@ unsafe fn render_taskbar_text(
         let (session_top, weekly_top) = vertical_row_tops(
             height, show_session_window, show_weekly_window,
         );
-        let radius = (((width - sc(7)) as f32) * 0.5).min(sc(17) as f32).max(1.0);
+        let radius = (((width - sc(7)) as f32) * 0.5).min(sc(15) as f32).max(1.0);
         for (top, label, pct, reset) in [
             (session_top, "5H", codex_session_pct, session_reset),
             (weekly_top, "7D", codex_weekly_pct, weekly_reset),
         ] {
             let Some(top) = top else { continue };
             let cx = width / 2;
-            let cy = top + sc(26);
+            let cy = top + sc(24);
             render_vertical_ring(
                 pixels, width, height, cx, cy, radius, pct,
                 track, quota_bar_color(pct.clamp(0.0, 100.0)).blend_over(track),
@@ -2964,7 +2964,7 @@ unsafe fn render_taskbar_text(
                 &percent, percent_size, FW_SEMIBOLD.0 as i32, value_color,
             );
             render_vertical_centered_text(
-                pixels, width, height, cx, top + sc(46),
+                pixels, width, height, cx, top + sc(42),
                 &reset, sc(9), FW_NORMAL.0 as i32, reset_color,
             );
         }
@@ -3122,13 +3122,13 @@ unsafe fn render_taskbar_text(
 
 fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
     let first = if show_session && show_weekly {
-        sc(16)
+        sc(12)
     } else {
-        ((height - sc(52)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
+        ((height - sc(46)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
     };
     (
         show_session.then_some(first),
-        show_weekly.then_some(if show_session { sc(68) } else { first }),
+        show_weekly.then_some(if show_session { sc(60) } else { first }),
     )
 }
 
@@ -3295,7 +3295,7 @@ fn paint_vertical_widget_content(
             ] {
                 let Some(top) = top else { continue };
                 let cx = width / 2;
-                let cy = top + sc(26);
+                let cy = top + sc(24);
                 let bounds = RECT {
                     left: cx - radius, top: cy - radius,
                     right: cx + radius + 1, bottom: cy + radius + 1,
@@ -4840,7 +4840,7 @@ fn usage_hover_hit(
                 left: sc(2),
                 top: y_top,
                 right: client.right - sc(2),
-                bottom: y_top + sc(51),
+                bottom: y_top + sc(47),
             };
             if point_in_rect(region, x, y) {
                 return Some((target, region));
@@ -7601,8 +7601,8 @@ mod tests {
         let first = session.unwrap();
         let second = weekly.unwrap();
         assert!(first >= sc(VERTICAL_DRAG_HANDLE_H) - sc(2));
-        assert!(second - first >= sc(50));
-        assert!(second + sc(46) + sc(10) <= height);
+        assert!(second - first >= sc(46));
+        assert!(second + sc(42) + sc(8) <= height);
         assert_eq!(vertical_reset_label(None, false), "--");
         assert_eq!(vertical_reset_label(None, true), "--");
     }
