@@ -17,7 +17,10 @@ $move = [regex]::Match($source, '(?s)WM_MOUSEMOVE\s*=>\s*\{(?<body>.*?)\n\s*WM_C
 if (-not $move.Success) { throw 'Unable to locate WM_MOUSEMOVE.' }
 $body = $move.Groups['body'].Value
 if ($body -notmatch 'GetDpiForWindow\s*\(\s*hovered_taskbar\.hwnd\s*\)') { throw 'Target taskbar DPI is not used.' }
-if ($body -notmatch 'drag_left_from_cursor\s*\(') { throw 'Cursor-anchored absolute positioning is not used.' }
+if ($body -notmatch 'drag_left_for_pointer\s*\(' -or
+    $source -notmatch 'let desired = drag_left_from_cursor\(taskbar_rect, pt, anchor_px\)') {
+    throw 'Cursor-anchored absolute positioning is not used.'
+}
 if ($body -match 'offset_for_drop_point\s*\(') { throw 'Live handoff still uses docked drop-point offset geometry.' }
 if ($body -match 'drag_start_mouse_x\s*-\s*pt\.x') { throw 'Live dragging still uses the old delta model.' }
 
