@@ -545,8 +545,12 @@ if ($styleWindow -match '"当前自定义"' -or
     $styleWindow -match '"Current custom"' -or
     $styleWindow -notmatch 'paint_style_preview_card\(' -or
     $styleWindow -notmatch 'if\s+!matched' -or
-    $styleWindow -notmatch 'rect\(hwnd, 200, 420, 424, 604\)') {
-    throw 'Preset page must show the custom preview below the preset row without a redundant Current custom heading.'
+    $styleWindow -notmatch 'const\s+PRESET_CARD_WIDTH:\s*i32\s*=\s*172' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_HEIGHT:\s*i32\s*=\s*390' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_GAP:\s*i32\s*=\s*16' -or
+    $styleWindow -notmatch 'preset_gallery_card_rect\(3\)' -or
+    $styleWindow -notmatch 'portrait_preview_widget_bounds\(') {
+    throw 'Preset gallery must place three preset cards and the custom preview in a single row with tall cards and a proportionally accurate portrait widget.'
 }
 if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'strip_jsonc_comments' -or
