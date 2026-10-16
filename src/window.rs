@@ -75,7 +75,6 @@ struct AppState {
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
-    frosted_popup_session: bool,
     small_taskbar_mode: bool,
     small_show_weekly: bool,
     minimal_hover_target: Option<MinimalHoverTarget>,
@@ -2440,7 +2439,6 @@ pub fn run() {
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
-                frosted_popup_session: false,
                 small_taskbar_mode: false,
                 small_show_weekly: false,
                 minimal_hover_target: None,
@@ -2600,43 +2598,6 @@ fn register_blur_backdrop_class() {
             ..Default::default()
         };
         let _ = RegisterClassExW(&wc);
-    }
-}
-
-// Normal frosted mode keeps both visual surfaces in the Explorer taskbar's
-// child-window hierarchy; it does not detach the foreground into a popup.
-fn embedded_frosted_enabled() -> bool {
-    true
-}
-
-fn popup_ownerless_frosted_experiment_enabled() -> bool {
-    diagnose::is_enabled()
-        && taskbar_replica_enabled()
-        && std::env::var_os("CODEX_TASKBAR_FROSTED_OWNERLESS_EXPERIMENT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn bind_popup_windows_to_taskbar_owner(foreground_hwnd: HWND) {
-    let (taskbar_hwnd, popup_session) = {
-        let state = lock_state();
-        state.as_ref().map(|s| (s.taskbar_hwnd, s.frosted_popup_session))
-            .unwrap_or((None, false))
-    };
-    if popup_session && popup_ownerless_frosted_experiment_enabled() {
-        if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
-            let _ = native_interop::clear_popup_owner_if_present(backdrop_hwnd);
-        }
-        let _ = native_interop::clear_popup_owner_if_present(foreground_hwnd);
-        return;
-    }
-    if let Some(taskbar_hwnd) = taskbar_hwnd {
-        // set_popup_owner() also promotes the popup to HWND_TOPMOST. Bind the
-        // backdrop first and the layered foreground last so owner changes can
-        // never leave the blur surface above text/progress content.
-        if let Some(backdrop_hwnd) = blur_backdrop_hwnd() {
-            native_interop::set_popup_owner(backdrop_hwnd, Some(taskbar_hwnd));
-        }
-        native_interop::set_popup_owner(foreground_hwnd, Some(taskbar_hwnd));
     }
 }
 
@@ -2844,29 +2805,17 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
         tint,
     };
 
-    // Keep one DirectComposition target per visited taskbar. Opening the Start
-    // menu can temporarily make creation of a new child blur target fail; a
-    // previously created sibling can be restored without a USER/DWM call to
-    // create a new window or Composition target.
-    if embedded_frosted_enabled() {
-        let target = {
-            let state = lock_state();
-            state.as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)
-        };
-        if let (Some(backdrop), Some(target)) = (blur_backdrop_hwnd(), target) {
-            let parent = unsafe { GetAncestor(backdrop, GA_PARENT) };
-            if parent != target {
-                diagnose::log(format!(
-                    "taskbar embedded blur target switched; park child backdrop old_parent={:?} target={:?}",
-                    parent, target
-                ));
-                park_embedded_blur_backdrop();
-            }
+    // Cache one Composition target for each taskbar and restore on return.
+    let target = lock_state().as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd);
+    if let (Some(backdrop), Some(target)) = (blur_backdrop_hwnd(), target) {
+        let parent = unsafe { GetAncestor(backdrop, GA_PARENT) };
+        if parent != target {
+            park_embedded_blur_backdrop();
         }
-        if let Some(target) = target {
-            if blur_backdrop_hwnd().is_none() {
-                let _ = restore_parked_embedded_blur_backdrop(target);
-            }
+    }
+    if let Some(target) = target {
+        if blur_backdrop_hwnd().is_none() {
+            let _ = restore_parked_embedded_blur_backdrop(target);
         }
     }
 
@@ -2904,27 +2853,18 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
     unsafe {
         let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
         let title = native_interop::wide_str("");
-        let taskbar_parent = if embedded_frosted_enabled() {
-            let state = lock_state();
-            state.as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)
-        } else { None };
-        let child_mode = taskbar_parent.is_some();
-        let exstyle = if child_mode {
-            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP
-        } else {
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
-                | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP
-        };
+        let taskbar_parent = lock_state().as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)?;
+        let child_mode = true;
         let hwnd = match CreateWindowExW(
-            exstyle,
+            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            if child_mode { WS_CHILD | WS_CLIPSIBLINGS } else { WS_POPUP },
+            WS_CHILD | WS_CLIPSIBLINGS,
             0,
             0,
             1,
             1,
-            taskbar_parent.unwrap_or_default(),
+            taskbar_parent,
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
             None,
@@ -2969,19 +2909,10 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
             *state = Some(SendHwnd::from_hwnd(hwnd));
         }
 
-        if !child_mode {
-            let owner = if popup_ownerless_frosted_experiment_enabled() {
-                None
-            } else {
-                let state = lock_state();
-                state.as_ref().and_then(|s| s.taskbar_hwnd)
-            };
-            native_interop::set_popup_owner(hwnd, owner);
-        }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         diagnose::log(format!(
-            "composition gaussian backdrop created child_mode={} taskbar_parent={:?}",
-            child_mode, taskbar_parent
+            "composition gaussian backdrop created taskbar_parent={:?}",
+            taskbar_parent
         ));
         Some(hwnd)
     }
@@ -2990,9 +2921,6 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
 fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     if widget_hidden_for_taskbar_space() {
         return;
-    }
-    if !embedded_frosted_enabled() {
-        bind_popup_windows_to_taskbar_owner(foreground_hwnd);
     }
     let Some(backdrop_hwnd) = blur_backdrop_hwnd() else {
         return;
@@ -3010,10 +2938,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         diagnose::log("composition blur bounds sync failed during z-order update");
     }
 
-    let embedded_target = if embedded_frosted_enabled() {
-        let state = lock_state();
-        state.as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)
-    } else { None };
+    let embedded_target = lock_state().as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd);
     if let Some(target) = embedded_target {
         if let Some(tr) = native_interop::get_window_rect_safe(target) {
             unsafe {
@@ -3031,26 +2956,6 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         return;
     }
 
-    unsafe {
-        let _ = SetWindowPos(
-            backdrop_hwnd,
-            HWND_TOPMOST,
-            rect.left,
-            rect.top,
-            width,
-            height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
-        let _ = SetWindowPos(
-            foreground_hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
-    }
 }
 
 fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
@@ -3068,12 +2973,9 @@ fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
     if !sync_composition_blur_bounds(width, height) {
         diagnose::log("composition blur bounds sync failed during geometry update");
     }
-    let parent_rect = if embedded_frosted_enabled() {
-        let state = lock_state();
-        state.as_ref().filter(|s| s.embedded)
-            .and_then(|s| s.taskbar_hwnd)
-            .and_then(native_interop::get_window_rect_safe)
-    } else { None };
+    let parent_rect = lock_state().as_ref().filter(|s| s.embedded)
+        .and_then(|s| s.taskbar_hwnd)
+        .and_then(native_interop::get_window_rect_safe);
     let (x, y) = parent_rect.map(|tr| (rect.left - tr.left, rect.top - tr.top))
         .unwrap_or((rect.left, rect.top));
     unsafe {
@@ -3138,157 +3040,30 @@ fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i32, height: 
     }
 }
 
-fn activate_blur_popup(
-    hwnd: HWND,
-    blur_amount: f32,
-    tint: Color,
-) -> bool {
-    let was_embedded = {
-        let state = lock_state();
-        state.as_ref().map(|s| s.embedded).unwrap_or(false)
-    };
-
-    // Child-only experiment: keep the existing Explorer-embedded layered
-    // widget and create a sibling DirectComposition blur HWND behind it.
-    if was_embedded && embedded_frosted_enabled() {
-        let Some(_) = ensure_blur_backdrop(blur_amount, tint) else {
-            diagnose::log("taskbar embedded blur creation failed; retaining normal embedded widget");
-            return false;
-        };
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.composition_blur_active = true;
-            }
-        }
-        sync_blur_backdrop_zorder(hwnd);
-        diagnose::log("taskbar embedded dual-window composition blur activated");
-        return true;
-    }
-
-    // Keep the foreground widget layered at all times. Only detach it from
-    // Explorer so the independent Composition backdrop can sit behind it.
-    if was_embedded {
-        native_interop::detach_from_taskbar_as_popup(hwnd);
-        native_interop::set_layered_style(hwnd, true);
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.embedded = false;
-                // Reparenting a layered HWND back into Explorer after entering
-                // backdrop mode is unreliable on affected Windows 11 builds.
-                // Keep this foreground as a top-level popup for the process.
-                s.frosted_popup_session = true;
-            }
-        }
-        bind_popup_windows_to_taskbar_owner(hwnd);
-        position_at_taskbar();
-    }
-
-    let Some(_) = ensure_blur_backdrop(blur_amount, tint) else {
-        diagnose::log(
-            "composition blur backdrop activation failed; restoring layered mode",
-        );
-        restore_layered_taskbar_mode(hwnd);
+fn activate_blur_backdrop(hwnd: HWND, blur_amount: f32, tint: Color) -> bool {
+    if !lock_state().as_ref().is_some_and(|s| s.embedded) {
+        diagnose::log("blur backdrop skipped: foreground is not taskbar embedded");
         return false;
-    };
-
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.composition_blur_active = true;
-        }
     }
-
-    bind_popup_windows_to_taskbar_owner(hwnd);
+    if ensure_blur_backdrop(blur_amount, tint).is_none() {
+        diagnose::log("taskbar embedded blur creation failed");
+        return false;
+    }
+    if let Some(s) = lock_state().as_mut() {
+        s.composition_blur_active = true;
+    }
     sync_blur_backdrop_zorder(hwnd);
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    }
-    diagnose::log("dual-window composition gaussian blur activated");
     true
 }
 
 fn restore_layered_taskbar_mode(hwnd: HWND) {
-    let frosted_popup_session = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| s.frosted_popup_session)
-            .unwrap_or(false)
-    };
-
     destroy_blur_backdrop();
     destroy_parked_blur_backdrops();
     native_interop::set_layered_style(hwnd, true);
-
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.composition_blur_active = false;
-        }
+    if let Some(s) = lock_state().as_mut() {
+        s.composition_blur_active = false;
     }
-
-    if embedded_frosted_enabled() {
-        let embedded = lock_state().as_ref().is_some_and(|s| s.embedded);
-        if embedded {
-            position_at_taskbar();
-            diagnose::log("taskbar embedded dual-window composition blur disabled");
-            return;
-        }
-    }
-
-    if frosted_popup_session {
-        // Do NOT SetParent() this HWND back into Explorer during the same
-        // process lifetime. Reparenting is what invalidates the layered surface
-        // on affected Windows 11 builds. Keep the same top-level layered HWND
-        // and simply render the normal opaque/transparent panel again.
-        bind_popup_windows_to_taskbar_owner(hwnd);
-        position_at_taskbar();
-        if !widget_hidden_for_taskbar_space() {
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            }
-        }
-        diagnose::log("frosted glass disabled; keeping foreground in stable layered popup mode");
-        return;
-    }
-
-    // This path is only for an activation failure that happened before the
-    // foreground ever entered the frosted popup session.
-    let (taskbar_monitor, taskbar_index) = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| (s.taskbar_monitor.clone(), s.taskbar_index))
-            .unwrap_or((None, 0))
-    };
-    if attach_to_preferred_taskbar(hwnd, taskbar_monitor.as_deref(), taskbar_index) {
-        position_at_taskbar();
-        if !widget_hidden_for_taskbar_space() {
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            }
-        }
-    } else {
-        native_interop::detach_from_taskbar_as_popup(hwnd);
-        native_interop::set_layered_style(hwnd, true);
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.embedded = false;
-                s.frosted_popup_session = true;
-            }
-        }
+    if lock_state().as_ref().is_some_and(|s| s.embedded) {
         position_at_taskbar();
     }
 }
@@ -3359,21 +3134,15 @@ fn render_layered() {
         }
         if !composition_blur_active {
             composition_blur_active =
-                activate_blur_popup(hwnd, blur_amount, blur_tint);
+                activate_blur_backdrop(hwnd, blur_amount, blur_tint);
         }
     } else if composition_blur_active {
         restore_layered_taskbar_mode(hwnd);
         composition_blur_active = false;
     }
 
-    let (embedded, frosted_popup_session) = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| (s.embedded, s.frosted_popup_session))
-            .unwrap_or((false, false))
-    };
-    if !embedded && !frosted_popup_session && !composition_blur_active {
+    let embedded = lock_state().as_ref().is_some_and(|s| s.embedded);
+    if !embedded && !composition_blur_active {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -4604,9 +4373,6 @@ fn position_at_taskbar() {
         }
     }
 
-    if !embedded && !blur_active {
-        bind_popup_windows_to_taskbar_owner(hwnd);
-    }
     if was_hidden {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -5613,10 +5379,7 @@ unsafe extern "system" fn wnd_proc(
                                 &hovered_taskbar,
                             )
                         } else {
-                            select_taskbar_for_popup_window(
-                                hovered_taskbar_index,
-                                &hovered_taskbar,
-                            )
+                            attach_to_taskbar_window(hwnd, hovered_taskbar_index, &hovered_taskbar)
                         };
                         if switched {
                             {
@@ -5837,7 +5600,7 @@ unsafe extern "system" fn wnd_proc(
                         let switched = if embedded {
                             attach_to_taskbar_window(hwnd, target_index, &target_taskbar)
                         } else {
-                            select_taskbar_for_popup_window(target_index, &target_taskbar)
+                            attach_to_taskbar_window(hwnd, target_index, &target_taskbar)
                         };
                         if !switched {
                             // A failed cross-taskbar drop must not save the
