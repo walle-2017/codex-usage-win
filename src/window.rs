@@ -3324,18 +3324,15 @@ fn paint_vertical_widget_content(
                 }
                 let _ = SelectObject(hdc, old_brush);
 
-                let (reset, _) = {
+                let reset = {
                     let state = lock_state();
                     let codex = state.as_ref().and_then(|s| s.data.as_ref())
                         .and_then(|data| data.codex.as_ref());
-                    (
-                        vertical_reset_label(codex.and_then(|c| if label == "5H" {
-                            c.session.resets_at
-                        } else {
-                            c.weekly.resets_at
-                        }), label == "7D"),
-                        (),
-                    )
+                    vertical_reset_label(codex.and_then(|c| if label == "5H" {
+                        c.session.resets_at
+                    } else {
+                        c.weekly.resets_at
+                    }), label == "7D")
                 };
                 for (text, y, font_height, color) in [
                     (label.to_string(), top, sc(10), quota_type_color),
@@ -4843,7 +4840,7 @@ fn usage_hover_hit(
                 left: sc(2),
                 top: y_top,
                 right: client.right - sc(2),
-                bottom: y_top + sc(34),
+                bottom: y_top + sc(51),
             };
             if point_in_rect(region, x, y) {
                 return Some((target, region));
@@ -7576,6 +7573,39 @@ mod tests {
         ]);
         assert_eq!(nearest_free_top_offset(taskbar, &gaps, 104, -100), Some(444));
         assert_eq!(nearest_free_top_offset(taskbar, &gaps, 104, 900), Some(852));
+    }
+
+    #[test]
+    fn vertical_ring_has_correct_clockwise_progress_and_clear_center() {
+        let width = 48;
+        let height = 128;
+        let mut pixels = vec![0u32; (width * height) as usize];
+        let track = Color::rgba(70, 70, 70, 255);
+        let accent = Color::rgba(0, 230, 0, 255);
+        render_vertical_ring(
+            &mut pixels, width, height, 24, 40, 15.0, 25.0,
+            track, accent, true,
+        );
+        let pixel = |x: i32, y: i32| pixels[(y * width + x) as usize];
+        // Starts at 12 o'clock, advances clockwise, and leaves the center free for 100%.
+        assert!((pixel(24, 25) & 0x0000FF00) > (pixel(24, 55) & 0x0000FF00));
+        assert_eq!(pixel(24, 40), 0);
+        assert_ne!(pixel(24, 55), 0);
+        assert_eq!(vertical_quota_text(2.0, true), "2%");
+        assert_eq!(vertical_quota_text(100.0, true), "100%");
+    }
+
+    #[test]
+    fn vertical_layout_keeps_both_reset_lines_inside_compact_height() {
+        let height = sc(VERTICAL_WIDGET_HEIGHT);
+        let (session, weekly) = vertical_row_tops(height, true, true);
+        let first = session.unwrap();
+        let second = weekly.unwrap();
+        assert!(first >= sc(VERTICAL_DRAG_HANDLE_H) - sc(2));
+        assert!(second - first >= sc(50));
+        assert!(second + sc(46) + sc(10) <= height);
+        assert_eq!(vertical_reset_label(None, false), "--");
+        assert_eq!(vertical_reset_label(None, true), "--");
     }
 
     #[test]
