@@ -8,25 +8,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
-use windows::Win32::UI::HiDpi::GetWindowDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::System::StationsAndDesktops::GetThreadDesktop;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetCapture, GetFocus};
-
-thread_local! {
-    static REPARENT_DIAGNOSTIC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub fn reparent_diagnostic_active() -> bool {
-    REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.get())
-}
-
-// The Windows 0.58 projections do not expose AttachThreadInput in the enabled
-// modules; call the Win32 API directly for this opt-in diagnostic only.
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn AttachThreadInput(id_attach: u32, id_attach_to: u32, attach: i32) -> i32;
-}
 
 // Window style constants
 pub const WS_POPUP_STYLE: u32 = 0x80000000;
@@ -314,409 +296,42 @@ pub fn get_window_rect_safe(hwnd: HWND) -> Option<RECT> {
     }
 }
 
-// Diagnostic-only, read-only input/capture handoff timeline.  No window
-// mutation, queue attachment, input injection, or retries are permitted here.
-thread_local! {
-    static HANDOFF_DEEP_START: std::cell::Cell<Option<std::time::Instant>> =
-        const { std::cell::Cell::new(None) };
-}
-
-fn handoff_deep_verify_enabled() -> bool {
-    crate::diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_HANDOFF_DEEP_VERIFY").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-fn window_rect_diagnostic(hwnd: HWND) -> String {
-    match get_window_rect_safe(hwnd) {
-        Some(rect) => format!("({},{},{},{})", rect.left, rect.top, rect.right, rect.bottom),
-        None => "<unavailable>".to_owned(),
-    }
-}
-
-/// Snapshot widget, Explorer source/target, and each distinct GUI thread.
-/// A matching GetGUIThreadInfo result does NOT establish queue attachment:
-/// Windows exposes no such read-only relationship query here.
-pub fn log_handoff_deep_snapshot(stage: &str, widget: HWND, target: HWND) {
-    if !handoff_deep_verify_enabled() { return; }
-    unsafe {
-        let now = std::time::Instant::now();
-        let elapsed = HANDOFF_DEEP_START.with(|cell| {
-            if stage == "drag-before-release" {
-                cell.set(Some(now));
-            }
-            cell.get().map(|start| now.saturating_duration_since(start).as_micros())
-        });
-        let source = GetAncestor(widget, GA_PARENT);
-        let foreground = GetForegroundWindow();
-        let mut cursor = windows::Win32::Foundation::POINT::default();
-        let cursor_ok = GetCursorPos(&mut cursor).is_ok();
-        let hit = if cursor_ok { WindowFromPoint(cursor) } else { HWND::default() };
-        let hit_root = if hit != HWND::default() { GetAncestor(hit, GA_ROOT) }
-            else { HWND::default() };
-        let widget_tid = GetWindowThreadProcessId(widget, None);
-        let source_tid = GetWindowThreadProcessId(source, None);
-        let target_tid = GetWindowThreadProcessId(target, None);
-        crate::diagnose::log(format!(
-            "taskbar handoff-deep stage={} elapsed_us={:?} widget={:?} source={:?} target={:?} foreground={:?} local_active={:?} local_focus={:?} local_capture={:?} cursor_ok={} cursor=({}, {}) cursor_hit={:?} cursor_root={:?} cursor_in_source={} cursor_in_target={} widget_tid={} source_tid={} target_tid={} source_target_same_thread={}",
-            stage, elapsed, widget, source, target, foreground,
-            GetActiveWindow(), GetFocus(), GetCapture(),
-            cursor_ok, cursor.x, cursor.y, hit, hit_root,
-            cursor_ok && get_window_rect_safe(source).is_some_and(|r| {
-                cursor.x >= r.left && cursor.x < r.right && cursor.y >= r.top && cursor.y < r.bottom
-            }),
-            cursor_ok && get_window_rect_safe(target).is_some_and(|r| {
-                cursor.x >= r.left && cursor.x < r.right && cursor.y >= r.top && cursor.y < r.bottom
-            }),
-            widget_tid, source_tid, target_tid, source_tid != 0 && source_tid == target_tid
-        ));
-        for (role, hwnd) in [("widget", widget), ("source", source), ("target", target)] {
-            if hwnd == HWND::default() { continue; }
-            let mut pid = 0;
-            let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            crate::diagnose::log(format!(
-                "taskbar handoff-deep window stage={} role={} hwnd={:?} valid={} tid={} pid={} parent={:?} root={:?} raw_parent={:#x} style={:#x} ex_style={:#x} rect={} dpi_context={:?}",
-                stage, role, hwnd, IsWindow(hwnd).as_bool(), tid, pid,
-                GetAncestor(hwnd, GA_PARENT), GetAncestor(hwnd, GA_ROOT),
-                GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT),
-                GetWindowLongW(hwnd, GWL_STYLE) as u32,
-                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
-                window_rect_diagnostic(hwnd), GetWindowDpiAwarenessContext(hwnd)
-            ));
-        }
-        // For source/target Explorer windows the TIDs are commonly identical.
-        // Avoid duplicating the same thread snapshot.
-        let mut seen = Vec::new();
-        for (role, tid) in [("widget", widget_tid), ("source", source_tid),
-                            ("target", target_tid)] {
-            if tid == 0 || seen.contains(&tid) { continue; }
-            seen.push(tid);
-            let mut gui = GUITHREADINFO {
-                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-                ..Default::default()
-            };
-            let ok = GetGUIThreadInfo(tid, &mut gui).is_ok();
-            crate::diagnose::log(format!(
-                "taskbar handoff-deep gui stage={} role={} tid={} ok={} flags={:#x} active={:?} focus={:?} capture={:?} menu_owner={:?} move_size={:?} caret={:?}",
-                stage, role, tid, ok, gui.flags.0, gui.hwndActive, gui.hwndFocus,
-                gui.hwndCapture, gui.hwndMenuOwner, gui.hwndMoveSize, gui.hwndCaret
-            ));
-        }
-    }
-}
-
-/// Embed our window as a child of the taskbar
+/// Embed a newly-created popup under its Explorer taskbar. Never transfer an
+/// existing child from one taskbar to another: replica handoff owns that logic.
 pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
     unsafe {
-        // Preserve existing extended style, add tool window + no activate
+        if !IsWindow(hwnd).as_bool() || !is_taskbar_window(taskbar_hwnd) {
+            return false;
+        }
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32,
-        );
-
-        // Change from popup to child
+        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE,
+            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32);
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         let new_style = (style & !WS_POPUP_STYLE) | WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE;
         let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
-
-        let previous_parent = GetAncestor(hwnd, GA_PARENT);
-        let source_style = GetWindowLongW(hwnd, GWL_STYLE);
-        let source_ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let widget_context = GetWindowDpiAwarenessContext(hwnd);
-        let target_context = GetWindowDpiAwarenessContext(taskbar_hwnd);
-        let capture = GetCapture();
-        let widget_thread = GetWindowThreadProcessId(hwnd, None);
-        let source_thread = GetWindowThreadProcessId(previous_parent, None);
-        let target_thread = GetWindowThreadProcessId(taskbar_hwnd, None);
-        // Snapshot the source/target Explorer thread desktops and GUI input
-        // state without attaching queues or changing window ownership.
-        let source_pid = {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(previous_parent, Some(&mut pid));
-            pid
-        };
-        let target_pid = {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(taskbar_hwnd, Some(&mut pid));
-            pid
-        };
-        let widget_pid = {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            pid
-        };
-        let source_desktop = GetThreadDesktop(source_thread);
-        let target_desktop = GetThreadDesktop(target_thread);
-        let widget_desktop = GetThreadDesktop(widget_thread);
-        let mut target_gui = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        let target_gui_ok = GetGUIThreadInfo(target_thread, &mut target_gui).is_ok();
-        crate::diagnose::log(format!(
-            "taskbar reparent environment source_pid={} target_pid={} widget_pid={} source_desktop={:?} target_desktop={:?} widget_desktop={:?} target_gui_ok={} target_gui_flags={:#x} target_gui_active={:?} target_gui_focus={:?} target_gui_capture={:?} target_gui_menu_owner={:?}",
-            source_pid, target_pid, widget_pid, source_desktop, target_desktop,
-            widget_desktop, target_gui_ok, target_gui.flags.0, target_gui.hwndActive,
-            target_gui.hwndFocus, target_gui.hwndCapture, target_gui.hwndMenuOwner
-        ));
-        crate::diagnose::log(format!(
-            "taskbar reparent before widget={:?} old_parent={:?} target={:?} style={:#x} ex_style={:#x} capture={:?} widget_thread={} source_thread={} target_thread={} widget_dpi_context={:?} target_dpi_context={:?}",
-            hwnd, previous_parent, taskbar_hwnd, source_style, source_ex_style, capture,
-            widget_thread, source_thread, target_thread, widget_context, target_context
-        ));
-        // Check for a newly-created shell hierarchy or an invalid target
-        // topology before attempting the transfer. USER32 can reject SetParent
-        // with ERROR_INVALID_PARAMETER even when both HWNDs are valid.
-        let mut ancestor = taskbar_hwnd;
-        let mut target_depth = 0usize;
-        let mut target_contains_widget = false;
-        for _ in 0..64 {
-            if ancestor == hwnd {
-                target_contains_widget = true;
-                break;
-            }
-            let next = GetAncestor(ancestor, GA_PARENT);
-            if next == HWND::default() || next == ancestor {
-                break;
-            }
-            ancestor = next;
-            target_depth += 1;
-        }
-        crate::diagnose::log(format!(
-            "taskbar reparent topology target_valid={} source_valid={} target_depth={} target_contains_widget={} target_root={:?}",
-            IsWindow(taskbar_hwnd).as_bool(), IsWindow(hwnd).as_bool(),
-            target_depth, target_contains_widget, GetAncestor(taskbar_hwnd, GA_ROOT)
-        ));
-        log_handoff_deep_snapshot("native-before-setparent", hwnd, taskbar_hwnd);
-        REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(true));
-        crate::diagnose::log("taskbar SetParent begin");
-        let mut set_parent_result = SetParent(hwnd, taskbar_hwnd);
-        let immediate_error = if set_parent_result.is_err() {
-            Some(windows::core::Error::from_win32())
-        } else {
-            None
-        };
-        REPARENT_DIAGNOSTIC_ACTIVE.with(|active| active.set(false));
-        log_handoff_deep_snapshot("native-after-setparent", hwnd, taskbar_hwnd);
-        // Optional controlled input-queue experiment. Attach only the widget
-        // thread to the Explorer taskbar thread, retry once, always detach.
-        // This is NOT used in normal operation.
-        if set_parent_result.is_err()
-            && widget_thread != 0
-            && target_thread != 0
-            && widget_thread != target_thread
-            && std::env::var_os("CODEX_TASKBAR_INPUT_QUEUE_EXPERIMENT").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-        {
-            let attach = AttachThreadInput(widget_thread, target_thread, 1) != 0;
-            crate::diagnose::log(format!(
-                "taskbar input queue experiment attach={:?} widget_thread={} target_thread={}",
-                attach, widget_thread, target_thread
-            ));
-            if attach {
-                set_parent_result = SetParent(hwnd, taskbar_hwnd);
-                let retry_error = if set_parent_result.is_err() {
-                    Some(windows::core::Error::from_win32())
-                } else { None };
-                let detach = AttachThreadInput(widget_thread, target_thread, 0) != 0;
-                crate::diagnose::log(format!(
-                    "taskbar input queue experiment retry={:?} retry_error={:?} detach={:?}",
-                    set_parent_result, retry_error, detach
-                ));
-            }
-        }
-        crate::diagnose::log(format!(
-            "taskbar SetParent end result={:?} immediate_last_error={:?}",
-            set_parent_result, immediate_error
-        ));
-        // SetParent's previous-parent return value alone cannot prove that the
-        // requested parent is now active. Verify the actual parent explicitly.
+        let result = SetParent(hwnd, taskbar_hwnd);
         let actual_parent = GetAncestor(hwnd, GA_PARENT);
-        let parent_matches = actual_parent == taskbar_hwnd;
-        if !parent_matches {
+        if result.is_err() || actual_parent != taskbar_hwnd {
             crate::diagnose::log(format!(
-                "taskbar reparent failed widget={:?} target={:?} actual_parent={:?} set_parent_result={:?}",
-                hwnd, taskbar_hwnd, actual_parent, set_parent_result
-            ));
+                "taskbar embed failed hwnd={:?} parent={:?} actual={:?} result={:?}",
+                hwnd, taskbar_hwnd, actual_parent, result));
             return false;
         }
-        let frame_result = SetWindowPos(
-            hwnd,
-            HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        crate::diagnose::log(format!(
-            "taskbar reparent verified widget={:?} target={:?} actual_parent={:?} frame_result={:?}",
-            hwnd, taskbar_hwnd, actual_parent, frame_result
-        ));
+        if let Err(error) = SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED) {
+            crate::diagnose::log(format!("taskbar embed frame update failed hwnd={:?} error={:?}", hwnd, error));
+        }
         true
     }
 }
 
-/// Detach the widget from Explorer and turn it back into a top-level popup.
-/// The independent Windows Composition backdrop requires a top-level target;
-/// the foreground remains layered and interactive above that target.
-pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
-    unsafe {
-        let _ = SetParent(hwnd, HWND::default());
-
-        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        let new_style =
-            (style & !(WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE)) | WS_POPUP_STYLE;
-        let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
-
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32,
-        );
-
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-    }
-}
-
-// Read-only owner query used only by the opt-in popup transition diagnostic.
-#[link(name = "user32")]
-unsafe extern "system" {
-    #[link_name = "GetWindow"]
-    fn get_popup_owner_diagnostic(hwnd: HWND, command: u32) -> HWND;
-}
-
-const GW_OWNER_POPUP_DIAGNOSTIC: u32 = 4;
-
-fn popup_owner_diagnostic_enabled() -> bool {
-    crate::diagnose::is_enabled()
-        && std::env::var_os("CODEX_TASKBAR_POPUP_OWNER_DIAGNOSTIC").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-}
-
-/// Assign an owner to a top-level popup without turning it into a child window.
-/// Owned popups remain above their owner in z-order, which keeps taskbar overlays
-/// visible when Explorer re-activates the taskbar.
+/// Assign an owner to a separate tooltip popup; this never changes taskbar children.
 pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
     unsafe {
-        let diagnostic = popup_owner_diagnostic_enabled();
-        let before_owner = if diagnostic {
-            get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC)
-        } else {
-            HWND::default()
-        };
-        let before_raw = if diagnostic {
-            GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)
-        } else {
-            0
-        };
         let owner_value = owner.map(|h| h.0 as isize).unwrap_or(0);
-        if diagnostic {
-            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
-        }
-        let previous_value = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
-        let set_last_error = if diagnostic {
-            Some(windows::Win32::Foundation::GetLastError())
-        } else {
-            None
-        };
-        let position_result = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-        );
-        if diagnostic {
-            let after_owner = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
-            let after_raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-            crate::diagnose::log(format!(
-                "taskbar popup owner transition hwnd={:?} requested={:?} before_owner={:?} after_owner={:?} before_raw={:#x} after_raw={:#x} prior_value={:#x} set_last_error={:?} owner_matches={} raw_matches={} topmost_result={:?}",
-                hwnd, owner, before_owner, after_owner, before_raw, after_raw,
-                previous_value, set_last_error, after_owner == owner.unwrap_or_default(),
-                after_raw == owner_value, position_result
-            ));
-        }
-    }
-}
-
-/// Compare both Win32's effective owner and its raw GWLP_HWNDPARENT field.
-/// The two values can diverge temporarily while the Start-menu shell surface
-/// moves top-level windows between z-order bands.
-/// Experimental shell-independent frosted popup: remove the top-level owner
-/// only when one exists. Preserve all styles, geometry, z-order and activation.
-/// A normal cross-monitor popup move then never has to transfer taskbar owner.
-pub fn clear_popup_owner_if_present(hwnd: HWND) -> bool {
-    unsafe {
-        if !IsWindow(hwnd).as_bool() { return false; }
-        let before_raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-        let before_effective = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
-        if before_raw == 0 && before_effective == HWND::default() {
-            return true;
-        }
-        windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
-        let previous = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
-        let error = windows::Win32::Foundation::GetLastError();
-        let after_raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-        let after_effective = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
-        let cleared = after_raw == 0 && after_effective == HWND::default();
-        crate::diagnose::log(format!(
-            "taskbar frosted ownerless clear hwnd={:?} before_raw={:#x} before_owner={:?} prior={:#x} error={:?} after_raw={:#x} after_owner={:?} cleared={}",
-            hwnd, before_raw, before_effective, previous, error, after_raw,
-            after_effective, cleared
-        ));
-        cleared
-    }
-}
-
-pub fn popup_owner_matches(hwnd: HWND, taskbar: HWND) -> bool {
-    unsafe {
-        IsWindow(hwnd).as_bool()
-            && IsWindow(taskbar).as_bool()
-            && get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC) == taskbar
-            && GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT) == taskbar.0 as isize
-    }
-}
-
-/// Retry only the owner assignment; in particular do not raise either popup
-/// when Windows rejects the change with ERROR_INVALID_PARAMETER (87).
-/// Caller restores foreground-over-backdrop z-order once *both* owners match.
-pub fn try_rebind_popup_owner(hwnd: HWND, taskbar: HWND) -> bool {
-    if popup_owner_matches(hwnd, taskbar) {
-        return true;
-    }
-    if !is_taskbar_window(taskbar) {
-        crate::diagnose::log(format!(
-            "taskbar popup owner retry skipped invalid taskbar={:?} hwnd={:?}",
-            taskbar, hwnd
-        ));
-        return false;
-    }
-    unsafe {
-        windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
-        let previous = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, taskbar.0 as isize);
-        let error = windows::Win32::Foundation::GetLastError();
-        let effective = get_popup_owner_diagnostic(hwnd, GW_OWNER_POPUP_DIAGNOSTIC);
-        let raw = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-        let matched = effective == taskbar && raw == taskbar.0 as isize;
-        crate::diagnose::log(format!(
-            "taskbar popup owner retry hwnd={:?} requested={:?} prior={:#x} error={:?} effective={:?} raw={:#x} matched={}",
-            hwnd, taskbar, previous, error, effective, raw, matched
-        ));
-        matched
+        let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     }
 }
 
