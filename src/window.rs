@@ -4629,14 +4629,15 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
         MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
-    let reset = format_precise_reset_time(section.resets_at)
-        .unwrap_or_else(|| "--".to_string());
     if effective_appearance_preset(s) == AppearancePreset::Minimal {
+        let reset = format_precise_reset_time(section.resets_at)
+            .unwrap_or_else(|| "--".to_string());
         Some(format!("{label} · {reset}"))
     } else {
         // Default view: hovering the displayed reset timestamp reveals only
         // that quota's full local reset date and time.
-        Some(reset)
+        Some(format_precise_reset_time(section.resets_at)
+            .unwrap_or_else(|| "--".to_string()))
     }
 }
 
