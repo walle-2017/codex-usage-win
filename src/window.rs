@@ -2951,9 +2951,7 @@ fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
                 ));
             }
         }
-        return;
     }
-
 }
 
 fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
@@ -5366,15 +5364,9 @@ unsafe extern "system" fn wnd_proc(
                         let _ = ReleaseCapture();
                         
 
-                        let switched = if embedded {
-                            attach_to_taskbar_window(
-                                hwnd,
-                                hovered_taskbar_index,
-                                &hovered_taskbar,
-                            )
-                        } else {
-                            attach_to_taskbar_window(hwnd, hovered_taskbar_index, &hovered_taskbar)
-                        };
+                        let switched = attach_to_taskbar_window(
+                            hwnd, hovered_taskbar_index, &hovered_taskbar
+                        );
                         if switched {
                             {
                                 let mut state = lock_state();
@@ -5587,11 +5579,7 @@ unsafe extern "system" fn wnd_proc(
                 let release_taskbar = taskbar_at_point(pt);
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
-                        let switched = if embedded {
-                            attach_to_taskbar_window(hwnd, target_index, &target_taskbar)
-                        } else {
-                            attach_to_taskbar_window(hwnd, target_index, &target_taskbar)
-                        };
+                        let switched = attach_to_taskbar_window(hwnd, target_index, &target_taskbar);
                         if !switched {
                             // A failed cross-taskbar drop must not save the
                             // target monitor's screen X as an old-taskbar offset.
