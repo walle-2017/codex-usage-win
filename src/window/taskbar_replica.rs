@@ -183,7 +183,7 @@ pub(super) fn try_taskbar_replica_handoff(
         (
             s.taskbar_hwnd?, s.embedded,
             s.composition_blur_active ||
-                s.styles.active(s.is_dark).panel_frosted_strength > 0,
+                s.styles.active(s.is_dark).panel_frosted_active(),
             s.dragging, s.drag_anchor_logical_x,
             total_widget_width_for_state(s), widget_height_for_state(s),
             s.taskbar_index, s.taskbar_monitor.clone(), s.tray_notify_hwnd
