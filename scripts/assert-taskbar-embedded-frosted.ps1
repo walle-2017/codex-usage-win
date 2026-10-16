@@ -7,7 +7,7 @@ foreach ($token in @(
   'if was_embedded && embedded_frosted_experiment_enabled()',
   'taskbar embedded dual-window composition blur activated',
   'taskbar embedded dual-window composition blur disabled',
-  'taskbar embedded blur target switched; recreate child backdrop',
+  'taskbar embedded blur target switched; park child backdrop',
   'if child_mode { WS_CHILD | WS_CLIPSIBLINGS } else { WS_POPUP }',
   'taskbar_parent.unwrap_or_default()',
   'if !child_mode {',
