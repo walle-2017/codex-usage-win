@@ -6738,6 +6738,7 @@ unsafe fn paint_preset_gallery(
             primary,
             snapshot.vertical_taskbar_mode,
             snapshot.appearance_preset == AppearancePreset::Minimal,
+            snapshot.language,
         );
     }
 
@@ -6757,6 +6758,7 @@ unsafe fn paint_preset_gallery(
             primary,
             snapshot.vertical_taskbar_mode,
             snapshot.appearance_preset == AppearancePreset::Minimal,
+            snapshot.language,
         );
     }
 }
@@ -6791,8 +6793,7 @@ fn preview_arc_point(cx: i32, cy: i32, radius: i32, angle: f32) -> (i32, i32) {
 unsafe fn paint_preview_remaining_ring(
     hdc: HDC, hwnd: HWND, cx: i32, cy: i32, remaining: f32, style: &ThemeStyle,
 ) {
-    let radius = scale(hwnd, 12).max(3);
-    let diameter = radius * 2;
+    let radius = scale(hwnd, 11).max(3);
     let bounds = RECT {
         left: cx - radius, top: cy - radius,
         right: cx + radius, bottom: cy + radius,
@@ -6820,75 +6821,115 @@ unsafe fn paint_preview_remaining_ring(
         let _ = SelectObject(hdc, old_pen);
         let _ = DeleteObject(accent_pen);
     }
-    let _ = diameter;
+}
+
+// Two explicitly measured quota rows fit inside the 110px portrait thumbnail.
+// The preview is a scaled representation, not a cropped full-height widget.
+#[derive(Clone, Copy, Debug)]
+struct PortraitPreviewRow {
+    label: RECT,
+    center_x: i32,
+    center_y: i32,
+    reset: RECT,
+}
+
+fn portrait_preview_row(strip: RECT, index: i32, sc: impl Fn(i32) -> i32) -> PortraitPreviewRow {
+    let top = strip.top + sc(1 + index * 53);
+    PortraitPreviewRow {
+        label: RECT {
+            left: strip.left + sc(3), top,
+            right: strip.right - sc(3), bottom: top + sc(11),
+        },
+        center_x: (strip.left + strip.right) / 2,
+        center_y: top + sc(26),
+        reset: RECT {
+            left: strip.left + sc(3), top: top + sc(40),
+            right: strip.right - sc(3), bottom: top + sc(51),
+        },
+    }
 }
 
 unsafe fn paint_vertical_style_preview(
-    hdc: HDC, hwnd: HWND, preview: RECT, style: &ThemeStyle, minimal: bool,
+    hdc: HDC, hwnd: HWND, preview: RECT, style: &ThemeStyle,
+    minimal: bool, language: LanguageId,
 ) {
-    // A miniature portrait taskbar is centered in the existing preset card.
-    // Two quota rows fit without overlapping; the tooltip example remains
-    // outside the taskbar strip and retains preset-specific colors.
+    // Dedicated portrait miniature at left, compact tooltip example at right.
     let strip = RECT {
-        left: preview.left + scale(hwnd, 7),
+        left: preview.left + scale(hwnd, 8),
         top: preview.top + scale(hwnd, 2),
-        right: preview.left + scale(hwnd, 69),
+        right: preview.left + scale(hwnd, 72),
         bottom: preview.bottom - scale(hwnd, 2),
     };
     let radius = scale(hwnd, i32::from(style.panel_corner_radius))
         .min(((strip.right - strip.left) / 2).max(0));
     fill_rounded_rect(hdc, strip, style.color(StyleColorTarget::PanelBackground), radius);
     draw_rounded_outline_rect(hdc, strip, style.color(StyleColorTarget::PanelBorder), radius, 1);
-    let cx = (strip.left + strip.right) / 2;
-    let small_font = CreateFontW(
+
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+    let caption_font = CreateFontW(
         -scale(hwnd, 9).max(1), 0, 0, 0, FW_MEDIUM.0 as i32, 0, 0, 0,
         DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
         CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
-        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-        PCWSTR::from_raw(native_interop::wide_str(
-            fonts::face(fonts::FontRole::Taskbar, None),
-        ).as_ptr()),
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
     );
-    let old_font = SelectObject(hdc, small_font);
+    let percent_font = CreateFontW(
+        -scale(hwnd, if minimal { 13 } else { 8 }).max(1), 0, 0, 0,
+        FW_SEMIBOLD.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
+    );
+    let old_font = SelectObject(hdc, caption_font);
     let _ = SetBkMode(hdc, TRANSPARENT);
     for (index, (label, remaining, reset)) in [
-        ("5H", 82.0, "03:49"),
-        ("7D", 37.0, "10/22"),
+        ("5H", 82.0_f32, "03:49"),
+        ("7D", 37.0_f32, "10/22"),
     ].iter().enumerate() {
-        let row_top = preview.top + scale(hwnd, 1 + index as i32 * 50);
+        let row = portrait_preview_row(strip, index as i32, |v| scale(hwnd, v));
         if minimal {
-            let center_y = row_top + scale(hwnd, 25);
+            let _ = SelectObject(hdc, percent_font);
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
             draw_text(hdc, &format!("{remaining:.0}%"), RECT {
-                left: strip.left + scale(hwnd, 3), top: center_y - scale(hwnd, 8),
-                right: strip.right - scale(hwnd, 3), bottom: center_y + scale(hwnd, 8),
+                left: strip.left + scale(hwnd, 4),
+                top: row.center_y - scale(hwnd, 12),
+                right: strip.right - scale(hwnd, 4),
+                bottom: row.center_y + scale(hwnd, 12),
             }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         } else {
+            let _ = SelectObject(hdc, caption_font);
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
-            draw_text(hdc, label, RECT {
-                left: strip.left + scale(hwnd, 3), top: row_top + scale(hwnd, 1),
-                right: strip.right - scale(hwnd, 3), bottom: row_top + scale(hwnd, 14),
-            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            let ring_cy = row_top + scale(hwnd, 25);
-            paint_preview_remaining_ring(hdc, hwnd, cx, ring_cy, *remaining, style);
+            draw_text(hdc, label, row.label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            paint_preview_remaining_ring(hdc, hwnd, row.center_x, row.center_y, *remaining, style);
+            let _ = SelectObject(hdc, percent_font);
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
             draw_text(hdc, &format!("{remaining:.0}%"), RECT {
-                left: cx - scale(hwnd, 11), top: ring_cy - scale(hwnd, 9),
-                right: cx + scale(hwnd, 11), bottom: ring_cy + scale(hwnd, 9),
+                left: row.center_x - scale(hwnd, 12),
+                top: row.center_y - scale(hwnd, 9),
+                right: row.center_x + scale(hwnd, 12),
+                bottom: row.center_y + scale(hwnd, 9),
             }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let _ = SelectObject(hdc, caption_font);
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
-            draw_text(hdc, reset, RECT {
-                left: strip.left + scale(hwnd, 3), top: row_top + scale(hwnd, 38),
-                right: strip.right - scale(hwnd, 3), bottom: row_top + scale(hwnd, 49),
-            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            draw_text(hdc, reset, row.reset, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
 
+    let text_left = strip.right + scale(hwnd, 9);
+    let text_right = preview.right - scale(hwnd, 7);
+    let _ = SelectObject(hdc, caption_font);
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
+    draw_text(
+        hdc,
+        if language == LanguageId::SimplifiedChinese { "悬浮提示" } else { "Tooltip" },
+        RECT {
+            left: text_left, top: preview.top + scale(hwnd, 26),
+            right: text_right, bottom: preview.top + scale(hwnd, 41),
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
     let tooltip = RECT {
-        left: strip.right + scale(hwnd, 8),
-        top: preview.top + scale(hwnd, 28),
-        right: preview.right - scale(hwnd, 6),
-        bottom: preview.top + scale(hwnd, 71),
+        left: text_left, top: preview.top + scale(hwnd, 43),
+        right: text_right, bottom: preview.top + scale(hwnd, 88),
     };
     let tooltip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
         .min(((tooltip.bottom - tooltip.top) / 2).max(0));
@@ -6898,16 +6939,17 @@ unsafe fn paint_vertical_style_preview(
     );
     let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
     draw_text(hdc, "2026-10-22", RECT {
-        left: tooltip.left + scale(hwnd, 2), top: tooltip.top + scale(hwnd, 4),
-        right: tooltip.right - scale(hwnd, 2), bottom: tooltip.top + scale(hwnd, 23),
+        left: tooltip.left + scale(hwnd, 3), top: tooltip.top + scale(hwnd, 4),
+        right: tooltip.right - scale(hwnd, 3), bottom: tooltip.top + scale(hwnd, 22),
     }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     draw_text(hdc, "21:30", RECT {
-        left: tooltip.left + scale(hwnd, 2), top: tooltip.top + scale(hwnd, 22),
-        right: tooltip.right - scale(hwnd, 2), bottom: tooltip.bottom - scale(hwnd, 2),
+        left: tooltip.left + scale(hwnd, 3), top: tooltip.top + scale(hwnd, 22),
+        right: tooltip.right - scale(hwnd, 3), bottom: tooltip.bottom - scale(hwnd, 3),
     }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     let _ = SelectObject(hdc, old_font);
-    let _ = DeleteObject(small_font);
+    let _ = DeleteObject(caption_font);
+    let _ = DeleteObject(percent_font);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6925,6 +6967,7 @@ unsafe fn paint_style_preview_card(
     primary: Color,
     vertical: bool,
     minimal: bool,
+    language: LanguageId,
 ) {
     fill_rounded_rect(hdc, r, surface, scale(hwnd, SETTINGS_CARD_RADIUS));
     draw_rounded_outline_rect(
@@ -6958,9 +7001,9 @@ unsafe fn paint_style_preview_card(
 
     let preview = RECT {
         left: r.left + scale(hwnd, 12),
-        top: r.top + scale(hwnd, 46),
+        top: r.top + scale(hwnd, if vertical { 42 } else { 46 }),
         right: r.right - scale(hwnd, 12),
-        bottom: r.top + scale(hwnd, if vertical { 148 } else { 138 }),
+        bottom: r.top + scale(hwnd, if vertical { 152 } else { 138 }),
     };
     let panel_radius = scale(hwnd, i32::from(style.panel_corner_radius))
         .min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
@@ -6984,7 +7027,7 @@ unsafe fn paint_style_preview_card(
     }
 
     if vertical {
-        paint_vertical_style_preview(hdc, hwnd, preview, style, minimal);
+        paint_vertical_style_preview(hdc, hwnd, preview, style, minimal, language);
     } else {
     let text_left = preview.left + scale(hwnd, 10);
     let text_right = preview.right - scale(hwnd, 10);
@@ -8113,6 +8156,28 @@ unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORM
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+
+    #[test]
+    fn portrait_preview_layout_reserves_non_overlapping_labels_rings_and_resets() {
+        // Use logical 96-DPI units; the renderer scales each band at runtime.
+        let strip = RECT { left: 0, top: 0, right: 64, bottom: 106 };
+        let first = portrait_preview_row(strip, 0, |v| v);
+        let second = portrait_preview_row(strip, 1, |v| v);
+        let ring_extent = 12;
+        assert!(first.label.bottom < first.center_y - ring_extent);
+        assert!(first.center_y + ring_extent < first.reset.top);
+        assert!(first.reset.bottom < second.label.top);
+        assert!(second.label.bottom < second.center_y - ring_extent);
+        assert!(second.center_y + ring_extent < second.reset.top);
+        assert!(second.reset.bottom <= strip.bottom);
+        for row in [first, second] {
+            assert!(row.reset.left >= strip.left && row.reset.right <= strip.right);
+        }
+        // At a fixed 2x scale, the allocation remains disjoint and in-bounds.
+        let double = RECT { left: 0, top: 0, right: 128, bottom: 212 };
+        let last = portrait_preview_row(double, 1, |v| v * 2);
+        assert!(last.reset.bottom <= double.bottom);
+    }
 
     #[test]
     fn vertical_preset_preview_ring_has_bottom_gap_and_remaining_quota_palette() {
