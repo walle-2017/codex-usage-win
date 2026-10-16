@@ -4,7 +4,7 @@ This document records the maintained product constraints for **Codex Usage Win**
 
 ## Current baseline
 
-- Current release: `v1.0.4`
+- Current release: `v1.0.5`
 - Repository: `walle-2017/codex-usage-win`
 - Product name: `Codex Usage Win`
 - Standalone executable: `codex-usage-win.exe`
@@ -47,3 +47,16 @@ v1.0.4 is the renamed Codex Usage Win baseline with the new icon and complete cu
 ## UI invariants
 
 The DPI-aware multi-monitor drag implementation must preserve the logical pointer anchor across taskbars. Mouse capture must be released before reparenting, restored after the switch, and released unconditionally on button-up.
+
+## Stable multi-taskbar architecture
+
+- The primary widget HWND is the sole service owner (poll timers, tray icon, updater and settings callbacks). Foreground replicas do not create extra pollers.
+- Each taskbar receives its own child HWND when first visited; an existing embedded HWND must never be reparented to another Explorer taskbar.
+- Frosted mode uses a taskbar-child DirectComposition backdrop behind the layered foreground; it must not create a separate topmost foreground popup.
+- When switching taskbars, hide and park the previous blur HWND and Composition context under their original taskbar; restore the existing pair when returning. Create a new pair only on the first visit or after validation failure.
+- Reject failed handoffs and roll back to the previous visible HWND and backdrop. Keep resource-count and memory safeguards, DPI-aware cursor anchors and the parked-replica fallback when Start temporarily hides taskbar enumeration.
+- Normal startup and `--diagnose` must have identical behavior; the flag controls logging only. No `CODEX_TASKBAR_*` environment flags are supported.
+
+## Verification
+
+Run `cargo test`, `cargo clippy -- -D warnings`, and `cargo build --release` on Windows. Before merging, manually verify cross-taskbar round trips with Start open, settings/style changes, Explorer restart, sleep/resume, monitor reconfiguration and resource cleanup.
