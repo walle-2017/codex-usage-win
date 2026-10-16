@@ -1198,14 +1198,27 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
 }
 
 
+// Four tall, narrow cards fit the complete 740px settings content band.
+const PRESET_GALLERY_LEFT: i32 = 200;
+const PRESET_CARD_TOP: i32 = 220;
+const PRESET_CARD_WIDTH: i32 = 172;
+const PRESET_CARD_HEIGHT: i32 = 390;
+const PRESET_CARD_GAP: i32 = 16;
+
+fn preset_gallery_card_rect(index: i32) -> RECT {
+    let left = PRESET_GALLERY_LEFT + index * (PRESET_CARD_WIDTH + PRESET_CARD_GAP);
+    RECT { left, top: PRESET_CARD_TOP, right: left + PRESET_CARD_WIDTH,
+        bottom: PRESET_CARD_TOP + PRESET_CARD_HEIGHT }
+}
+
 fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     let index = match preset {
         ThemePreset::Classic => 0,
         ThemePreset::Ocean => 1,
         ThemePreset::Forest => 2,
     };
-    let left = 200 + index * 244;
-    rect(hwnd, left, 220, left + 224, 404)
+    let r = preset_gallery_card_rect(index);
+    rect(hwnd, r.left, r.top, r.right, r.bottom)
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -1403,9 +1416,9 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
 }
 
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    // Keep one compact row gap below the official preset cards. Their logical
-    // bottom is 404, so 420 leaves 16 px and avoids border overlap.
-    rect(hwnd, 200, 420, 424, 604)
+    // Custom styles always occupy the fourth position in the same row.
+    let r = preset_gallery_card_rect(3);
+    rect(hwnd, r.left, r.top, r.right, r.bottom)
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
@@ -7001,29 +7014,38 @@ unsafe fn paint_style_preview_card(
 
     let preview = RECT {
         left: r.left + scale(hwnd, 12),
-        top: r.top + scale(hwnd, if vertical { 42 } else { 46 }),
+        top: r.top + scale(hwnd, if vertical { 50 } else { 126 }),
         right: r.right - scale(hwnd, 12),
-        bottom: r.top + scale(hwnd, if vertical { 152 } else { 138 }),
+        bottom: r.top + scale(hwnd, if vertical { 326 } else { 234 }),
     };
-    let panel_radius = scale(hwnd, i32::from(style.panel_corner_radius))
-        .min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
+    // A neutral canvas frames the actual vertical widget, whose panel
+    // background/border are rendered independently below at true proportions.
+    let panel_radius = scale(hwnd, if vertical { 8 } else {
+        i32::from(style.panel_corner_radius)
+    }).min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
+    let canvas_fill = if vertical { surface } else {
+        style.color(StyleColorTarget::PanelBackground)
+    };
+    let canvas_border = if vertical { border } else {
+        style.color(StyleColorTarget::PanelBorder)
+    };
     if panel_radius > 0 {
         fill_rounded_rect(
             hdc,
             preview,
-            style.color(StyleColorTarget::PanelBackground),
+            canvas_fill,
             panel_radius,
         );
         draw_rounded_outline_rect(
             hdc,
             preview,
-            style.color(StyleColorTarget::PanelBorder),
+            canvas_border,
             panel_radius,
             1,
         );
     } else {
-        fill(hdc, preview, style.color(StyleColorTarget::PanelBackground));
-        draw_outline_rect(hdc, preview, style.color(StyleColorTarget::PanelBorder));
+        fill(hdc, preview, canvas_fill);
+        draw_outline_rect(hdc, preview, canvas_border);
     }
 
     if vertical {
@@ -7159,14 +7181,18 @@ unsafe fn paint_style_preview_card(
     .copied()
     .enumerate()
     {
-        let left = r.left + scale(hwnd, 14 + index as i32 * 48);
+        let swatch_width = 26;
+        let swatch_gap = 10;
+        let total_width = 4 * swatch_width + 3 * swatch_gap;
+        let left = (r.left + r.right - scale(hwnd, total_width)) / 2
+            + scale(hwnd, index as i32 * (swatch_width + swatch_gap));
         fill_rounded_rect(
             hdc,
             RECT {
                 left,
-                top: r.top + scale(hwnd, 158),
-                right: left + scale(hwnd, 34),
-                bottom: r.top + scale(hwnd, 172),
+                top: r.top + scale(hwnd, 346),
+                right: left + scale(hwnd, swatch_width),
+                bottom: r.top + scale(hwnd, 360),
             },
             style.color(target),
             scale(hwnd, 4),
@@ -8156,6 +8182,23 @@ unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORM
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+
+    #[test]
+    fn preset_gallery_is_four_tall_equal_cards_in_one_row() {
+        let cards: Vec<_> = (0..4).map(preset_gallery_card_rect).collect();
+        assert_eq!(cards[0].left, 200);
+        assert_eq!(cards[3].right, 936);
+        assert!(cards[3].right <= 940);
+        for (i, card) in cards.iter().enumerate() {
+            assert_eq!(card.right - card.left, PRESET_CARD_WIDTH);
+            assert_eq!(card.bottom - card.top, PRESET_CARD_HEIGHT);
+            assert_eq!(card.bottom, 610);
+            if i > 0 {
+                assert_eq!(card.left - cards[i - 1].right, PRESET_CARD_GAP);
+                assert_eq!(card.top, cards[i - 1].top);
+            }
+        }
+    }
 
     #[test]
     fn portrait_preview_layout_reserves_non_overlapping_labels_rings_and_resets() {
