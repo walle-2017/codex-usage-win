@@ -3601,7 +3601,7 @@ fn hide_tooltip_blur_backdrop() {
 fn sync_minimal_tooltip_owner(hwnd: HWND, taskbar_owner: Option<HWND>) {
     let Some(owner) = taskbar_owner else { return };
     unsafe {
-        if IsWindow(owner).as_bool() && GetWindow(hwnd, GW_OWNER) != owner {
+        if IsWindow(owner).as_bool() && GetWindow(hwnd, GW_OWNER).ok() != Some(owner) {
             let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
         }
     }
