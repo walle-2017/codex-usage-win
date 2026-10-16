@@ -198,6 +198,7 @@ const GITHUB_RELEASES_URL: &str =
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
+const WM_APP_FOCUS_EXISTING_SETTINGS: u32 = native_interop::WM_APP + 140;
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 
 /// How often the watchdog thread polls for an explorer.exe restart (which
@@ -2287,7 +2288,7 @@ fn render_layered() {
 
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
-    let blur_requested = frosted_strength > 0;
+    let blur_requested = style.panel_frosted_active();
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
@@ -4074,14 +4075,18 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
         x = x.clamp(monitor_rect.left + margin, max_x);
         y = y.clamp(monitor_rect.top + margin, max_y);
 
-        let (tooltip_frosted_strength, tooltip_background) = {
+        let (tooltip_frosted_strength, tooltip_background, blur_allowed) = {
             let state = lock_state();
             state.as_ref().map(|s| {
                 let style = s.styles.active(s.is_dark);
-                (style.tooltip_frosted_strength(), style.color(StyleColorTarget::TooltipBackground))
-            }).unwrap_or((0, Color::from_hex("#30343CFF")))
+                (
+                    style.tooltip_frosted_strength(),
+                    style.color(StyleColorTarget::TooltipBackground),
+                    style.tooltip_frosted_active(),
+                )
+            }).unwrap_or((0, Color::from_hex("#30343CFF"), false))
         };
-        let frosted_active = if tooltip_frosted_strength > 0 {
+        let frosted_active = if blur_allowed {
             if let Some(backdrop) = ensure_tooltip_blur_backdrop(
                 blur_amount_for_strength(tooltip_frosted_strength),
                 tooltip_background,
@@ -5207,10 +5212,14 @@ unsafe extern "system" fn wnd_proc(
                     style_window::sync(style_settings_snapshot());
                 }
                 IDM_STYLE_SETTINGS => {
-                    close_style_editors();
-                    style_window::open_or_focus(
+                    // Popup-menu root commands are dispatched synchronously
+                    // before the root is destroyed. Defer focus until its
+                    // z-order and activation changes have finished.
+                    let _ = PostMessageW(
                         taskbar_replica_service_hwnd(hwnd),
-                        style_settings_snapshot(),
+                        WM_APP_FOCUS_EXISTING_SETTINGS,
+                        WPARAM(0),
+                        LPARAM(0),
                     );
                 }
                 IDM_STYLE_PANEL_BACKGROUND
@@ -5291,6 +5300,14 @@ unsafe extern "system" fn wnd_proc(
                 }
                 _ => {}
             }
+            LRESULT(0)
+        }
+        _ if msg == WM_APP_FOCUS_EXISTING_SETTINGS => {
+            close_style_editors();
+            style_window::open_or_focus(
+                taskbar_replica_service_hwnd(hwnd),
+                style_settings_snapshot(),
+            );
             LRESULT(0)
         }
         _ if msg == WM_APP_TRAY => {
