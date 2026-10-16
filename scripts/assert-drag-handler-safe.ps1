@@ -16,15 +16,17 @@ if ($moveBody -match 'current_appearance_preset\s*\(') {
     throw 'WM_MOUSEMOVE must not re-lock STATE through current_appearance_preset() while dragging.'
 }
 
-if ($moveBody -notmatch 'taskbar_at_point\s*\(') {
-    throw 'WM_MOUSEMOVE must detect the taskbar under the cursor while dragging.'
+if ($moveBody -notmatch 'taskbar_for_drag_point\s*\(' -or
+    $source -notmatch 'taskbar_at_point\(pt\)\.or_else\(current_drag_taskbar\)') {
+    throw 'WM_MOUSEMOVE must use exact taskbar hits first and the current parent only outside taskbars.'
 }
 if ($moveBody -notmatch 'attach_to_taskbar_window\s*\(' -or
     $moveBody -notmatch 'hovered_taskbar\.hwnd') {
     throw 'WM_MOUSEMOVE must reattach directly to the exact taskbar HWND under the cursor.'
 }
-if ($moveBody -notmatch 'drag_left_from_cursor\s*\(') {
-    throw 'WM_MOUSEMOVE must preserve the cursor grab point with cursor-anchored geometry when switching taskbars.'
+if ($moveBody -notmatch 'drag_left_for_pointer\s*\(' -or
+    $source -notmatch 'let desired = drag_left_from_cursor\(taskbar_rect, pt, anchor_px\)') {
+    throw 'WM_MOUSEMOVE must preserve cursor-anchored X geometry and clamp movement outside taskbars.'
 }
 if ($moveBody -notmatch 'SetCapture\s*\(\s*hwnd\s*\)') {
     throw 'WM_MOUSEMOVE must restore mouse capture after a live taskbar switch.'
@@ -97,6 +99,10 @@ if (-not $buttonUpMatch.Success) {
     throw 'Unable to locate WM_LBUTTONUP handler.'
 }
 $buttonUpBody = $buttonUpMatch.Groups['body'].Value
+if ($buttonUpBody -notmatch 'taskbar_for_drag_point\s*\(pt\)' -or
+    $buttonUpBody -notmatch 'left_offset_for_drag_left\s*\(') {
+    throw 'Releasing outside the taskbar must finalize a safe offset on the current taskbar.'
+}
 $releasePos = $buttonUpBody.IndexOf('ReleaseCapture')
 $dragResultBranchPos = $buttonUpBody.IndexOf('if let Some((current_taskbar_hwnd')
 if ($releasePos -lt 0 -or ($dragResultBranchPos -ge 0 -and $releasePos -gt $dragResultBranchPos)) {
