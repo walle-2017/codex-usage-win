@@ -1288,49 +1288,8 @@ fn attach_to_taskbar_window(
     if let Some(switched) = try_taskbar_replica_handoff(hwnd, index, taskbar) {
         return switched;
     }
-    
-    
-    
-    let source_taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
-    
-    
-    
-    let handoff_attempt = if explorer_active_state_verify_enabled()
-        && source_taskbar.is_some() && source_taskbar != Some(taskbar.hwnd)
-    {
-        EXPLORER_HANDOFF_ATTEMPT.with(|c| {
-            let next = c.get().saturating_add(1);
-            c.set(next);
-            next
-        })
-    } else { 0 };
-    if handoff_attempt != 0 {
-        diagnose::log(format!(
-            "taskbar active-state verify handoff_begin attempt={} source={:?} target={:?}",
-            handoff_attempt, source_taskbar, taskbar.hwnd
-        ));
-    }
-    
-    
+
     if !native_interop::embed_in_taskbar(hwnd, taskbar.hwnd) {
-        if focus_cycle_enabled() {
-            FOCUS_CYCLE_ARMED.with(|cell| cell.set(true));
-            diagnose::log("taskbar focus cycle experiment armed by failed reparent");
-        }
-        
-        
-        
-        
-        
-        
-        
-        if handoff_attempt != 0 {
-            diagnose::log(format!(
-                "taskbar active-state verify handoff_result attempt={} success=false source={:?} target={:?}",
-                handoff_attempt, source_taskbar, taskbar.hwnd
-            ));
-        }
-        
         diagnose::log(format!(
             "taskbar switch aborted: target hwnd={:?} monitor={} (window parent did not change)",
             taskbar.hwnd,
@@ -1339,19 +1298,6 @@ fn attach_to_taskbar_window(
         return false;
     }
 
-    
-    
-    
-    
-    
-    
-    if handoff_attempt != 0 {
-        diagnose::log(format!(
-            "taskbar active-state verify handoff_result attempt={} success=true source={:?} target={:?}",
-            handoff_attempt, source_taskbar, taskbar.hwnd
-        ));
-    }
-    
     // Only release the old event hook after the window actually moves.
     let old_hook = {
         let mut state = lock_state();
@@ -1454,75 +1400,6 @@ fn replica_taskbar_targets_from_existing_windows() -> Vec<native_interop::Taskba
     result
 }
 
-// Unlike embedded replica windows, the frosted popup has no parked taskbar
-// child HWNDs. Remember only taskbars that have been positively identified
-// during this process lifetime, so a Start-menu enumeration gap cannot make
-// the previously visited taskbar an unreachable return target.
-const POPUP_VISITED_TASKBAR_LIMIT: usize = 4;
-thread_local! {
-    static POPUP_VISITED_TASKBARS:
-        std::cell::RefCell<Vec<native_interop::TaskbarWindow>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn remember_popup_visited_taskbar(taskbar: &native_interop::TaskbarWindow) {
-    if !taskbar_replica_enabled() || !native_interop::is_taskbar_window(taskbar.hwnd) {
-        return;
-    }
-    POPUP_VISITED_TASKBARS.with(|cache| {
-        let mut targets = cache.borrow_mut();
-        if let Some(previous) = targets.iter_mut().find(|t| t.hwnd == taskbar.hwnd) {
-            *previous = taskbar.clone();
-        } else if targets.len() < POPUP_VISITED_TASKBAR_LIMIT {
-            targets.push(taskbar.clone());
-            diagnose::log(format!(
-                "taskbar popup visited target cached hwnd={:?} monitor={} rect=({}, {}, {}, {})",
-                taskbar.hwnd,
-                taskbar.monitor_device.as_deref().unwrap_or("<unknown>"),
-                taskbar.rect.left, taskbar.rect.top,
-                taskbar.rect.right, taskbar.rect.bottom
-            ));
-        }
-    });
-}
-
-/// Read-only exact-rectangle lookup: never extrapolate outside a taskbar,
-/// alter popup ownership/z-order or reparent an HWND. Discard cached handles
-/// if Explorer has replaced the window or the window changed monitors.
-fn popup_visited_taskbar_at_point(pt: POINT) -> Option<native_interop::TaskbarWindow> {
-    if !taskbar_replica_enabled()
-        || !lock_state().as_ref().is_some_and(|s| !s.embedded) {
-        return None;
-    }
-    POPUP_VISITED_TASKBARS.with(|cache| {
-        let mut targets = cache.borrow_mut();
-        targets.retain_mut(|entry| {
-            if !native_interop::is_taskbar_window(entry.hwnd) {
-                return false;
-            }
-            let Some(rect) = native_interop::get_taskbar_rect(entry.hwnd)
-                .or_else(|| native_interop::get_window_rect_safe(entry.hwnd)) else {
-                return false;
-            };
-            if rect.right <= rect.left || rect.bottom <= rect.top {
-                return false;
-            }
-            let monitor = native_interop::monitor_device_name(entry.hwnd);
-            if entry.monitor_device.is_some() && monitor != entry.monitor_device {
-                return false;
-            }
-            entry.rect = rect;
-            entry.monitor_device = monitor;
-            true
-        });
-        targets.iter().find(|entry| point_is_in_taskbar_rect(pt, entry.rect)).cloned()
-    })
-}
-
-fn popup_visited_taskbars_for_diagnostics() -> Vec<native_interop::TaskbarWindow> {
-    POPUP_VISITED_TASKBARS.with(|cache| cache.borrow().clone())
-}
-
 fn point_is_in_taskbar_rect(pt: POINT, rect: RECT) -> bool {
     pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
 }
@@ -1532,9 +1409,6 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
     if let Some((index, found)) = enumerated.iter().enumerate()
         .find(|(_, taskbar)| point_is_in_taskbar_rect(pt, taskbar.rect))
     {
-        if lock_state().as_ref().is_some_and(|s| !s.embedded) {
-            remember_popup_visited_taskbar(found);
-        }
         return Some((index, found.clone()));
     }
 
@@ -1565,30 +1439,6 @@ fn taskbar_at_point(pt: POINT) -> Option<(usize, native_interop::TaskbarWindow)>
             }
         });
         return Some((index, found.clone()));
-    }
-
-    // A frosted/standalone popup has no parked child windows, unlike the
-    // embedded replica mode. Use exact geometry from a previously visited
-    // Explorer taskbar while Start temporarily hides it from enumeration.
-    if let Some(visited) = popup_visited_taskbar_at_point(pt) {
-        if !enumerated.iter().any(|taskbar| taskbar.hwnd == visited.hwnd) {
-            enumerated.push(visited.clone());
-        }
-        enumerated.sort_by_key(|taskbar| (
-            taskbar.rect.top, taskbar.rect.left,
-            taskbar.rect.bottom, taskbar.rect.right
-        ));
-        if let Some((index, found)) = enumerated.iter().enumerate()
-            .find(|(_, taskbar)| taskbar.hwnd == visited.hwnd)
-        {
-            diagnose::log(format!(
-                "taskbar popup recovered visited target hwnd={:?} monitor={} cursor=({}, {}) rect=({}, {}, {}, {})",
-                found.hwnd, found.monitor_device.as_deref().unwrap_or("<unknown>"),
-                pt.x, pt.y, found.rect.left, found.rect.top,
-                found.rect.right, found.rect.bottom
-            ));
-            return Some((index, found.clone()));
-        }
     }
 
     // Opening Start or another shell surface can transiently omit the taskbar
@@ -5099,13 +4949,6 @@ fn minimal_tooltip_hwnd() -> Option<HWND> {
 
     register_minimal_tooltip_class();
     unsafe {
-        // WS_POPUP treats this as an *owner*, not a child parent.
-        // Only the opt-in variant starts life owned by Explorer's taskbar.
-        let desired_owner = if tooltip_owner_experiment_enabled() {
-            lock_state().as_ref().and_then(|s| s.taskbar_hwnd)
-                .filter(|owner| IsWindow(*owner).as_bool())
-                .unwrap_or_default()
-        } else { HWND::default() };
         let class_name = native_interop::wide_str(MINIMAL_TOOLTIP_CLASS);
         let title = native_interop::wide_str("");
         let hwnd = CreateWindowExW(
@@ -5117,24 +4960,12 @@ fn minimal_tooltip_hwnd() -> Option<HWND> {
             0,
             sc(112),
             sc(28),
-            desired_owner,
+            HWND::default(),
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).ok()?,
             None,
         )
         .ok()?;
-        // Existing tooltip HWNDs must not inherit the preceding popup's
-        // attempted owner when Explorer replaces the taskbar.
-        LAST_TOOLTIP_OWNER_ATTEMPT.with(|c| c.set(desired_owner.0 as isize));
-        if tooltip_owner_experiment_enabled() {
-            let raw_owner = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-            let gw_owner = get_window_zorder_diagnostic(hwnd, GW_OWNER_ZORDER_DIAGNOSTIC);
-            diagnose::log(format!(
-                "taskbar tooltip owner creation requested={:?} gw_owner={:?} raw_owner={:#x} raw_matches={} gw_matches={}",
-                desired_owner, gw_owner, raw_owner,
-                raw_owner == desired_owner.0 as isize, gw_owner == desired_owner
-            ));
-        }
         let mut state = MINIMAL_TOOLTIP_HWND
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -5222,9 +5053,6 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
-    // In isolation mode no tooltip/blur HWND is created or shown at all.
-    // No mouse activation, drag or SetParent behavior changes.
-    if tooltip_disable_experiment_enabled() { return; }
     let Some(text) = minimal_hover_text(target) else {
         hide_minimal_usage_tooltip();
         return;
@@ -5232,7 +5060,6 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(tooltip) = minimal_tooltip_hwnd() else {
         return;
     };
-    experiment_bind_tooltip_owner(tooltip);
     let measured_width = unsafe { measure_minimal_tooltip_width(&text) };
 
     {
@@ -5293,7 +5120,6 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
                 (style.tooltip_frosted_strength(), style.color(StyleColorTarget::TooltipBackground))
             }).unwrap_or((0, Color::from_hex("#30343CFF")))
         };
-        let mut backdrop_placement_ok = None;
         let frosted_active = if tooltip_frosted_strength > 0 {
             if let Some(backdrop) = ensure_tooltip_blur_backdrop(
                 blur_amount_for_strength(tooltip_frosted_strength),
@@ -5301,10 +5127,8 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
                 width,
                 height,
             ) {
-                backdrop_placement_ok = Some(
-                    SetWindowPos(backdrop, HWND_TOPMOST, x, y, width, height,
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW).is_ok()
-                );
+                let _ = SetWindowPos(backdrop, HWND_TOPMOST, x, y, width, height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 true
             } else {
                 false
@@ -5313,7 +5137,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
             hide_tooltip_blur_backdrop();
             false
         };
-        let tooltip_placement_ok = SetWindowPos(
+        let _ = SetWindowPos(
             tooltip,
             HWND_TOPMOST,
             x,
@@ -5670,62 +5494,12 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
-            
-            
-            
-            
-            if focus_experiment_enabled() { diagnose::log("taskbar focus experiment drag_begin"); }
-            if focus_cycle_enabled() && FOCUS_CYCLE_ARMED.with(|cell| cell.replace(false)) {
-                let candidate = FOCUS_CYCLE_CANDIDATE.with(|cell| cell.get());
-                let target = HWND(candidate as *mut _);
-                let original = GetForegroundWindow();
-                let valid = candidate != 0 && IsWindow(target).as_bool();
-                let accepted = if valid { SetForegroundWindow(target).as_bool() } else { false };
-                let after = GetForegroundWindow();
-                diagnose::log(format!(
-                    "taskbar focus cycle experiment candidate={:?} valid={} foreground_before={:?} accepted={} foreground_after={:?} switched={}",
-                    target, valid, original, accepted, after, valid && after == target
-                ));
-                // Never send synthetic button events or move the pointer.
-                // If foreground permission is denied, drag continues unchanged.
-            }
-            
+
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             if !is_drag_handle_point(client_x, client_y) {
                 return LRESULT(0);
             }
-            if diagnose::is_enabled()
-                && std::env::var_os("CODEX_TASKBAR_FOCUS_SWITCH_EXPERIMENT").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
-            {
-                let target = LAST_EXTERNAL_FOREGROUND_HWND.with(|cell| HWND(cell.get() as *mut _));
-                let before = GetForegroundWindow();
-                let taskbar = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
-                if taskbar == Some(before)
-                    && target != HWND::default() && IsWindow(target).as_bool()
-                    && IsWindowVisible(target).as_bool()
-                {
-                    let mut target_pid = 0u32;
-                    let mut taskbar_pid = 0u32;
-                    GetWindowThreadProcessId(target, Some(&mut target_pid));
-                    if let Some(h) = taskbar { GetWindowThreadProcessId(h, Some(&mut taskbar_pid)); }
-                    if target_pid != 0 && target_pid != taskbar_pid {
-                        let accepted = SetForegroundWindow(target).as_bool();
-                        let after = GetForegroundWindow();
-                        diagnose::log(format!(
-                            "taskbar focus switch experiment candidate={:?} before={:?} accepted={} after={:?} actually_changed={}",
-                            target, before, accepted, after, after == target
-                        ));
-                    }
-                } else {
-                    diagnose::log(format!(
-                        "taskbar focus switch experiment skipped candidate={:?} foreground={:?} taskbar={:?}",
-                        target, before, taskbar
-                    ));
-                }
-            }
-
             let window_dpi = GetDpiForWindow(hwnd);
             let dpi = if window_dpi > 0 {
                 window_dpi
@@ -6011,9 +5785,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            
-            
-            
+
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let drag_result = {
@@ -6060,24 +5832,6 @@ unsafe extern "system" fn wnd_proc(
 
             if let Some((current_taskbar_hwnd, anchor_logical_x, embedded, failed_target)) = drag_result {
                 let release_taskbar = taskbar_at_point(pt);
-                if release_taskbar.is_none() && taskbar_replica_enabled() {
-                    diagnose::log(format!(
-                        "taskbar replica drop-miss cursor=({}, {}) live_targets={:?} parked_targets={:?} popup_visited_targets={:?}",
-                        pt.x, pt.y,
-                        native_interop::find_taskbars().iter().map(|t| (
-                            t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
-                            t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
-                        )).collect::<Vec<_>>(),
-                        replica_taskbar_targets_from_existing_windows().iter().map(|t| (
-                            t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
-                            t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
-                        )).collect::<Vec<_>>(),
-                        popup_visited_taskbars_for_diagnostics().iter().map(|t| (
-                            t.hwnd, t.monitor_device.as_deref().unwrap_or("<unknown>"),
-                            t.rect.left, t.rect.top, t.rect.right, t.rect.bottom
-                        )).collect::<Vec<_>>()
-                    ));
-                }
                 if let Some((target_index, target_taskbar)) = release_taskbar {
                     if current_taskbar_hwnd != Some(target_taskbar.hwnd) && failed_target != Some(target_taskbar.hwnd) {
                         let switched = if embedded {
