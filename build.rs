@@ -9,6 +9,7 @@ fn main() {
             .file("native/composition_blur.cpp")
             .file("native/directwrite_text.cpp")
             .file("native/control_primitives.cpp")
+            .file("native/taskbar_layout.cpp")
             .flag_if_supported("/std:c++20")
             .flag_if_supported("/EHsc")
             .compile("codex_composition_blur");
@@ -16,6 +17,7 @@ fn main() {
         println!("cargo:rerun-if-changed=native/composition_blur.cpp");
         println!("cargo:rerun-if-changed=native/directwrite_text.cpp");
         println!("cargo:rerun-if-changed=native/control_primitives.cpp");
+        println!("cargo:rerun-if-changed=native/taskbar_layout.cpp");
         println!("cargo:rustc-link-lib=windowsapp");
         println!("cargo:rustc-link-lib=CoreMessaging");
         println!("cargo:rustc-link-lib=runtimeobject");
@@ -23,6 +25,7 @@ fn main() {
         println!("cargo:rustc-link-lib=dwrite");
         println!("cargo:rustc-link-lib=windowscodecs");
         println!("cargo:rustc-link-lib=ole32");
+        println!("cargo:rustc-link-lib=Uiautomationcore");
     }
 
     // Embed the icon and richer PE version metadata into the executable.

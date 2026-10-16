@@ -17,9 +17,22 @@ $move = [regex]::Match($source, '(?s)WM_MOUSEMOVE\s*=>\s*\{(?<body>.*?)\n\s*WM_C
 if (-not $move.Success) { throw 'Unable to locate WM_MOUSEMOVE.' }
 $body = $move.Groups['body'].Value
 if ($body -notmatch 'GetDpiForWindow\s*\(\s*hovered_taskbar\.hwnd\s*\)') { throw 'Target taskbar DPI is not used.' }
-if ($body -notmatch 'drag_left_from_cursor\s*\(') { throw 'Cursor-anchored absolute positioning is not used.' }
+if ($body -notmatch 'drag_left_for_pointer\s*\(' -or
+    $source -notmatch 'let desired = drag_left_from_cursor\(taskbar_rect, pt, anchor_px\)') {
+    throw 'Cursor-anchored absolute positioning is not used.'
+}
 if ($body -match 'offset_for_drop_point\s*\(') { throw 'Live handoff still uses docked drop-point offset geometry.' }
 if ($body -match 'drag_start_mouse_x\s*-\s*pt\.x') { throw 'Live dragging still uses the old delta model.' }
+
+$taskbarAtPoint = [regex]::Match($source, '(?s)fn\s+taskbar_at_point\s*\(.*?\n\}')
+if (-not $taskbarAtPoint.Success) { throw 'Unable to locate taskbar_at_point.' }
+$taskbarBody = $taskbarAtPoint.Value
+if ($taskbarBody -notmatch 'native_interop::find_taskbars' -or
+    $taskbarBody -notmatch 'native_interop::is_taskbar_window' -or
+    $taskbarBody -notmatch 'state\.taskbar_hwnd' -or
+    $taskbarBody -notmatch 'get_taskbar_rect') {
+    throw 'Dragging must fall back to the persisted valid taskbar when EnumWindows temporarily omits it.'
+}
 
 $up = [regex]::Match($source, '(?s)WM_LBUTTONUP\s*=>\s*\{(?<body>.*?)\n\s*WM_RBUTTONUP\s*=>')
 if (-not $up.Success) { throw 'Unable to locate WM_LBUTTONUP.' }

@@ -10,6 +10,8 @@ $settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_mode
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 
 foreach ($mode in @('System', 'Dark', 'Light')) {
@@ -389,7 +391,7 @@ if ($windowProduction -notmatch 's\.taskbar_hwnd\.unwrap_or_else\(\|\| s\.hwnd\.
 if ($windowProduction -notmatch 'FROSTED_MAX_BLUR_PX:\s*f32\s*=\s*20\.0' -or
     $windowProduction -notmatch 'blur_amount_for_strength' -or
     $windowProduction -notmatch 'FROSTED_MAX_BLUR_PX\s*\*\s*f32::from\(strength' -or
-    $windowProduction -notmatch 'frosted_strength\s*>\s*0') {
+    $styleProduction -notmatch 'panel_frosted_strength\s*>\s*0') {
     throw 'Frosted intensity must map 0-100 linearly to a real Gaussian blur amount.'
 }
 if ($native -match 'SetWindowCompositionAttribute' -or
@@ -412,10 +414,11 @@ if ($windowProduction -notmatch 'BLUR_BACKDROP_HWND' -or
 if ($windowProduction -match 'set_layered_style\(hwnd, false\)') {
     throw 'The foreground widget must remain layered while frosted glass is active.'
 }
-if ($native -notmatch 'detach_from_taskbar_as_popup' -or
-    $windowProduction -notmatch 'activate_blur_popup' -or
-    $windowProduction -notmatch 'restore_layered_taskbar_mode') {
-    throw 'Frosted foreground must detach as a layered popup and safely restore taskbar embedding.'
+if ($windowProduction -notmatch 'activate_blur_backdrop' -or
+    $windowProduction -notmatch 'restore_layered_taskbar_mode' -or
+    $windowProduction -notmatch 'park_embedded_blur_backdrop' -or
+    $windowProduction -notmatch 'restore_parked_embedded_blur_backdrop') {
+    throw 'Frosted foreground must stay taskbar-embedded and restore cached child Composition backdrops.'
 }
 if ($windowProduction -notmatch 'MIN_INTERACTIVE_ALPHA:\s*u8\s*=\s*1' -or
     $windowProduction -notmatch 'else if background\.a == 0' -or
@@ -423,48 +426,10 @@ if ($windowProduction -notmatch 'MIN_INTERACTIVE_ALPHA:\s*u8\s*=\s*1' -or
     $windowProduction -notmatch 'UpdateLayeredWindow') {
     throw 'Transparent layered panels must keep a minimally nonzero alpha so blank areas remain interactive with or without Composition blur.'
 }
-if ($windowProduction -notmatch 'select_taskbar_for_popup' -or
-    $windowProduction -notmatch 'taskbar_rect\.left \+ drag_left' -or
-    $windowProduction -notmatch 'sync_blur_backdrop_zorder\(hwnd\)') {
-    throw 'Frosted popup dragging must keep the Composition backdrop aligned and preserve taskbar selection.'
-}
-if ($windowProduction -notmatch 'frosted_popup_session' -or
-    $windowProduction -notmatch 'keeping foreground in stable layered popup mode') {
-    throw 'After frosted mode is entered, foreground must remain a stable layered popup for the process lifetime.'
-}
-$restoreBlock = [regex]::Match(
-    $windowProduction,
-    '(?s)fn\s+restore_layered_taskbar_mode\s*\(.*?\n\}'
-).Value
-if ($restoreBlock -notmatch 'if\s+frosted_popup_session\s*\{[\s\S]*?return;') {
-    throw 'Stable frosted-popup shutdown path must return before any Explorer reparent fallback.'
-}
-if ($windowProduction -notmatch 'refresh_widget_after_style_editor_close') {
-    throw 'Closing style editors must re-render and restore foreground z-order.'
-}
-if ($native -notmatch 'set_popup_owner' -or
-    $native -notmatch 'GWLP_HWNDPARENT' -or
-    $windowProduction -notmatch 'bind_popup_windows_to_taskbar_owner') {
-    throw 'Stable frosted popups must be owned by the selected taskbar so Explorer cannot cover them.'
-}
-$bindOwnerBlock = [regex]::Match(
-    $windowProduction,
-    '(?s)fn\s+bind_popup_windows_to_taskbar_owner\s*\(.*?\n\}'
-).Value
-$backdropOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner(backdrop_hwnd')
-$foregroundOwnerIndex = $bindOwnerBlock.IndexOf('set_popup_owner(foreground_hwnd')
-if ($backdropOwnerIndex -lt 0 -or
-    $foregroundOwnerIndex -lt 0 -or
-    $backdropOwnerIndex -ge $foregroundOwnerIndex) {
-    throw 'Taskbar owner rebinding must promote the blur backdrop before the foreground.'
-}
-$popupTaskbarSwitchBlock = [regex]::Match(
-    $windowProduction,
-    '(?s)fn\s+select_taskbar_for_popup_window\s*\(.*?\n\}'
-).Value
-if ($popupTaskbarSwitchBlock -notmatch 'composition_blur_active' -or
-    $popupTaskbarSwitchBlock -notmatch 'if\s+blur_active\s*\{[\s\S]*?sync_blur_backdrop_zorder\(foreground_hwnd\)') {
-    throw 'Cross-taskbar popup switches must reassert blur/foreground z-order once after owner rebinding.'
+if ($windowProduction -notmatch 'try_taskbar_replica_handoff' -or
+    $windowProduction -notmatch 'sync_blur_backdrop_zorder' -or
+    $windowProduction -notmatch 'GetAncestor\(blur, GA_PARENT\) == taskbar\.hwnd') {
+    throw 'Cross-taskbar embedded blur handoff must validate each sibling and reuse cached backgrounds.'
 }
 if ($native -notmatch 'monitor_device_name\(' -or
     $native -notmatch 'MONITORINFOEXW' -or
@@ -478,14 +443,13 @@ $positionBlock = [regex]::Match(
     $windowProduction,
     '(?s)fn\s+position_at_taskbar\s*\(\)\s*\{.*?\n\}'
 ).Value
-if ($positionBlock -notmatch 'actual_left_offset\s*=\s*desired_left_offset\.clamp' -or
-    $positionBlock -notmatch 'Never write this transient clamp back' -or
+if ($positionBlock -notmatch 'taskbar_free_spans\(' -or
+    $positionBlock -notmatch 'placement_for_free_spans\(' -or
     $positionBlock -match 'taskbar_left_offset\s*=\s*actual_left_offset') {
-    throw 'Transient TrayNotifyWnd width changes must clamp only the current frame and must never persist positional drift.'
+    throw 'Taskbar layout changes must snap only the current frame into a safe free span without persisting positional drift.'
 }
 if ($windowProduction -notmatch 'current_taskbar_hwnd\s*!=\s*Some\(hovered_taskbar\.hwnd\)' -or
     $windowProduction -notmatch 'attach_to_taskbar_window\(' -or
-    $windowProduction -notmatch 'select_taskbar_for_popup_window\(' -or
     $windowProduction -match 'attach_to_taskbar\(hwnd,\s*hovered_taskbar_index\)') {
     throw 'Cross-monitor dragging must bind the exact taskbar HWND already hit-tested instead of re-resolving an array index.'
 }
@@ -519,15 +483,19 @@ $mouseMoveBlock = [regex]::Match(
     $windowProduction,
     '(?s)WM_MOUSEMOVE\s*=>\s*\{.*?WM_CANCELMODE\s*=>'
 ).Value
-if ($mouseMoveBlock -notmatch 'let\s+Some\(\(hovered_taskbar_index, hovered_taskbar\)\)\s*=\s*taskbar_at_point\(pt\)\s+else\s*\{\s*return\s+LRESULT\(0\);') {
-    throw 'Cross-monitor dragging must freeze while the pointer is outside every taskbar.'
+if ($mouseMoveBlock -notmatch 'taskbar_for_drag_point\(pt\)' -or
+    $windowProduction -notmatch 'taskbar_at_point\(pt\)\.or_else\(current_drag_taskbar\)' -or
+    $mouseMoveBlock -notmatch 'drag_left_for_pointer\(') {
+    throw 'Outside-taskbar dragging must stay anchored to the current taskbar; real taskbar hits must still drive cross-monitor handoffs.'
 }
 $mouseUpBlock = [regex]::Match(
     $windowProduction,
     '(?s)WM_LBUTTONUP\s*=>\s*\{.*?updater::WM_APP_STARTUP_UPDATE_RESULT'
 ).Value
-if ($mouseUpBlock -notmatch 'drag released outside taskbars; restored last valid taskbar position') {
-    throw 'Releasing a drag over desktop must restore a valid taskbar position.'
+if ($mouseUpBlock -notmatch 'taskbar_for_drag_point\(pt\)' -or
+    $mouseUpBlock -notmatch 'placement_for_free_spans\(' -or
+    $mouseUpBlock -notmatch 'save_state_settings\(\)') {
+    throw 'Releasing a drag over desktop must commit a safe position on the current taskbar.'
 }
 if ($mouseMoveBlock -match 'sync_blur_backdrop_zorder') {
     throw 'Drag frames must not reorder Composition backdrop/foreground windows.'

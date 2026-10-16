@@ -73,6 +73,11 @@ unsafe extern "C" {
         stroke_a: u8,
         stroke_width: f32,
     ) -> i32;
+    fn codex_taskbar_control_rects(
+        taskbar_hwnd_raw: isize,
+        out_rects: *mut TaskbarControlRect,
+        capacity: usize,
+    ) -> i32;
     fn codex_draw_settings_icon(
         hdc_raw: isize,
         left: i32,
@@ -85,6 +90,15 @@ unsafe extern "C" {
         color_b: u8,
         color_a: u8,
     ) -> i32;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct TaskbarControlRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
 }
 
 // Win event constants
@@ -100,6 +114,7 @@ pub const TIMER_RESET_POLL: usize = 3;
 pub const WM_APP: u32 = 0x8000;
 pub const WM_APP_USAGE_UPDATED: u32 = WM_APP + 1;
 pub const WM_APP_TRAY: u32 = WM_APP + 3;
+pub const WM_APP_TASKBAR_LAYOUT_UPDATED: u32 = WM_APP + 4;
 
 const WINDOWS_TO_UNIX_EPOCH_SECONDS: u64 = 11_644_473_600;
 
@@ -150,6 +165,23 @@ pub fn monitor_device_name(hwnd: HWND) -> Option<String> {
     }
 }
 
+pub fn is_taskbar_window(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return false;
+        }
+        let mut class_name = [0u16; 64];
+        let len = GetClassNameW(hwnd, &mut class_name);
+        if len <= 0 {
+            return false;
+        }
+        matches!(
+            String::from_utf16_lossy(&class_name[..len as usize]).as_str(),
+            "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+        )
+    }
+}
+
 pub fn find_taskbars() -> Vec<TaskbarWindow> {
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let taskbars = &mut *(lparam.0 as *mut Vec<TaskbarWindow>);
@@ -183,6 +215,32 @@ pub fn find_taskbars() -> Vec<TaskbarWindow> {
         )
     });
     taskbars
+}
+
+/// Query visible actionable taskbar controls through Windows UI Automation.
+///
+/// Failures preserve the native HRESULT so the background cache can retain the
+/// last-known-good taskbar geometry and diagnose transient UI Automation errors.
+pub fn taskbar_control_rects(taskbar_hwnd: HWND) -> Result<Vec<RECT>, i32> {
+    const CAPACITY: usize = 256;
+    let mut raw = vec![TaskbarControlRect::default(); CAPACITY];
+    let count = unsafe {
+        codex_taskbar_control_rects(taskbar_hwnd.0 as isize, raw.as_mut_ptr(), raw.len())
+    };
+    if count < 0 {
+        return Err(count);
+    }
+    raw.truncate(count as usize);
+    Ok(
+        raw.into_iter()
+            .map(|rect| RECT {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+            })
+            .collect(),
+    )
 }
 
 /// Find a child window by class name
@@ -238,82 +296,42 @@ pub fn get_window_rect_safe(hwnd: HWND) -> Option<RECT> {
     }
 }
 
-/// Embed our window as a child of the taskbar
-pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
+/// Embed a newly-created popup under its Explorer taskbar. Never transfer an
+/// existing child from one taskbar to another: replica handoff owns that logic.
+pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) -> bool {
     unsafe {
-        // Preserve existing extended style, add tool window + no activate
+        if !IsWindow(hwnd).as_bool() || !is_taskbar_window(taskbar_hwnd) {
+            return false;
+        }
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32,
-        );
-
-        // Change from popup to child
+        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE,
+            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32);
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         let new_style = (style & !WS_POPUP_STYLE) | WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE;
         let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
-
-        let _ = SetParent(hwnd, taskbar_hwnd);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
+        let result = SetParent(hwnd, taskbar_hwnd);
+        let actual_parent = GetAncestor(hwnd, GA_PARENT);
+        if result.is_err() || actual_parent != taskbar_hwnd {
+            crate::diagnose::log(format!(
+                "taskbar embed failed hwnd={:?} parent={:?} actual={:?} result={:?}",
+                hwnd, taskbar_hwnd, actual_parent, result));
+            return false;
+        }
+        if let Err(error) = SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED) {
+            crate::diagnose::log(format!("taskbar embed frame update failed hwnd={:?} error={:?}", hwnd, error));
+        }
+        true
     }
 }
 
-/// Detach the widget from Explorer and turn it back into a top-level popup.
-/// The independent Windows Composition backdrop requires a top-level target;
-/// the foreground remains layered and interactive above that target.
-pub fn detach_from_taskbar_as_popup(hwnd: HWND) {
-    unsafe {
-        let _ = SetParent(hwnd, HWND::default());
-
-        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        let new_style =
-            (style & !(WS_CHILD_STYLE | WS_CLIPSIBLINGS_STYLE)) | WS_POPUP_STYLE;
-        let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
-
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            ex_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32,
-        );
-
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-    }
-}
-
-/// Assign an owner to a top-level popup without turning it into a child window.
-/// Owned popups remain above their owner in z-order, which keeps taskbar overlays
-/// visible when Explorer re-activates the taskbar.
+/// Assign an owner to a separate tooltip popup; this never changes taskbar children.
 pub fn set_popup_owner(hwnd: HWND, owner: Option<HWND>) {
     unsafe {
         let owner_value = owner.map(|h| h.0 as isize).unwrap_or(0);
         let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_value);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-        );
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     }
 }
 
@@ -569,11 +587,6 @@ pub struct Color {
 }
 
 impl Color {
-    #[allow(dead_code)]
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
-    }
-
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }

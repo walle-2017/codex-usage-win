@@ -87,6 +87,14 @@ pub fn is_enabled() -> bool {
     DIAGNOSE_STATE.get().is_some()
 }
 
+/// Avoid allocating diagnostic messages when --diagnose is not active.
+/// The closure runs synchronously and only for an enabled log writer.
+pub fn log_lazy(build: impl FnOnce() -> String) {
+    if is_enabled() {
+        log(build());
+    }
+}
+
 pub fn log(message: impl AsRef<str>) {
     let Some(state) = DIAGNOSE_STATE.get() else {
         return;

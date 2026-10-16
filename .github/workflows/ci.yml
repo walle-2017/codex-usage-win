@@ -47,12 +47,18 @@ jobs:
       - name: Verify live drag anchor handling
         shell: pwsh
         run: ./scripts/assert-live-drag-anchor.ps1
+      - name: Verify adaptive taskbar free-space placement
+        shell: pwsh
+        run: ./scripts/assert-taskbar-free-space.ps1
       - name: Verify default taskbar UI contract
         shell: pwsh
         run: ./scripts/assert-default-ui.ps1
       - name: Verify v1.0.5 theme and style customization
         shell: pwsh
         run: ./scripts/assert-style-customization.ps1
+      - name: Verify settings focus and alpha-gated frosted rendering
+        shell: pwsh
+        run: ./scripts/assert-settings-and-frosted-alpha.ps1
       - name: Verify small-taskbar UI contract
         shell: pwsh
         run: ./scripts/assert-small-taskbar-ui.ps1
@@ -68,6 +74,10 @@ jobs:
       - name: Verify persistent runtime logging contract
         shell: pwsh
         run: ./scripts/assert-runtime-log.ps1
+
+      - name: Verify permanent embedded taskbar architecture
+        shell: pwsh
+        run: ./scripts/assert-stable-taskbar-frosted.ps1
 
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
