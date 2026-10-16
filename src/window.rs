@@ -2603,6 +2603,8 @@ fn render_layered() {
             &bg_color,
             language,
             strings,
+            codex_session_pct,
+            codex_weekly_pct,
             &codex_session_text,
             &codex_weekly_text,
             show_session_window,
@@ -2905,12 +2907,55 @@ unsafe fn render_taskbar_text(
     bg: &Color,
     language: LanguageId,
     strings: Strings,
+    codex_session_pct: f64,
+    codex_weekly_pct: f64,
     codex_session_text: &str,
     codex_weekly_text: &str,
     show_session_window: bool,
     show_weekly_window: bool,
     last_poll_ok: bool,
 ) {
+    if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) {
+        let panel_base = style.color(StyleColorTarget::PanelBackground).blend_over(*bg);
+        let label_color = style.color(StyleColorTarget::QuotaType).blend_over(panel_base);
+        let value_color = style.color(if last_poll_ok {
+            StyleColorTarget::Remaining
+        } else {
+            StyleColorTarget::Error
+        }).blend_over(panel_base);
+        let (session_top, weekly_top) = vertical_row_tops(
+            height, show_session_window, show_weekly_window,
+        );
+        for (top, label, pct) in [
+            (session_top, "5H", codex_session_pct),
+            (weekly_top, "7D", codex_weekly_pct),
+        ] {
+            let Some(top) = top else { continue };
+            draw_directwrite_text(
+                pixels, width, height, surface_style,
+                RECT {
+                    left: width / 2 - sc(10),
+                    top,
+                    right: width - sc(2),
+                    bottom: top + sc(13),
+                },
+                label, sc(11), FW_MEDIUM.0 as i32, label_color,
+            );
+            let value = vertical_quota_text(pct, last_poll_ok);
+            draw_directwrite_text(
+                pixels, width, height, surface_style,
+                RECT {
+                    left: (width - sc(36)).max(sc(1)) / 2,
+                    top: top + sc(13),
+                    right: width - sc(1),
+                    bottom: top + sc(30),
+                },
+                &value, sc(13), FW_SEMIBOLD.0 as i32, value_color,
+            );
+        }
+        return;
+    }
+
     let preset = current_appearance_preset();
     let metrics = preset.metrics();
     let (label_width, text_width) = usage_layout_widths(language, preset);
