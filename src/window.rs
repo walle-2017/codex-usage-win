@@ -210,6 +210,17 @@ struct BlurBackdropParams {
 static BLUR_BACKDROP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static BLUR_BACKDROP_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static BLUR_BACKDROP_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
+
+// Embedded blur siblings stay tied to their original Explorer taskbar.
+// Reuse them after a round trip instead of creating a new cross-process child
+// while the Start menu is holding that taskbar active.
+struct ParkedBlurBackdrop {
+    parent: SendHwnd,
+    hwnd: SendHwnd,
+    context: usize,
+    params: Option<BlurBackdropParams>,
+}
+static PARKED_BLUR_BACKDROPS: Mutex<Vec<ParkedBlurBackdrop>> = Mutex::new(Vec::new());
 static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
@@ -3676,6 +3687,98 @@ fn destroy_blur_backdrop() {
     }
 }
 
+// Only the UI thread parks and restores the active backdrop. Keep the HWND
+// and its Composition target intact: reparenting either is not allowed.
+fn park_embedded_blur_backdrop() {
+    let (Some(hwnd), Some(context)) = (blur_backdrop_hwnd(), blur_backdrop_context()) else {
+        destroy_blur_backdrop();
+        return;
+    };
+    let parent = unsafe { GetAncestor(hwnd, GA_PARENT) };
+    if parent == HWND::default() || !unsafe { IsWindow(parent).as_bool() } {
+        diagnose::log("taskbar embedded blur cache rejected stale parent");
+        destroy_blur_backdrop();
+        return;
+    }
+    let mut cache = PARKED_BLUR_BACKDROPS.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= TASKBAR_REPLICA_MAX_WINDOWS ||
+        cache.iter().any(|entry| entry.parent.to_hwnd() == parent)
+    {
+        drop(cache);
+        diagnose::log("taskbar embedded blur cache full or duplicate; destroying old backdrop");
+        destroy_blur_backdrop();
+        return;
+    }
+    unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+    let held_hwnd = BLUR_BACKDROP_HWND.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let held_context = BLUR_BACKDROP_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let params = BLUR_BACKDROP_PARAMS.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let (Some(held_hwnd), Some(held_context)) = (held_hwnd, held_context) {
+        cache.push(ParkedBlurBackdrop {
+            parent: SendHwnd::from_hwnd(parent),
+            hwnd: held_hwnd,
+            context: held_context,
+            params,
+        });
+        diagnose::log(format!(
+            "taskbar embedded blur cache parked parent={:?} backdrop={:?} entries={}",
+            parent, hwnd, cache.len()
+        ));
+    } else {
+        drop(cache);
+        if let Some(context) = held_context {
+            native_interop::destroy_composition_blur(context);
+        }
+        if let Some(hwnd) = held_hwnd {
+            unsafe { let _ = DestroyWindow(hwnd.to_hwnd()); }
+        }
+    }
+    let _ = context;
+}
+
+fn restore_parked_embedded_blur_backdrop(parent: HWND) -> bool {
+    let entry = {
+        let mut cache = PARKED_BLUR_BACKDROPS.lock().unwrap_or_else(|e| e.into_inner());
+        cache.iter().position(|s| s.parent.to_hwnd() == parent)
+            .map(|index| cache.swap_remove(index))
+    };
+    let Some(entry) = entry else { return false };
+    let hwnd = entry.hwnd.to_hwnd();
+    if !unsafe { IsWindow(parent).as_bool() && IsWindow(hwnd).as_bool()
+        && GetAncestor(hwnd, GA_PARENT) == parent }
+    {
+        native_interop::destroy_composition_blur(entry.context);
+        if unsafe { IsWindow(hwnd).as_bool() } {
+            unsafe { let _ = DestroyWindow(hwnd); }
+        }
+        diagnose::log(format!("taskbar embedded blur cache invalid target={:?}", parent));
+        return false;
+    }
+    *BLUR_BACKDROP_HWND.lock().unwrap_or_else(|e| e.into_inner()) = Some(entry.hwnd);
+    *BLUR_BACKDROP_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(entry.context);
+    *BLUR_BACKDROP_PARAMS.lock().unwrap_or_else(|e| e.into_inner()) = entry.params;
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+    diagnose::log(format!(
+        "taskbar embedded blur cache restored target={:?} backdrop={:?}",
+        parent, hwnd
+    ));
+    true
+}
+
+fn destroy_parked_blur_backdrops() {
+    let entries = {
+        let mut cache = PARKED_BLUR_BACKDROPS.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *cache)
+    };
+    for entry in entries {
+        native_interop::destroy_composition_blur(entry.context);
+        let hwnd = entry.hwnd.to_hwnd();
+        if unsafe { IsWindow(hwnd).as_bool() } {
+            unsafe { let _ = DestroyWindow(hwnd); }
+        }
+    }
+}
+
 fn blur_amount_for_strength(strength: u8) -> f32 {
     FROSTED_MAX_BLUR_PX * f32::from(strength.min(FROSTED_STRENGTH_MAX))
         / f32::from(FROSTED_STRENGTH_MAX)
@@ -3687,9 +3790,10 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
         tint,
     };
 
-    // A child Composition HWND is tied to its parent taskbar. If a cross-screen
-    // move changes the active embedded taskbar, recreate the backdrop in that
-    // taskbar rather than SetParent() an existing Composition target.
+    // Keep one DirectComposition target per visited taskbar. Opening the Start
+    // menu can temporarily make creation of a new child blur target fail; a
+    // previously created sibling can be restored without a USER/DWM call to
+    // create a new window or Composition target.
     if embedded_frosted_experiment_enabled() {
         let target = {
             let state = lock_state();
@@ -3699,10 +3803,15 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
             let parent = unsafe { GetAncestor(backdrop, GA_PARENT) };
             if parent != target {
                 diagnose::log(format!(
-                    "taskbar embedded blur target switched; recreate child backdrop old_parent={:?} target={:?}",
+                    "taskbar embedded blur target switched; park child backdrop old_parent={:?} target={:?}",
                     parent, target
                 ));
-                destroy_blur_backdrop();
+                park_embedded_blur_backdrop();
+            }
+        }
+        if let Some(target) = target {
+            if blur_backdrop_hwnd().is_none() {
+                let _ = restore_parked_embedded_blur_backdrop(target);
             }
         }
     }
@@ -3752,7 +3861,7 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
                 | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP
         };
-        let hwnd = CreateWindowExW(
+        let hwnd = match CreateWindowExW(
             exstyle,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
@@ -3765,12 +3874,24 @@ fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND> {
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
             None,
-        )
-        .ok()?;
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                diagnose::log(format!(
+                    "taskbar embedded blur CreateWindowExW failed child={} parent={:?} error={:?}",
+                    child_mode, taskbar_parent, error
+                ));
+                return None;
+            }
+        };
 
         let Some(context) =
             native_interop::create_composition_blur(hwnd, blur_amount, tint)
         else {
+            diagnose::log(format!(
+                "taskbar embedded blur DirectComposition create failed child={} parent={:?}",
+                child_mode, taskbar_parent
+            ));
             let _ = DestroyWindow(hwnd);
             return None;
         };
@@ -4044,6 +4165,7 @@ fn restore_layered_taskbar_mode(hwnd: HWND) {
     };
 
     destroy_blur_backdrop();
+    destroy_parked_blur_backdrops();
     native_interop::set_layered_style(hwnd, true);
 
     {
@@ -7787,6 +7909,7 @@ unsafe extern "system" fn wnd_proc(
                 }
                 2 => {
                     destroy_blur_backdrop();
+                    destroy_parked_blur_backdrops();
             destroy_tooltip_blur_backdrop();
                     let hook = {
                         let state = lock_state();
@@ -8255,6 +8378,7 @@ unsafe extern "system" fn wnd_proc(
             hide_minimal_usage_tooltip();
 
             destroy_blur_backdrop();
+            destroy_parked_blur_backdrops();
             let hook = {
                 let state = lock_state();
                 state.as_ref().and_then(|s| s.win_event_hook)
