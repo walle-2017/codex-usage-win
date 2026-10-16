@@ -145,6 +145,8 @@ pub struct StyleWindowSnapshot {
     pub theme_mode: ThemeMode,
     pub is_dark: bool,
     pub appearance_preset: AppearancePreset,
+    // Runtime orientation, not a persisted appearance setting.
+    pub vertical_taskbar_mode: bool,
     pub active_style: ThemeStyle,
     pub editable_settings: EditableSettings,
 }
@@ -895,6 +897,19 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
     }
+}
+
+/// Keep the preset gallery in sync when the widget moves between horizontal
+/// and vertical taskbars without discarding active style edits.
+pub fn set_preview_orientation(vertical: bool) {
+    let hwnd = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else { return };
+        if s.snapshot.vertical_taskbar_mode == vertical { return; }
+        s.snapshot.vertical_taskbar_mode = vertical;
+        s.hwnd.to_hwnd()
+    };
+    unsafe { let _ = InvalidateRect(hwnd, None, false); }
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
@@ -6721,6 +6736,8 @@ unsafe fn paint_preset_gallery(
             border,
             accent,
             primary,
+            snapshot.vertical_taskbar_mode,
+            snapshot.appearance_preset == AppearancePreset::Minimal,
         );
     }
 
@@ -6738,6 +6755,8 @@ unsafe fn paint_preset_gallery(
             border,
             accent,
             primary,
+            snapshot.vertical_taskbar_mode,
+            snapshot.appearance_preset == AppearancePreset::Minimal,
         );
     }
 }
@@ -6755,6 +6774,8 @@ unsafe fn paint_style_preview_card(
     border: Color,
     accent: Color,
     primary: Color,
+    vertical: bool,
+    minimal: bool,
 ) {
     fill_rounded_rect(hdc, r, surface, scale(hwnd, SETTINGS_CARD_RADIUS));
     draw_rounded_outline_rect(
@@ -6790,7 +6811,7 @@ unsafe fn paint_style_preview_card(
         left: r.left + scale(hwnd, 12),
         top: r.top + scale(hwnd, 46),
         right: r.right - scale(hwnd, 12),
-        bottom: r.top + scale(hwnd, 138),
+        bottom: r.top + scale(hwnd, if vertical { 148 } else { 138 }),
     };
     let panel_radius = scale(hwnd, i32::from(style.panel_corner_radius))
         .min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
@@ -6813,6 +6834,9 @@ unsafe fn paint_style_preview_card(
         draw_outline_rect(hdc, preview, style.color(StyleColorTarget::PanelBorder));
     }
 
+    if vertical {
+        paint_vertical_style_preview(hdc, hwnd, preview, style, minimal);
+    } else {
     let text_left = preview.left + scale(hwnd, 10);
     let text_right = preview.right - scale(hwnd, 10);
     let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
@@ -6932,6 +6956,7 @@ unsafe fn paint_style_preview_card(
         );
     }
 
+    } // Horizontal preview: preserve existing bar and tooltip layout.
     for (index, target) in [
         StyleColorTarget::ProgressHigh,
         StyleColorTarget::ProgressMedium,
@@ -7962,6 +7987,7 @@ mod ui_smoke_tests {
                 theme_mode: ThemeMode::Dark,
                 is_dark: true,
                 appearance_preset: AppearancePreset::Default,
+                vertical_taskbar_mode: false,
                 active_style: ThemeStyle::dark_default(),
                 editable_settings: EditableSettings {
                     schema_version: 1,
