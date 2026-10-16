@@ -2926,34 +2926,46 @@ unsafe fn render_taskbar_text(
         } else {
             StyleColorTarget::Error
         }).blend_over(panel_base);
+        let reset_color = style.color(StyleColorTarget::ResetTime).blend_over(panel_base);
+        let track = style.color(StyleColorTarget::ProgressConsumed).blend_over(panel_base);
+        let (session_reset, weekly_reset) = {
+            let state = lock_state();
+            let codex = state.as_ref().and_then(|s| s.data.as_ref())
+                .and_then(|data| data.codex.as_ref());
+            (
+                vertical_reset_label(codex.and_then(|c| c.session.resets_at), false),
+                vertical_reset_label(codex.and_then(|c| c.weekly.resets_at), true),
+            )
+        };
         let (session_top, weekly_top) = vertical_row_tops(
             height, show_session_window, show_weekly_window,
         );
-        for (top, label, pct) in [
-            (session_top, "5H", codex_session_pct),
-            (weekly_top, "7D", codex_weekly_pct),
+        let radius = (((width - sc(7)) as f32) * 0.5).min(sc(17) as f32).max(1.0);
+        for (top, label, pct, reset) in [
+            (session_top, "5H", codex_session_pct, session_reset),
+            (weekly_top, "7D", codex_weekly_pct, weekly_reset),
         ] {
             let Some(top) = top else { continue };
-            draw_directwrite_text(
-                pixels, width, height, surface_style,
-                RECT {
-                    left: width / 2 - sc(10),
-                    top,
-                    right: width - sc(2),
-                    bottom: top + sc(13),
-                },
-                label, sc(11), FW_MEDIUM.0 as i32, label_color,
+            let cx = width / 2;
+            let cy = top + sc(26);
+            render_vertical_ring(
+                pixels, width, height, cx, cy, radius, pct,
+                track, quota_bar_color(pct.clamp(0.0, 100.0)).blend_over(track),
+                last_poll_ok,
             );
-            let value = vertical_quota_text(pct, last_poll_ok);
-            draw_directwrite_text(
-                pixels, width, height, surface_style,
-                RECT {
-                    left: (width - sc(36)).max(sc(1)) / 2,
-                    top: top + sc(13),
-                    right: width - sc(1),
-                    bottom: top + sc(30),
-                },
-                &value, sc(13), FW_SEMIBOLD.0 as i32, value_color,
+            render_vertical_centered_text(
+                pixels, width, height, cx, top + sc(5),
+                label, sc(10), FW_MEDIUM.0 as i32, label_color,
+            );
+            let percent = vertical_quota_text(pct, last_poll_ok);
+            let percent_size = if percent.len() >= 4 { sc(8) } else { sc(11) };
+            render_vertical_centered_text(
+                pixels, width, height, cx, cy,
+                &percent, percent_size, FW_SEMIBOLD.0 as i32, value_color,
+            );
+            render_vertical_centered_text(
+                pixels, width, height, cx, top + sc(46),
+                &reset, sc(9), FW_NORMAL.0 as i32, reset_color,
             );
         }
         return;
@@ -3118,6 +3130,112 @@ fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Opt
         show_session.then_some(first),
         show_weekly.then_some(if show_session { sc(68) } else { first }),
     )
+}
+
+fn vertical_reset_label(reset_at: Option<SystemTime>, weekly: bool) -> String {
+    let Some(local) = reset_at.and_then(native_interop::system_time_to_local) else {
+        return "--".to_string();
+    };
+    if weekly {
+        format!("{:02}/{:02}", local.wMonth, local.wDay)
+    } else {
+        format!("{:02}:{:02}", local.wHour, local.wMinute)
+    }
+}
+
+/// Antialiased ring composited into the already-premultiplied layered bitmap.
+/// 12 o'clock is 0%; progress advances clockwise. No GDI hollow brush/alpha
+/// conversion is needed, including on transparent frosted backgrounds.
+#[allow(clippy::too_many_arguments)]
+fn render_vertical_ring(
+    pixels: &mut [u32],
+    width: i32,
+    height: i32,
+    cx: i32,
+    cy: i32,
+    radius: f32,
+    percent: f64,
+    track: Color,
+    accent: Color,
+    has_data: bool,
+) {
+    let stroke = sc(3) as f32;
+    let half_stroke = stroke * 0.5;
+    let extent = (radius + half_stroke + 1.5).ceil() as i32;
+    let completed = if has_data { (percent / 100.0).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    for y in (cy - extent).max(0)..(cy + extent + 1).min(height) {
+        for x in (cx - extent).max(0)..(cx + extent + 1).min(width) {
+            let dx = x as f32 + 0.5 - cx as f32;
+            let dy = y as f32 + 0.5 - cy as f32;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let coverage = (half_stroke + 0.5 - (distance - radius).abs()).clamp(0.0, 1.0);
+            if coverage <= 0.0 { continue; }
+            let mut angle = dx.atan2(-dy);
+            if angle < 0.0 { angle += std::f32::consts::TAU; }
+            let fraction = angle / std::f32::consts::TAU;
+            let color = if completed > 0.0 && fraction <= completed {
+                accent
+            } else {
+                track
+            };
+            let opacity = (coverage * 255.0).round() as u8;
+            let index = (y * width + x) as usize;
+            pixels[index] = composite_premultiplied_text(pixels[index], color, opacity);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn render_vertical_centered_text(
+    pixels: &mut [u32],
+    width: i32,
+    height: i32,
+    center_x: i32,
+    center_y: i32,
+    value: &str,
+    font_size: i32,
+    weight: i32,
+    color: Color,
+) {
+    if value.is_empty() { return; }
+    let mask_width = (width - sc(4)).max(1);
+    let mask_height = sc(18).max(1);
+    let Some(mask) = native_interop::directwrite_text_mask(
+        value,
+        fonts::face(fonts::FontRole::Taskbar, None),
+        font_size as f32,
+        weight,
+        mask_width,
+        mask_height,
+    ) else { return };
+    let mut min_x = mask_width;
+    let mut min_y = mask_height;
+    let mut max_x = -1;
+    let mut max_y = -1;
+    for y in 0..mask_height {
+        for x in 0..mask_width {
+            if mask[(y * mask_width + x) as usize] == 0 { continue; }
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+    }
+    if max_x < 0 { return; }
+    let origin_x = center_x - (min_x + max_x + 1) / 2;
+    let origin_y = center_y - (min_y + max_y + 1) / 2;
+    for y in min_y..=max_y {
+        let target_y = origin_y + y;
+        if target_y < 0 || target_y >= height { continue; }
+        for x in min_x..=max_x {
+            let target_x = origin_x + x;
+            if target_x < 0 || target_x >= width { continue; }
+            let coverage = mask[(y * mask_width + x) as usize];
+            if coverage == 0 { continue; }
+            let index = (target_y * width + target_x) as usize;
+            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+        }
+    }
 }
 
 fn vertical_quota_text(percentage: f64, last_poll_ok: bool) -> String {
