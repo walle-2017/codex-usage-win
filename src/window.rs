@@ -5068,13 +5068,12 @@ unsafe extern "system" fn wnd_proc(
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
                 *last = None;
             }
-            SetCapture(hwnd);
+            let previous_capture = SetCapture(hwnd);
             diagnose::log_lazy(|| format!(
-                "drag start hwnd={:?} vertical={} client=({}, {}) capture={:?}",
+                "drag start hwnd={:?} vertical={} client=({}, {}) previous_capture={:?}",
                 hwnd,
                 lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode),
-                client_x, client_y,
-                GetCapture(),
+                client_x, client_y, previous_capture,
             ));
             LRESULT(0)
         }
