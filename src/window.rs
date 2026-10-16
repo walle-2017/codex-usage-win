@@ -3060,6 +3060,123 @@ unsafe fn render_taskbar_text(
     }
 }
 
+fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
+    let first = if show_session && show_weekly {
+        sc(20)
+    } else {
+        (height - sc(39)).max(sc(VERTICAL_DRAG_HANDLE_H)) / 2 + sc(4)
+    };
+    (
+        show_session.then_some(first),
+        show_weekly.then_some(if show_session { sc(62) } else { first }),
+    )
+}
+
+fn vertical_quota_text(percentage: f64, last_poll_ok: bool) -> String {
+    if !last_poll_ok || !percentage.is_finite() {
+        "--".to_string()
+    } else {
+        format!("{:.0}%", percentage.clamp(0.0, 100.0))
+    }
+}
+
+fn paint_vertical_widget_content(
+    hdc: HDC,
+    width: i32,
+    height: i32,
+    session_pct: f64,
+    weekly_pct: f64,
+    show_session: bool,
+    show_weekly: bool,
+    last_poll_ok: bool,
+    quota_type_color: Color,
+    primary_color: Color,
+    track: Color,
+    drag_color: Color,
+    hovered: bool,
+    paint_text: bool,
+) {
+    unsafe {
+        let handle_brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
+        let dot = sc(2).max(1);
+        let gap = sc(3);
+        for row in 0..2 {
+            for col in 0..3 {
+                let left = width / 2 - (3 * dot + 2 * gap) / 2 + col * (dot + gap);
+                let top = sc(5) + row * (dot + gap);
+                let rect = RECT {
+                    left, top, right: left + dot, bottom: top + dot,
+                };
+                FillRect(hdc, &rect, handle_brush);
+            }
+        }
+        let _ = DeleteObject(handle_brush);
+
+        let (session_top, weekly_top) = vertical_row_tops(height, show_session, show_weekly);
+        for (top, percent, label) in [
+            (session_top, session_pct, "5H"),
+            (weekly_top, weekly_pct, "7D"),
+        ] {
+            let Some(y) = top else { continue };
+            let track_rect = RECT {
+                left: sc(4),
+                top: y + sc(31),
+                right: width - sc(4),
+                bottom: y + sc(34),
+            };
+            if track_rect.right <= track_rect.left { continue; }
+            let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
+            FillRect(hdc, &track_rect, track_brush);
+            let _ = DeleteObject(track_brush);
+            let displayed = percent.clamp(0.0, 100.0);
+            let fill_width = ((track_rect.right - track_rect.left) as f64
+                * displayed / 100.0).round() as i32;
+            if fill_width > 0 && last_poll_ok {
+                let accent = quota_bar_color(displayed).blend_over(track);
+                let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
+                let fill = RECT { right: track_rect.left + fill_width, ..track_rect };
+                FillRect(hdc, &fill, brush);
+                let _ = DeleteObject(brush);
+            }
+
+            if paint_text {
+                let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+                let font = CreateFontW(
+                    sc(12), 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+                    DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+                    CLIP_DEFAULT_PRECIS.0 as u32, gdi_text_quality(),
+                    (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                    PCWSTR::from_raw(font_name.as_ptr()),
+                );
+                let previous = SelectObject(hdc, font);
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                for (line, text, color) in [
+                    (y, label.to_string(), quota_type_color),
+                    (y + sc(13), vertical_quota_text(displayed, last_poll_ok), primary_color),
+                ] {
+                    let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
+                    let mut chars: Vec<u16> = text.encode_utf16().collect();
+                    let mut bounds = RECT {
+                        left: sc(1), top: line, right: width - sc(1), bottom: line + sc(15),
+                    };
+                    let _ = DrawTextW(
+                        hdc, &mut chars, &mut bounds,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                }
+                let _ = SelectObject(hdc, previous);
+                let _ = DeleteObject(font);
+            }
+        }
+        if hovered {
+            let grip = RECT { left: sc(3), top: sc(2), right: width - sc(3), bottom: sc(3) };
+            let brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
+            FillRect(hdc, &grip, brush);
+            let _ = DeleteObject(brush);
+        }
+    }
+}
+
 /// Paint widget foreground. For the normal-window fallback this also paints the
 /// panel using the same style, while the layered taskbar path prepares the
 /// backdrop and panel pixels before calling this function.
@@ -3142,6 +3259,19 @@ fn paint_content(
                 &panel_base,
                 style.panel_corner_radius,
             );
+        }
+
+        let vertical_mode = lock_state()
+            .as_ref()
+            .is_some_and(|s| s.vertical_taskbar_mode);
+        if vertical_mode {
+            paint_vertical_widget_content(
+                hdc, width, height, codex_session_pct, codex_weekly_pct,
+                show_session_window, show_weekly_window, last_poll_ok,
+                quota_type_color, primary_color, track, drag_color,
+                drag_handle_hovered, paint_background,
+            );
+            return;
         }
 
         draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
