@@ -2532,7 +2532,8 @@ fn render_layered() {
     let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
     // Desktop popups use per-pixel transparency for the collapsed grip.
     // Avoid the embedded-only background blur while drawing a desktop popup.
-    let blur_requested = style.panel_frosted_active() && !floating;
+    let blur_requested = style.panel_frosted_active();
+    let blur_requested = blur_requested && !floating;
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
