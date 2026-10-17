@@ -4084,11 +4084,17 @@ fn move_floating_widget(hwnd: HWND) {
     let (left, top) = floating_edge_position(
         bounds, x, y, width, height, edge, collapsed, sc(FLOAT_EDGE_PEEK),
     );
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd, HWND_TOPMOST, left, top, width, height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
+    let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
+    if blur {
+        move_frosted_pair(hwnd, left, top, width, height);
+        sync_blur_backdrop_zorder(hwnd);
+    } else {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd, HWND_TOPMOST, left, top, width, height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
     }
 }
 
@@ -4103,6 +4109,60 @@ fn set_floating_collapsed(collapsed: bool) {
     };
     if collapsed { hide_minimal_usage_tooltip(); }
     move_floating_widget(hwnd);
+}
+
+fn update_floating_drag(hwnd: HWND, pointer: POINT) {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let (anchor_x, anchor_y, width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if !s.floating_mode { return; }
+        (drag_anchor_px_for_dpi(s.drag_anchor_logical_x, dpi),
+         drag_anchor_px_for_dpi(s.drag_anchor_logical_y, dpi),
+         total_widget_width_for_state(s), widget_height_for_state(s))
+    };
+    let Some(bounds) = floating_monitor_bounds(pointer) else { return };
+    let (x, y) = floating_clamp_position(
+        bounds, width, height, pointer.x - anchor_x, pointer.y - anchor_y,
+    );
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        s.floating_x = x;
+        s.floating_y = y;
+        s.floating_edge = None;
+        s.floating_collapsed = false;
+    }
+    move_floating_widget(hwnd);
+}
+
+fn finish_floating_drag(hwnd: HWND) {
+    let (x, y, width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if !s.floating_mode { return; }
+        (s.floating_x, s.floating_y,
+         total_widget_width_for_state(s), widget_height_for_state(s))
+    };
+    let Some(bounds) = floating_monitor_bounds(
+        POINT { x: x + width / 2, y: y + height / 2 }
+    ) else { return };
+    let rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
+    let edge = floating_nearest_edge(bounds, rect, sc(FLOAT_EDGE_SNAP));
+    let (x, y) = floating_edge_position(
+        bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
+    );
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.floating_x = x;
+            s.floating_y = y;
+            s.floating_edge = edge;
+            s.floating_collapsed = false;
+        }
+    }
+    move_floating_widget(hwnd);
+    save_state_settings();
 }
 
 fn enable_floating_widget(reason: &str, vertical: bool) {
@@ -5498,6 +5558,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.floating_collapsed) {
+                set_floating_collapsed(false);
+            }
             let is_dragging = {
                 let state = lock_state();
                 state.as_ref().map(|s| s.dragging).unwrap_or(false)
@@ -5539,6 +5602,10 @@ unsafe extern "system" fn wnd_proc(
                     return LRESULT(0);
                 }
 
+                if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                    update_floating_drag(hwnd, pt);
+                    return LRESULT(0);
+                }
                 let (current_taskbar_hwnd, blur_active) = {
                     let state = lock_state();
                     state
@@ -5734,6 +5801,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             hide_minimal_usage_tooltip();
+            set_floating_collapsed(true);
             render_layered();
             LRESULT(0)
         }
@@ -5760,6 +5828,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                let was_dragging = {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        let was = s.dragging;
+                        s.dragging = false;
+                        was
+                    } else { false }
+                };
+                let _ = ReleaseCapture();
+                let _ = drag_frame_due(true);
+                if was_dragging { finish_floating_drag(hwnd); }
+                return LRESULT(0);
+            }
 
             let mut pt = POINT::default();
             let cursor_valid = GetCursorPos(&mut pt).is_ok();
