@@ -4049,6 +4049,7 @@ fn floating_nearest_edge(bounds: RECT, rect: RECT, threshold: i32) -> Option<Flo
 
 // The stable expanded position is always in screen coordinates. Only the
 // visible sliver of a docked popup is on-screen while collapsed.
+#[allow(clippy::too_many_arguments)]
 fn floating_edge_position(
     bounds: RECT, x: i32, y: i32, width: i32, height: i32,
     edge: Option<FloatingEdge>, collapsed: bool, peek: i32,
