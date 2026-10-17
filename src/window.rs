@@ -3991,66 +3991,254 @@ fn tray_reposition_is_suppressed() -> bool {
     }
 }
 
-fn show_taskbar_space_warning(language: LanguageId) {
-    let title = native_interop::wide_str(language.strings().window_title);
-    let body = native_interop::wide_str(match language {
-        LanguageId::SimplifiedChinese => {
-            "任务栏当前没有足够的空白区域容纳组件，组件已临时隐藏。空白区域恢复后将自动显示。"
+// Desktop fallback keeps a separately owned popup alive instead of
+// detaching/reparenting Explorer's active taskbar child window.
+const FLOAT_EDGE_SNAP: i32 = 24;
+const FLOAT_EDGE_PEEK: i32 = 15;
+
+fn vertical_placement_for_gaps(
+    preset: AppearancePreset, taskbar_rect: RECT, spans: &[(i32, i32)], desired: i32,
+) -> Option<(AppearancePreset, i32)> {
+    let normal = vertical_widget_height_for_preset(AppearancePreset::Default);
+    let compact = vertical_widget_height_for_preset(AppearancePreset::Minimal);
+    let choices = match preset {
+        AppearancePreset::Minimal => [Some((AppearancePreset::Minimal, compact)), None],
+        AppearancePreset::Adaptive => [
+            Some((AppearancePreset::Default, normal)),
+            Some((AppearancePreset::Minimal, compact)),
+        ],
+        AppearancePreset::Default => [Some((AppearancePreset::Default, normal)), None],
+    };
+    for choice in choices.into_iter().flatten() {
+        if let Some(top) = nearest_free_top_offset(taskbar_rect, spans, choice.1, desired) {
+            return Some((choice.0, top));
         }
-        LanguageId::TraditionalChinese => {
-            "工作列目前沒有足夠的空白區域容納元件，元件已暫時隱藏。空白區域恢復後將自動顯示。"
-        }
-        LanguageId::Japanese => {
-            "タスクバーに十分な空き領域がないため、ウィジェットを一時的に非表示にしました。空き領域が確保されると自動的に再表示します。"
-        }
-        LanguageId::Korean => {
-            "작업 표시줄에 충분한 빈 공간이 없어 위젯을 일시적으로 숨겼습니다. 공간이 확보되면 자동으로 다시 표시됩니다."
-        }
-        _ => {
-            "There is not enough empty taskbar space for the widget. It has been temporarily hidden and will reappear automatically when enough space is available."
-        }
-    });
+    }
+    None
+}
+
+fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
     unsafe {
-        let _ = MessageBoxW(
-            HWND::default(),
-            PCWSTR::from_raw(body.as_ptr()),
-            PCWSTR::from_raw(title.as_ptr()),
-            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcMonitor)
+    }
+}
+
+fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
+    (
+        x.clamp(bounds.left, (bounds.right - width).max(bounds.left)),
+        y.clamp(bounds.top, (bounds.bottom - height).max(bounds.top)),
+    )
+}
+
+fn floating_nearest_edge(bounds: RECT, rect: RECT, threshold: i32) -> Option<FloatingEdge> {
+    let edges = [
+        (FloatingEdge::Left, (rect.left - bounds.left).abs()),
+        (FloatingEdge::Right, (bounds.right - rect.right).abs()),
+        (FloatingEdge::Top, (rect.top - bounds.top).abs()),
+        (FloatingEdge::Bottom, (bounds.bottom - rect.bottom).abs()),
+    ];
+    edges.into_iter().min_by_key(|(_, distance)| *distance)
+        .and_then(|(edge, distance)| (distance <= threshold).then_some(edge))
+}
+
+// The stable expanded position is always in screen coordinates. Only the
+// visible sliver of a docked popup is on-screen while collapsed.
+fn floating_edge_position(
+    bounds: RECT, x: i32, y: i32, width: i32, height: i32,
+    edge: Option<FloatingEdge>, collapsed: bool, peek: i32,
+) -> (i32, i32) {
+    let (x, y) = floating_clamp_position(bounds, width, height, x, y);
+    match edge {
+        Some(FloatingEdge::Left) => (
+            if collapsed { bounds.left - width + peek } else { bounds.left }, y,
+        ),
+        Some(FloatingEdge::Right) => (
+            if collapsed { bounds.right - peek } else { bounds.right - width }, y,
+        ),
+        Some(FloatingEdge::Top) => (
+            x, if collapsed { bounds.top - height + peek } else { bounds.top },
+        ),
+        Some(FloatingEdge::Bottom) => (
+            x, if collapsed { bounds.bottom - peek } else { bounds.bottom - height },
+        ),
+        None => (x, y),
+    }
+}
+
+fn move_floating_widget(hwnd: HWND) {
+    let (x, y, edge, collapsed, width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if !s.floating_mode { return; }
+        (s.floating_x, s.floating_y, s.floating_edge, s.floating_collapsed,
+         total_widget_width_for_state(s), widget_height_for_state(s))
+    };
+    let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
+    let Some(bounds) = floating_monitor_bounds(center) else { return };
+    let (left, top) = floating_edge_position(
+        bounds, x, y, width, height, edge, collapsed, sc(FLOAT_EDGE_PEEK),
+    );
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd, HWND_TOPMOST, left, top, width, height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
     }
 }
 
+fn set_floating_collapsed(collapsed: bool) {
+    let hwnd = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || s.dragging || s.floating_edge.is_none()
+            || s.floating_collapsed == collapsed { return; }
+        s.floating_collapsed = collapsed;
+        s.hwnd.to_hwnd()
+    };
+    if collapsed { hide_minimal_usage_tooltip(); }
+    move_floating_widget(hwnd);
+}
+
+fn enable_floating_widget(reason: &str, vertical: bool) {
+    let (existing, old, x, y, language, width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if s.floating_mode { return; }
+        let preset = if vertical { vertical_effective_preset(s.appearance_preset) }
+            else { effective_appearance_preset(s) };
+        (
+            s.floating_hwnd.map(|h| h.to_hwnd()), s.hwnd.to_hwnd(),
+            s.floating_x, s.floating_y, s.language,
+            if vertical { sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48)) }
+                else { total_widget_width_for_preset(s.language, preset) },
+            if vertical { vertical_widget_height_for_preset(preset) }
+                else { sc(preset.metrics().widget_height) },
+        )
+    };
+    let hwnd = match existing {
+        Some(hwnd) if unsafe { IsWindow(hwnd).as_bool()
+            && GetAncestor(hwnd, GA_PARENT) == HWND::default() } => hwnd,
+        _ => unsafe {
+            let class = native_interop::wide_str("CodexUsageWin");
+            let title = native_interop::wide_str(language.strings().window_title);
+            let instance = match GetModuleHandleW(PCWSTR::null()) {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            match CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+                PCWSTR::from_raw(class.as_ptr()), PCWSTR::from_raw(title.as_ptr()),
+                WS_POPUP, 0, 0, width, height, HWND::default(),
+                HMENU::default(), instance, None,
+            ) {
+                Ok(hwnd) => hwnd,
+                Err(error) => {
+                    diagnose::log(format!("floating popup create failed: {error:?}"));
+                    return;
+                }
+            }
+        },
+    };
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+    }
+    let origin = native_interop::get_window_rect_safe(old);
+    let default_point = origin.map(|r| POINT { x: r.left, y: r.top })
+        .unwrap_or(POINT { x: 0, y: 0 });
+    let bounds = floating_monitor_bounds(default_point).unwrap_or(RECT {
+        left: 0, top: 0, right: 1920, bottom: 1080,
+    });
+    let start_x = if x == i32::MIN { bounds.right - width - sc(32) } else { x };
+    let start_y = if y == i32::MIN {
+        bounds.top + (bounds.bottom - bounds.top - height) / 2
+    } else { y };
+    let (x, y) = floating_clamp_position(bounds, width, height, start_x, start_y);
+    hide_minimal_usage_tooltip();
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        s.parked_taskbar_foreground = s.embedded.then_some(s.hwnd);
+        s.floating_hwnd = Some(SendHwnd::from_hwnd(hwnd));
+        s.hwnd = SendHwnd::from_hwnd(hwnd);
+        s.floating_mode = true;
+        s.embedded = false;
+        s.hidden_for_taskbar_space = false;
+        s.floating_collapsed = false;
+        s.floating_x = x;
+        s.floating_y = y;
+        s.vertical_taskbar_mode = vertical;
+        s.effective_appearance_preset = if vertical {
+            vertical_effective_preset(s.appearance_preset)
+        } else {
+            effective_appearance_preset(s)
+        };
+        s.vertical_widget_width = width;
+    }
+    unsafe { let _ = ShowWindow(old, SW_HIDE); }
+    if let Some(backdrop) = blur_backdrop_hwnd() {
+        unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
+    }
+    move_floating_widget(hwnd);
+    render_layered();
+    save_state_settings();
+    diagnose::log(format!("taskbar has no safe slot: desktop popup enabled ({reason})"));
+}
+
+fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
+    let (float, target) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return false };
+        if !s.floating_mode { return true; }
+        let Some(target) = s.parked_taskbar_foreground else { return false };
+        (s.hwnd.to_hwnd(), target.to_hwnd())
+    };
+    if !unsafe { IsWindow(target).as_bool()
+        && GetAncestor(target, GA_PARENT) == taskbar } {
+        return false;
+    }
+    hide_minimal_usage_tooltip();
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return false };
+        s.hwnd = SendHwnd::from_hwnd(target);
+        s.embedded = true;
+        s.floating_mode = false;
+        s.floating_collapsed = false;
+        s.parked_taskbar_foreground = None;
+        s.hidden_for_taskbar_space = false;
+    }
+    unsafe { let _ = ShowWindow(float, SW_HIDE); }
+    diagnose::log("safe taskbar slot recovered; desktop popup parked");
+    true
+}
+
 fn hide_widget_for_taskbar_space(
     hwnd: HWND,
-    language: LanguageId,
+    _language: LanguageId,
     reason: &str,
-    notify_user: bool,
+    cache_pending: bool,
 ) {
-    let should_warn = {
+    // Ignore a transient uninitialized Explorer layout cache only until the
+    // next worker update. Actual no-space conditions never hide or alert.
+    if !cache_pending {
+        let vertical = lock_state().as_ref()
+            .is_some_and(|s| s.taskbar_hwnd.and_then(native_interop::get_taskbar_rect)
+                .is_some_and(|rect| taskbar_axis(rect) == TaskbarAxis::Vertical));
+        enable_floating_widget(reason, vertical);
+        return;
+    }
+    if lock_state().as_ref().is_some_and(|s| s.floating_mode) { return; }
+    {
         let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
-            return;
-        };
-        s.hidden_for_taskbar_space = true;
-        if notify_user && !s.taskbar_space_warning_shown {
-            s.taskbar_space_warning_shown = true;
-            true
-        } else {
-            false
-        }
-    };
-
-    hide_minimal_usage_tooltip();
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        if let Some(backdrop) = blur_backdrop_hwnd() {
-            let _ = ShowWindow(backdrop, SW_HIDE);
-        }
+        if let Some(s) = state.as_mut() { s.hidden_for_taskbar_space = true; }
     }
-    diagnose::log(format!("taskbar widget temporarily hidden: {reason}"));
-    if should_warn {
-        show_taskbar_space_warning(language);
-    }
+    unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+    diagnose::log(format!("waiting for taskbar layout cache: {reason}"));
 }
 
 fn position_vertical_taskbar(
