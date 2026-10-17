@@ -6590,6 +6590,25 @@ unsafe extern "system" fn wnd_proc(
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
+        _ if msg == style_window::WM_STYLE_POSITION_CHANGE => {
+            let position = if wparam.0 == 1 {
+                DisplayPosition::Desktop
+            } else {
+                DisplayPosition::Taskbar
+            };
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.display_position = position;
+                }
+            }
+            hide_minimal_usage_tooltip();
+            save_state_settings();
+            position_at_taskbar();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
         _ if msg == style_window::WM_STYLE_PRESET_CHANGE => {
             let Some(preset) = ThemePreset::from_index(wparam.0) else {
                 return LRESULT(0);
