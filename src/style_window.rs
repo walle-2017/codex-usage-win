@@ -6844,7 +6844,7 @@ unsafe fn paint_preview_remaining_ring(
     hdc: HDC, hwnd: HWND, cx: i32, cy: i32, remaining: f32, style: &ThemeStyle,
 ) {
     let size = scale(hwnd, 36).max(8);
-    let radius = scale(hwnd, 13).max(2) as f32;
+    let radius = scale(hwnd, 15).max(2) as f32;
     let stroke = scale(hwnd, 3).max(1) as f32;
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -6967,7 +6967,11 @@ fn portrait_preview_widget_bounds(
         PORTRAIT_PREVIEW_WIDGET_H
     });
     let left = canvas.left + (canvas.right - canvas.left - width) / 2;
-    let top = canvas.top + (canvas.bottom - canvas.top - height) / 2;
+    // Align the widget together with its tooltip, rather than centering
+    // the widget alone (which left a large dead area above both).
+    let group_height = height + logical(7 + 40);
+    let available = (canvas.bottom - canvas.top - group_height).max(0);
+    let top = canvas.top + available / 3;
     RECT { left, top, right: left + width, bottom: top + height }
 }
 
@@ -6989,12 +6993,12 @@ fn portrait_preview_row(widget: RECT, index: i32, logical: impl Fn(i32) -> i32) 
             bottom: top + logical(18),
         },
         center_x: (widget.left + widget.right) / 2,
-        center_y: top + logical(35),
+        center_y: top + logical(36),
         reset: RECT {
             left: widget.left + logical(2),
-            top: top + logical(52),
+            top: top + logical(54),
             right: widget.right - logical(2),
-            bottom: top + logical(70),
+            bottom: top + logical(72),
         },
     }
 }
@@ -7034,7 +7038,9 @@ unsafe fn paint_vertical_style_preview(
         (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
     );
     let label_font = font(10, FW_MEDIUM.0 as i32);
-    let percent_font = font(if minimal { 12 } else { 11 }, FW_SEMIBOLD.0 as i32);
+    // At a 50px taskbar width, a three-character percentage needs room
+    // around its glyphs; a 9px font inside a 15px ring preserves that gap.
+    let percent_font = font(if minimal { 12 } else { 9 }, FW_SEMIBOLD.0 as i32);
     let reset_font = font(9, FW_NORMAL.0 as i32);
     let old_font = SelectObject(hdc, label_font);
     let _ = SetBkMode(hdc, TRANSPARENT);
@@ -8335,10 +8341,14 @@ mod ui_smoke_tests {
         assert_eq!(widget.right - widget.left, 50);
         assert_eq!(widget.bottom - widget.top, 168);
         assert_eq!(widget.left, 49);
-        assert_eq!(widget.top, 54);
+        // The widget + tooltip move up as one block, reducing unused space.
+        assert_eq!(widget.top, 20);
+        let popup = portrait_preview_tooltip_rect(canvas, widget, |v| v);
+        assert_eq!(popup.top, 195);
+        assert!(popup.bottom <= canvas.bottom);
         let first = portrait_preview_row(widget, 0, |v| v);
         let second = portrait_preview_row(widget, 1, |v| v);
-        let ring_extent = 15;
+        let ring_extent = 17;
         assert!(first.label.bottom < first.center_y - ring_extent);
         assert!(first.center_y + ring_extent < first.reset.top);
         assert!(first.reset.bottom < second.label.top);
@@ -8354,9 +8364,33 @@ mod ui_smoke_tests {
         let scaled = portrait_preview_widget_bounds(large_canvas, false, |v| v * 2);
         assert_eq!(scaled.right - scaled.left, 100);
         assert_eq!(scaled.bottom - scaled.top, 336);
-        assert_eq!(scaled.top, 108);
+        assert_eq!(scaled.top, 40);
         let last = portrait_preview_row(scaled, 1, |v| v * 2);
         assert!(last.reset.bottom <= scaled.bottom);
+    }
+
+    #[test]
+    fn portrait_preview_ring_has_safe_clearance_for_larger_radius() {
+        // The type/reset bands cannot touch the 15px radius + 1.5px stroke.
+        let widget = RECT { left: 0, top: 0, right: 50, bottom: 168 };
+        let first = portrait_preview_row(widget, 0, |v| v);
+        let second = portrait_preview_row(widget, 1, |v| v);
+        for row in [first, second] {
+            assert!(row.label.bottom < row.center_y - 16);
+            assert!(row.center_y + 17 < row.reset.top);
+            assert!(row.center_x - 18 >= widget.left);
+            assert!(row.center_x + 18 <= widget.right);
+        }
+        assert!(first.reset.bottom < second.label.top);
+        // The 4x4 antialiased renderer retains the 6 o'clock gap at 100%.
+        let bg = Color::rgba(18, 21, 25, 255);
+        let track = Color::rgba(41, 52, 63, 255);
+        let accent = Color::rgba(5, 206, 230, 255);
+        let background_pixel = 0x00121519;
+        assert_eq!(preview_ring_pixel(18, 34, 36, 15.0, 3.0, 100.0,
+            bg, track, accent), background_pixel);
+        assert_ne!(preview_ring_pixel(18, 3, 36, 15.0, 3.0, 100.0,
+            bg, track, accent), background_pixel);
     }
 
     #[test]
