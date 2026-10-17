@@ -63,6 +63,8 @@ pub struct EditableUsage {
 pub struct EditableAppearance {
     pub theme: String,
     pub layout: String,
+    #[serde(default = "default_display_position")]
+    pub position: String,
     pub dark: EditableThemeStyle,
     pub light: EditableThemeStyle,
 }
@@ -219,6 +221,8 @@ impl EditableThemeStyle {
     }
 }
 
+fn default_display_position() -> String { "taskbar".to_string() }
+
 impl EditableSettings {
     pub fn validate_and_normalize(&self) -> Result<Self, String> {
         if self.schema_version != EDITABLE_SETTINGS_SCHEMA_VERSION {
@@ -262,9 +266,10 @@ impl EditableSettings {
             );
         }
         if !matches!(self.appearance.layout.as_str(), "default" | "minimal" | "adaptive") {
-            return Err(
-                "appearance.layout: allowed values are default, minimal, adaptive".to_string(),
-            );
+            return Err("appearance.layout: allowed values are default, minimal".to_string());
+        }
+        if !matches!(self.appearance.position.as_str(), "taskbar" | "desktop") {
+            return Err("appearance.position: allowed values are taskbar, desktop".to_string());
         }
 
         let appearance_preset = match self.appearance.layout.as_str() {
@@ -348,6 +353,10 @@ r#"{{
     // {layout_options}
     "layout": {layout},
 
+    // {position_desc}
+    // {position_options}
+    "position": {position},
+
     // {dark_desc}
     "dark": {{
 {dark_json}
@@ -399,10 +408,13 @@ r#"{{
             layout_desc = localized(zh, "组件排版", "Widget layout"),
             layout_options = localized(
                 zh,
-                "可选：default | minimal | adaptive；adaptive 会按可用宽度自动在默认/极简间切换",
-                "Options: default | minimal | adaptive; adaptive switches between Default and Minimal based on available width",
+                "可选：default | minimal；默认排版会在任务栏空间不足时自动临时切换至极简",
+                "Options: default | minimal; Default temporarily switches to Minimal when taskbar space is insufficient",
             ),
-            layout = q(&a.layout),
+            layout = q(if a.layout == "adaptive" { "default" } else { &a.layout }),
+            position_desc = localized(zh, "组件显示位置；任务栏空间不足时自动临时切换至桌面", "Display location; temporarily fall back to Desktop if the taskbar is too full"),
+            position_options = localized(zh, "可选：taskbar | desktop", "Options: taskbar | desktop"),
+            position = q(&a.position),
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
             light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
             dark_json = theme_jsonc(dark, zh, 6, &a.layout),
@@ -686,6 +698,7 @@ mod tests {
             appearance: EditableAppearance {
                 theme: "system".into(),
                 layout: "default".into(),
+                position: "taskbar".into(),
                 dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                 light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
             },
