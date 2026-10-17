@@ -310,7 +310,8 @@ fn refresh_dpi() {
             // During a cross-monitor popup move, the foreground HWND can report
             // the old monitor DPI for a short period. The selected taskbar is
             // already authoritative for layout, so prefer its DPI.
-            s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd())
+            if s.floating_mode { s.hwnd.to_hwnd() }
+            else { s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd()) }
         })
     };
     if let Some(hwnd) = dpi_source {
@@ -4105,10 +4106,23 @@ fn set_floating_collapsed(collapsed: bool) {
 }
 
 fn enable_floating_widget(reason: &str, vertical: bool) {
+    let is_already_floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    if is_already_floating {
+        let hwnd = {
+            let mut state = lock_state();
+            let Some(s) = state.as_mut() else { return };
+            s.vertical_taskbar_mode = vertical;
+            s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
+            s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
+            s.hwnd.to_hwnd()
+        };
+        move_floating_widget(hwnd);
+        render_layered();
+        return;
+    }
     let (existing, old, x, y, language, width, height) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
-        if s.floating_mode { return; }
         let preset = if vertical { vertical_effective_preset(s.appearance_preset) }
             else { effective_appearance_preset(s) };
         (
@@ -4121,8 +4135,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         )
     };
     let hwnd = match existing {
-        Some(hwnd) if unsafe { IsWindow(hwnd).as_bool()
-            && GetAncestor(hwnd, GA_PARENT) == HWND::default() } => hwnd,
+        Some(hwnd) if unsafe { IsWindow(hwnd).as_bool() } => hwnd,
         _ => unsafe {
             let class = native_interop::wide_str("CodexUsageWin");
             let title = native_interop::wide_str(language.strings().window_title);
@@ -4184,6 +4197,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
     move_floating_widget(hwnd);
+    style_window::set_preview_orientation(vertical);
     render_layered();
     save_state_settings();
     diagnose::log(format!("taskbar has no safe slot: desktop popup enabled ({reason})"));
@@ -4295,14 +4309,8 @@ fn position_vertical_taskbar(
     } else {
         native_interop::move_window(hwnd, x, rect.top + top, width, height);
     }
-    if was_hidden || hwnd != {
-        let state = lock_state();
-        state.as_ref().map(|s| s.floating_hwnd).flatten()
-            .map(|h| h.to_hwnd()).unwrap_or(HWND::default())
-    } {
-        unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
-        if blur_active { sync_blur_backdrop_zorder(hwnd); }
-    }
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+    if blur_active { sync_blur_backdrop_zorder(hwnd); }
     if changed { render_layered(); }
     diagnose::log_lazy(|| format!(
         "vertical taskbar slot top={} w={} h={} preset={preset:?} gaps={} restored={was_hidden}",
@@ -4448,6 +4456,8 @@ fn position_at_taskbar() {
         diagnose::log("desktop popup retained: original Explorer taskbar child unavailable");
         return;
     }
+    let (hwnd, embedded) = lock_state().as_ref()
+        .map(|s| (s.hwnd.to_hwnd(), s.embedded)).unwrap_or((hwnd, embedded));
     let (was_hidden, effective_changed) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else {
