@@ -6799,6 +6799,7 @@ fn preview_remaining_color(remaining: f32) -> StyleColorTarget {
 // 36-degree bottom opening at 0% through 100%.
 const PREVIEW_RING_SAMPLES: i32 = 4;
 
+#[allow(clippy::too_many_arguments)]
 fn preview_ring_pixel(
     px: i32, py: i32, size: i32, radius: f32, stroke: f32,
     remaining: f32, background: Color, track: Color, accent: Color,
