@@ -1942,6 +1942,18 @@ fn vertical_drag_handle_hit(x: i32, y: i32, width: i32, height: i32) -> bool {
 }
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
+    {
+        let state = lock_state();
+        if let Some(s) = state.as_ref() {
+            if s.floating_mode {
+                return floating_drag_handle_hit(
+                    client_x, client_y,
+                    total_widget_width_for_state(s), widget_height_for_state(s),
+                    s.floating_edge, sc(FLOAT_EDGE_PEEK),
+                );
+            }
+        }
+    }
     let vertical_mode = lock_state()
         .as_ref()
         .is_some_and(|s| s.vertical_taskbar_mode);
@@ -3980,7 +3992,42 @@ fn tray_reposition_is_suppressed() -> bool {
 // Desktop fallback keeps a separately owned popup alive instead of
 // detaching/reparenting Explorer's active taskbar child window.
 const FLOAT_EDGE_SNAP: i32 = 24;
-const FLOAT_EDGE_PEEK: i32 = 15;
+const FLOAT_EDGE_PEEK: i32 = 20;
+const FLOAT_GRIP_LENGTH: i32 = 46;
+const FLOAT_ANIMATION_STEP: u8 = 14;
+const TIMER_FLOAT_ANIMATION: usize = 0xF141;
+
+/// This rectangle is used for the rendered tab, pointer hit testing and
+/// collapsed alpha mask. Desktop-only, independent of the embedded taskbar grip.
+fn floating_grip_rect(width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32) -> RECT {
+    let peek = peek.min(width.min(height)).max(1);
+    let grip_width = FLOAT_GRIP_LENGTH.min(width).max(1);
+    let grip_height = FLOAT_GRIP_LENGTH.min(height).max(1);
+    match edge {
+        Some(FloatingEdge::Left) => RECT {
+            left: width - peek, right: width,
+            top: (height - grip_height) / 2, bottom: (height + grip_height) / 2,
+        },
+        Some(FloatingEdge::Right) => RECT {
+            left: 0, right: peek,
+            top: (height - grip_height) / 2, bottom: (height + grip_height) / 2,
+        },
+        Some(FloatingEdge::Top) => RECT {
+            left: (width - grip_width) / 2, right: (width + grip_width) / 2,
+            top: height - peek, bottom: height,
+        },
+        Some(FloatingEdge::Bottom) | None => RECT {
+            left: (width - grip_width) / 2, right: (width + grip_width) / 2,
+            top: 0, bottom: peek,
+        },
+    }
+}
+
+fn floating_drag_handle_hit(
+    x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
+) -> bool {
+    point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
+}
 
 fn vertical_placement_for_gaps(
     preset: AppearancePreset, taskbar_rect: RECT, spans: &[VerticalSpan], desired: i32,
@@ -4058,18 +4105,26 @@ fn floating_edge_position(
 }
 
 fn move_floating_widget(hwnd: HWND) {
-    let (x, y, edge, collapsed, width, height) = {
+    let (x, y, edge, reveal, width, height) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        (s.floating_x, s.floating_y, s.floating_edge, s.floating_collapsed,
+        (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal,
          total_widget_width_for_state(s), widget_height_for_state(s))
     };
     let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
     let Some(bounds) = floating_monitor_bounds(center) else { return };
-    let (left, top) = floating_edge_position(
-        bounds, x, y, width, height, edge, collapsed, sc(FLOAT_EDGE_PEEK),
+    let (expanded_x, expanded_y) = floating_edge_position(
+        bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
     );
+    let (collapsed_x, collapsed_y) = floating_edge_position(
+        bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
+    );
+    let interpolation = |a: i32, b: i32| {
+        a + (((b - a) as i64 * i64::from(reveal)) / 100) as i32
+    };
+    let left = interpolation(collapsed_x, expanded_x);
+    let top = interpolation(collapsed_y, expanded_y);
     let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
     if blur {
         move_frosted_pair(hwnd, left, top, width, height);
@@ -4094,7 +4149,32 @@ fn set_floating_collapsed(collapsed: bool) {
         s.hwnd.to_hwnd()
     };
     if collapsed { hide_minimal_usage_tooltip(); }
+    unsafe {
+        let service = taskbar_replica_service_hwnd(hwnd);
+        SetTimer(service, TIMER_FLOAT_ANIMATION, 16, None);
+    }
     move_floating_widget(hwnd);
+}
+
+fn step_floating_animation(hwnd: HWND) {
+    let (active, completed) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode { return };
+        let destination = if s.floating_collapsed { 0 } else { 100 };
+        if s.floating_reveal < destination {
+            s.floating_reveal = s.floating_reveal.saturating_add(FLOAT_ANIMATION_STEP).min(destination);
+        } else if s.floating_reveal > destination {
+            s.floating_reveal = s.floating_reveal.saturating_sub(FLOAT_ANIMATION_STEP).max(destination);
+        }
+        (s.hwnd.to_hwnd(), s.floating_reveal == destination)
+    };
+    move_floating_widget(active);
+    // Once the popup is fully offscreen, render only the edge grip's pixels.
+    render_layered();
+    if completed {
+        unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
+    }
 }
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
@@ -4118,7 +4198,9 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         s.floating_y = y;
         s.floating_edge = None;
         s.floating_collapsed = false;
+        s.floating_reveal = 100;
     }
+    unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
     move_floating_widget(hwnd);
 }
 
@@ -4145,6 +4227,7 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_y = y;
             s.floating_edge = edge;
             s.floating_collapsed = false;
+            s.floating_reveal = 100;
         }
     }
     move_floating_widget(hwnd);
@@ -4239,6 +4322,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.embedded = false;
         s.hidden_for_taskbar_space = false;
         s.floating_collapsed = false;
+        s.floating_reveal = 100;
         s.floating_x = x;
         s.floating_y = y;
         s.vertical_taskbar_mode = vertical;
@@ -4280,6 +4364,7 @@ fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
         s.embedded = true;
         s.floating_mode = false;
         s.floating_collapsed = false;
+        s.floating_reveal = 100;
         s.parked_taskbar_foreground = None;
         s.hidden_for_taskbar_space = false;
     }
@@ -5421,6 +5506,9 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_FLOAT_ANIMATION => {
+                    step_floating_animation(hwnd);
+                }
                 TIMER_POLL => {
                     let auth_watch = {
                         let state = lock_state();
