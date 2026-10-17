@@ -8629,6 +8629,7 @@ mod ui_smoke_tests {
                         theme: "dark".into(),
                         layout: "default".into(),
                         position: "taskbar".into(),
+                        desktop_direction: "horizontal".into(),
                         dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                         light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
                     },
