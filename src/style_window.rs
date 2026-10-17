@@ -8545,6 +8545,7 @@ mod ui_smoke_tests {
                 theme_mode: ThemeMode::Dark,
                 is_dark: true,
                 appearance_preset: AppearancePreset::Default,
+                display_position: DisplayPosition::Taskbar,
                 vertical_taskbar_mode: false,
                 active_style: ThemeStyle::dark_default(),
                 editable_settings: EditableSettings {
@@ -8562,6 +8563,7 @@ mod ui_smoke_tests {
                     appearance: crate::settings_model::EditableAppearance {
                         theme: "dark".into(),
                         layout: "default".into(),
+                        position: "taskbar".into(),
                         dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                         light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
                     },
