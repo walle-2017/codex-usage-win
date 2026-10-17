@@ -23,6 +23,15 @@ pub enum DisplayPosition {
     Desktop,
 }
 
+/// User-selected direction for a desktop popup; taskbar positioning ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesktopDirection {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
 impl AppearancePreset {
     /// Legacy 'adaptive' selections have the new default semantics.
     pub fn configured(self) -> Self {
