@@ -20,7 +20,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appearance::{AppearancePreset, DisplayPosition};
+use crate::appearance::{AppearancePreset, DesktopDirection, DisplayPosition};
 use crate::fonts;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
@@ -37,6 +37,7 @@ pub const WM_STYLE_SAVE: u32 = WM_APP + 122;
 pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
 pub const WM_STYLE_POSITION_CHANGE: u32 = WM_APP + 125;
+pub const WM_STYLE_DESKTOP_DIRECTION_CHANGE: u32 = WM_APP + 139;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
 pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
@@ -147,6 +148,7 @@ pub struct StyleWindowSnapshot {
     pub is_dark: bool,
     pub appearance_preset: AppearancePreset,
     pub display_position: DisplayPosition,
+    pub desktop_direction: DesktopDirection,
     // Runtime orientation, not a persisted appearance setting.
     pub vertical_taskbar_mode: bool,
     pub active_style: ThemeStyle,
@@ -246,6 +248,7 @@ enum HitTarget {
     Theme(ThemeMode),
     Layout(AppearancePreset),
     Position(DisplayPosition),
+    DesktopDirection(DesktopDirection),
     Preset(ThemePreset),
     Section(Section),
     Row(EditorSelection),
@@ -1194,6 +1197,11 @@ fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
 fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
     let index = if position == DisplayPosition::Desktop { 1 } else { 0 };
     rect(hwnd, 314 + index * 108, 162, 414 + index * 108, 196)
+}
+
+fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
+    let index = if direction == DesktopDirection::Vertical { 1 } else { 0 };
+    rect(hwnd, 652 + index * 92, 162, 738 + index * 92, 196)
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -4119,6 +4127,15 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Position(position));
             }
         }
+        if lock_state().as_ref().is_some_and(|s| {
+            s.snapshot.display_position == DisplayPosition::Desktop
+        }) {
+            for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
+                if pt_in_rect(desktop_direction_rect(hwnd, direction), x, y) {
+                    return Some(HitTarget::DesktopDirection(direction));
+                }
+            }
+        }
         if section == Section::Preset {
             for preset in ThemePreset::ALL {
                 if pt_in_rect(preset_card_rect(hwnd, preset), x, y) {
@@ -4206,6 +4223,12 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 WM_STYLE_POSITION_CHANGE,
                 if position == DisplayPosition::Desktop { 1 } else { 0 },
                 0,
+            );
+        }
+        HitTarget::DesktopDirection(direction) => {
+            send_parent(
+                WM_STYLE_DESKTOP_DIRECTION_CHANGE,
+                if direction == DesktopDirection::Vertical { 1 } else { 0 }, 0,
             );
         }
         HitTarget::Preset(preset) => {
@@ -6544,6 +6567,12 @@ unsafe fn paint_appearance_page(
         );
     }
 
+    draw_text(
+        hdc,
+        if zh { "方向" } else { "Direction" },
+        rect(hwnd, 562, 162, 638, 196),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
         let selected = snapshot.display_position == position;
         let target = HitTarget::Position(position);
@@ -6569,6 +6598,41 @@ unsafe fn paint_appearance_page(
                 (true, DisplayPosition::Desktop) => "桌面",
                 (false, DisplayPosition::Taskbar) => "Taskbar",
                 (false, DisplayPosition::Desktop) => "Desktop",
+            },
+        );
+    }
+
+    for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
+        let enabled = snapshot.display_position == DisplayPosition::Desktop;
+        let selected = enabled && snapshot.desktop_direction == direction;
+        let target = HitTarget::DesktopDirection(direction);
+        let background = if enabled {
+            button_background(
+                target, selected, hovered, pressed,
+                ButtonPalette {
+                    normal: card_hover, hover: card_pressed, pressed: card_pressed,
+                    selected: accent, selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            )
+        } else {
+            card
+        };
+        draw_segment_with_icon(
+            hdc, hwnd, desktop_direction_rect(hwnd, direction), selected,
+            background,
+            if selected { Color::from_hex("#FFFFFFFF") }
+            else if enabled { primary } else { secondary },
+            if direction == DesktopDirection::Horizontal {
+                SettingsIcon::Panel
+            } else {
+                SettingsIcon::ThemeSystem
+            },
+            match (zh, direction) {
+                (true, DesktopDirection::Horizontal) => "横向",
+                (true, DesktopDirection::Vertical) => "纵向",
+                (false, DesktopDirection::Horizontal) => "Horizontal",
+                (false, DesktopDirection::Vertical) => "Vertical",
             },
         );
     }
@@ -8546,6 +8610,7 @@ mod ui_smoke_tests {
                 is_dark: true,
                 appearance_preset: AppearancePreset::Default,
                 display_position: DisplayPosition::Taskbar,
+                desktop_direction: DesktopDirection::Horizontal,
                 vertical_taskbar_mode: false,
                 active_style: ThemeStyle::dark_default(),
                 editable_settings: EditableSettings {
