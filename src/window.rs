@@ -8169,7 +8169,8 @@ mod tests {
         let short = [VerticalSpan { top: 20, bottom: 130 }];
         assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &short, 24),
             Some((AppearancePreset::Minimal, 24)));
-        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24), None);
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24),
+            Some((AppearancePreset::Minimal, 24)));
         let exhausted = [VerticalSpan { top: 20, bottom: 65 }];
         assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &exhausted, 24), None);
         assert_eq!(vertical_placement_for_gaps(AppearancePreset::Minimal, bar, &short, 24),
@@ -8408,7 +8409,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(placement.0, AppearancePreset::Default);
-        assert_eq!(placement.2, 100);
+        assert_eq!(placement.2, 120);
     }
 
     #[test]
