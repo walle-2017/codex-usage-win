@@ -20,7 +20,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appearance::{self, AppearancePreset, DisplayPosition};
+use crate::appearance::{self, AppearancePreset, DesktopDirection, DisplayPosition};
 use crate::diagnose;
 use crate::fonts;
 use crate::localization::{self, LanguageId, Strings};
@@ -76,6 +76,7 @@ struct AppState {
     appearance_preset: AppearancePreset,
     effective_appearance_preset: AppearancePreset,
     display_position: DisplayPosition,
+    desktop_direction: DesktopDirection,
     hidden_for_taskbar_space: bool,
     taskbar_space_warning_shown: bool,
     floating_mode: bool,
@@ -85,6 +86,8 @@ struct AppState {
     floating_y: i32,
     floating_edge: Option<FloatingEdge>,
     floating_collapsed: bool,
+    // 0 = hidden edge tab, 100 = fully expanded; updated by the popup timer.
+    floating_reveal: u8,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -517,6 +520,8 @@ struct SettingsFile {
     #[serde(default)]
     display_position: DisplayPosition,
     #[serde(default)]
+    desktop_direction: DesktopDirection,
+    #[serde(default)]
     theme_mode: ThemeMode,
     #[serde(default)]
     styles: StyleSettings,
@@ -545,6 +550,7 @@ impl Default for SettingsFile {
             language: None,
             appearance_preset: AppearancePreset::Default,
             display_position: DisplayPosition::Taskbar,
+            desktop_direction: DesktopDirection::Horizontal,
             theme_mode: ThemeMode::System,
             styles: StyleSettings::default(),
             show_session_window: true,
@@ -641,6 +647,7 @@ fn save_state_settings() {
                 .map(|language| language.code().to_string()),
             appearance_preset: s.appearance_preset.configured(),
             display_position: s.display_position,
+            desktop_direction: s.desktop_direction,
             theme_mode: s.theme_mode,
             styles: s.styles.clone(),
             show_session_window: s.show_session_window,
@@ -2258,6 +2265,7 @@ pub fn run() {
                 language,
                 appearance_preset: settings.appearance_preset,
                 display_position: settings.display_position,
+                desktop_direction: settings.desktop_direction,
                 effective_appearance_preset: match settings.appearance_preset {
                     AppearancePreset::Minimal => AppearancePreset::Minimal,
                     _ => AppearancePreset::Default,
@@ -2271,6 +2279,7 @@ pub fn run() {
                 floating_y: settings.floating_y.unwrap_or(i32::MIN),
                 floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
                 floating_collapsed: false,
+                floating_reveal: 100,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -7307,6 +7316,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             is_dark: s.is_dark,
             appearance_preset: s.appearance_preset.configured(),
             display_position: s.display_position,
+            desktop_direction: s.desktop_direction,
             vertical_taskbar_mode: s.vertical_taskbar_mode,
             active_style: s.styles.active(s.is_dark).clone(),
             editable_settings: editable_settings_from_state(s, startup_enabled),
@@ -7318,6 +7328,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             is_dark: true,
             appearance_preset: AppearancePreset::Default,
             display_position: DisplayPosition::Taskbar,
+            desktop_direction: DesktopDirection::Horizontal,
             vertical_taskbar_mode: false,
             active_style: ThemeStyle::dark_default(),
             editable_settings: default_editable_settings(),
