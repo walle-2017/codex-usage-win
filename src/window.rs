@@ -4152,6 +4152,14 @@ fn finish_floating_drag(hwnd: HWND) {
 }
 
 fn enable_floating_widget(reason: &str, vertical: bool) {
+    let vertical = {
+        let state = lock_state();
+        state.as_ref().is_some_and(|s|
+            if s.display_position == DisplayPosition::Desktop {
+                s.desktop_direction == DesktopDirection::Vertical
+            } else { vertical }
+        )
+    };
     let is_already_floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
     if is_already_floating {
         let hwnd = {
@@ -6619,6 +6627,23 @@ unsafe extern "system" fn wnd_proc(
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
+        _ if msg == style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    if s.display_position == DisplayPosition::Desktop {
+                        s.desktop_direction = if wparam.0 == 1 {
+                            DesktopDirection::Vertical
+                        } else { DesktopDirection::Horizontal };
+                    }
+                }
+            }
+            save_state_settings();
+            position_at_taskbar();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
         _ if msg == style_window::WM_STYLE_PRESET_CHANGE => {
             let Some(preset) = ThemePreset::from_index(wparam.0) else {
                 return LRESULT(0);
@@ -7277,6 +7302,9 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
             position: if state.display_position == DisplayPosition::Desktop {
                 "desktop"
             } else { "taskbar" }.to_string(),
+            desktop_direction: if state.desktop_direction == DesktopDirection::Vertical {
+                "vertical"
+            } else { "horizontal" }.to_string(),
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
             light: EditableThemeStyle::from_theme_style(&state.styles.light),
         },
@@ -7300,6 +7328,7 @@ fn default_editable_settings() -> EditableSettings {
             theme: "system".to_string(),
             layout: "default".to_string(),
             position: "taskbar".to_string(),
+            desktop_direction: "horizontal".to_string(),
             dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
             light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
         },
@@ -7393,6 +7422,9 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         s.display_position = if settings.appearance.position == "desktop" {
             DisplayPosition::Desktop
         } else { DisplayPosition::Taskbar };
+        s.desktop_direction = if settings.appearance.desktop_direction == "vertical" {
+            DesktopDirection::Vertical
+        } else { DesktopDirection::Horizontal };
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
         s.styles.clamp_corner_radii(s.appearance_preset);
