@@ -8355,6 +8355,64 @@ mod tests {
     }
 
     #[test]
+    fn desktop_grip_stays_inside_only_visible_edge_peek() {
+        let width = 240;
+        let height = 168;
+        let peek = sc(FLOAT_EDGE_PEEK);
+        for edge in [Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom), None] {
+            let r = floating_grip_rect(width, height, edge, peek);
+            assert!(r.left >= 0 && r.top >= 0 && r.right <= width && r.bottom <= height);
+            assert!(floating_drag_handle_hit((r.left + r.right) / 2,
+                (r.top + r.bottom) / 2, width, height, edge, peek));
+            assert!(!floating_drag_handle_hit(-1, -1, width, height, edge, peek));
+            match edge {
+                Some(FloatingEdge::Left) => assert_eq!(r.left, width - peek),
+                Some(FloatingEdge::Right) => assert_eq!(r.right, peek),
+                Some(FloatingEdge::Top) => assert_eq!(r.bottom, height),
+                Some(FloatingEdge::Bottom) | None => assert_eq!(r.top, 0),
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_collapsed_bitmap_only_keeps_grip_pixels_visible() {
+        let w = 240;
+        let h = 168;
+        let style = ThemeStyle::dark_default();
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let mut pixels = vec![0xFFFFFFFF; (w * h) as usize];
+            render_floating_handle_bitmap(&mut pixels, w, h, edge, true, false, &style);
+            let r = floating_grip_rect(w, h, sc(FLOAT_EDGE_PEEK));
+            for y in 0..h {
+                for x in 0..w {
+                    let pixel = pixels[(y * w + x) as usize];
+                    if !point_in_rect(r, x, y) { assert_eq!(pixel, 0); }
+                }
+            }
+            assert_ne!(pixels[(((r.top + r.bottom) / 2) * w +
+                (r.left + r.right) / 2) as usize], 0);
+        }
+    }
+
+    #[test]
+    fn desktop_horizontal_and_vertical_direction_round_trip() {
+        let settings = SettingsFile {
+            display_position: DisplayPosition::Desktop,
+            desktop_direction: DesktopDirection::Vertical,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let parsed: SettingsFile = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed.desktop_direction, DesktopDirection::Vertical);
+        assert_eq!(parsed.display_position, DisplayPosition::Desktop);
+        let legacy: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.desktop_direction, DesktopDirection::Horizontal);
+        assert_eq!(legacy.display_position, DisplayPosition::Taskbar);
+    }
+
+    #[test]
     fn vertical_adaptive_uses_compact_before_desktop_fallback() {
         let bar = RECT { left: 1800, top: 0, right: 1850, bottom: 800 };
         let ample = [VerticalSpan { top: 20, bottom: 280 }];
