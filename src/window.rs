@@ -20,7 +20,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appearance::{self, AppearancePreset};
+use crate::appearance::{self, AppearancePreset, DisplayPosition};
 use crate::diagnose;
 use crate::fonts;
 use crate::localization::{self, LanguageId, Strings};
@@ -75,6 +75,7 @@ struct AppState {
     language: LanguageId,
     appearance_preset: AppearancePreset,
     effective_appearance_preset: AppearancePreset,
+    display_position: DisplayPosition,
     hidden_for_taskbar_space: bool,
     taskbar_space_warning_shown: bool,
     floating_mode: bool,
@@ -514,6 +515,8 @@ struct SettingsFile {
     #[serde(default)]
     appearance_preset: AppearancePreset,
     #[serde(default)]
+    display_position: DisplayPosition,
+    #[serde(default)]
     theme_mode: ThemeMode,
     #[serde(default)]
     styles: StyleSettings,
@@ -541,6 +544,7 @@ impl Default for SettingsFile {
             poll_interval_ms: default_poll_interval(),
             language: None,
             appearance_preset: AppearancePreset::Default,
+            display_position: DisplayPosition::Taskbar,
             theme_mode: ThemeMode::System,
             styles: StyleSettings::default(),
             show_session_window: true,
@@ -602,6 +606,7 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
     settings.styles.normalize();
+    settings.appearance_preset = settings.appearance_preset.configured();
     settings.styles.clamp_corner_radii(settings.appearance_preset);
     settings
 }
@@ -634,7 +639,8 @@ fn save_state_settings() {
             language: s
                 .language_override
                 .map(|language| language.code().to_string()),
-            appearance_preset: s.appearance_preset,
+            appearance_preset: s.appearance_preset.configured(),
+            display_position: s.display_position,
             theme_mode: s.theme_mode,
             styles: s.styles.clone(),
             show_session_window: s.show_session_window,
@@ -1554,45 +1560,18 @@ fn placement_for_free_spans(
     free_spans: &[HorizontalSpan],
     desired_left_offset: i32,
 ) -> Option<(AppearancePreset, i32, i32)> {
-    match configured_preset {
-        AppearancePreset::Default | AppearancePreset::Minimal => {
-            let width = total_widget_width_for_preset(language, configured_preset);
-            nearest_free_left_offset(taskbar_rect, free_spans, width, desired_left_offset)
-                .map(|left| (configured_preset, width, left))
-        }
-        AppearancePreset::Adaptive => {
-            let default_width =
-                total_widget_width_for_preset(language, AppearancePreset::Default);
-            let minimal_width =
-                total_widget_width_for_preset(language, AppearancePreset::Minimal);
-            let mut best: Option<(i32, u8, AppearancePreset, i32, i32)> = None;
-
-            for span in free_spans.iter().copied() {
-                let (preset, width, preference) = if span.width() >= default_width {
-                    (AppearancePreset::Default, default_width, 0u8)
-                } else if span.width() >= minimal_width {
-                    (AppearancePreset::Minimal, minimal_width, 1u8)
-                } else {
-                    continue;
-                };
-
-                let min_left = span.left - taskbar_rect.left;
-                let max_left = span.right - taskbar_rect.left - width;
-                let candidate = desired_left_offset.clamp(min_left, max_left);
-                let distance = (candidate - desired_left_offset).abs();
-                let value = (distance, preference, preset, width, candidate);
-
-                if best
-                    .as_ref()
-                    .map(|current| (distance, preference) < (current.0, current.1))
-                    .unwrap_or(true)
-                {
-                    best = Some(value);
-                }
-            }
-
-            best.map(|(_, _, preset, width, left)| (preset, width, left))
-        }
+    let choice = configured_preset.configured();
+    let preset_width = |preset| total_widget_width_for_preset(language, preset);
+    let place = |preset| {
+        let width = preset_width(preset);
+        nearest_free_left_offset(taskbar_rect, free_spans, width, desired_left_offset)
+            .map(|left| (preset, width, left))
+    };
+    match choice {
+        AppearancePreset::Minimal => place(AppearancePreset::Minimal),
+        AppearancePreset::Default => place(AppearancePreset::Default)
+            .or_else(|| place(AppearancePreset::Minimal)),
+        AppearancePreset::Adaptive => unreachable!(),
     }
 }
 fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
@@ -2004,20 +1983,16 @@ fn is_small_taskbar_height(taskbar_height: i32) -> bool {
 }
 
 fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
-    match state.appearance_preset {
-        AppearancePreset::Adaptive => state.effective_appearance_preset,
-        preset => preset,
+    match state.appearance_preset.configured() {
+        AppearancePreset::Default => state.effective_appearance_preset,
+        AppearancePreset::Minimal => AppearancePreset::Minimal,
+        AppearancePreset::Adaptive => unreachable!(),
     }
 }
 
-// Adaptive uses the normal portrait ring layout while it fits, and switches
-// temporarily to minimal when only the shorter layout can fit.
+// The configured Default is always adaptive, without changing stored settings.
 fn vertical_effective_preset(preset: AppearancePreset) -> AppearancePreset {
-    if preset == AppearancePreset::Adaptive {
-        AppearancePreset::Default
-    } else {
-        preset
-    }
+    preset.configured()
 }
 
 fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
@@ -2282,6 +2257,7 @@ pub fn run() {
                 language_override,
                 language,
                 appearance_preset: settings.appearance_preset,
+                display_position: settings.display_position,
                 effective_appearance_preset: match settings.appearance_preset {
                     AppearancePreset::Minimal => AppearancePreset::Minimal,
                     _ => AppearancePreset::Default,
@@ -4002,13 +3978,13 @@ fn vertical_placement_for_gaps(
 ) -> Option<(AppearancePreset, i32)> {
     let normal = vertical_widget_height_for_preset(AppearancePreset::Default);
     let compact = vertical_widget_height_for_preset(AppearancePreset::Minimal);
-    let choices = match preset {
+    let choices = match preset.configured() {
         AppearancePreset::Minimal => [Some((AppearancePreset::Minimal, compact)), None],
-        AppearancePreset::Adaptive => [
+        AppearancePreset::Default => [
             Some((AppearancePreset::Default, normal)),
             Some((AppearancePreset::Minimal, compact)),
         ],
-        AppearancePreset::Default => [Some((AppearancePreset::Default, normal)), None],
+        AppearancePreset::Adaptive => unreachable!(),
     };
     for choice in choices.into_iter().flatten() {
         if let Some(top) = nearest_free_top_offset(taskbar_rect, spans, choice.1, desired) {
@@ -4384,6 +4360,20 @@ fn position_vertical_taskbar(
 
 fn position_at_taskbar() {
     refresh_dpi();
+    let desktop_selection = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| {
+            (s.display_position == DisplayPosition::Desktop).then_some(
+                s.taskbar_hwnd.and_then(native_interop::get_taskbar_rect)
+                    .map(|rect| taskbar_axis(rect) == TaskbarAxis::Vertical)
+                    .unwrap_or(s.vertical_taskbar_mode),
+            )
+        })
+    };
+    if let Some(vertical) = desktop_selection {
+        enable_floating_widget("explicit desktop preference", vertical);
+        return;
+    }
     let (
         hwnd,
         embedded,
@@ -7249,12 +7239,15 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
                 ThemeMode::Light => "light",
             }
             .to_string(),
-            layout: match state.appearance_preset {
+            layout: match state.appearance_preset.configured() {
                 AppearancePreset::Default => "default",
                 AppearancePreset::Minimal => "minimal",
-                AppearancePreset::Adaptive => "adaptive",
+                AppearancePreset::Adaptive => unreachable!(),
             }
             .to_string(),
+            position: if state.display_position == DisplayPosition::Desktop {
+                "desktop"
+            } else { "taskbar" }.to_string(),
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
             light: EditableThemeStyle::from_theme_style(&state.styles.light),
         },
@@ -7277,6 +7270,7 @@ fn default_editable_settings() -> EditableSettings {
         appearance: EditableAppearance {
             theme: "system".to_string(),
             layout: "default".to_string(),
+            position: "taskbar".to_string(),
             dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
             light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
         },
@@ -7291,7 +7285,8 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             language: s.language,
             theme_mode: s.theme_mode,
             is_dark: s.is_dark,
-            appearance_preset: s.appearance_preset,
+            appearance_preset: s.appearance_preset.configured(),
+            display_position: s.display_position,
             vertical_taskbar_mode: s.vertical_taskbar_mode,
             active_style: s.styles.active(s.is_dark).clone(),
             editable_settings: editable_settings_from_state(s, startup_enabled),
@@ -7302,6 +7297,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             theme_mode: ThemeMode::System,
             is_dark: true,
             appearance_preset: AppearancePreset::Default,
+            display_position: DisplayPosition::Taskbar,
             vertical_taskbar_mode: false,
             active_style: ThemeStyle::dark_default(),
             editable_settings: default_editable_settings(),
@@ -7338,7 +7334,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     };
     let appearance_preset = match settings.appearance.layout.as_str() {
         "minimal" => AppearancePreset::Minimal,
-        "adaptive" => AppearancePreset::Adaptive,
+        "adaptive" => AppearancePreset::Default,
         _ => AppearancePreset::Default,
     };
     let startup_enabled = settings.general.start_with_windows;
@@ -7363,6 +7359,9 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
             ThemeMode::Light => false,
         };
         s.appearance_preset = appearance_preset;
+        s.display_position = if settings.appearance.position == "desktop" {
+            DisplayPosition::Desktop
+        } else { DisplayPosition::Taskbar };
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
         s.styles.clamp_corner_radii(s.appearance_preset);
