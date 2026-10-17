@@ -2529,7 +2529,10 @@ fn render_layered() {
 
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
-    let blur_requested = style.panel_frosted_active();
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    // Desktop popups use per-pixel transparency for the collapsed grip.
+    // Avoid the embedded-only background blur while drawing a desktop popup.
+    let blur_requested = style.panel_frosted_active() && !floating;
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
@@ -2560,7 +2563,7 @@ fn render_layered() {
     }
 
     let embedded = lock_state().as_ref().is_some_and(|s| s.embedded);
-    if !embedded && !composition_blur_active {
+    if !embedded && !composition_blur_active && !floating {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -2688,6 +2691,20 @@ fn render_layered() {
             last_poll_ok,
         );
 
+        if floating {
+            let (edge, hidden, hovered) = {
+                let state = lock_state();
+                state.as_ref().map(|s| (
+                    s.floating_edge,
+                    s.floating_collapsed && s.floating_reveal == 0,
+                    s.drag_handle_hovered,
+                )).unwrap_or((None, false, false))
+            };
+            render_floating_handle_bitmap(
+                pixel_data, width, height, edge, hidden, hovered, &style,
+            );
+        }
+
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
             cx: width,
@@ -2718,6 +2735,49 @@ fn render_layered() {
 
     if composition_blur_active {
         sync_blur_backdrop_geometry(hwnd);
+    }
+}
+
+/// Draw the dedicated desktop drag tab into the premultiplied layered surface.
+/// When collapsed, every pixel outside the tab is fully transparent and cannot
+/// obstruct other desktop windows or leave a visible panel edge.
+fn render_floating_handle_bitmap(
+    pixels: &mut [u32], width: i32, height: i32,
+    edge: Option<FloatingEdge>, hidden: bool, hovered: bool, style: &ThemeStyle,
+) {
+    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+    let fill = style.color(StyleColorTarget::PanelBackground);
+    let border = style.color(StyleColorTarget::PanelBorder);
+    let mut dots = style.color(StyleColorTarget::DragHandle);
+    if hovered {
+        dots.r = dots.r.saturating_add(36);
+        dots.g = dots.g.saturating_add(36);
+        dots.b = dots.b.saturating_add(36);
+    }
+    if hidden {
+        pixels.fill(0);
+    }
+    let center_x = (grip.left + grip.right) / 2;
+    let center_y = (grip.top + grip.bottom) / 2;
+    let vertical_grip = matches!(edge, Some(FloatingEdge::Left | FloatingEdge::Right));
+    let dot = sc(2).max(1);
+    let gap = sc(3).max(1);
+    // Long side of the six-dot grip follows the long side of the tab.
+    let (cols, rows) = if vertical_grip { (2, 3) } else { (3, 2) };
+    let dots_w = cols * dot + (cols - 1) * gap;
+    let dots_h = rows * dot + (rows - 1) * gap;
+    for y in grip.top.max(0)..grip.bottom.min(height) {
+        for x in grip.left.max(0)..grip.right.min(width) {
+            let frame = x == grip.left || x == grip.right - 1
+                || y == grip.top || y == grip.bottom - 1;
+            let dot_pixel = (0..rows).any(|r| (0..cols).any(|c| {
+                let dx = center_x - dots_w / 2 + c * (dot + gap);
+                let dy = center_y - dots_h / 2 + r * (dot + gap);
+                x >= dx && x < dx + dot && y >= dy && y < dy + dot
+            }));
+            let color = if dot_pixel { dots } else if frame { border } else { fill };
+            pixels[(y * width + x) as usize] = premultiplied_pixel(color);
+        }
     }
 }
 
@@ -3392,20 +3452,22 @@ fn paint_vertical_widget_content(
     minimal: bool,
 ) {
     unsafe {
-        let handle_brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
-        let dot = sc(2).max(1);
-        let gap = sc(3);
-        for row in 0..2 {
-            for col in 0..3 {
-                let left = width / 2 - (3 * dot + 2 * gap) / 2 + col * (dot + gap);
-                let top = sc(5) + row * (dot + gap);
-                let rect = RECT {
-                    left, top, right: left + dot, bottom: top + dot,
-                };
-                FillRect(hdc, &rect, handle_brush);
+        if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+            let handle_brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
+            let dot = sc(2).max(1);
+            let gap = sc(3);
+            for row in 0..2 {
+                for col in 0..3 {
+                    let left = width / 2 - (3 * dot + 2 * gap) / 2 + col * (dot + gap);
+                    let top = sc(5) + row * (dot + gap);
+                    let rect = RECT {
+                        left, top, right: left + dot, bottom: top + dot,
+                    };
+                    FillRect(hdc, &rect, handle_brush);
+                }
             }
+            let _ = DeleteObject(handle_brush);
         }
-        let _ = DeleteObject(handle_brush);
 
         // The layered renderer composites rings and text with DirectWrite.
         // GDI is only needed for the compact fallback popup (when embedding
@@ -3639,7 +3701,9 @@ fn paint_content(
             return;
         }
 
-        draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
+        if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+            draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
+        }
 
         let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
         let row2_y = height - sc(4) - sc(SEGMENT_H);
@@ -4001,8 +4065,8 @@ const TIMER_FLOAT_ANIMATION: usize = 0xF141;
 /// collapsed alpha mask. Desktop-only, independent of the embedded taskbar grip.
 fn floating_grip_rect(width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32) -> RECT {
     let peek = peek.min(width.min(height)).max(1);
-    let grip_width = FLOAT_GRIP_LENGTH.min(width).max(1);
-    let grip_height = FLOAT_GRIP_LENGTH.min(height).max(1);
+    let grip_width = sc(FLOAT_GRIP_LENGTH).min(width).max(1);
+    let grip_height = sc(FLOAT_GRIP_LENGTH).min(height).max(1);
     match edge {
         Some(FloatingEdge::Left) => RECT {
             left: width - peek, right: width,
@@ -4294,9 +4358,8 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             }
         },
     };
-    unsafe {
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-    }
+    // Per-pixel UpdateLayeredWindow is required for a grip-only collapsed
+    // popup; SetLayeredWindowAttributes would disable that rendering path.
     let origin = native_interop::get_window_rect_safe(old);
     let default_point = origin.map(|r| POINT { x: r.left, y: r.top })
         .unwrap_or(POINT { x: 0, y: 0 });
@@ -5475,7 +5538,7 @@ unsafe extern "system" fn wnd_proc(
                     .map(|s| (s.embedded, s.composition_blur_active))
                     .unwrap_or((false, false))
             };
-            if embedded || frosted_active {
+            if embedded || frosted_active || lock_state().as_ref().is_some_and(|s| s.floating_mode) {
                 // Both taskbar mode and frosted foreground use UpdateLayeredWindow.
                 let mut ps = PAINTSTRUCT::default();
                 let _ = BeginPaint(hwnd, &mut ps);
