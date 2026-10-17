@@ -8399,7 +8399,7 @@ mod tests {
                      Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
             let mut pixels = vec![0xFFFFFFFF; (w * h) as usize];
             render_floating_handle_bitmap(&mut pixels, w, h, edge, true, false, &style);
-            let r = floating_grip_rect(w, h, sc(FLOAT_EDGE_PEEK));
+            let r = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
             for y in 0..h {
                 for x in 0..w {
                     let pixel = pixels[(y * w + x) as usize];
