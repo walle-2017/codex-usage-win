@@ -4250,38 +4250,43 @@ fn position_vertical_taskbar(
     language: LanguageId,
 ) {
     let Some(width) = vertical_widget_width(rect) else {
-        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar is too narrow", true);
+        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar is too narrow", false);
         return;
     };
-    let height = {
+    let (desired_top, configured) = {
         let state = lock_state();
-        state.as_ref().map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
-            .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
+        state.as_ref().map(|s| (s.taskbar_top_offset, s.appearance_preset))
+            .unwrap_or((0, AppearancePreset::Default))
     };
-    let desired_top = lock_state()
-        .as_ref()
-        .map(|s| s.taskbar_top_offset)
-        .unwrap_or(0);
     let Some(free) = taskbar_free_vertical_spans(taskbar_hwnd, rect) else {
-        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar layout cache is not ready", false);
+        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar layout cache is not ready", true);
         return;
     };
-    let Some(top) = nearest_free_top_offset(rect, &free, height, desired_top) else {
-        hide_widget_for_taskbar_space(hwnd, language, "no safe vertical space is available", true);
+    let Some((preset, top)) =
+        vertical_placement_for_gaps(configured, rect, &free, desired_top)
+    else {
+        hide_widget_for_taskbar_space(hwnd, language, "no safe vertical space is available", false);
         return;
     };
-    let was_hidden = {
+    if !restore_floating_widget_to_taskbar(taskbar_hwnd) {
+        diagnose::log("desktop popup retained: original Explorer child is no longer valid");
+        return;
+    }
+    let (hwnd, embedded, was_hidden, changed) = {
         let mut state = lock_state();
-        let Some(s) = state.as_mut() else { return; };
+        let Some(s) = state.as_mut() else { return };
         let was_hidden = s.hidden_for_taskbar_space;
+        let changed = s.effective_appearance_preset != preset || !s.vertical_taskbar_mode;
         s.hidden_for_taskbar_space = false;
         s.taskbar_space_warning_shown = false;
         s.vertical_taskbar_mode = true;
-        s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
+        s.effective_appearance_preset = preset;
         s.vertical_widget_width = width;
         s.small_taskbar_mode = false;
-        was_hidden
+        if changed { refresh_usage_texts(s); }
+        (s.hwnd.to_hwnd(), s.embedded, was_hidden, changed)
     };
+    let height = vertical_widget_height_for_preset(preset);
     let x = rect.left + (rect.right - rect.left - width) / 2;
     if embedded {
         native_interop::move_window(hwnd, x - rect.left, top, width, height);
@@ -4290,13 +4295,18 @@ fn position_vertical_taskbar(
     } else {
         native_interop::move_window(hwnd, x, rect.top + top, width, height);
     }
-    if was_hidden {
+    if was_hidden || hwnd != {
+        let state = lock_state();
+        state.as_ref().map(|s| s.floating_hwnd).flatten()
+            .map(|h| h.to_hwnd()).unwrap_or(HWND::default())
+    } {
         unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
         if blur_active { sync_blur_backdrop_zorder(hwnd); }
     }
+    if changed { render_layered(); }
     diagnose::log_lazy(|| format!(
-        "vertical taskbar widget positioned top={} w={} h={} gaps={} restored={}",
-        top, width, height, free.len(), was_hidden
+        "vertical taskbar slot top={} w={} h={} preset={preset:?} gaps={} restored={was_hidden}",
+        top, width, height, free.len(),
     ));
 }
 
@@ -4412,7 +4422,7 @@ fn position_at_taskbar() {
             hwnd,
             language,
             "safe taskbar layout cache is not ready",
-            false,
+            true,
         );
         return;
     };
@@ -4429,11 +4439,15 @@ fn position_at_taskbar() {
             hwnd,
             language,
             "no empty span is wide enough",
-            true,
+            false,
         );
         return;
     };
 
+    if !restore_floating_widget_to_taskbar(taskbar_hwnd) {
+        diagnose::log("desktop popup retained: original Explorer taskbar child unavailable");
+        return;
+    }
     let (was_hidden, effective_changed) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else {
@@ -4475,13 +4489,10 @@ fn position_at_taskbar() {
         }
     }
 
-    if was_hidden {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-        if blur_active {
-            sync_blur_backdrop_zorder(hwnd);
-        }
+    {
+        let active = lock_state().as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or(hwnd);
+        unsafe { let _ = ShowWindow(active, SW_SHOWNOACTIVATE); }
+        if blur_active { sync_blur_backdrop_zorder(active); }
     }
 
     diagnose::log_lazy(|| format!(
