@@ -2026,11 +2026,15 @@ fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
         return vertical_widget_height_for_preset(effective_appearance_preset(state));
     }
-    if state.small_taskbar_mode {
+    let content_height = if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
     } else {
         sc(effective_appearance_preset(state).metrics().widget_height)
-    }
+    };
+    // Desktop horizontal mode reserves a dedicated top tab. Horizontal
+    // taskbar-embedded widgets retain their original exact height.
+    if state.floating_mode { content_height + sc(FLOAT_EDGE_PEEK) }
+    else { content_height }
 }
 
 fn current_appearance_preset() -> AppearancePreset {
