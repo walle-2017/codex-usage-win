@@ -272,16 +272,19 @@ impl EditableSettings {
             return Err("appearance.position: allowed values are taskbar, desktop".to_string());
         }
 
-        let appearance_preset = match self.appearance.layout.as_str() {
-            "minimal" => AppearancePreset::Minimal,
-            "adaptive" => AppearancePreset::Adaptive,
-            _ => AppearancePreset::Default,
+        let appearance_preset = if self.appearance.layout == "minimal" {
+            AppearancePreset::Minimal
+        } else {
+            AppearancePreset::Default
         };
         let panel_radius_max = panel_corner_radius_max(appearance_preset);
         let tooltip_radius_max = tooltip_corner_radius_max();
         let progress_radius_max = progress_corner_radius_max(appearance_preset);
 
         let mut normalized = self.clone();
+        if normalized.appearance.layout == "adaptive" {
+            normalized.appearance.layout = "default".to_string();
+        }
         normalized.appearance.dark = self.appearance.dark.validate_and_normalize(
             "appearance.dark",
             panel_radius_max,
