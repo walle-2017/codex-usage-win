@@ -77,6 +77,13 @@ struct AppState {
     effective_appearance_preset: AppearancePreset,
     hidden_for_taskbar_space: bool,
     taskbar_space_warning_shown: bool,
+    floating_mode: bool,
+    floating_hwnd: Option<SendHwnd>,
+    parked_taskbar_foreground: Option<SendHwnd>,
+    floating_x: i32,
+    floating_y: i32,
+    floating_edge: Option<FloatingEdge>,
+    floating_collapsed: bool,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -116,6 +123,19 @@ struct AppState {
     drag_anchor_logical_y: i32,
     drag_reparenting: bool,
     failed_drag_target: Option<HWND>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatingEdge { Left, Right, Top, Bottom }
+
+impl FloatingEdge {
+    fn name(self) -> &'static str {
+        match self { Self::Left => "left", Self::Right => "right", Self::Top => "top", Self::Bottom => "bottom" }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        match value { "left" => Some(Self::Left), "right" => Some(Self::Right),
+            "top" => Some(Self::Top), "bottom" => Some(Self::Bottom), _ => None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -479,6 +499,12 @@ struct SettingsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_top_offset: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    floating_x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floating_y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floating_edge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_monitor: Option<String>,
     #[serde(default = "default_poll_interval")]
     poll_interval_ms: u32,
@@ -507,6 +533,9 @@ impl Default for SettingsFile {
             taskbar_index: 0,
             taskbar_left_offset: None,
             taskbar_top_offset: None,
+            floating_x: None,
+            floating_y: None,
+            floating_edge: None,
             taskbar_monitor: None,
             poll_interval_ms: default_poll_interval(),
             language: None,
@@ -596,6 +625,9 @@ fn save_state_settings() {
             taskbar_index: s.taskbar_index,
             taskbar_left_offset: Some(s.taskbar_left_offset),
             taskbar_top_offset: Some(s.taskbar_top_offset),
+            floating_x: Some(s.floating_x),
+            floating_y: Some(s.floating_y),
+            floating_edge: s.floating_edge.map(|e| e.name().to_string()),
             taskbar_monitor: s.taskbar_monitor.clone(),
             poll_interval_ms: s.poll_interval_ms,
             language: s
@@ -1977,8 +2009,8 @@ fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
     }
 }
 
-// Adaptive uses the normal ring layout in portrait orientation unless the
-// user explicitly selected Minimal. Horizontal adaptive width stays untouched.
+// Adaptive uses the normal portrait ring layout while it fits, and switches
+// temporarily to minimal when only the shorter layout can fit.
 fn vertical_effective_preset(preset: AppearancePreset) -> AppearancePreset {
     if preset == AppearancePreset::Adaptive {
         AppearancePreset::Default
@@ -1997,7 +2029,7 @@ fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
 
 fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
-        return vertical_widget_height_for_preset(vertical_effective_preset(state.appearance_preset));
+        return vertical_widget_height_for_preset(effective_appearance_preset(state));
     }
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
@@ -2255,6 +2287,13 @@ pub fn run() {
                 },
                 hidden_for_taskbar_space: false,
                 taskbar_space_warning_shown: false,
+                floating_mode: false,
+                floating_hwnd: None,
+                parked_taskbar_foreground: None,
+                floating_x: settings.floating_x.unwrap_or(i32::MIN),
+                floating_y: settings.floating_y.unwrap_or(i32::MIN),
+                floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
+                floating_collapsed: false,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -4028,7 +4067,7 @@ fn position_vertical_taskbar(
     };
     let height = {
         let state = lock_state();
-        state.as_ref().map(|s| vertical_widget_height_for_preset(vertical_effective_preset(s.appearance_preset)))
+        state.as_ref().map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
             .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
     };
     let desired_top = lock_state()
@@ -5597,7 +5636,7 @@ unsafe extern "system" fn wnd_proc(
                                 let height = {
                                     let state = lock_state();
                                     state.as_ref()
-                                        .map(|s| vertical_widget_height_for_preset(vertical_effective_preset(s.appearance_preset)))
+                                        .map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
                                         .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
                                 };
                                 let desired_top = drag_top_from_cursor(
@@ -5914,7 +5953,7 @@ unsafe extern "system" fn wnd_proc(
                                 let desired_bottom = taskbar_rect.bottom - taskbar_rect.top;
                                 let top = nearest_free_top_offset(
                                     taskbar_rect, &spans,
-                                    vertical_widget_height_for_preset(vertical_effective_preset(s.appearance_preset)),
+                                    vertical_widget_height_for_preset(effective_appearance_preset(s)),
                                     desired_bottom,
                                 )?;
                                 return Some((TaskbarAxis::Vertical, top));
