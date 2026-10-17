@@ -15,8 +15,11 @@ foreach ($required in @(
     'spawn_taskbar_layout_worker',
     'WM_APP_TASKBAR_LAYOUT_UPDATED',
     'TASKBAR_CONTROL_MARGIN_LOGICAL',
-    'show_taskbar_space_warning',
-    'MessageBoxW'
+    'vertical_placement_for_gaps',
+    'enable_floating_widget',
+    'restore_floating_widget_to_taskbar',
+    'floating_nearest_edge',
+    'floating_edge_position'
 )) {
     if ($window -notmatch [regex]::Escape($required)) {
         throw "Missing adaptive taskbar placement contract: $required"
@@ -55,8 +58,13 @@ $position = [regex]::Match(
 ).Value
 if ($position -notmatch 'hide_widget_for_taskbar_space' -or
     $position -notmatch 'placement_for_free_spans' -or
-    $position -notmatch 'effective_appearance_preset') {
-    throw 'Positioning must hide on insufficient space and apply the resolved adaptive layout.'
+    $position -notmatch 'effective_appearance_preset' -or
+    $window -notmatch 'vertical_placement_for_gaps' -or
+    $window -notmatch 'AppearancePreset::Adaptive\s*=>\s*\[' -or
+    $window -notmatch 'restore_floating_widget_to_taskbar\(' -or
+    $window -notmatch 'enable_floating_widget\(' -or
+    $window -match 'fn\s+show_taskbar_space_warning\(') {
+    throw 'Positioning must fall back Default -> Minimal -> desktop popup without modal space warnings and restore taskbar placement when possible.'
 }
 
 $worker = [regex]::Match(
