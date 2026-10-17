@@ -6361,10 +6361,11 @@ unsafe extern "system" fn wnd_proc(
                     style_window::sync(style_settings_snapshot());
                 }
                 IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL | IDM_LAYOUT_ADAPTIVE => {
-                    let preset = match id {
-                        IDM_LAYOUT_MINIMAL => AppearancePreset::Minimal,
-                        IDM_LAYOUT_ADAPTIVE => AppearancePreset::Adaptive,
-                        _ => AppearancePreset::Default,
+                    // The retired Adaptive command is an alias for Default.
+                    let preset = if id == IDM_LAYOUT_MINIMAL {
+                        AppearancePreset::Minimal
+                    } else {
+                        AppearancePreset::Default
                     };
                     {
                         let mut state = lock_state();
@@ -6575,7 +6576,7 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(s) = state.as_mut() {
                     s.appearance_preset = match wparam.0 {
                         1 => AppearancePreset::Minimal,
-                        2 => AppearancePreset::Adaptive,
+                        2 => AppearancePreset::Default,
                         _ => AppearancePreset::Default,
                     };
                     s.styles.clamp_corner_radii(s.appearance_preset);
@@ -8377,7 +8378,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_layout_prefers_nearby_minimal_gap_over_distant_default_gap() {
+    fn default_layout_prioritizes_full_display_before_compact_elsewhere() {
         let taskbar = RECT {
             left: 0,
             top: 0,
@@ -8406,8 +8407,8 @@ mod tests {
             900,
         )
         .unwrap();
-        assert_eq!(placement.0, AppearancePreset::Minimal);
-        assert_eq!(placement.2, 900);
+        assert_eq!(placement.0, AppearancePreset::Default);
+        assert_eq!(placement.2, 100);
     }
 
     #[test]
@@ -8479,6 +8480,41 @@ mod tests {
     fn legacy_settings_default_to_default_appearance() {
         let settings: SettingsFile = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+    }
+
+    #[test]
+    fn display_position_and_legacy_adaptive_config_are_compatible() {
+        let settings: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.display_position, DisplayPosition::Taskbar);
+        let desktop = SettingsFile {
+            display_position: DisplayPosition::Desktop,
+            appearance_preset: AppearancePreset::Default,
+            ..Default::default()
+        };
+        let parsed: SettingsFile = serde_json::from_str(
+            &serde_json::to_string(&desktop).unwrap()
+        ).unwrap();
+        assert_eq!(parsed.display_position, DisplayPosition::Desktop);
+        assert_eq!(parsed.appearance_preset, AppearancePreset::Default);
+        let legacy = normalize_settings(SettingsFile {
+            appearance_preset: AppearancePreset::Adaptive, ..Default::default()
+        });
+        assert_eq!(legacy.appearance_preset, AppearancePreset::Default);
+    }
+
+    #[test]
+    fn default_adapts_on_vertical_taskbar_without_mutating_selection() {
+        let bar = RECT { left: 1800, top: 0, right: 1850, bottom: 800 };
+        let ample = [VerticalSpan { top: 20, bottom: 280 }];
+        let narrow = [VerticalSpan { top: 20, bottom: 130 }];
+        let exhausted = [VerticalSpan { top: 20, bottom: 65 }];
+        let configured = AppearancePreset::Default;
+        assert_eq!(vertical_placement_for_gaps(configured, bar, &ample, 24).unwrap().0,
+            AppearancePreset::Default);
+        assert_eq!(vertical_placement_for_gaps(configured, bar, &narrow, 24).unwrap().0,
+            AppearancePreset::Minimal);
+        assert_eq!(vertical_placement_for_gaps(configured, bar, &exhausted, 24), None);
+        assert_eq!(configured, AppearancePreset::Default);
     }
 
     #[test]
