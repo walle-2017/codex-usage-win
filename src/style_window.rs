@@ -20,7 +20,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appearance::AppearancePreset;
+use crate::appearance::{AppearancePreset, DisplayPosition};
 use crate::fonts;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
@@ -36,6 +36,7 @@ pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 121;
 pub const WM_STYLE_SAVE: u32 = WM_APP + 122;
 pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
+pub const WM_STYLE_POSITION_CHANGE: u32 = WM_APP + 125;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
 pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
@@ -145,6 +146,7 @@ pub struct StyleWindowSnapshot {
     pub theme_mode: ThemeMode,
     pub is_dark: bool,
     pub appearance_preset: AppearancePreset,
+    pub display_position: DisplayPosition,
     // Runtime orientation, not a persisted appearance setting.
     pub vertical_taskbar_mode: bool,
     pub active_style: ThemeStyle,
@@ -243,6 +245,7 @@ enum PendingDiscardAction {
 enum HitTarget {
     Theme(ThemeMode),
     Layout(AppearancePreset),
+    Position(DisplayPosition),
     Preset(ThemePreset),
     Section(Section),
     Row(EditorSelection),
@@ -1188,6 +1191,11 @@ fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
     rect(hwnd, 314 + index * 108, 70, 414 + index * 108, 104)
 }
 
+fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
+    let index = if position == DisplayPosition::Desktop { 1 } else { 0 };
+    rect(hwnd, 314 + index * 108, 162, 414 + index * 108, 196)
+}
+
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     let index = match preset {
         AppearancePreset::Default => 0,
@@ -1200,7 +1208,7 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
 
 // Four tall, narrow cards fit the complete 740px settings content band.
 const PRESET_GALLERY_LEFT: i32 = 200;
-const PRESET_CARD_TOP: i32 = 220;
+const PRESET_CARD_TOP: i32 = 266;
 const PRESET_CARD_WIDTH: i32 = 172;
 const PRESET_CARD_HEIGHT: i32 = 390;
 const PRESET_CARD_GAP: i32 = 16;
@@ -1211,14 +1219,29 @@ fn preset_gallery_card_rect(index: i32) -> RECT {
         bottom: PRESET_CARD_TOP + PRESET_CARD_HEIGHT }
 }
 
-fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+fn preview_is_vertical() -> bool {
+    STATE.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().is_some_and(|s| s.snapshot.vertical_taskbar_mode)
+}
+
+fn preset_card_rect_for_orientation(hwnd: HWND, preset: ThemePreset, vertical: bool) -> RECT {
     let index = match preset {
         ThemePreset::Classic => 0,
         ThemePreset::Ocean => 1,
         ThemePreset::Forest => 2,
     };
-    let r = preset_gallery_card_rect(index);
-    rect(hwnd, r.left, r.top, r.right, r.bottom)
+    if vertical {
+        let r = preset_gallery_card_rect(index);
+        rect(hwnd, r.left, r.top, r.right, r.bottom)
+    } else {
+        // Restore the original three-across horizontal gallery.
+        let left = 200 + index * 244;
+        rect(hwnd, left, PRESET_CARD_TOP, left + 224, PRESET_CARD_TOP + 184)
+    }
+}
+
+fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+    preset_card_rect_for_orientation(hwnd, preset, preview_is_vertical())
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -1415,10 +1438,17 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
     rect(hwnd, 812, top, 920, top + 26)
 }
 
+fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool) -> RECT {
+    if vertical {
+        let r = preset_gallery_card_rect(3);
+        rect(hwnd, r.left, r.top, r.right, r.bottom)
+    } else {
+        // Restore original second-row custom preview for horizontal taskbars.
+        rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
+    }
+}
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    // Custom styles always occupy the fourth position in the same row.
-    let r = preset_gallery_card_rect(3);
-    rect(hwnd, r.left, r.top, r.right, r.bottom)
+    custom_preset_card_rect_for_orientation(hwnd, preview_is_vertical())
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
@@ -4079,9 +4109,14 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Theme(mode));
             }
         }
-        for preset in [AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive] {
+        for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
             if pt_in_rect(layout_rect(hwnd, preset), x, y) {
                 return Some(HitTarget::Layout(preset));
+            }
+        }
+        for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
+            if pt_in_rect(position_rect(hwnd, position), x, y) {
+                return Some(HitTarget::Position(position));
             }
         }
         if section == Section::Preset {
@@ -4162,11 +4197,14 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
         HitTarget::Layout(preset) => {
             send_parent(
                 WM_STYLE_LAYOUT_CHANGE,
-                match preset {
-                    AppearancePreset::Default => 0,
-                    AppearancePreset::Minimal => 1,
-                    AppearancePreset::Adaptive => 2,
-                },
+                if preset == AppearancePreset::Minimal { 1 } else { 0 },
+                0,
+            );
+        }
+        HitTarget::Position(position) => {
+            send_parent(
+                WM_STYLE_POSITION_CHANGE,
+                if position == DisplayPosition::Desktop { 1 } else { 0 },
                 0,
             );
         }
