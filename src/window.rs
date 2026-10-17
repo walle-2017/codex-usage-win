@@ -2747,9 +2747,13 @@ fn render_floating_handle_bitmap(
     edge: Option<FloatingEdge>, hidden: bool, hovered: bool, style: &ThemeStyle,
 ) {
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
-    let fill = style.color(StyleColorTarget::PanelBackground);
-    let border = style.color(StyleColorTarget::PanelBorder);
+    // Grip remains readable even if the user chose a fully transparent panel.
+    let mut fill = style.color(StyleColorTarget::PanelBackground);
+    let mut border = style.color(StyleColorTarget::PanelBorder);
     let mut dots = style.color(StyleColorTarget::DragHandle);
+    fill.a = fill.a.max(180);
+    border.a = border.a.max(190);
+    dots.a = dots.a.max(230);
     if hovered {
         dots.r = dots.r.saturating_add(36);
         dots.g = dots.g.saturating_add(36);
@@ -4185,8 +4189,11 @@ fn move_floating_widget(hwnd: HWND) {
     let (collapsed_x, collapsed_y) = floating_edge_position(
         bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
     );
+    // Smoothstep avoids the mechanical look of a fixed-speed edge slide.
+    let t = f64::from(reveal) / 100.0;
+    let ease = t * t * (3.0 - 2.0 * t);
     let interpolation = |a: i32, b: i32| {
-        a + (((b - a) as i64 * i64::from(reveal)) / 100) as i32
+        a + (f64::from(b - a) * ease).round() as i32
     };
     let left = interpolation(collapsed_x, expanded_x);
     let top = interpolation(collapsed_y, expanded_y);
@@ -4314,8 +4321,11 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             let mut state = lock_state();
             let Some(s) = state.as_mut() else { return };
             s.vertical_taskbar_mode = vertical;
+            s.small_taskbar_mode = false;
             s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
             s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
+            s.floating_collapsed = false;
+            s.floating_reveal = 100;
             s.hwnd.to_hwnd()
         };
         move_floating_widget(hwnd);
@@ -4390,6 +4400,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_x = x;
         s.floating_y = y;
         s.vertical_taskbar_mode = vertical;
+        s.small_taskbar_mode = false;
         s.effective_appearance_preset = if vertical {
             vertical_effective_preset(s.appearance_preset)
         } else {
@@ -4432,7 +4443,10 @@ fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
         s.parked_taskbar_foreground = None;
         s.hidden_for_taskbar_space = false;
     }
-    unsafe { let _ = ShowWindow(float, SW_HIDE); }
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(float), TIMER_FLOAT_ANIMATION);
+        let _ = ShowWindow(float, SW_HIDE);
+    }
     diagnose::log("safe taskbar slot recovered; desktop popup parked");
     true
 }
