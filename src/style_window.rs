@@ -6794,44 +6794,159 @@ fn preview_remaining_color(remaining: f32) -> StyleColorTarget {
     }
 }
 
-fn preview_arc_point(cx: i32, cy: i32, radius: i32, angle: f32) -> (i32, i32) {
-    (
-        cx + (radius as f32 * angle.sin()).round() as i32,
-        cy - (radius as f32 * angle.cos()).round() as i32,
-    )
+// A four-by-four coverage raster instead of the jagged GDI Arc stroke.
+// The ring remains clockwise, displays remaining quota and keeps its
+// 36-degree bottom opening at 0% through 100%.
+const PREVIEW_RING_SAMPLES: i32 = 4;
+
+fn preview_ring_pixel(
+    px: i32, py: i32, size: i32, radius: f32, stroke: f32,
+    remaining: f32, background: Color, track: Color, accent: Color,
+) -> u32 {
+    let (start, end, _) = preview_ring_angles(remaining);
+    let sweep = end - start;
+    let fraction = (remaining / 100.0).clamp(0.0, 1.0);
+    let track = track.blend_over(background);
+    let accent = accent.blend_over(background);
+    let count = (PREVIEW_RING_SAMPLES * PREVIEW_RING_SAMPLES) as u32;
+    let (mut red, mut green, mut blue) = (0u32, 0u32, 0u32);
+    for sy in 0..PREVIEW_RING_SAMPLES {
+        for sx in 0..PREVIEW_RING_SAMPLES {
+            let dx = px as f32 + (sx as f32 + 0.5) / PREVIEW_RING_SAMPLES as f32
+                - size as f32 * 0.5;
+            let dy = py as f32 + (sy as f32 + 0.5) / PREVIEW_RING_SAMPLES as f32
+                - size as f32 * 0.5;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let color = if (distance - radius).abs() <= stroke * 0.5 {
+                let angle = dx.atan2(-dy).rem_euclid(std::f32::consts::TAU);
+                let offset = (angle - start).rem_euclid(std::f32::consts::TAU);
+                if offset <= sweep {
+                    if offset / sweep <= fraction { accent } else { track }
+                } else {
+                    background
+                }
+            } else {
+                background
+            };
+            red += u32::from(color.r);
+            green += u32::from(color.g);
+            blue += u32::from(color.b);
+        }
+    }
+    let r = (red + count / 2) / count;
+    let g = (green + count / 2) / count;
+    let b = (blue + count / 2) / count;
+    (r << 16) | (g << 8) | b
 }
 
 unsafe fn paint_preview_remaining_ring(
     hdc: HDC, hwnd: HWND, cx: i32, cy: i32, remaining: f32, style: &ThemeStyle,
 ) {
-    let radius = scale(hwnd, 13).max(3);
-    let bounds = RECT {
-        left: cx - radius, top: cy - radius,
-        right: cx + radius, bottom: cy + radius,
+    let size = scale(hwnd, 36).max(8);
+    let radius = scale(hwnd, 13).max(2) as f32;
+    let stroke = scale(hwnd, 3).max(1) as f32;
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size,
+            biHeight: -size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            ..Default::default()
+        },
+        ..Default::default()
     };
-    let (start, end, filled) = preview_ring_angles(remaining);
-    let (sx, sy) = preview_arc_point(cx, cy, radius, start);
-    let (ex, ey) = preview_arc_point(cx, cy, radius, end);
-    let track_pen = CreatePen(
-        PS_SOLID, scale(hwnd, 2).max(1),
-        COLORREF(style.color(StyleColorTarget::ProgressConsumed).to_colorref()),
-    );
-    let old_pen = SelectObject(hdc, track_pen);
-    // Win32 Arc draws counterclockwise; reverse start/end to draw clockwise.
-    let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, ex, ey, sx, sy);
-    let _ = SelectObject(hdc, old_pen);
-    let _ = DeleteObject(track_pen);
-    if remaining > 0.0 {
-        let accent_pen = CreatePen(
-            PS_SOLID, scale(hwnd, 2).max(1),
-            COLORREF(style.color(preview_remaining_color(remaining)).to_colorref()),
-        );
-        let old_pen = SelectObject(hdc, accent_pen);
-        let (px, py) = preview_arc_point(cx, cy, radius, filled);
-        let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, px, py, sx, sy);
-        let _ = SelectObject(hdc, old_pen);
-        let _ = DeleteObject(accent_pen);
+    let dc = CreateCompatibleDC(hdc);
+    if dc.0.is_null() { return; }
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        .unwrap_or_default();
+    if dib.is_invalid() || bits.is_null() {
+        let _ = DeleteDC(dc);
+        return;
     }
+    let old_bitmap = SelectObject(dc, dib);
+    let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
+    let background = style.color(StyleColorTarget::PanelBackground);
+    let track = style.color(StyleColorTarget::ProgressConsumed);
+    let accent = style.color(preview_remaining_color(remaining));
+    for y in 0..size {
+        for x in 0..size {
+            pixels[(y * size + x) as usize] = preview_ring_pixel(
+                x, y, size, radius, stroke, remaining, background, track, accent,
+            );
+        }
+    }
+    let _ = BitBlt(hdc, cx - size / 2, cy - size / 2, size, size, dc, 0, 0, SRCCOPY);
+    let _ = SelectObject(dc, old_bitmap);
+    let _ = DeleteObject(dib);
+    let _ = DeleteDC(dc);
+}
+
+fn portrait_preview_tooltip_rect(
+    canvas: RECT, widget: RECT, logical: impl Fn(i32) -> i32,
+) -> RECT {
+    let width = logical(128).min(canvas.right - canvas.left - logical(12));
+    let height = logical(40);
+    let left = canvas.left + (canvas.right - canvas.left - width) / 2;
+    let top = widget.bottom + logical(7);
+    RECT { left, top, right: left + width, bottom: top + height }
+}
+
+unsafe fn paint_portrait_preview_tooltip(
+    hdc: HDC, hwnd: HWND, canvas: RECT, widget: RECT,
+    style: &ThemeStyle, minimal: bool,
+) {
+    // The preview always includes a sample floating tooltip to demonstrate
+    // theme customization. It sits below the widget rather than obscuring it.
+    // Runtime hover rules are unchanged (reset only / percent only).
+    let tooltip = portrait_preview_tooltip_rect(canvas, widget, |v| scale(hwnd, v));
+    let radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+        .min(((tooltip.right - tooltip.left).min(tooltip.bottom - tooltip.top) / 2).max(0));
+    if radius > 0 {
+        fill_rounded_rect(hdc, tooltip, style.color(StyleColorTarget::TooltipBackground), radius);
+        draw_rounded_outline_rect(
+            hdc, tooltip, style.color(StyleColorTarget::TooltipBorder), radius, 1,
+        );
+    } else {
+        fill(hdc, tooltip, style.color(StyleColorTarget::TooltipBackground));
+        draw_outline_rect(hdc, tooltip, style.color(StyleColorTarget::TooltipBorder));
+    }
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+    let font = CreateFontW(
+        -scale(hwnd, 10).max(1), 0, 0, 0, FW_MEDIUM.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
+    );
+    let old_font = SelectObject(hdc, font);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let text_color = style.color(StyleColorTarget::ResetTime);
+    let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
+    draw_text(
+        hdc,
+        if minimal { "5H · 2026-10-22" } else { "2026-10-22" },
+        RECT {
+            left: tooltip.left + scale(hwnd, 3),
+            top: tooltip.top + scale(hwnd, 3),
+            right: tooltip.right - scale(hwnd, 3),
+            bottom: tooltip.top + scale(hwnd, 21),
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc, "21:30",
+        RECT {
+            left: tooltip.left + scale(hwnd, 3),
+            top: tooltip.top + scale(hwnd, 20),
+            right: tooltip.right - scale(hwnd, 3),
+            bottom: tooltip.bottom - scale(hwnd, 2),
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SelectObject(hdc, old_font);
+    let _ = DeleteObject(font);
 }
 
 // Preview the actual portrait taskbar widget rather than a stretched card
@@ -6961,6 +7076,7 @@ unsafe fn paint_vertical_style_preview(
     let _ = DeleteObject(label_font);
     let _ = DeleteObject(percent_font);
     let _ = DeleteObject(reset_font);
+    paint_portrait_preview_tooltip(hdc, hwnd, preview, widget, style, minimal);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8198,6 +8314,20 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn portrait_preview_tooltip_is_visible_without_covering_component() {
+        let canvas = RECT { left: 0, top: 0, right: 148, bottom: 276 };
+        for minimal in [false, true] {
+            let widget = portrait_preview_widget_bounds(canvas, minimal, |v| v);
+            let popup = portrait_preview_tooltip_rect(canvas, widget, |v| v);
+            assert!(popup.top > widget.bottom);
+            assert!(popup.bottom <= canvas.bottom);
+            assert!(popup.left >= canvas.left && popup.right <= canvas.right);
+            assert_eq!(popup.right - popup.left, 128);
+            assert_eq!(popup.bottom - popup.top, 40);
+        }
+    }
+
+    #[test]
     fn portrait_preview_matches_taskbar_aspect_ratio_and_label_clearances() {
         let canvas = RECT { left: 0, top: 0, right: 148, bottom: 276 };
         let widget = portrait_preview_widget_bounds(canvas, false, |v| v);
@@ -8239,10 +8369,19 @@ mod ui_smoke_tests {
         assert_eq!(preview_remaining_color(82.0), StyleColorTarget::ProgressHigh);
         assert_eq!(preview_remaining_color(37.0), StyleColorTarget::ProgressMedium);
         assert_eq!(preview_remaining_color(12.0), StyleColorTarget::ProgressLow);
-        let (sx, sy) = preview_arc_point(30, 30, 12, start);
-        let (ex, ey) = preview_arc_point(30, 30, 12, end);
-        assert!(sy > 30 && ey > 30, "ring opening must point down");
-        assert!(sx < 30 && ex > 30);
+        // A true 100% ring retains an opaque-free gap at six o'clock.
+        let bg = Color::rgba(18, 21, 25, 255);
+        let track = Color::rgba(41, 52, 63, 255);
+        let accent = Color::rgba(5, 206, 230, 255);
+        let bg_pixel = (18u32 << 16) | (21u32 << 8) | 25u32;
+        assert_eq!(preview_ring_pixel(18, 31, 36, 13.0, 3.0, 100.0, bg, track, accent), bg_pixel);
+        assert_ne!(preview_ring_pixel(18, 5, 36, 13.0, 3.0, 100.0, bg, track, accent), bg_pixel);
+        // Supersampling produces partially covered edge pixels, not only
+        // abrupt foreground/background transitions.
+        let pixels: Vec<u32> = (0..36).flat_map(|y| (0..36).map(move |x|
+            preview_ring_pixel(x, y, 36, 13.0, 3.0, 82.0, bg, track, accent)
+        )).collect();
+        assert!(pixels.iter().any(|p| *p != bg_pixel && *p != 0x0005CEE6 && *p != 0x0029343F));
     }
 
     #[test]
