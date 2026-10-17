@@ -65,6 +65,8 @@ pub struct EditableAppearance {
     pub layout: String,
     #[serde(default = "default_display_position")]
     pub position: String,
+    #[serde(default = "default_desktop_direction")]
+    pub desktop_direction: String,
     pub dark: EditableThemeStyle,
     pub light: EditableThemeStyle,
 }
@@ -222,6 +224,7 @@ impl EditableThemeStyle {
 }
 
 fn default_display_position() -> String { "taskbar".to_string() }
+fn default_desktop_direction() -> String { "horizontal".to_string() }
 
 impl EditableSettings {
     pub fn validate_and_normalize(&self) -> Result<Self, String> {
@@ -270,6 +273,9 @@ impl EditableSettings {
         }
         if !matches!(self.appearance.position.as_str(), "taskbar" | "desktop") {
             return Err("appearance.position: allowed values are taskbar, desktop".to_string());
+        }
+        if !matches!(self.appearance.desktop_direction.as_str(), "horizontal" | "vertical") {
+            return Err("appearance.desktop_direction: allowed values are horizontal, vertical".to_string());
         }
 
         let appearance_preset = if self.appearance.layout == "minimal" {
@@ -359,6 +365,9 @@ r#"{{
     // {position_desc}
     // {position_options}
     "position": {position},
+    // {direction_desc}
+    // {direction_options}
+    "desktop_direction": {desktop_direction},
 
     // {dark_desc}
     "dark": {{
@@ -418,6 +427,9 @@ r#"{{
             position_desc = localized(zh, "组件显示位置；任务栏空间不足时自动临时切换至桌面", "Display location; temporarily fall back to Desktop if the taskbar is too full"),
             position_options = localized(zh, "可选：taskbar | desktop", "Options: taskbar | desktop"),
             position = q(&a.position),
+            direction_desc = localized(zh, "桌面模式的横向或纵向布局；任务栏模式下忽略", "Horizontal/vertical layout for Desktop, ignored in Taskbar mode"),
+            direction_options = localized(zh, "可选：horizontal | vertical", "Options: horizontal | vertical"),
+            desktop_direction = q(&a.desktop_direction),
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
             light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
             dark_json = theme_jsonc(dark, zh, 6, &a.layout),
@@ -702,6 +714,7 @@ mod tests {
                 theme: "system".into(),
                 layout: "default".into(),
                 position: "taskbar".into(),
+                desktop_direction: "horizontal".into(),
                 dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                 light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
             },
