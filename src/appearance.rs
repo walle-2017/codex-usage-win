@@ -14,6 +14,25 @@ pub enum AppearancePreset {
     Adaptive,
 }
 
+/// User-selected location. Automatic taskbar-space fallback never changes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayPosition {
+    #[default]
+    Taskbar,
+    Desktop,
+}
+
+impl AppearancePreset {
+    /// Legacy 'adaptive' selections have the new default semantics.
+    pub fn configured(self) -> Self {
+        match self {
+            Self::Adaptive => Self::Default,
+            other => other,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for AppearancePreset {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
