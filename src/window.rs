@@ -3998,7 +3998,7 @@ const FLOAT_EDGE_SNAP: i32 = 24;
 const FLOAT_EDGE_PEEK: i32 = 15;
 
 fn vertical_placement_for_gaps(
-    preset: AppearancePreset, taskbar_rect: RECT, spans: &[(i32, i32)], desired: i32,
+    preset: AppearancePreset, taskbar_rect: RECT, spans: &[VerticalSpan], desired: i32,
 ) -> Option<(AppearancePreset, i32)> {
     let normal = vertical_widget_height_for_preset(AppearancePreset::Default);
     let compact = vertical_widget_height_for_preset(AppearancePreset::Minimal);
@@ -4236,6 +4236,9 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         s.parked_taskbar_foreground = s.embedded.then_some(s.hwnd);
+        // Embedded blur backdrop belongs to Explorer and cannot follow
+        // the desktop popup; the fallback uses opaque GDI or popup blur.
+        s.composition_blur_active = false;
         s.floating_hwnd = Some(SendHwnd::from_hwnd(hwnd));
         s.hwnd = SendHwnd::from_hwnd(hwnd);
         s.floating_mode = true;
@@ -4317,7 +4320,7 @@ fn hide_widget_for_taskbar_space(
 
 fn position_vertical_taskbar(
     hwnd: HWND,
-    embedded: bool,
+    _embedded: bool,
     taskbar_hwnd: HWND,
     rect: RECT,
     blur_active: bool,
@@ -8135,6 +8138,46 @@ mod tests {
         assert!(!vertical_drag_handle_hit(16, sc(18), sc(32), height));
         assert_eq!(vertical_reset_label(None, false), "--");
         assert_eq!(vertical_reset_label(None, true), "--");
+    }
+
+    #[test]
+    fn vertical_adaptive_uses_compact_before_desktop_fallback() {
+        let bar = RECT { left: 1800, top: 0, right: 1850, bottom: 800 };
+        let ample = [VerticalSpan { top: 20, bottom: 280 }];
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &ample, 24),
+            Some((AppearancePreset::Default, 24)));
+        let short = [VerticalSpan { top: 20, bottom: 130 }];
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &short, 24),
+            Some((AppearancePreset::Minimal, 24)));
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24), None);
+        let exhausted = [VerticalSpan { top: 20, bottom: 65 }];
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &exhausted, 24), None);
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Minimal, bar, &short, 24),
+            Some((AppearancePreset::Minimal, 24)));
+    }
+
+    #[test]
+    fn floating_widget_snaps_to_edges_and_preserves_a_visible_peek() {
+        let bounds = RECT { left: -1920, top: -80, right: 0, bottom: 1000 };
+        let (x, y) = floating_clamp_position(bounds, 48, 168, -3000, 1200);
+        assert_eq!((x, y), (-1920, 832));
+        assert_eq!(floating_nearest_edge(bounds,
+            RECT { left: -1910, top: 200, right: -1862, bottom: 368 }, 24),
+            Some(FloatingEdge::Left));
+        assert_eq!(floating_nearest_edge(bounds,
+            RECT { left: -1100, top: 200, right: -1052, bottom: 368 }, 24), None);
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Left), true, 15), (-1953, 100));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Left), false, 15), (-1920, 100));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Right), true, 15), (-15, 100));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Top), true, 15), (-1500, -233));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Bottom), true, 15), (-1500, 985));
+        assert_eq!(FloatingEdge::parse("right"), Some(FloatingEdge::Right));
+        assert_eq!(FloatingEdge::parse("unknown"), None);
     }
 
     #[test]
