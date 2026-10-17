@@ -4127,7 +4127,7 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Position(position));
             }
         }
-        if lock_state().as_ref().is_some_and(|s| {
+        if STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| {
             s.snapshot.display_position == DisplayPosition::Desktop
         }) {
             for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
