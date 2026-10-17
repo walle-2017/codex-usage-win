@@ -6448,7 +6448,7 @@ unsafe fn paint_appearance_page(
 
     fill_rounded_rect(
         hdc,
-        settings_card_rect(hwnd, 58, 164),
+        settings_card_rect(hwnd, 58, 206),
         card,
         scale(hwnd, SETTINGS_CARD_RADIUS),
     );
@@ -6463,6 +6463,12 @@ unsafe fn paint_appearance_page(
         hdc,
         if zh { "排版" } else { "Layout" },
         rect(hwnd, 218, 116, 300, 150),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc,
+        if zh { "位置" } else { "Position" },
+        rect(hwnd, 218, 162, 300, 196),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -6502,8 +6508,8 @@ unsafe fn paint_appearance_page(
         );
     }
 
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive] {
-        let selected = snapshot.appearance_preset == preset;
+    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+        let selected = snapshot.appearance_preset.configured() == preset;
         let target = HitTarget::Layout(preset);
         let control_background = button_background(
             target,
@@ -6534,6 +6540,35 @@ unsafe fn paint_appearance_page(
                 (false, AppearancePreset::Default) => "Default",
                 (false, AppearancePreset::Minimal) => "Minimal",
                 (false, AppearancePreset::Adaptive) => "Adaptive",
+            },
+        );
+    }
+
+    for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
+        let selected = snapshot.display_position == position;
+        let target = HitTarget::Position(position);
+        let background = button_background(
+            target, selected, hovered, pressed,
+            ButtonPalette {
+                normal: card_hover, hover: card_pressed, pressed: card_pressed,
+                selected: accent, selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        draw_segment_with_icon(
+            hdc, hwnd, position_rect(hwnd, position), selected,
+            background,
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            if position == DisplayPosition::Taskbar {
+                SettingsIcon::ThemeSystem
+            } else {
+                SettingsIcon::Panel
+            },
+            match (zh, position) {
+                (true, DisplayPosition::Taskbar) => "任务栏",
+                (true, DisplayPosition::Desktop) => "桌面",
+                (false, DisplayPosition::Taskbar) => "Taskbar",
+                (false, DisplayPosition::Desktop) => "Desktop",
             },
         );
     }
@@ -6755,7 +6790,7 @@ unsafe fn paint_preset_gallery(
     draw_text(
         hdc,
         preset_group_label(snapshot.is_dark, snapshot.language),
-        rect(hwnd, 200, 180, 940, 212),
+        rect(hwnd, 200, 226, 940, 258),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -7172,9 +7207,9 @@ unsafe fn paint_style_preview_card(
 
     let preview = RECT {
         left: r.left + scale(hwnd, 12),
-        top: r.top + scale(hwnd, if vertical { 50 } else { 126 }),
+        top: r.top + scale(hwnd, if vertical { 50 } else { 46 }),
         right: r.right - scale(hwnd, 12),
-        bottom: r.top + scale(hwnd, if vertical { 326 } else { 234 }),
+        bottom: r.top + scale(hwnd, if vertical { 326 } else { 138 }),
     };
     // A neutral canvas frames the actual vertical widget, whose panel
     // background/border are rendered independently below at true proportions.
@@ -7339,18 +7374,27 @@ unsafe fn paint_style_preview_card(
     .copied()
     .enumerate()
     {
-        let swatch_width = 26;
-        let swatch_gap = 10;
-        let total_width = 4 * swatch_width + 3 * swatch_gap;
-        let left = (r.left + r.right - scale(hwnd, total_width)) / 2
-            + scale(hwnd, index as i32 * (swatch_width + swatch_gap));
+        let (left, top, width) = if vertical {
+            let swatch_width = 26;
+            let swatch_gap = 10;
+            let total_width = 4 * swatch_width + 3 * swatch_gap;
+            (
+                (r.left + r.right - scale(hwnd, total_width)) / 2
+                    + scale(hwnd, index as i32 * (swatch_width + swatch_gap)),
+                r.top + scale(hwnd, 346),
+                swatch_width,
+            )
+        } else {
+            // Preserve the original horizontal preset-card color strips.
+            (r.left + scale(hwnd, 14 + index as i32 * 48),
+             r.top + scale(hwnd, 158), 34)
+        };
         fill_rounded_rect(
             hdc,
             RECT {
-                left,
-                top: r.top + scale(hwnd, 346),
-                right: left + scale(hwnd, swatch_width),
-                bottom: r.top + scale(hwnd, 360),
+                left, top,
+                right: left + scale(hwnd, width),
+                bottom: top + scale(hwnd, 14),
             },
             style.color(target),
             scale(hwnd, 4),
@@ -8342,6 +8386,28 @@ mod ui_smoke_tests {
     use super::*;
 
     #[test]
+    fn horizontal_preset_gallery_restores_three_across_and_custom_below() {
+        let row = [
+            ThemePreset::Classic, ThemePreset::Ocean, ThemePreset::Forest,
+        ];
+        let bounds: Vec<_> = row.iter().map(|p| {
+            let index = match p {
+                ThemePreset::Classic => 0,
+                ThemePreset::Ocean => 1,
+                ThemePreset::Forest => 2,
+            };
+            let left = 200 + index * 244;
+            RECT { left, top: PRESET_CARD_TOP, right: left + 224, bottom: PRESET_CARD_TOP + 184 }
+        }).collect();
+        assert_eq!(bounds[2].right, 912);
+        assert_eq!(bounds[0].top, bounds[2].top);
+        let custom = RECT { left: 200, top: PRESET_CARD_TOP + 200,
+            right: 424, bottom: PRESET_CARD_TOP + 384 };
+        assert_eq!(custom.left, bounds[0].left);
+        assert_eq!(custom.top - bounds[0].bottom, 16);
+    }
+
+    #[test]
     fn preset_gallery_is_four_tall_equal_cards_in_one_row() {
         let cards: Vec<_> = (0..4).map(preset_gallery_card_rect).collect();
         assert_eq!(cards[0].left, 200);
@@ -8350,7 +8416,7 @@ mod ui_smoke_tests {
         for (i, card) in cards.iter().enumerate() {
             assert_eq!(card.right - card.left, PRESET_CARD_WIDTH);
             assert_eq!(card.bottom - card.top, PRESET_CARD_HEIGHT);
-            assert_eq!(card.bottom, 610);
+            assert_eq!(card.bottom, 656);
             if i > 0 {
                 assert_eq!(card.left - cards[i - 1].right, PRESET_CARD_GAP);
                 assert_eq!(card.top, cards[i - 1].top);
