@@ -31,25 +31,23 @@ if ($native -notmatch 'codex_taskbar_control_rects' -or
     throw 'Taskbar occupied controls must be queried through the native UI Automation bridge.'
 }
 
-if ($appearance -notmatch '(?m)^\s*Adaptive,\s*$' -or
-    $settings -notmatch '"adaptive"\s*=>\s*AppearancePreset::Adaptive' -or
-    $styleWindow -notmatch 'AppearancePreset::Adaptive' -or
-    $styleWindow -notmatch '"自适应"') {
-    throw 'Adaptive must be a persisted and selectable layout option.'
+if ($appearance -notmatch 'pub enum DisplayPosition' -or
+    $appearance -notmatch 'Self::Adaptive\s*=>\s*Self::Default' -or
+    $settings -notmatch 'appearance.position: allowed values are taskbar, desktop' -or
+    $styleWindow -notmatch 'HitTarget::Position\(position\)' -or
+    $styleWindow -notmatch 'DisplayPosition::Taskbar, DisplayPosition::Desktop' -or
+    $styleWindow -match 'for preset in \[AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive\]') {
+    throw 'Appearance must provide Default and Minimal layouts with a separate persisted Taskbar/Desktop location selector.'
 }
 
 $placement = [regex]::Match(
     $window,
     '(?s)fn\s+placement_for_free_spans\s*\(.*?\n\}'
 ).Value
-$defaultWidthPos = $placement.IndexOf('span.width() >= default_width')
-$minimalWidthPos = $placement.IndexOf('span.width() >= minimal_width')
-if ($defaultWidthPos -lt 0 -or
-    $minimalWidthPos -lt 0 -or
-    $defaultWidthPos -ge $minimalWidthPos -or
-    $placement -notmatch 'AppearancePreset::Default,\s*default_width' -or
-    $placement -notmatch 'AppearancePreset::Minimal,\s*minimal_width') {
-    throw 'Adaptive layout must use Default for a sufficiently wide target gap and fall back to Minimal for a narrower target gap.'
+if ($placement -notmatch 'AppearancePreset::Default\s*=>\s*place\(AppearancePreset::Default\)' -or
+    $placement -notmatch 'or_else\(\|\| place\(AppearancePreset::Minimal\)\)' -or
+    $placement -notmatch 'AppearancePreset::Minimal\s*=>\s*place\(AppearancePreset::Minimal\)') {
+    throw 'Default layout must try full width before falling back to Minimal; explicit Minimal must remain unchanged.'
 }
 
 $position = [regex]::Match(
@@ -60,7 +58,8 @@ if ($position -notmatch 'hide_widget_for_taskbar_space' -or
     $position -notmatch 'placement_for_free_spans' -or
     $position -notmatch 'effective_appearance_preset' -or
     $window -notmatch 'vertical_placement_for_gaps' -or
-    $window -notmatch 'AppearancePreset::Adaptive\s*=>\s*\[' -or
+    $window -notmatch 'AppearancePreset::Default\s*=>\s*\[' -or
+    $window -notmatch 'DisplayPosition::Desktop' -or
     $window -notmatch 'restore_floating_widget_to_taskbar\(' -or
     $window -notmatch 'enable_floating_widget\(' -or
     $window -match 'fn\s+show_taskbar_space_warning\(') {
@@ -102,4 +101,4 @@ if ((Get-Content -Raw (Join-Path $PSScriptRoot '..\native\taskbar_layout.cpp')) 
     throw 'The taskbar UI Automation worker must initialize COM as MTA.'
 }
 
-Write-Host 'PASS: adaptive taskbar free-space placement contract.'
+Write-Host 'PASS: default adaptive taskbar placement and persistent taskbar/desktop selection contract.'
