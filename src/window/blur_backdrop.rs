@@ -340,10 +340,20 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         }
     } else if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
         unsafe {
-            // Top-level sibling directly behind the panel, not the drag tab.
+            // The desktop backdrop is a *top-level* popup. Keep both windows
+            // in the TOPMOST band: placing a non-topmost backdrop behind a
+            // topmost foreground leaves its glass effect under Explorer's
+            // left/right taskbar. The foreground must be raised last.
+            // This is called on initialization and final docking, NOT while
+            // the mouse is dragging (which would flicker on every frame).
             let _ = SetWindowPos(
-                backdrop_hwnd, foreground_hwnd,
+                backdrop_hwnd, HWND_TOPMOST,
                 panel_x, panel_y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = SetWindowPos(
+                foreground_hwnd, HWND_TOPMOST,
+                0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
     }
