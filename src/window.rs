@@ -6149,7 +6149,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
-            if lock_state().as_ref().is_some_and(|s| s.dragging) {
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
                 return LRESULT(0);
             }
             {
