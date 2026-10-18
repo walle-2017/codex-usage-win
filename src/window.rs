@@ -88,6 +88,9 @@ struct AppState {
     floating_collapsed: bool,
     // 0 = hidden edge tab, 100 = fully expanded; updated by the popup timer.
     floating_reveal: u8,
+    // Desktop-only: undocked grip is hidden until the pointer hovers the widget.
+    floating_grip_alpha: u8,
+    floating_grip_hover: bool,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -1946,6 +1949,9 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             if s.floating_mode {
+                if s.floating_edge.is_none() && s.floating_grip_alpha == 0 {
+                    return false;
+                }
                 return floating_drag_handle_hit(
                     client_x, client_y,
                     floating_canvas_size_for_state(s).0,
@@ -2293,6 +2299,8 @@ pub fn run() {
                 floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
                 floating_collapsed: false,
                 floating_reveal: 100,
+                floating_grip_alpha: 0,
+                floating_grip_hover: false,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -2700,13 +2708,15 @@ fn render_layered() {
             AlphaFormat: 1,
         };
         if floating {
-            let (edge, hidden, hovered) = {
+            let (edge, hidden, hovered, grip_alpha) = {
                 let state = lock_state();
                 state.as_ref().map(|s| (
                     s.floating_edge,
                     s.floating_collapsed && s.floating_reveal == 0,
                     s.drag_handle_hovered,
-                )).unwrap_or((None, false, false))
+                    if s.floating_edge.is_some() || s.dragging { 100 }
+                    else { s.floating_grip_alpha },
+                )).unwrap_or((None, false, false, 0))
             };
             // Composite the already rendered taskbar-size panel into a separate
             // transparent desktop canvas. Neither the panel border nor quota
@@ -2744,7 +2754,7 @@ fn render_layered() {
                     }
                 }
                 render_floating_handle_bitmap(
-                    canvas, canvas_w, canvas_h, edge, false, hovered, &style,
+                    canvas, canvas_w, canvas_h, edge, false, hovered, &style, grip_alpha,
                 );
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
@@ -2779,6 +2789,7 @@ fn render_layered() {
 fn render_floating_handle_bitmap(
     pixels: &mut [u32], width: i32, height: i32,
     edge: Option<FloatingEdge>, hidden: bool, hovered: bool, style: &ThemeStyle,
+    opacity: u8,
 ) {
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
     // Grip remains readable even if the user chose a fully transparent panel.
@@ -2823,7 +2834,8 @@ fn render_floating_handle_bitmap(
                 let dy = center_y - dots_h / 2 + r * (dot + gap);
                 x >= dx && x < dx + dot && y >= dy && y < dy + dot
             }));
-            let color = if dot_pixel { dots } else if frame { border } else { fill };
+            let mut color = if dot_pixel { dots } else if frame { border } else { fill };
+            color.a = ((u16::from(color.a) * u16::from(opacity.min(100)) + 50) / 100) as u8;
             pixels[(y * width + x) as usize] = premultiplied_pixel(color);
         }
     }
@@ -4107,6 +4119,7 @@ const FLOAT_EDGE_SNAP: i32 = 24;
 const FLOAT_EDGE_PEEK: i32 = 20;
 const FLOAT_GRIP_LENGTH: i32 = 46;
 const FLOAT_ANIMATION_STEP: u8 = 14;
+const FLOAT_GRIP_FADE_STEP: u8 = 12;
 const TIMER_FLOAT_ANIMATION: usize = 0xF141;
 
 /// This rectangle is used for the rendered tab, pointer hit testing and
@@ -8555,7 +8568,7 @@ mod tests {
         for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
                      Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
             let mut pixels = vec![0xFFFFFFFF; (w * h) as usize];
-            render_floating_handle_bitmap(&mut pixels, w, h, edge, true, false, &style);
+            render_floating_handle_bitmap(&mut pixels, w, h, edge, true, false, &style, 100);
             let r = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
             for y in 0..h {
                 for x in 0..w {
