@@ -316,8 +316,7 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
     let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
         return;
     };
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
+    let (panel_x, panel_y, width, height) = blur_panel_bounds_for_foreground(rect);
     if width <= 0 || height <= 0 {
         return;
     }
@@ -333,12 +332,32 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
                 // The HWNDs share the taskbar parent. Put the blur directly
                 // behind the layered foreground in child-window z-order.
                 if let Err(error) = SetWindowPos(backdrop_hwnd, foreground_hwnd,
-                    rect.left - tr.left, rect.top - tr.top, width, height,
+                    panel_x - tr.left, panel_y - tr.top, width, height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW) {
                     diagnose::log(format!("taskbar embedded blur sibling position failed parent={:?} error={:?}", target, error));
                 }
             }
         }
+    } else if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+        unsafe {
+            // Top-level sibling directly behind the panel, not the drag tab.
+            let _ = SetWindowPos(
+                backdrop_hwnd, foreground_hwnd,
+                panel_x, panel_y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+}
+
+fn blur_panel_bounds_for_foreground(rect: RECT) -> (i32, i32, i32, i32) {
+    let state = lock_state();
+    if let Some(s) = state.as_ref().filter(|s| s.floating_mode) {
+        let body_w = total_widget_width_for_state(s);
+        let body_h = widget_height_for_state(s);
+        let (_, _, body) = floating_canvas_geometry(body_w, body_h, s.floating_edge);
+        (rect.left + body.left, rect.top + body.top, body_w, body_h)
+    } else {
+        (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
     }
 }
 
@@ -349,8 +368,7 @@ pub(super) fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
     let Some(rect) = native_interop::get_window_rect_safe(foreground_hwnd) else {
         return;
     };
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
+    let (panel_x, panel_y, width, height) = blur_panel_bounds_for_foreground(rect);
     if width <= 0 || height <= 0 {
         return;
     }
@@ -360,8 +378,8 @@ pub(super) fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
     let parent_rect = lock_state().as_ref().filter(|s| s.embedded)
         .and_then(|s| s.taskbar_hwnd)
         .and_then(native_interop::get_window_rect_safe);
-    let (x, y) = parent_rect.map(|tr| (rect.left - tr.left, rect.top - tr.top))
-        .unwrap_or((rect.left, rect.top));
+    let (x, y) = parent_rect.map(|tr| (panel_x - tr.left, panel_y - tr.top))
+        .unwrap_or((panel_x, panel_y));
     unsafe {
         let _ = SetWindowPos(
             backdrop_hwnd,
@@ -394,9 +412,12 @@ pub(super) fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i3
         move_window_without_repaint(foreground_hwnd, x, y, width, height);
         return;
     };
+    let (panel_x, panel_y, panel_w, panel_h) = blur_panel_bounds_for_foreground(
+        RECT { left: x, top: y, right: x + width, bottom: y + height },
+    );
     // Shrink/expand the visual tree first. The current HWND bounds clip an
     // expansion, while an early visual shrink prevents a stale-DPI blur tail.
-    if !sync_composition_blur_bounds(width, height) {
+    if !sync_composition_blur_bounds(panel_w, panel_h) {
         diagnose::log("composition blur bounds sync failed during drag");
     }
     unsafe {
@@ -406,10 +427,10 @@ pub(super) fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i3
         let _ = SetWindowPos(
             backdrop_hwnd,
             HWND::default(),
-            x,
-            y,
-            width,
-            height,
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_h,
             flags,
         );
         let _ = SetWindowPos(
