@@ -5890,17 +5890,16 @@ unsafe extern "system" fn wnd_proc(
                     s.drag_anchor_logical_y = anchor_logical_y;
                     s.failed_drag_target = None;
                     if s.floating_mode {
-                        let hidden = s.floating_collapsed && s.floating_reveal == 0;
                         s.floating_collapsed = false;
                         s.floating_reveal = 100;
                         s.floating_grip_hover = true;
                         s.floating_grip_alpha = 100;
-                        hidden
+                        true
                     } else { false }
                 } else { false }
             };
-            // Restore panel pixels at the existing HWND location before the
-            // first drag frame; movement must not trigger a grip relocation.
+            // Restore panel pixels and a fully visible tab at the current HWND
+            // location before dragging, without changing the docking geometry.
             if reveal_hidden_panel { render_layered(); }
             {
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
@@ -8607,7 +8606,13 @@ mod tests {
         let width = 240;
         let height = 168;
         let style = ThemeStyle::light_default();
-        let body = vec![0xFF445566u32; (width * height) as usize];
+        let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+        let mut body = vec![0xFF445566u32; (width * height) as usize];
+        for y in grip.top..grip.bottom {
+            for x in grip.left..grip.right {
+                body[(y * width + x) as usize] = 0; // detached tab gutter
+            }
+        }
         let mut hidden = body.clone();
         let mut visible = body.clone();
         render_floating_handle_bitmap(
@@ -8616,7 +8621,6 @@ mod tests {
         render_floating_handle_bitmap(
             &mut visible, width, height, None, false, false, &style, 100,
         );
-        let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
         for y in 0..height {
             for x in 0..width {
                 let idx = (y * width + x) as usize;
