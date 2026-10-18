@@ -2759,7 +2759,7 @@ fn render_layered() {
                     }
                 }
                 render_floating_handle_bitmap(
-                    canvas, canvas_w, canvas_h, edge, false, hovered, &style, grip_alpha,
+                    canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
                 );
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
@@ -2793,8 +2793,7 @@ fn render_layered() {
 /// obstruct other desktop windows or leave a visible panel edge.
 fn render_floating_handle_bitmap(
     pixels: &mut [u32], width: i32, height: i32,
-    edge: Option<FloatingEdge>, hidden: bool, hovered: bool, style: &ThemeStyle,
-    opacity: u8,
+    edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
 ) {
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
     // Grip remains readable even if the user chose a fully transparent panel.
@@ -2808,9 +2807,6 @@ fn render_floating_handle_bitmap(
         dots.r = dots.r.saturating_add(36);
         dots.g = dots.g.saturating_add(36);
         dots.b = dots.b.saturating_add(36);
-    }
-    if hidden {
-        pixels.fill(0);
     }
     let center_x = (grip.left + grip.right) / 2;
     let center_y = (grip.top + grip.bottom) / 2;
@@ -8619,10 +8615,10 @@ mod tests {
         let mut hidden = body.clone();
         let mut visible = body.clone();
         render_floating_handle_bitmap(
-            &mut hidden, width, height, None, false, false, &style, 0,
+            &mut hidden, width, height, None, false, &style, 0,
         );
         render_floating_handle_bitmap(
-            &mut visible, width, height, None, false, false, &style, 100,
+            &mut visible, width, height, None, false, &style, 100,
         );
         for y in 0..height {
             for x in 0..width {
@@ -8671,8 +8667,8 @@ mod tests {
         let style = ThemeStyle::dark_default();
         for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
                      Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
-            let mut pixels = vec![0xFFFFFFFF; (w * h) as usize];
-            render_floating_handle_bitmap(&mut pixels, w, h, edge, true, false, &style, 100);
+            let mut pixels = vec![0u32; (w * h) as usize];
+            render_floating_handle_bitmap(&mut pixels, w, h, edge, false, &style, 100);
             let r = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
             for y in 0..h {
                 for x in 0..w {
