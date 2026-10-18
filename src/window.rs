@@ -4217,6 +4217,19 @@ fn vertical_placement_for_gaps(
     None
 }
 
+/// Keep edge tabs in the monitor's *work area*, not under a vertical taskbar.
+/// A left-side Explorer taskbar otherwise covers the docked grip even when
+/// the desktop popup itself is in the topmost band.
+fn floating_usable_bounds(monitor: RECT, work: RECT) -> RECT {
+    if work.left >= monitor.left && work.top >= monitor.top
+        && work.right <= monitor.right && work.bottom <= monitor.bottom
+        && work.right > work.left && work.bottom > work.top {
+        work
+    } else {
+        monitor
+    }
+}
+
 fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
     unsafe {
         let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
@@ -4224,7 +4237,8 @@ fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcMonitor)
+        GetMonitorInfoW(monitor, &mut info).as_bool()
+            .then_some(floating_usable_bounds(info.rcMonitor, info.rcWork))
     }
 }
 
@@ -4464,6 +4478,11 @@ fn finish_floating_drag(hwnd: HWND) {
     // Publish the resized/reoriented tab and the final HWND coordinates in
     // one layered-window update. No intermediate frame uses the old bitmap.
     render_layered_at(Some(POINT { x, y }));
+    // Explorer can reorder its taskbar while a desktop grip is being dragged.
+    // Re-raise the composition pair once on release, never per drag frame.
+    if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
+        sync_blur_backdrop_zorder(hwnd);
+    }
     save_state_settings();
 }
 
@@ -8642,6 +8661,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn desktop_left_taskbar_dock_keeps_visible_tab_outside_explorer() {
+        let monitor = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let work = RECT { left: -1872, top: 0, right: 0, bottom: 1040 };
+        let bounds = floating_usable_bounds(monitor, work);
+        assert_eq!(bounds.left, -1872);
+        let (width, height, _) = floating_canvas_geometry(
+            240, 168, Some(FloatingEdge::Left),
+        );
+        let (x, y) = floating_edge_position(
+            bounds, -1860, 140, width, height,
+            Some(FloatingEdge::Left), true, sc(FLOAT_EDGE_PEEK),
+        );
+        let grip = floating_grip_rect(
+            width, height, Some(FloatingEdge::Left), sc(FLOAT_EDGE_PEEK),
+        );
+        assert_eq!(x + grip.left, work.left);
+        assert!(x + grip.right <= work.right);
+        assert!(y + grip.top >= work.top && y + grip.bottom <= work.bottom);
+
+        let invalid = RECT { left: -3000, top: 0, right: 10, bottom: 1080 };
+        assert_eq!(floating_usable_bounds(monitor, invalid).left, monitor.left);
+    }
+
+    #[test]
+    fn desktop_release_tab_switch_preserves_body_screen_origin() {
+        let body_w = 240;
+        let body_h = 150;
+        let (old_w, old_h, old_body) =
+            floating_canvas_geometry(body_w, body_h, Some(FloatingEdge::Left));
+        let _ = (old_w, old_h);
+        let (new_w, new_h, new_body) =
+            floating_canvas_geometry(body_w, body_h, None);
+        let _ = (new_w, new_h);
+        let old_x = 500;
+        let old_y = 250;
+        let final_x = old_x + old_body.left - new_body.left;
+        let final_y = old_y + old_body.top - new_body.top;
+        assert_eq!(final_x + new_body.left, old_x + old_body.left);
+        assert_eq!(final_y + new_body.top, old_y + old_body.top);
     }
 
     #[test]
