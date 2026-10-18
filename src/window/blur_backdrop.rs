@@ -182,10 +182,18 @@ pub(super) fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND
 
     // Cache one Composition target for each taskbar and restore on return.
     let target = lock_state().as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd);
-    if let (Some(backdrop), Some(target)) = (blur_backdrop_hwnd(), target) {
-        let parent = unsafe { GetAncestor(backdrop, GA_PARENT) };
-        if parent != target {
-            park_embedded_blur_backdrop();
+    let desktop = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    if let Some(backdrop) = blur_backdrop_hwnd() {
+        let child = unsafe {
+            (GetWindowLongW(backdrop, GWL_STYLE) as u32) & WS_CHILD.0 != 0
+        };
+        if child {
+            if desktop || target.is_some_and(|taskbar|
+                unsafe { GetAncestor(backdrop, GA_PARENT) != taskbar }) {
+                park_embedded_blur_backdrop();
+            }
+        } else if target.is_some() {
+            destroy_blur_backdrop();
         }
     }
     if let Some(target) = target {
@@ -228,18 +236,23 @@ pub(super) fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND
     unsafe {
         let class_name = native_interop::wide_str("CodexUsageBlurBackdrop");
         let title = native_interop::wide_str("");
-        let taskbar_parent = lock_state().as_ref().filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd)?;
-        let child_mode = true;
+        let taskbar_parent = lock_state().as_ref()
+            .filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd);
+        if taskbar_parent.is_none() && !desktop { return None; }
+        let child_mode = taskbar_parent.is_some();
+        let ex_style = WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP
+            | if child_mode { WINDOW_EX_STYLE(0) } else { WS_EX_TOOLWINDOW };
+        let window_style = if child_mode { WS_CHILD | WS_CLIPSIBLINGS } else { WS_POPUP };
         let hwnd = match CreateWindowExW(
-            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP,
+            ex_style,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_CHILD | WS_CLIPSIBLINGS,
+            window_style,
             0,
             0,
             1,
             1,
-            taskbar_parent,
+            taskbar_parent.unwrap_or_default(),
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
             None,
@@ -412,8 +425,7 @@ pub(super) fn move_frosted_pair(foreground_hwnd: HWND, x: i32, y: i32, width: i3
 }
 
 pub(super) fn activate_blur_backdrop(hwnd: HWND, blur_amount: f32, tint: Color) -> bool {
-    if !lock_state().as_ref().is_some_and(|s| s.embedded) {
-        diagnose::log("blur backdrop skipped: foreground is not taskbar embedded");
+    if !lock_state().as_ref().is_some_and(|s| s.embedded || s.floating_mode) {
         return false;
     }
     if ensure_blur_backdrop(blur_amount, tint).is_none() {
