@@ -340,12 +340,21 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
         }
     } else if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
         unsafe {
-            // The desktop backdrop is a *top-level* popup. Keep both windows
-            // in the TOPMOST band: placing a non-topmost backdrop behind a
-            // topmost foreground leaves its glass effect under Explorer's
-            // left/right taskbar. The foreground must be raised last.
-            // This is called on initialization and final docking, NOT while
-            // the mouse is dragging (which would flicker on every frame).
+            // Desktop blur belongs directly behind the TOPMOST foreground.
+            // If Explorer hasn't disturbed the pair, don't change Z-order:
+            // needless promotion is visible as a flash when the mouse is
+            // released and the detached grip changes side.
+            let fg_topmost = (GetWindowLongW(foreground_hwnd, GWL_EXSTYLE) as u32)
+                & WS_EX_TOPMOST.0 != 0;
+            let bg_topmost = (GetWindowLongW(backdrop_hwnd, GWL_EXSTYLE) as u32)
+                & WS_EX_TOPMOST.0 != 0;
+            let directly_behind = GetWindow(foreground_hwnd, GW_HWNDNEXT).ok()
+                == Some(backdrop_hwnd);
+            if fg_topmost && bg_topmost && directly_behind {
+                return;
+            }
+            // Promote the backdrop first and foreground last so both remain
+            // above taskbar windows, with the handle always in front.
             let _ = SetWindowPos(
                 backdrop_hwnd, HWND_TOPMOST,
                 panel_x, panel_y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW,
