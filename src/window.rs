@@ -2531,10 +2531,9 @@ fn render_layered() {
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
     let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
-    // Desktop popups use per-pixel transparency for the collapsed grip.
-    // Avoid the embedded-only background blur while drawing a desktop popup.
+    // Embedded and desktop panels use the same Gaussian-blur theme path.
+    // The desktop backdrop is clipped to the original body (never the tab).
     let blur_requested = style.panel_frosted_active();
-    let blur_requested = blur_requested && !floating;
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
@@ -4523,9 +4522,12 @@ fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
         return false;
     }
     hide_minimal_usage_tooltip();
+    // A desktop backdrop is top-level; it cannot be reused as an Explorer child.
+    destroy_blur_backdrop();
     {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return false };
+        s.composition_blur_active = false;
         s.hwnd = SendHwnd::from_hwnd(target);
         s.embedded = true;
         s.floating_mode = false;
