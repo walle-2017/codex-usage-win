@@ -2770,7 +2770,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 );
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
-                    hwnd, screen_dc, desktop_origin.as_ref(), Some(&sz),
+                    hwnd, screen_dc, desktop_origin.as_ref().map(|p| p as *const POINT), Some(&sz),
                     canvas_dc, Some(&pt_src),
                     COLORREF(0), Some(&blend), ULW_ALPHA,
                 );
