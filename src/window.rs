@@ -2693,6 +2693,13 @@ fn render_layered() {
             last_poll_ok,
         );
 
+        let pt_src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: 0,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: 1,
+        };
         if floating {
             let (edge, hidden, hovered) = {
                 let state = lock_state();
@@ -2702,33 +2709,60 @@ fn render_layered() {
                     s.drag_handle_hovered,
                 )).unwrap_or((None, false, false))
             };
-            render_floating_handle_bitmap(
-                pixel_data, width, height, edge, hidden, hovered, &style,
+            // Composite the already rendered taskbar-size panel into a separate
+            // transparent desktop canvas. Neither the panel border nor quota
+            // graphics are ever stretched or shifted to make room for the tab.
+            let (canvas_w, canvas_h, body) = floating_canvas_geometry(width, height, edge);
+            let canvas_info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: canvas_w,
+                    biHeight: -canvas_h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let canvas_dc = CreateCompatibleDC(screen_dc);
+            let mut canvas_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let canvas_dib = CreateDIBSection(
+                canvas_dc, &canvas_info, DIB_RGB_COLORS, &mut canvas_bits, None, 0,
+            ).unwrap_or_default();
+            if !canvas_dib.is_invalid() && !canvas_bits.is_null() {
+                let old_canvas_bmp = SelectObject(canvas_dc, canvas_dib);
+                let canvas = std::slice::from_raw_parts_mut(
+                    canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
+                );
+                canvas.fill(0);
+                if !hidden {
+                    for y in 0..height {
+                        let dst = ((y + body.top) * canvas_w + body.left) as usize;
+                        let src = (y * width) as usize;
+                        canvas[dst..dst + width as usize]
+                            .copy_from_slice(&pixel_data[src..src + width as usize]);
+                    }
+                }
+                render_floating_handle_bitmap(
+                    canvas, canvas_w, canvas_h, edge, false, hovered, &style,
+                );
+                let sz = SIZE { cx: canvas_w, cy: canvas_h };
+                let _ = UpdateLayeredWindow(
+                    hwnd, screen_dc, None, Some(&sz), canvas_dc, Some(&pt_src),
+                    COLORREF(0), Some(&blend), ULW_ALPHA,
+                );
+                SelectObject(canvas_dc, old_canvas_bmp);
+            }
+            if !canvas_dib.is_invalid() { let _ = DeleteObject(canvas_dib); }
+            let _ = DeleteDC(canvas_dc);
+        } else {
+            let sz = SIZE { cx: width, cy: height };
+            let _ = UpdateLayeredWindow(
+                hwnd, screen_dc, None, Some(&sz), mem_dc, Some(&pt_src),
+                COLORREF(0), Some(&blend), ULW_ALPHA,
             );
         }
-
-        let pt_src = POINT { x: 0, y: 0 };
-        let sz = SIZE {
-            cx: width,
-            cy: height,
-        };
-        let blend = BLENDFUNCTION {
-            BlendOp: 0,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: 1,
-        };
-        let _ = UpdateLayeredWindow(
-            hwnd,
-            screen_dc,
-            None,
-            Some(&sz),
-            mem_dc,
-            Some(&pt_src),
-            COLORREF(0),
-            Some(&blend),
-            ULW_ALPHA,
-        );
         SelectObject(mem_dc, old_bmp);
         let _ = DeleteObject(dib);
         let _ = DeleteDC(mem_dc);
@@ -2774,8 +2808,17 @@ fn render_floating_handle_bitmap(
     let dots_h = rows * dot + (rows - 1) * gap;
     for y in grip.top.max(0)..grip.bottom.min(height) {
         for x in grip.left.max(0)..grip.right.min(width) {
-            let frame = x == grip.left || x == grip.right - 1
-                || y == grip.top || y == grip.bottom - 1;
+            let local_x = x - grip.left;
+            let local_y = y - grip.top;
+            let grip_w = grip.right - grip.left;
+            let grip_h = grip.bottom - grip.top;
+            let radius = sc(7).max(2).min(grip_w.min(grip_h) / 2);
+            let outer = point_in_rounded_box(grip_w, grip_h, local_x, local_y, 0, radius);
+            if !outer { continue; }
+            let inner = point_in_rounded_box(
+                grip_w, grip_h, local_x, local_y, 1, (radius - 1).max(1),
+            );
+            let frame = !inner;
             let dot_pixel = (0..rows).any(|r| (0..cols).any(|c| {
                 let dx = center_x - dots_w / 2 + c * (dot + gap);
                 let dy = center_y - dots_h / 2 + r * (dot + gap);
@@ -8435,6 +8478,23 @@ mod tests {
                 Some(FloatingEdge::Top) => assert_eq!(r.bottom, height),
                 Some(FloatingEdge::Bottom) | None => assert_eq!(r.top, 0),
             }
+        }
+    }
+
+    #[test]
+    fn desktop_tab_is_outside_taskbar_sized_panel() {
+        let body_w = 240;
+        let body_h = 168;
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let (width, height, body) = floating_canvas_geometry(body_w, body_h, edge);
+            let tab = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+            assert_eq!(body.right - body.left, body_w);
+            assert_eq!(body.bottom - body.top, body_h);
+            assert!(tab.right <= body.left || tab.left >= body.right
+                || tab.bottom <= body.top || tab.top >= body.bottom);
+            assert!(tab.left >= 0 && tab.top >= 0
+                && tab.right <= width && tab.bottom <= height);
         }
     }
 
