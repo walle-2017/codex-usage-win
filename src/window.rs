@@ -128,6 +128,9 @@ struct AppState {
     dragging: bool,
     drag_anchor_logical_x: i32,
     drag_anchor_logical_y: i32,
+    // Keep desktop grip's physical grab offset constant across DPI changes.
+    floating_drag_anchor_x: i32,
+    floating_drag_anchor_y: i32,
     drag_reparenting: bool,
     failed_drag_target: Option<HWND>,
 }
@@ -2338,6 +2341,8 @@ pub fn run() {
                 dragging: false,
                 drag_anchor_logical_x: 0,
                 drag_anchor_logical_y: 0,
+                floating_drag_anchor_x: 0,
+                floating_drag_anchor_y: 0,
                 drag_reparenting: false,
         failed_drag_target: None,
             });
@@ -4388,15 +4393,11 @@ fn animate_toward(value: u8, target: u8, step: u8) -> u8 {
 }
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
-    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
     let (anchor_x, anchor_y) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        (
-            drag_anchor_px_for_dpi(s.drag_anchor_logical_x, dpi),
-            drag_anchor_px_for_dpi(s.drag_anchor_logical_y, dpi),
-        )
+        (s.floating_drag_anchor_x, s.floating_drag_anchor_y)
     };
     {
         let mut state = lock_state();
@@ -5888,6 +5889,8 @@ unsafe extern "system" fn wnd_proc(
                     s.drag_handle_hovered = true;
                     s.drag_anchor_logical_x = anchor_logical_x;
                     s.drag_anchor_logical_y = anchor_logical_y;
+                    s.floating_drag_anchor_x = client_x;
+                    s.floating_drag_anchor_y = client_y;
                     s.failed_drag_target = None;
                     if s.floating_mode {
                         s.floating_collapsed = false;
