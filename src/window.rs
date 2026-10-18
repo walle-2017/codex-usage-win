@@ -4480,6 +4480,8 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
             s.floating_collapsed = false;
             s.floating_reveal = 100;
+            s.floating_grip_hover = false;
+            s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
             s.hwnd.to_hwnd()
         };
         move_floating_widget(hwnd);
@@ -4556,6 +4558,8 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.hidden_for_taskbar_space = false;
         s.floating_collapsed = false;
         s.floating_reveal = 100;
+        s.floating_grip_hover = false;
+        s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
         s.floating_x = x;
         s.floating_y = y;
         s.vertical_taskbar_mode = vertical;
@@ -4602,6 +4606,8 @@ fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
         s.floating_mode = false;
         s.floating_collapsed = false;
         s.floating_reveal = 100;
+        s.floating_grip_hover = false;
+        s.floating_grip_alpha = 0;
         s.parked_taskbar_foreground = None;
         s.hidden_for_taskbar_space = false;
     }
@@ -5875,14 +5881,27 @@ unsafe extern "system" fn wnd_proc(
             let anchor_logical_x = (client_x as f64 * 96.0 / dpi as f64).round() as i32;
             let anchor_logical_y = (client_y as f64 * 96.0 / dpi as f64).round() as i32;
 
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.dragging = true;
-                s.drag_handle_hovered = true;
-                s.drag_anchor_logical_x = anchor_logical_x;
-                s.drag_anchor_logical_y = anchor_logical_y;
-                s.failed_drag_target = None;
-            }
+            let reveal_hidden_panel = {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.dragging = true;
+                    s.drag_handle_hovered = true;
+                    s.drag_anchor_logical_x = anchor_logical_x;
+                    s.drag_anchor_logical_y = anchor_logical_y;
+                    s.failed_drag_target = None;
+                    if s.floating_mode {
+                        let hidden = s.floating_collapsed && s.floating_reveal == 0;
+                        s.floating_collapsed = false;
+                        s.floating_reveal = 100;
+                        s.floating_grip_hover = true;
+                        s.floating_grip_alpha = 100;
+                        hidden
+                    } else { false }
+                } else { false }
+            };
+            // Restore panel pixels at the existing HWND location before the
+            // first drag frame; movement must not trigger a grip relocation.
+            if reveal_hidden_panel { render_layered(); }
             {
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
                 *last = None;
@@ -5907,6 +5926,7 @@ unsafe extern "system" fn wnd_proc(
             if is_dragging {
                 hide_minimal_usage_tooltip();
             } else {
+                set_floating_grip_hover(true);
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let drag_hovered = is_drag_handle_point(client_x, client_y);
@@ -6131,7 +6151,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
-            
+            if lock_state().as_ref().is_some_and(|s| s.dragging) {
+                return LRESULT(0);
+            }
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -6140,6 +6162,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             hide_minimal_usage_tooltip();
+            set_floating_grip_hover(false);
             set_floating_collapsed(true);
             render_layered();
             LRESULT(0)
@@ -8553,21 +8576,68 @@ mod tests {
     }
 
     #[test]
-    fn desktop_docked_drag_reanchors_inside_undocked_grip() {
-        let w = 240;
-        let h = 168;
-        let (free_w, free_h, _) = floating_canvas_geometry(w, h, None);
-        let free_tab = floating_grip_rect(free_w, free_h, None, sc(FLOAT_EDGE_PEEK));
+    fn desktop_drag_grip_geometry_stays_fixed_until_release() {
+        let body_w = 240;
+        let body_h = 168;
         for edge in [FloatingEdge::Left, FloatingEdge::Right,
                      FloatingEdge::Top, FloatingEdge::Bottom] {
-            let (cw, ch, _) = floating_canvas_geometry(w, h, Some(edge));
-            let tab = floating_grip_rect(cw, ch, Some(edge), sc(FLOAT_EDGE_PEEK));
-            let (new_x, new_y) = remap_floating_drag_anchor(
-                (tab.left + tab.right) / 2, (tab.top + tab.bottom) / 2,
-                w, h, Some(edge),
-            );
-            assert!(point_in_rect(free_tab, new_x, new_y));
+            let (w, h, body) = floating_canvas_geometry(body_w, body_h, Some(edge));
+            let original_tab = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let anchor_x = (original_tab.left + original_tab.right) / 2;
+            let anchor_y = (original_tab.top + original_tab.bottom) / 2;
+            for pointer in [POINT { x: 300, y: 400 }, POINT { x: 700, y: 250 }] {
+                let window_x = pointer.x - anchor_x;
+                let window_y = pointer.y - anchor_y;
+                let tab = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+                assert_eq!((window_x + tab.left + (tab.right - tab.left) / 2,
+                            window_y + tab.top + (tab.bottom - tab.top) / 2),
+                            (pointer.x, pointer.y));
+                assert_eq!((body.right - body.left, body.bottom - body.top),
+                           (body_w, body_h));
+            }
         }
+    }
+
+    #[test]
+    fn desktop_grip_fade_is_reversible_and_never_changes_body_pixels() {
+        assert_eq!(animate_toward(0, 100, 12), 12);
+        assert_eq!(animate_toward(96, 100, 12), 100);
+        assert_eq!(animate_toward(100, 0, 12), 88);
+        assert_eq!(animate_toward(4, 0, 12), 0);
+        let width = 240;
+        let height = 168;
+        let style = ThemeStyle::light_default();
+        let body = vec![0xFF445566u32; (width * height) as usize];
+        let mut hidden = body.clone();
+        let mut visible = body.clone();
+        render_floating_handle_bitmap(
+            &mut hidden, width, height, None, false, false, &style, 0,
+        );
+        render_floating_handle_bitmap(
+            &mut visible, width, height, None, false, false, &style, 100,
+        );
+        let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                if !point_in_rect(grip, x, y) {
+                    assert_eq!(hidden[idx], body[idx]);
+                    assert_eq!(visible[idx], body[idx]);
+                } else {
+                    assert_eq!((hidden[idx] >> 24) & 0xFF, 0,
+                        "fully transparent free grip must not intercept clicks");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_drag_drop_recognizes_partially_offscreen_old_canvas() {
+        let bounds = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let still_peeking = RECT { left: -200, top: 300, right: 20, bottom: 400 };
+        assert_eq!(floating_drop_edge(bounds, still_peeking, 24), Some(FloatingEdge::Left));
+        let free = RECT { left: 640, top: 300, right: 860, bottom: 400 };
+        assert_eq!(floating_drop_edge(bounds, free, 24), None);
     }
 
     #[test]
