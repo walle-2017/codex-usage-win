@@ -4283,31 +4283,34 @@ fn floating_edge_position(
 }
 
 fn move_floating_widget(hwnd: HWND) {
-    let (x, y, edge, reveal, width, height) = {
+    let (x, y, edge, reveal, width, height, dragging) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        {
-            let (width, height) = floating_canvas_size_for_state(s);
-            (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal, width, height)
-        }
+        let (width, height) = floating_canvas_size_for_state(s);
+        (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal,
+         width, height, s.dragging)
     };
-    let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
-    let Some(bounds) = floating_monitor_bounds(center) else { return };
-    let (expanded_x, expanded_y) = floating_edge_position(
-        bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
-    );
-    let (collapsed_x, collapsed_y) = floating_edge_position(
-        bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
-    );
-    // Smoothstep avoids the mechanical look of a fixed-speed edge slide.
-    let t = f64::from(reveal) / 100.0;
-    let ease = t * t * (3.0 - 2.0 * t);
-    let interpolation = |a: i32, b: i32| {
-        a + (f64::from(b - a) * ease).round() as i32
+    let (left, top) = if dragging {
+        // Keep the initial canvas and grab offset at every drag frame.
+        // Edge recognition and grip relocation happen only on mouse release.
+        (x, y)
+    } else {
+        let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
+        let Some(bounds) = floating_monitor_bounds(center) else { return };
+        let (expanded_x, expanded_y) = floating_edge_position(
+            bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
+        );
+        let (collapsed_x, collapsed_y) = floating_edge_position(
+            bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
+        );
+        let t = f64::from(reveal) / 100.0;
+        let ease = t * t * (3.0 - 2.0 * t);
+        let interpolate = |a: i32, b: i32| {
+            a + (f64::from(b - a) * ease).round() as i32
+        };
+        (interpolate(collapsed_x, expanded_x), interpolate(collapsed_y, expanded_y))
     };
-    let left = interpolation(collapsed_x, expanded_x);
-    let top = interpolation(collapsed_y, expanded_y);
     let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
     if blur {
         move_frosted_pair(hwnd, left, top, width, height);
@@ -4319,6 +4322,20 @@ fn move_floating_widget(hwnd: HWND) {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
+    }
+}
+
+fn set_floating_grip_hover(hovered: bool) {
+    let hwnd = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || s.dragging || s.floating_edge.is_some()
+            || s.floating_grip_hover == hovered { return; }
+        s.floating_grip_hover = hovered;
+        s.hwnd.to_hwnd()
+    };
+    unsafe {
+        SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
     }
 }
 
@@ -4340,24 +4357,38 @@ fn set_floating_collapsed(collapsed: bool) {
 }
 
 fn step_floating_animation(hwnd: HWND) {
-    let (active, completed) = {
+    let (active, completed, moved) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
-        if !s.floating_mode { return };
-        let destination = if s.floating_collapsed { 0 } else { 100 };
-        if s.floating_reveal < destination {
-            s.floating_reveal = s.floating_reveal.saturating_add(FLOAT_ANIMATION_STEP).min(destination);
-        } else if s.floating_reveal > destination {
-            s.floating_reveal = s.floating_reveal.saturating_sub(FLOAT_ANIMATION_STEP).max(destination);
+        if !s.floating_mode {
+            unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
+            return;
         }
-        (s.hwnd.to_hwnd(), s.floating_reveal == destination)
+        let destination = if s.floating_collapsed { 0 } else { 100 };
+        let before = s.floating_reveal;
+        s.floating_reveal = animate_toward(s.floating_reveal, destination, FLOAT_ANIMATION_STEP);
+        let grip_target = if s.floating_edge.is_some() || s.dragging || s.floating_grip_hover {
+            100
+        } else { 0 };
+        s.floating_grip_alpha = animate_toward(
+            s.floating_grip_alpha, grip_target, FLOAT_GRIP_FADE_STEP,
+        );
+        (s.hwnd.to_hwnd(),
+         s.floating_reveal == destination && s.floating_grip_alpha == grip_target,
+         s.floating_reveal != before)
     };
-    move_floating_widget(active);
-    // Once the popup is fully offscreen, render only the edge grip's pixels.
+    if moved { move_floating_widget(active); }
+    // Fade changes only the detached grip; the panel is rendered unchanged.
     render_layered();
     if completed {
         unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
     }
+}
+
+fn animate_toward(value: u8, target: u8, step: u8) -> u8 {
+    if value < target { value.saturating_add(step).min(target) }
+    else if value > target { value.saturating_sub(step).max(target) }
+    else { value }
 }
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
