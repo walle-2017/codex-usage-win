@@ -4174,6 +4174,26 @@ fn floating_canvas_size_for_state(state: &AppState) -> (i32, i32) {
     (width, height)
 }
 
+fn remap_floating_drag_anchor(
+    x: i32, y: i32, body_width: i32, body_height: i32,
+    edge: Option<FloatingEdge>,
+) -> (i32, i32) {
+    let Some(edge) = edge else { return (x, y); };
+    let (old_w, old_h, _) = floating_canvas_geometry(body_width, body_height, Some(edge));
+    let old_tab = floating_grip_rect(old_w, old_h, Some(edge), sc(FLOAT_EDGE_PEEK));
+    let (new_w, new_h, _) = floating_canvas_geometry(body_width, body_height, None);
+    let new_tab = floating_grip_rect(new_w, new_h, None, sc(FLOAT_EDGE_PEEK));
+    let remap = |at: i32, start: i32, end: i32, new_start: i32, new_end: i32| {
+        let old_size = (end - start).max(1);
+        let new_size = (new_end - new_start).max(1);
+        new_start + (at - start).clamp(0, old_size - 1) * new_size / old_size
+    };
+    (
+        remap(x, old_tab.left, old_tab.right, new_tab.left, new_tab.right),
+        remap(y, old_tab.top, old_tab.bottom, new_tab.top, new_tab.bottom),
+    )
+}
+
 fn vertical_placement_for_gaps(
     preset: AppearancePreset, taskbar_rect: RECT, spans: &[VerticalSpan], desired: i32,
 ) -> Option<(AppearancePreset, i32)> {
@@ -4329,17 +4349,19 @@ fn step_floating_animation(hwnd: HWND) {
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    let (anchor_x, anchor_y, width, height) = {
+    let (anchor_x, anchor_y, width, height, was_docked) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        {
-            let (width, height, _) = floating_canvas_geometry(
-                total_widget_width_for_state(s), widget_height_for_state(s), None,
-            );
-            (drag_anchor_px_for_dpi(s.drag_anchor_logical_x, dpi),
-             drag_anchor_px_for_dpi(s.drag_anchor_logical_y, dpi), width, height)
-        }
+        let body_w = total_widget_width_for_state(s);
+        let body_h = widget_height_for_state(s);
+        let (width, height, _) = floating_canvas_geometry(body_w, body_h, None);
+        let (anchor_x, anchor_y) = remap_floating_drag_anchor(
+            drag_anchor_px_for_dpi(s.drag_anchor_logical_x, dpi),
+            drag_anchor_px_for_dpi(s.drag_anchor_logical_y, dpi),
+            body_w, body_h, s.floating_edge,
+        );
+        (anchor_x, anchor_y, width, height, s.floating_edge.is_some())
     };
     let Some(bounds) = floating_monitor_bounds(pointer) else { return };
     let (x, y) = floating_clamp_position(
@@ -4353,9 +4375,16 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         s.floating_edge = None;
         s.floating_collapsed = false;
         s.floating_reveal = 100;
+        if was_docked {
+            s.drag_anchor_logical_x = (f64::from(anchor_x) * 96.0 / f64::from(dpi)).round() as i32;
+            s.drag_anchor_logical_y = (f64::from(anchor_y) * 96.0 / f64::from(dpi)).round() as i32;
+        }
     }
     unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
     move_floating_widget(hwnd);
+    // Repaint only on the edge -> undocked transition; drag frames merely move
+    // existing pixels, preserving the original high-frequency drag performance.
+    if was_docked { render_layered(); }
 }
 
 fn finish_floating_drag(hwnd: HWND) {
@@ -8480,6 +8509,24 @@ mod tests {
                 Some(FloatingEdge::Top) => assert_eq!(r.bottom, height),
                 Some(FloatingEdge::Bottom) | None => assert_eq!(r.top, 0),
             }
+        }
+    }
+
+    #[test]
+    fn desktop_docked_drag_reanchors_inside_undocked_grip() {
+        let w = 240;
+        let h = 168;
+        let (free_w, free_h, _) = floating_canvas_geometry(w, h, None);
+        let free_tab = floating_grip_rect(free_w, free_h, None, sc(FLOAT_EDGE_PEEK));
+        for edge in [FloatingEdge::Left, FloatingEdge::Right,
+                     FloatingEdge::Top, FloatingEdge::Bottom] {
+            let (cw, ch, _) = floating_canvas_geometry(w, h, Some(edge));
+            let tab = floating_grip_rect(cw, ch, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let (new_x, new_y) = remap_floating_drag_anchor(
+                (tab.left + tab.right) / 2, (tab.top + tab.bottom) / 2,
+                w, h, Some(edge),
+            );
+            assert!(point_in_rect(free_tab, new_x, new_y));
         }
     }
 
