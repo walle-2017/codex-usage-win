@@ -1948,7 +1948,8 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
             if s.floating_mode {
                 return floating_drag_handle_hit(
                     client_x, client_y,
-                    total_widget_width_for_state(s), widget_height_for_state(s),
+                    floating_canvas_size_for_state(s).0,
+                    floating_canvas_size_for_state(s).1,
                     s.floating_edge, sc(FLOAT_EDGE_PEEK),
                 );
             }
@@ -2026,15 +2027,11 @@ fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
         return vertical_widget_height_for_preset(effective_appearance_preset(state));
     }
-    let content_height = if state.small_taskbar_mode {
+    if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
     } else {
         sc(effective_appearance_preset(state).metrics().widget_height)
-    };
-    // Desktop horizontal mode reserves a dedicated top tab. Horizontal
-    // taskbar-embedded widgets retain their original exact height.
-    if state.floating_mode { content_height + sc(FLOAT_EDGE_PEEK) }
-    else { content_height }
+    }
 }
 
 fn current_appearance_preset() -> AppearancePreset {
@@ -4102,6 +4099,39 @@ fn floating_drag_handle_hit(
     point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
 }
 
+/// Desktop tabs occupy an independent, transparent gutter. The panel dimensions
+/// remain identical to the taskbar renderer, including progress and ring layout.
+fn floating_canvas_geometry(
+    body_width: i32, body_height: i32, edge: Option<FloatingEdge>,
+) -> (i32, i32, RECT) {
+    let tab = sc(FLOAT_EDGE_PEEK);
+    match edge {
+        Some(FloatingEdge::Left) => (
+            body_width + tab, body_height,
+            RECT { left: 0, top: 0, right: body_width, bottom: body_height },
+        ),
+        Some(FloatingEdge::Right) => (
+            body_width + tab, body_height,
+            RECT { left: tab, top: 0, right: body_width + tab, bottom: body_height },
+        ),
+        Some(FloatingEdge::Top) => (
+            body_width, body_height + tab,
+            RECT { left: 0, top: 0, right: body_width, bottom: body_height },
+        ),
+        Some(FloatingEdge::Bottom) | None => (
+            body_width, body_height + tab,
+            RECT { left: 0, top: tab, right: body_width, bottom: body_height + tab },
+        ),
+    }
+}
+
+fn floating_canvas_size_for_state(state: &AppState) -> (i32, i32) {
+    let (width, height, _) = floating_canvas_geometry(
+        total_widget_width_for_state(state), widget_height_for_state(state), state.floating_edge,
+    );
+    (width, height)
+}
+
 fn vertical_placement_for_gaps(
     preset: AppearancePreset, taskbar_rect: RECT, spans: &[VerticalSpan], desired: i32,
 ) -> Option<(AppearancePreset, i32)> {
@@ -4182,8 +4212,10 @@ fn move_floating_widget(hwnd: HWND) {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal,
-         total_widget_width_for_state(s), widget_height_for_state(s))
+        {
+            let (width, height) = floating_canvas_size_for_state(s);
+            (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal, width, height)
+        }
     };
     let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
     let Some(bounds) = floating_monitor_bounds(center) else { return };
@@ -4259,9 +4291,13 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        (drag_anchor_px_for_dpi(s.drag_anchor_logical_x, dpi),
-         drag_anchor_px_for_dpi(s.drag_anchor_logical_y, dpi),
-         total_widget_width_for_state(s), widget_height_for_state(s))
+        {
+            let (width, height, _) = floating_canvas_geometry(
+                total_widget_width_for_state(s), widget_height_for_state(s), None,
+            );
+            (drag_anchor_px_for_dpi(s.drag_anchor_logical_x, dpi),
+             drag_anchor_px_for_dpi(s.drag_anchor_logical_y, dpi), width, height)
+        }
     };
     let Some(bounds) = floating_monitor_bounds(pointer) else { return };
     let (x, y) = floating_clamp_position(
@@ -4285,8 +4321,10 @@ fn finish_floating_drag(hwnd: HWND) {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        (s.floating_x, s.floating_y,
-         total_widget_width_for_state(s), widget_height_for_state(s))
+        {
+            let (width, height) = floating_canvas_size_for_state(s);
+            (s.floating_x, s.floating_y, width, height)
+        }
     };
     let Some(bounds) = floating_monitor_bounds(
         POINT { x: x + width / 2, y: y + height / 2 }
@@ -4307,6 +4345,7 @@ fn finish_floating_drag(hwnd: HWND) {
         }
     }
     move_floating_widget(hwnd);
+    render_layered();
     save_state_settings();
 }
 
@@ -4350,6 +4389,9 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
                 else { sc(preset.metrics().widget_height) },
         )
     };
+    let (window_width, window_height, _) = floating_canvas_geometry(
+        width, height, lock_state().as_ref().and_then(|s| s.floating_edge),
+    );
     let hwnd = match existing {
         Some(hwnd) if unsafe { IsWindow(hwnd).as_bool() } => hwnd,
         _ => unsafe {
@@ -4362,7 +4404,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             match CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
                 PCWSTR::from_raw(class.as_ptr()), PCWSTR::from_raw(title.as_ptr()),
-                WS_POPUP, 0, 0, width, height, HWND::default(),
+                WS_POPUP, 0, 0, window_width, window_height, HWND::default(),
                 HMENU::default(), instance, None,
             ) {
                 Ok(hwnd) => hwnd,
@@ -4381,11 +4423,13 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     let bounds = floating_monitor_bounds(default_point).unwrap_or(RECT {
         left: 0, top: 0, right: 1920, bottom: 1080,
     });
-    let start_x = if x == i32::MIN { bounds.right - width - sc(32) } else { x };
+    let start_x = if x == i32::MIN { bounds.right - window_width - sc(32) } else { x };
     let start_y = if y == i32::MIN {
-        bounds.top + (bounds.bottom - bounds.top - height) / 2
+        bounds.top + (bounds.bottom - bounds.top - window_height) / 2
     } else { y };
-    let (x, y) = floating_clamp_position(bounds, width, height, start_x, start_y);
+    let (x, y) = floating_clamp_position(
+        bounds, window_width, window_height, start_x, start_y,
+    );
     hide_minimal_usage_tooltip();
     {
         let mut state = lock_state();
