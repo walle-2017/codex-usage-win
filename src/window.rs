@@ -2503,6 +2503,13 @@ fn drag_frame_due(force: bool) -> bool {
 /// Render the foreground widget through UpdateLayeredWindow. Frosted mode keeps
 /// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
+    render_layered_at(None);
+}
+
+/// Commit a new desktop grip direction and canvas size together with its
+/// screen position. This avoids exposing stale pixels between SetWindowPos
+/// and UpdateLayeredWindow when the user releases the mouse.
+fn render_layered_at(desktop_origin: Option<POINT>) {
     refresh_dpi();
     if widget_hidden_for_taskbar_space() {
         return;
@@ -2763,7 +2770,8 @@ fn render_layered() {
                 );
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
-                    hwnd, screen_dc, None, Some(&sz), canvas_dc, Some(&pt_src),
+                    hwnd, screen_dc, desktop_origin.as_ref(), Some(&sz),
+                    canvas_dc, Some(&pt_src),
                     COLORREF(0), Some(&blend), ULW_ALPHA,
                 );
                 SelectObject(canvas_dc, old_canvas_bmp);
@@ -4310,8 +4318,9 @@ fn move_floating_widget(hwnd: HWND) {
     };
     let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
     if blur {
+        // The desktop pair is raised when blur is activated or when docking
+        // changes; dragging must only move its HWNDs, never reorder them.
         move_frosted_pair(hwnd, left, top, width, height);
-        sync_blur_backdrop_zorder(hwnd);
     } else {
         unsafe {
             let _ = SetWindowPos(
@@ -4452,8 +4461,9 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_grip_alpha = if edge.is_some() || hovered { 100 } else { 0 };
         }
     }
-    move_floating_widget(hwnd);
-    render_layered();
+    // Publish the resized/reoriented tab and the final HWND coordinates in
+    // one layered-window update. No intermediate frame uses the old bitmap.
+    render_layered_at(Some(POINT { x, y }));
     save_state_settings();
 }
 
