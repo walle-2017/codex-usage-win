@@ -9501,6 +9501,30 @@ mod tests {
     }
 
     #[test]
+    fn v24_1_glow_is_feathered_not_a_thick_solid_outline() {
+        assert!(drag_hover_glow_coverage(0.0) > drag_hover_glow_coverage(1.0));
+        assert!(drag_hover_glow_coverage(1.0) > drag_hover_glow_coverage(2.0));
+        assert!(drag_hover_glow_coverage(2.0) > drag_hover_glow_coverage(3.0));
+        assert!(drag_hover_glow_coverage(3.0) > drag_hover_glow_coverage(4.0));
+        assert_eq!(drag_hover_glow_coverage(0.0), drag_hover_glow_coverage(-0.0));
+        assert_eq!(drag_hover_glow_coverage(2.0), drag_hover_glow_coverage(-2.0));
+        let style = ThemeStyle::preset(true, ThemePreset::Forest);
+        let mut pixels = vec![0u32; 190 * 62];
+        let body = RECT { left: 7, top: 7, right: 183, bottom: 55 };
+        draw_drag_hover_outline(&mut pixels, 190, 62, body,
+            style.panel_corner_radius, drag_hover_outline_color(&style));
+        let sample_alpha = |y: usize| -> u32 { pixels[y * 190 + 95] >> 24 };
+        // There is real translucent glow outside a panel when canvas space
+        // exists, but it never paints the center or expands the body geometry.
+        assert!(sample_alpha(6) > 0, "halo should extend beyond outer body edge");
+        assert!(sample_alpha(6) < sample_alpha(8));
+        assert!(sample_alpha(8) > sample_alpha(10));
+        assert!(sample_alpha(10) > sample_alpha(12));
+        assert_eq!(sample_alpha(20), 0);
+        assert_eq!(pixels.len(), 190 * 62);
+    }
+
+    #[test]
     fn v24_hover_outlines_only_panel_and_detached_tab_without_resizing() {
         let style = ThemeStyle::preset(true, ThemePreset::Forest);
         let accent = drag_hover_outline_color(&style);
