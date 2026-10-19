@@ -148,6 +148,19 @@ impl AppearancePreset {
 
 }
 
+/// Matches the runtime hover tooltip wording for both layouts. The
+/// renderer may visually wrap the returned string, but its content must not
+/// lose the reset date/time or the minimal-layout quota prefix.
+pub fn quota_reset_tooltip_text(
+    preset: AppearancePreset, label: &str, full_local_reset: &str,
+) -> String {
+    if preset.configured() == AppearancePreset::Minimal {
+        format!("{label} · {full_local_reset}")
+    } else {
+        full_local_reset.to_string()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskbarValueText {
     pub primary: String,
@@ -201,6 +214,27 @@ mod tests {
             percentage: used,
             resets_at: Some(UNIX_EPOCH + Duration::from_secs(unix_seconds)),
         }
+    }
+
+    #[test]
+    fn tooltip_templates_match_actual_default_and_minimal_hover_text() {
+        let timestamp = "2026-10-19 20:16";
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Default, "5H", timestamp),
+            "2026-10-19 20:16"
+        );
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Minimal, "5H", timestamp),
+            "5H · 2026-10-19 20:16"
+        );
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Minimal, "7D", timestamp),
+            "7D · 2026-10-19 20:16"
+        );
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Adaptive, "5H", timestamp),
+            "2026-10-19 20:16"
+        );
     }
 
     #[test]
