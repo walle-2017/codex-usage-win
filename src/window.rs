@@ -9653,18 +9653,19 @@ mod tests {
         style.set_color(StyleColorTarget::PanelBackground, Color::rgba(14, 32, 25, 68));
         style.set_color(StyleColorTarget::PanelBorder, Color::rgba(40, 110, 87, 127));
         style.panel_corner_radius = 2;
-        let w = sc(FLOAT_GRIP_LENGTH);
-        let h = sc(FLOAT_EDGE_PEEK);
-        let expected_w = sc(36);
-        let expected_h = sc(16);
-        assert_eq!((w, h), (expected_w, expected_h));
+        let (w, h, _) = floating_canvas_geometry(
+            sc(FLOAT_GRIP_LENGTH), sc(FLOAT_EDGE_PEEK), None,
+        );
+        let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+        assert_eq!(grip.right - grip.left, sc(36));
+        assert_eq!(grip.bottom - grip.top, sc(16));
         let mut pixels = vec![0u32; (w * h) as usize];
         render_floating_handle_bitmap(&mut pixels, w, h, None, false, &style, 100);
-        let center = (h / 2 * w + sc(6)) as usize; // clear of the six-dot cluster
+        let center = ((grip.top + grip.bottom) / 2 * w + grip.left + sc(6)) as usize;
         assert_eq!(pixels[center], premultiplied_pixel(
             style.color(StyleColorTarget::PanelBackground),
         ));
-        // Panel corner clipping is applied to the grip too.
+        // Panel corner clipping and the new outer halo gutter stay transparent.
         assert_eq!(pixels[0], 0);
         let mut transparent = vec![0u32; (w * h) as usize];
         render_floating_handle_bitmap(&mut transparent, w, h, None, false, &style, 0);
