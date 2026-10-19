@@ -142,8 +142,10 @@ if ($minimalPaintBlock -match 'draw_row\(' -or
     $minimalPaintBlock -match 'draw_usage_bar\(') {
     throw 'Minimal layout must not render quota labels or progress bars.'
 }
-if ($windowProduction -notmatch 'Some\(format!\("\{label\}\s*·\s*\{reset\}"\)\)') {
-    throw 'Minimal hover detail must contain the quota type label and reset time.'
+if ($windowProduction -notmatch 'appearance::quota_reset_tooltip_text\(' -or
+    $appearanceProduction -notmatch 'fn quota_reset_tooltip_text\(' -or
+    $appearanceProduction -notmatch 'format!\("\{label\} · \{full_local_reset\}"\)') {
+    throw 'Minimal hover detail must use the shared quota type label and full reset-time template.'
 }
 if ($windowProduction -notmatch 'TrackMouseEvent' -or
     $windowProduction -notmatch 'WM_MOUSELEAVE_MSG') {
