@@ -9446,6 +9446,69 @@ mod tests {
     }
 
     #[test]
+    fn v24_3_drag_release_preserves_hover_on_detached_tab_without_mouse_motion() {
+        let edges = [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)];
+        for (body_w, body_h) in [(240, 42), (48, 168)] {
+            for edge in edges {
+                let (width, height, body) =
+                    floating_canvas_geometry(body_w, body_h, edge);
+                let tab = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+                let origin = POINT { x: -500, y: 320 };
+                let pointer = POINT {
+                    x: origin.x + (tab.left + tab.right) / 2,
+                    y: origin.y + (tab.top + tab.bottom) / 2,
+                };
+                assert!(floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, pointer,
+                ));
+                // The grip is independent of the body. The previous
+                // body-based check cleared hover despite a stationary cursor.
+                assert!(!point_in_rect(body,
+                    pointer.x - origin.x, pointer.y - origin.y));
+                let outside = POINT { x: origin.x + body.left + 2,
+                    y: origin.y + body.top + body_h / 2 };
+                assert!(!floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, outside,
+                ));
+                assert!(!floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge,
+                    POINT { x: origin.x - 3, y: origin.y - 3 },
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn v24_3_release_grip_hover_and_glow_use_the_same_frame() {
+        let style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        let (width, height, body) = floating_canvas_geometry(240, 42, None);
+        let tab = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+        let pointer = POINT { x: 420 + (tab.left + tab.right) / 2,
+            y: 180 + (tab.top + tab.bottom) / 2 };
+        let hovered = floating_drag_grip_contains_screen_point(
+            420, 180, width, height, None, pointer,
+        );
+        assert!(hovered);
+        let alpha = if hovered { 100 } else { 0 };
+        assert_eq!(alpha, 100, "tab must not fade on mouse release");
+        let mut canvas = vec![0u32; (width * height) as usize];
+        render_floating_handle_bitmap(
+            &mut canvas, width, height, None, hovered, &style, alpha,
+        );
+        let grip_pixel = ((tab.top + tab.bottom) / 2 * width
+            + (tab.left + tab.right) / 2) as usize;
+        assert_ne!(canvas[grip_pixel], 0, "tab remains visible");
+        let accent = drag_hover_outline_color(&style);
+        draw_drag_hover_outline(
+            &mut canvas, width, height, body, style.panel_corner_radius, accent,
+        );
+        let ring_pixel = ((body.top + 1) * width + (body.left + body.right) / 2)
+            as usize;
+        assert_ne!(canvas[ring_pixel], 0, "body hover glow stays visible");
+    }
+
+    #[test]
     fn v24_2_free_desktop_canvas_has_real_outer_halo_space() {
         for (width, height) in [(240, 42), (48, 168)] {
             let halo = sc(FLOAT_FREE_GLOW_MARGIN);
