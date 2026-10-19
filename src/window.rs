@@ -9448,59 +9448,77 @@ mod tests {
     }
 
     #[test]
-    fn drag_grip_hover_uses_same_taskbar_visual_in_both_modes() {
+    fn v24_drag_grip_dots_remain_stable_on_hover() {
         let base = Color::rgba(40, 70, 110, 160);
-        let (normal_dot, normal_x, normal_y, normal_color) =
-            drag_handle_dot_style(base, false, true);
-        let (hover_dot, hover_x, hover_y, hover_color) =
-            drag_handle_dot_style(base, true, true);
-        // Original taskbar grip: larger dots, tighter long-axis spacing
-        // and the same +36 RGB hover emphasis with unchanged alpha.
-        assert_eq!(normal_dot, sc(2).max(1));
-        assert_eq!(hover_dot, sc(3).max(2));
-        assert_eq!(normal_x, hover_x);
-        assert!(hover_y <= normal_y);
-        assert_eq!(normal_color.to_hex_rgba(), base.to_hex_rgba());
-        assert_eq!(hover_color, Color::rgba(76, 106, 146, 160));
-        // The desktop's horizontally oriented grip rotates the dot matrix
-        // but shares exactly the same metrics and brightness.
-        let (_, horizontal_x, horizontal_y, horizontal_color) =
-            drag_handle_dot_style(base, true, false);
-        assert_eq!((horizontal_x, horizontal_y), (hover_y, hover_x));
-        assert_eq!(horizontal_color, hover_color);
+        for vertical in [false, true] {
+            assert_eq!(
+                drag_handle_dot_style(base, false, vertical),
+                drag_handle_dot_style(base, true, vertical),
+                "hover must no longer grow the grip under the mouse",
+            );
+        }
     }
 
     #[test]
-    fn desktop_grip_hover_changes_dots_without_highlighting_panel_border() {
-        let style = ThemeStyle::dark_default();
-        let width = 220;
-        let height = 180;
-        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
-                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
-            let mut idle = vec![0u32; (width * height) as usize];
-            let mut hovered = idle.clone();
-            render_floating_handle_bitmap(
-                &mut idle, width, height, edge, false, &style, 100,
-            );
-            render_floating_handle_bitmap(
-                &mut hovered, width, height, edge, true, &style, 100,
-            );
-            let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
-            let mid_x = (grip.left + grip.right) / 2;
-            let mid_y = (grip.top + grip.bottom) / 2;
-            let mut changed_dots = 0;
-            for y in grip.top..grip.bottom {
-                for x in grip.left..grip.right {
-                    let idx = (y * width + x) as usize;
-                    if idle[idx] != hovered[idx] {
-                        changed_dots += 1;
-                        assert!((x - mid_x).abs() <= sc(12).max(12)
-                            && (y - mid_y).abs() <= sc(12).max(12),
-                            "hover must not alter the tab border");
-                    }
-                }
+    fn v24_hover_color_follows_theme_and_stays_readable() {
+        for dark in [false, true] {
+            for preset in ThemePreset::ALL {
+                let style = ThemeStyle::preset(dark, preset);
+                let color = drag_hover_outline_color(&style);
+                assert_eq!(color.a, 255);
+                let background = style.color(StyleColorTarget::PanelBackground);
+                let difference = (i32::from(color.r) - i32::from(background.r)).abs()
+                    + (i32::from(color.g) - i32::from(background.g)).abs()
+                    + (i32::from(color.b) - i32::from(background.b)).abs();
+                assert!(difference >= 150, "theme hover outline must remain visible");
+                assert_eq!(color, Color::rgba(
+                    style.color(StyleColorTarget::ProgressHigh).r,
+                    style.color(StyleColorTarget::ProgressHigh).g,
+                    style.color(StyleColorTarget::ProgressHigh).b,
+                    255,
+                ));
             }
-            assert!(changed_dots > 0, "hover must visibly change six dots");
+        }
+        let mut custom = ThemeStyle::dark_default();
+        custom.set_color(StyleColorTarget::ProgressHigh,
+            custom.color(StyleColorTarget::PanelBackground));
+        assert_ne!(drag_hover_outline_color(&custom),
+            custom.color(StyleColorTarget::ProgressHigh));
+    }
+
+    #[test]
+    fn v24_hover_outlines_only_panel_and_detached_tab_without_resizing() {
+        let style = ThemeStyle::preset(true, ThemePreset::Forest);
+        let accent = drag_hover_outline_color(&style);
+        for (w, h) in [(180, 40), (50, 168)] {
+            let bounds = RECT { left: 0, top: 0, right: w, bottom: h };
+            let mut pixels = vec![0xFF14211Du32; (w * h) as usize];
+            let idle = pixels.clone();
+            draw_drag_hover_outline(&mut pixels, w, h, bounds,
+                style.panel_corner_radius, accent);
+            assert_ne!(pixels, idle);
+            assert_eq!(pixels[(h / 2 * w + w / 2) as usize],
+                idle[(h / 2 * w + w / 2) as usize],
+                "center content must never be covered by the hover ring");
+            assert_ne!(pixels[(w + w / 2) as usize],
+                idle[(w + w / 2) as usize], "top border must highlight");
+        }
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let (cw, ch, body) = floating_canvas_geometry(180, 40, edge);
+            let tab = floating_grip_rect(cw, ch, edge, sc(FLOAT_EDGE_PEEK));
+            let mut canvas = vec![0u32; (cw * ch) as usize];
+            draw_drag_hover_outline(&mut canvas, cw, ch, body,
+                style.panel_corner_radius, accent);
+            let after_body = canvas.clone();
+            draw_drag_hover_outline(&mut canvas, cw, ch, tab,
+                style.panel_corner_radius, accent);
+            assert_ne!(canvas, after_body, "desktop tab must highlight independently");
+            assert_eq!(canvas.len(), (cw * ch) as usize);
+            let body_center = ((body.top + body.bottom) / 2 * cw
+                + (body.left + body.right) / 2) as usize;
+            assert_eq!(canvas[body_center], 0,
+                "independent hover borders must not fill the actual content");
         }
     }
 
