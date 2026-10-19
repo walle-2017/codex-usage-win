@@ -3448,7 +3448,15 @@ unsafe fn render_taskbar_text(
 }
 
 fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
-    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    vertical_row_tops_for_layout(
+        height, show_session, show_weekly,
+        lock_state().as_ref().is_some_and(|s| s.floating_mode),
+    )
+}
+
+fn vertical_row_tops_for_layout(
+    height: i32, show_session: bool, show_weekly: bool, floating: bool,
+) -> (Option<i32>, Option<i32>) {
     let first = if floating {
         sc(DESKTOP_VERTICAL_CONTENT_PADDING)
     } else if show_session && show_weekly {
@@ -3466,7 +3474,16 @@ fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Opt
 fn vertical_minimal_percent_centers(
     height: i32, show_session: bool, show_weekly: bool,
 ) -> (Option<i32>, Option<i32>) {
-    if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+    vertical_minimal_percent_centers_for_layout(
+        height, show_session, show_weekly,
+        lock_state().as_ref().is_some_and(|s| s.floating_mode),
+    )
+}
+
+fn vertical_minimal_percent_centers_for_layout(
+    height: i32, show_session: bool, show_weekly: bool, floating: bool,
+) -> (Option<i32>, Option<i32>) {
+    if floating {
         let center = sc(DESKTOP_VERTICAL_CONTENT_PADDING + DESKTOP_MINIMAL_ROW_HEIGHT / 2);
         let second = center + sc(DESKTOP_MINIMAL_ROW_HEIGHT + DESKTOP_MINIMAL_ROW_GAP);
         return (
