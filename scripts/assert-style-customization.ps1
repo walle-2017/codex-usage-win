@@ -344,13 +344,18 @@ if ($composition -notmatch 'CreateDesktopWindowTarget' -or
     throw 'Native helper must use DesktopWindowTarget + BackdropBrush + real GaussianBlurEffect.'
 }
 if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
+    $composition -notmatch 'codex_composition_blur_set_desktop_bounds' -or
     $composition -notmatch 'CreateRoundedRectangleGeometry' -or
     $composition -notmatch 'CreateGeometricClip' -or
-    $composition -notmatch 'clip_geometry\.CornerRadius' -or
+    $composition -notmatch 'panel_geometry' -or
+    $composition -notmatch 'grip_geometry' -or
+    $composition -notmatch 'geometry\.CornerRadius' -or
     $composition -notmatch 'root\.Size\(size\)' -or
     $composition -notmatch 'blur_visual\.Size\(size\)' -or
+    $composition -notmatch 'grip_blur_visual\.Size\(grip_size\)' -or
+    $composition -notmatch 'grip_visual\.Opacity\(alpha\)' -or
     $composition -notmatch 'tint_visual\.Size\(size\)') {
-    throw 'Composition backdrop must use explicit size and rounded hard clipping to match the panel and prevent stale-DPI blur tails.'
+    throw 'Composition backdrop must hard-clip the taskbar panel and independently clip, fade and blur the desktop grip without stale-DPI tails.'
 }
 if ($native -notmatch 'codex_draw_settings_icon') {
     throw 'Rust native interop must expose the Direct2D settings-icon renderer.'
