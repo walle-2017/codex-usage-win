@@ -891,6 +891,16 @@ if ($styleWindow -notmatch 'SETTINGS_EDIT_SUBCLASS_ID' -or
     throw 'Settings must support wheel adjustment, compact JSON-error shake, 5H/7D labels, and Chinese/English-only language selection.'
 }
 
+# Drag hover belongs exclusively to the six-dot grip, not to a thin
+# highlighted line along the vertical panel edge.
+if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*top:\s*sc\(2\)' -or
+    $windowProduction -notmatch 'fn\s+drag_handle_dot_style\(' -or
+    $windowProduction -notmatch 'drag_handle_dot_style\(drag_color, hovered, false\)' -or
+    $windowProduction -notmatch 'drag_handle_dot_style\(\*color, hovered, true\)' -or
+    $windowProduction -notmatch 'let\s+\(dot, gap_x, gap_y, dots\)\s*=\s*drag_handle_dot_style') {
+    throw 'Vertical hover indicator lines must stay removed; taskbar and desktop grips must share six-dot hover styling.'
+}
+
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 
 
