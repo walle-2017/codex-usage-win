@@ -4382,7 +4382,7 @@ fn set_floating_collapsed(collapsed: bool) {
 }
 
 fn step_floating_animation(hwnd: HWND) {
-    let (active, completed, moved) = {
+    let (active, completed, moved, appearance_changed, guarded) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         if !s.floating_mode {
@@ -4390,7 +4390,8 @@ fn step_floating_animation(hwnd: HWND) {
             return;
         }
         let destination = if s.floating_collapsed { 0 } else { 100 };
-        let before = s.floating_reveal;
+        let old_reveal = s.floating_reveal;
+        let old_alpha = s.floating_grip_alpha;
         s.floating_reveal = animate_toward(s.floating_reveal, destination, FLOAT_ANIMATION_STEP);
         let grip_target = if s.floating_edge.is_some() || s.dragging || s.floating_grip_hover {
             100
@@ -4400,14 +4401,52 @@ fn step_floating_animation(hwnd: HWND) {
         );
         (s.hwnd.to_hwnd(),
          s.floating_reveal == destination && s.floating_grip_alpha == grip_target,
-         s.floating_reveal != before)
+         s.floating_reveal != old_reveal,
+         s.floating_reveal != old_reveal || s.floating_grip_alpha != old_alpha,
+         s.floating_first_collapse_guard && s.floating_collapsed)
     };
     if moved { move_floating_widget(active); }
-    // Fade changes only the detached grip; the panel is rendered unchanged.
-    render_layered();
+    if appearance_changed { render_layered(); }
+
+    // The new dock's first contraction is non-interactive. Re-arm hover only
+    // after it is fully hidden AND the pointer has left the now-visible tab.
+    // Poll slowly when the pointer rests on the tab, without repainting.
+    if completed && guarded {
+        if floating_pointer_is_outside_grip(active) {
+            if let Some(s) = lock_state().as_mut() {
+                if s.hwnd.to_hwnd() == active { s.floating_first_collapse_guard = false; }
+            }
+        } else {
+            unsafe {
+                SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 80, None);
+            }
+            return;
+        }
+    }
     if completed {
         unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
     }
+}
+
+/// False while the pointer still overlaps the collapsed exposed edge grip.
+fn floating_pointer_is_outside_grip(hwnd: HWND) -> bool {
+    let (edge, width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s| s.floating_mode) else { return false };
+        let (width, height) = floating_canvas_size_for_state(s);
+        (s.floating_edge, width, height)
+    };
+    let Some(edge) = edge else { return true };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() { return false; }
+    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
+    !point_in_rect(RECT {
+        left: rect.left + grip.left,
+        top: rect.top + grip.top,
+        right: rect.left + grip.right,
+        bottom: rect.top + grip.bottom,
+    }, point.x, point.y)
 }
 
 fn animate_toward(value: u8, target: u8, step: u8) -> u8 {
