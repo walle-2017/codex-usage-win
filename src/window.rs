@@ -3330,7 +3330,8 @@ unsafe fn render_taskbar_text(
         show_weekly_window
     };
 
-    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let content_x = horizontal_content_left(&metrics, floating);
     let row2_y = height - sc(4) - sc(SEGMENT_H);
     let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
     let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -3447,7 +3448,10 @@ unsafe fn render_taskbar_text(
 }
 
 fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
-    let first = if show_session && show_weekly {
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let first = if floating {
+        sc(DESKTOP_VERTICAL_CONTENT_PADDING)
+    } else if show_session && show_weekly {
         sc(VERTICAL_FIRST_ROW_TOP)
     } else {
         ((height - sc(VERTICAL_QUOTA_ROW_HEIGHT)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
@@ -3462,6 +3466,14 @@ fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Opt
 fn vertical_minimal_percent_centers(
     height: i32, show_session: bool, show_weekly: bool,
 ) -> (Option<i32>, Option<i32>) {
+    if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+        let center = sc(DESKTOP_VERTICAL_CONTENT_PADDING + DESKTOP_MINIMAL_ROW_HEIGHT / 2);
+        let second = center + sc(DESKTOP_MINIMAL_ROW_HEIGHT + DESKTOP_MINIMAL_ROW_GAP);
+        return (
+            show_session.then_some(center),
+            show_weekly.then_some(if show_session { second } else { center }),
+        );
+    }
     let one_center = (height + sc(VERTICAL_DRAG_HANDLE_H)) / 2;
     if show_session && show_weekly {
         (Some(sc(VERTICAL_MINIMAL_FIRST_PERCENT_Y)), Some(sc(VERTICAL_MINIMAL_SECOND_PERCENT_Y)))
@@ -3864,7 +3876,8 @@ fn paint_content(
             draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
         }
 
-        let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+        let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+        let content_x = horizontal_content_left(&metrics, floating);
         let row2_y = height - sc(4) - sc(SEGMENT_H);
         let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
         let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -4800,9 +4813,18 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.floating_hwnd.map(|h| h.to_hwnd()), s.hwnd.to_hwnd(),
             s.floating_x, s.floating_y, s.language,
             if vertical { sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48)) }
-                else { total_widget_width_for_preset(s.language, preset) },
-            if vertical { vertical_widget_height_for_preset(preset) }
-                else { sc(preset.metrics().widget_height) },
+            else {
+                desktop_horizontal_content_width(
+                    s.language, preset,
+                    s.show_session_window, s.show_weekly_window,
+                    &s.codex_session_text, &s.codex_weekly_text,
+                )
+            },
+            if vertical {
+                desktop_vertical_content_height(
+                    preset, s.show_session_window, s.show_weekly_window,
+                )
+            } else { sc(preset.metrics().widget_height) },
         )
     };
     let (window_width, window_height, _) = floating_canvas_geometry(
@@ -5807,7 +5829,8 @@ fn minimal_percent_hit(
     }
     let height = client.bottom - client.top;
     let metrics = preset.metrics();
-    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let content_x = horizontal_content_left(&metrics, floating);
     let row2_y = height - sc(4) - sc(SEGMENT_H);
     let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
     let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -5876,7 +5899,8 @@ fn default_reset_hit(
     let segment_count = row_bar_segment_count(preset);
     let progress_width =
         segment_count * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
-    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let content_x = horizontal_content_left(&metrics, floating);
     let bar_x = content_x + sc(label_width) + sc(metrics.label_bar_gap);
     let text_x = bar_x + progress_width + sc(metrics.bar_percent_gap);
     let reset_x = text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
