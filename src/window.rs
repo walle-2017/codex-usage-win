@@ -5730,7 +5730,7 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
         // Failed measurement must not fall back to a tiny fixed-width box.
         return tooltip_width_with_render_slack(
             sc((text.chars().count().min(64) as i32) * 12),
-            |v| sc(v),
+            sc,
         );
     }
     let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
@@ -5757,7 +5757,7 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
     let _ = ReleaseDC(HWND::default(), hdc);
-    tooltip_width_with_render_slack(size.cx, |v| sc(v))
+    tooltip_width_with_render_slack(size.cx, sc)
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
