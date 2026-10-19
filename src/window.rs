@@ -3152,13 +3152,13 @@ fn restore_text_background_rect(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HorizontalTextAlign { Start, Center, End }
+enum HorizontalTextAlign { Start, InkStart, Center, End }
 
 /// Align the visible ink, not the reserved width of a text column.
 fn directwrite_mask_x_offset(
     mask: &[u8], width: i32, height: i32, align: HorizontalTextAlign,
 ) -> i32 {
-    if align == HorizontalTextAlign::Start || width <= 0 || height <= 0 { return 0; }
+    if width <= 0 || height <= 0 || align == HorizontalTextAlign::Start { return 0; }
     let mut first = width;
     let mut last = -1;
     for x in 0..width {
@@ -3172,6 +3172,7 @@ fn directwrite_mask_x_offset(
     if last < 0 { return 0; }
     match align {
         HorizontalTextAlign::Start => 0,
+        HorizontalTextAlign::InkStart => -first,
         HorizontalTextAlign::Center => (width - (last - first + 1)) / 2 - first,
         HorizontalTextAlign::End => width - 1 - last,
     }
@@ -3415,7 +3416,11 @@ unsafe fn render_taskbar_text(
             sc(metrics.font_height),
             FW_MEDIUM.0 as i32,
             quota_type_color,
-            HorizontalTextAlign::Start,
+            if floating {
+                HorizontalTextAlign::InkStart
+            } else {
+                HorizontalTextAlign::Start
+            },
         );
 
         let segment_count = row_bar_segment_count(preset);
