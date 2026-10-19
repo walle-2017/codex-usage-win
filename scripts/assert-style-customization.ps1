@@ -563,6 +563,17 @@ if ($styleWindow -match '"当前自定义"' -or
     $styleWindow -notmatch 'preview_vertical_for_snapshot\(') {
     throw 'Preset gallery must support V23 compact heights, direction-aware previews, detached desktop drag tabs, and true horizontal minimal content.'
 }
+# Both thumbnail orientations must use the same sample text template
+# as the production tooltip, with no time-only legacy preview strings.
+$appearanceSource = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\appearance.rs')
+if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
+    $windowProduction -notmatch 'appearance::quota_reset_tooltip_text\(' -or
+    $styleWindow -notmatch 'fn preview_reset_tooltip_lines\(' -or
+    $styleWindow -notmatch 'quota_reset_tooltip_text\(' -or
+    $styleWindow -notmatch 'let \(date, time\) = preview_reset_tooltip_lines\(minimal\)' -or
+    $styleWindow -match 'draw_text\(hdc, "21:30", tip,') {
+    throw 'Every preview tooltip must use the real default/minimal reset-time text template, not a time-only placeholder.'
+}
 if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'strip_jsonc_comments' -or
     $settingsModel -notmatch 'parse_jsonc' -or
