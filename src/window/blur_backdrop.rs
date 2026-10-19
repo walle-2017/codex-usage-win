@@ -19,27 +19,35 @@ fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
     let Some(context) = blur_backdrop_context() else {
         return false;
     };
-    let (clip_inset_px, clip_radius_px) = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| {
-                let outer_radius =
-                    sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius));
-                let outer_inset = sc(1).max(1);
-                (
-                    (outer_inset + PANEL_BORDER_WIDTH_PX) as f32,
-                    (outer_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32,
-                )
-            })
-            .unwrap_or((0.0, 0.0))
-    };
+    let state = lock_state();
+    let Some(s) = state.as_ref() else { return false };
+    let outer_radius = sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius));
+    let outer_inset = sc(1).max(1);
+    let inset = (outer_inset + PANEL_BORDER_WIDTH_PX) as f32;
+    let radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32;
+    if s.floating_mode {
+        let (canvas_w, canvas_h, panel) = floating_canvas_geometry(
+            total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
+        );
+        let grip = floating_grip_rect(
+            canvas_w, canvas_h, s.floating_edge, sc(FLOAT_EDGE_PEEK),
+        );
+        let tab_radius = sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius))
+            .min(((grip.right - grip.left).min(grip.bottom - grip.top) / 2).max(0));
+        let grip_alpha = if s.floating_edge.is_some() || s.dragging {
+            100
+        } else {
+            s.floating_grip_alpha
+        };
+        return native_interop::set_composition_blur_desktop_bounds(
+            context, width, height, panel, grip,
+            inset, radius,
+            inset, (tab_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32,
+            grip_alpha, !(s.floating_collapsed && s.floating_reveal == 0),
+        );
+    }
     native_interop::set_composition_blur_bounds(
-        context,
-        width,
-        height,
-        clip_inset_px,
-        clip_radius_px,
+        context, width, height, inset, radius,
     )
 }
 
@@ -369,15 +377,10 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
 }
 
 fn blur_panel_bounds_for_foreground(rect: RECT) -> (i32, i32, i32, i32) {
-    let state = lock_state();
-    if let Some(s) = state.as_ref().filter(|s| s.floating_mode) {
-        let body_w = total_widget_width_for_state(s);
-        let body_h = widget_height_for_state(s);
-        let (_, _, body) = floating_canvas_geometry(body_w, body_h, s.floating_edge);
-        (rect.left + body.left, rect.top + body.top, body_w, body_h)
-    } else {
-        (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-    }
+    // Desktop mode now clips two rounded glass regions within one transparent
+    // Composition surface: the original taskbar-sized body and its small tab.
+    // Embedded taskbar mode continues to use its unchanged original bounds.
+    (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
 }
 
 pub(super) fn sync_blur_backdrop_geometry(foreground_hwnd: HWND) {
