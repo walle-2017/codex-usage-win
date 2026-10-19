@@ -2812,6 +2812,31 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     }
 }
 
+/// Use the established taskbar six-dot hover effect in every drag-grip mode.
+/// Hover enlarges the dots, tightens their spacing, and brightens the original
+/// DragHandle color. Only the dots change; the panel border never highlights.
+fn drag_handle_dot_style(color: Color, hovered: bool, vertical: bool) -> (i32, i32, i32, Color) {
+    let dot = if hovered { sc(3).max(2) } else { sc(2).max(1) };
+    let compact_gap = sc(1).max(1);
+    let long_gap = if hovered { sc(1).max(1) } else { sc(2).max(1) };
+    let (gap_x, gap_y) = if vertical {
+        (compact_gap, long_gap)
+    } else {
+        (long_gap, compact_gap)
+    };
+    let tint = if hovered {
+        Color::rgba(
+            color.r.saturating_add(36),
+            color.g.saturating_add(36),
+            color.b.saturating_add(36),
+            color.a,
+        )
+    } else {
+        color
+    };
+    (dot, gap_x, gap_y, tint)
+}
+
 /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
 /// When collapsed, every pixel outside the tab is fully transparent and cannot
 /// obstruct other desktop windows or leave a visible panel edge.
@@ -2822,21 +2847,16 @@ fn render_floating_handle_bitmap(
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
     // The tab is a miniature panel, not a separate style. Its fill, border,
     // corner radius, transparency and glass strength follow ThemeStyle.
-    let mut dots = style.color(StyleColorTarget::DragHandle);
-    if hovered {
-        dots.r = dots.r.saturating_add(12);
-        dots.g = dots.g.saturating_add(12);
-        dots.b = dots.b.saturating_add(12);
-    }
     let center_x = (grip.left + grip.right) / 2;
     let center_y = (grip.top + grip.bottom) / 2;
     let vertical_grip = matches!(edge, Some(FloatingEdge::Left | FloatingEdge::Right));
-    let dot = sc(2).max(1);
-    let gap = sc(3).max(1);
+    let (dot, gap_x, gap_y, dots) = drag_handle_dot_style(
+        style.color(StyleColorTarget::DragHandle), hovered, vertical_grip,
+    );
     // Long side of the six-dot grip follows the long side of the tab.
     let (cols, rows) = if vertical_grip { (2, 3) } else { (3, 2) };
-    let dots_w = cols * dot + (cols - 1) * gap;
-    let dots_h = rows * dot + (rows - 1) * gap;
+    let dots_w = cols * dot + (cols - 1) * gap_x;
+    let dots_h = rows * dot + (rows - 1) * gap_y;
     for y in grip.top.max(0)..grip.bottom.min(height) {
         for x in grip.left.max(0)..grip.right.min(width) {
             let local_x = x - grip.left;
@@ -2847,8 +2867,8 @@ fn render_floating_handle_bitmap(
                 style, grip_w, grip_h, local_x, local_y,
             ) else { continue };
             let dot_pixel = (0..rows).any(|r| (0..cols).any(|c| {
-                let dx = center_x - dots_w / 2 + c * (dot + gap);
-                let dy = center_y - dots_h / 2 + r * (dot + gap);
+                let dx = center_x - dots_w / 2 + c * (dot + gap_x);
+                let dy = center_y - dots_h / 2 + r * (dot + gap_y);
                 x >= dx && x < dx + dot && y >= dy && y < dy + dot
             }));
             let mut color = if dot_pixel { dots } else { panel_color };
@@ -3530,20 +3550,19 @@ fn paint_vertical_widget_content(
 ) {
     unsafe {
         if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
-            let handle_brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
-            let dot = sc(2).max(1);
-            let gap = sc(3);
+            let (dot, gap_x, gap_y, color) =
+                drag_handle_dot_style(drag_color, hovered, false);
+            let matrix_w = 3 * dot + 2 * gap_x;
             for row in 0..2 {
                 for col in 0..3 {
-                    let left = width / 2 - (3 * dot + 2 * gap) / 2 + col * (dot + gap);
-                    let top = sc(5) + row * (dot + gap);
+                    let left = width / 2 - matrix_w / 2 + col * (dot + gap_x);
+                    let top = sc(5) + row * (dot + gap_y);
                     let rect = RECT {
                         left, top, right: left + dot, bottom: top + dot,
                     };
-                    FillRect(hdc, &rect, handle_brush);
+                    draw_rounded_rect(hdc, &rect, &color, sc(1).max(1));
                 }
             }
-            let _ = DeleteObject(handle_brush);
         }
 
         // The layered renderer composites rings and text with DirectWrite.
@@ -3670,12 +3689,6 @@ fn paint_vertical_widget_content(
                     let _ = DeleteObject(font);
                 }
             }
-        }
-        if hovered {
-            let grip = RECT { left: sc(3), top: sc(2), right: width - sc(3), bottom: sc(3) };
-            let brush = CreateSolidBrush(COLORREF(drag_color.to_colorref()));
-            FillRect(hdc, &grip, brush);
-            let _ = DeleteObject(brush);
         }
     }
 }
@@ -8488,9 +8501,8 @@ fn draw_panel(
 }
 
 fn draw_drag_handle(hdc: HDC, height: i32, color: &Color, hovered: bool) {
-    let dot = if hovered { sc(3).max(2) } else { sc(2).max(1) };
-    let gap_x = sc(1).max(1);
-    let gap_y = if hovered { sc(1).max(1) } else { sc(2).max(1) };
+    let (dot, gap_x, gap_y, hover_color) =
+        drag_handle_dot_style(*color, hovered, true);
     let matrix_w = dot * 2 + gap_x;
     let matrix_h = dot * 3 + gap_y * 2;
     // Nudge the visible grip away from the rounded left edge without
@@ -8498,16 +8510,6 @@ fn draw_drag_handle(hdc: HDC, height: i32, color: &Color, hovered: bool) {
     let hit_center_x = sc(DRAG_HANDLE_HIT_W) / 2;
     let origin_x = hit_center_x + sc(2) - matrix_w / 2;
     let origin_y = (height - matrix_h) / 2;
-    let hover_color = if hovered {
-        Color::rgba(
-            color.r.saturating_add(36),
-            color.g.saturating_add(36),
-            color.b.saturating_add(36),
-            color.a,
-        )
-    } else {
-        *color
-    };
 
     for row in 0..3 {
         for col in 0..2 {
