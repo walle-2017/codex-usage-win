@@ -551,11 +551,17 @@ if ($styleWindow -match '"当前自定义"' -or
     $styleWindow -notmatch 'paint_style_preview_card\(' -or
     $styleWindow -notmatch 'if\s+!matched' -or
     $styleWindow -notmatch 'const\s+PRESET_CARD_WIDTH:\s*i32\s*=\s*172' -or
-    $styleWindow -notmatch 'const\s+PRESET_CARD_HEIGHT:\s*i32\s*=\s*390' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_HEIGHT:\s*i32\s*=\s*350' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_MINIMAL_HEIGHT:\s*i32\s*=\s*250' -or
     $styleWindow -notmatch 'const\s+PRESET_CARD_GAP:\s*i32\s*=\s*16' -or
-    $styleWindow -notmatch 'preset_gallery_card_rect\(3\)' -or
-    $styleWindow -notmatch 'portrait_preview_widget_bounds\(') {
-    throw 'Preset gallery must place three preset cards and the custom preview in a single row with tall cards and a proportionally accurate portrait widget.'
+    $styleWindow -notmatch 'preset_gallery_card_rect\(3, minimal\)' -or
+    $styleWindow -notmatch 'portrait_preview_widget_bounds\(' -or
+    $styleWindow -notmatch 'desktop_portrait_preview_bounds\(' -or
+    $styleWindow -notmatch 'paint_desktop_horizontal_preview\(' -or
+    $styleWindow -notmatch 'paint_preview_horizontal_minimal_text\(' -or
+    $styleWindow -notmatch 'paint_preview_drag_tab\(' -or
+    $styleWindow -notmatch 'preview_vertical_for_snapshot\(') {
+    throw 'Preset gallery must support V23 compact heights, direction-aware previews, detached desktop drag tabs, and true horizontal minimal content.'
 }
 if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'strip_jsonc_comments' -or
