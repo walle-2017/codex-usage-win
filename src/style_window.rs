@@ -7439,14 +7439,25 @@ unsafe fn paint_horizontal_style_preview(
                 left: content.left + scale(hwnd, 34), top: y + scale(hwnd, 6),
                 right: content.left + scale(hwnd, 86), bottom: y + scale(hwnd, 12),
             };
-            fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
             let remaining = if index == 0 { 82 } else { 37 };
-            fill(hdc, RECT { right: progress.left + (progress.right - progress.left)
-                * remaining / 100, ..progress }, style.color(if index == 0 {
+            let fill_rect = RECT { right: progress.left + (progress.right - progress.left)
+                * remaining / 100, ..progress };
+            let progress_radius = scale(hwnd, i32::from(style.progress_corner_radius))
+                .min((progress.bottom - progress.top) / 2);
+            let progress_color = style.color(if index == 0 {
                 StyleColorTarget::ProgressHigh
             } else {
                 StyleColorTarget::ProgressMedium
-            }));
+            });
+            if progress_radius > 0 {
+                fill_rounded_rect(hdc, progress,
+                    style.color(StyleColorTarget::ProgressConsumed), progress_radius);
+                fill_rounded_rect(hdc, fill_rect, progress_color,
+                    progress_radius.min((fill_rect.right - fill_rect.left) / 2));
+            } else {
+                fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
+                fill(hdc, fill_rect, progress_color);
+            }
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
             draw_text(hdc, percent, text_rect(content.left + scale(hwnd, 90),
                 content.left + scale(hwnd, 124)), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -7464,11 +7475,11 @@ unsafe fn paint_horizontal_style_preview(
         right: (canvas.left + canvas.right + tip_width) / 2,
         bottom: body.bottom + scale(hwnd, 6) + tip_height,
     };
-    let tip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+    let tooltip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
         .min(tip_height / 2);
-    if tip_radius > 0 {
-        fill_rounded_rect(hdc, tip, style.color(StyleColorTarget::TooltipBackground), tip_radius);
-        draw_rounded_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder), tip_radius, 1);
+    if tooltip_radius > 0 {
+        fill_rounded_rect(hdc, tip, style.color(StyleColorTarget::TooltipBackground), tooltip_radius);
+        draw_rounded_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder), tooltip_radius, 1);
     } else {
         fill(hdc, tip, style.color(StyleColorTarget::TooltipBackground));
         draw_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder));
