@@ -5993,11 +5993,81 @@ fn vertical_usage_hover_hit(
     None
 }
 
+fn desktop_horizontal_usage_hover_hit(
+    width: i32, height: i32, preset: AppearancePreset,
+    show_session: bool, show_weekly: bool, x: i32, y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    let metrics = preset.metrics();
+    let left = horizontal_content_left(&metrics, true);
+    let row2_y = height - sc(4) - sc(SEGMENT_H);
+    let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
+    let single_y = (height - sc(SEGMENT_H)) / 2;
+    let (hit_left, hit_right) = if preset == AppearancePreset::Minimal {
+        (left - sc(2), left + sc(metrics.percent_width) + sc(2))
+    } else {
+        let (label_width, reset_width) = usage_layout_widths(LanguageId::English, preset);
+        let bar = row_bar_segment_count(preset)
+            * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+        let x = left + sc(label_width) + sc(metrics.label_bar_gap)
+            + bar + sc(metrics.bar_percent_gap)
+            + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
+        (x - sc(2), x + sc(reset_width) + sc(2))
+    };
+    for (target, visible, row_y) in [
+        (MinimalHoverTarget::Session, show_session,
+         if show_weekly { row1_y } else { single_y }),
+        (MinimalHoverTarget::Weekly, show_weekly,
+         if show_session { row2_y } else { single_y }),
+    ] {
+        if !visible { continue; }
+        let rect = RECT {
+            left: hit_left, top: row_y - sc(2),
+            right: hit_right.min(width), bottom: row_y + sc(SEGMENT_H) + sc(2),
+        };
+        if point_in_rect(rect, x, y) { return Some((target, rect)); }
+    }
+    None
+}
+
 fn usage_hover_hit(
     hwnd: HWND,
     x: i32,
     y: i32,
 ) -> Option<(MinimalHoverTarget, RECT)> {
+    let desktop = {
+        let state = lock_state();
+        state.as_ref().filter(|s| s.floating_mode).map(|s| (
+            total_widget_width_for_state(s),
+            widget_height_for_state(s),
+            s.floating_edge,
+            s.vertical_taskbar_mode,
+            effective_appearance_preset(s),
+            s.show_session_window, s.show_weekly_window,
+        ))
+    };
+    if let Some((width, height, edge, vertical, preset, show_session, show_weekly)) = desktop {
+        let (_, _, body) = floating_canvas_geometry(width, height, edge);
+        if !point_in_rect(body, x, y) { return None; }
+        let local_x = x - body.left;
+        let local_y = y - body.top;
+        let hit = if vertical {
+            vertical_usage_hover_hit(
+                width, height, preset == AppearancePreset::Minimal,
+                show_session, show_weekly, local_x, local_y,
+            )
+        } else {
+            desktop_horizontal_usage_hover_hit(
+                width, height, preset, show_session, show_weekly,
+                local_x, local_y,
+            )
+        };
+        return hit.map(|(target, rect)| (target, RECT {
+            left: rect.left + body.left,
+            top: rect.top + body.top,
+            right: rect.right + body.left,
+            bottom: rect.bottom + body.top,
+        }));
+    }
     let (vertical, minimal, show_session, show_weekly) = {
         let state = lock_state();
         let s = state.as_ref()?;
