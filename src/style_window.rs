@@ -7041,6 +7041,19 @@ unsafe fn paint_preview_remaining_ring(
     let _ = DeleteDC(dc);
 }
 
+// Use the same textual template as the live usage tooltip. The preview
+// deliberately uses sample data and wraps *only* at the final separator
+// between the date and time when a theme card cannot fit one line.
+fn preview_reset_tooltip_lines(minimal: bool) -> (String, String) {
+    let preset = if minimal { AppearancePreset::Minimal } else { AppearancePreset::Default };
+    let sample = crate::appearance::quota_reset_tooltip_text(
+        preset, "5H", "2026-10-19 20:16",
+    );
+    let (date, time) = sample.rsplit_once(' ')
+        .expect("sample full local timestamp contains a time separator");
+    (date.to_owned(), time.to_owned())
+}
+
 fn portrait_preview_tooltip_rect(
     canvas: RECT, widget: RECT, logical: impl Fn(i32) -> i32,
 ) -> RECT {
@@ -7081,9 +7094,10 @@ unsafe fn paint_portrait_preview_tooltip(
     let _ = SetBkMode(hdc, TRANSPARENT);
     let text_color = style.color(StyleColorTarget::ResetTime);
     let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
+    let (date, time) = preview_reset_tooltip_lines(minimal);
     draw_text(
         hdc,
-        if minimal { "5H · 2026-10-22" } else { "2026-10-22" },
+        &date,
         RECT {
             left: tooltip.left + scale(hwnd, 3),
             top: tooltip.top + scale(hwnd, 3),
@@ -7093,7 +7107,7 @@ unsafe fn paint_portrait_preview_tooltip(
         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
     draw_text(
-        hdc, "21:30",
+        hdc, &time,
         RECT {
             left: tooltip.left + scale(hwnd, 3),
             top: tooltip.top + scale(hwnd, 20),
@@ -7138,7 +7152,7 @@ const PREVIEW_DRAG_TAB_H: i32 = 16;
 const PREVIEW_DRAG_TAB_W: i32 = 36;
 const PREVIEW_DRAG_TAB_GAP: i32 = 4;
 const PREVIEW_TASKBAR_GRIP_W: i32 = 16;
-const PREVIEW_HORIZONTAL_TOOLTIP_H: i32 = 20;
+const PREVIEW_HORIZONTAL_TOOLTIP_H: i32 = 36;
 
 fn desktop_portrait_preview_bounds(
     canvas: RECT, minimal: bool, logical: impl Fn(i32) -> i32,
@@ -7467,7 +7481,9 @@ unsafe fn paint_horizontal_style_preview(
         }
     }
 
-    let tip_width = scale(hwnd, 76);
+    let tip_width = scale(hwnd, 136).min(
+        (canvas.right - canvas.left - scale(hwnd, 8)).max(scale(hwnd, 48)),
+    );
     let tip_height = scale(hwnd, PREVIEW_HORIZONTAL_TOOLTIP_H);
     let tip = RECT {
         left: (canvas.left + canvas.right - tip_width) / 2,
@@ -7485,7 +7501,11 @@ unsafe fn paint_horizontal_style_preview(
         draw_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder));
     }
     let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
-    draw_text(hdc, "21:30", tip, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    let (date, time) = preview_reset_tooltip_lines(minimal);
+    let first = RECT { bottom: tip.top + scale(hwnd, 18), ..tip };
+    let second = RECT { top: tip.top + scale(hwnd, 18), ..tip };
+    draw_text(hdc, &date, first, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, &time, second, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     let _ = SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
 }
@@ -7541,7 +7561,7 @@ unsafe fn paint_style_preview_card(
         left: r.left + scale(hwnd, 12),
         top: r.top + scale(hwnd, if vertical { 50 } else { 46 }),
         right: r.right - scale(hwnd, 12),
-        bottom: if vertical { r.bottom - scale(hwnd, 53) } else { r.top + scale(hwnd, 138) },
+        bottom: if vertical { r.bottom - scale(hwnd, 53) } else { r.top + scale(hwnd, 152) },
     };
     // The preview rectangle is only a positioning region. The card itself
     // provides the backdrop; drawing a second frame here would surround the
@@ -8643,8 +8663,23 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn preview_tooltip_templates_match_runtime_content_in_all_layouts() {
+        for (minimal, expected) in [
+            (false, "2026-10-19 20:16"),
+            (true, "5H · 2026-10-19 20:16"),
+        ] {
+            let (first_line, second_line) = preview_reset_tooltip_lines(minimal);
+            assert_eq!(format!("{first_line} {second_line}"), expected);
+            assert_eq!(second_line, "20:16");
+            assert!(!first_line.ends_with(' '));
+        }
+        // Both orientations and both display positions call the exact same
+        // template helper; dimensions only affect where the break is drawn.
+    }
+
+    #[test]
     fn v23_horizontal_minimal_preview_is_content_sized() {
-        let canvas = RECT { left: 0, top: 0, right: 200, bottom: 92 };
+        let canvas = RECT { left: 0, top: 0, right: 200, bottom: 106 };
         for minimal in [false, true] {
             let desktop = horizontal_preview_body(canvas, minimal, true, |v| v);
             let taskbar = horizontal_preview_body(canvas, minimal, false, |v| v);
@@ -8672,7 +8707,7 @@ mod ui_smoke_tests {
         let (body, tab) = desktop_portrait_preview_bounds(portrait, false, |v| v * 2);
         assert_eq!(body.top - tab.bottom, PREVIEW_DRAG_TAB_GAP * 2);
         assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H * 2);
-        let landscape = RECT { left: 0, top: 0, right: 400, bottom: 184 };
+        let landscape = RECT { left: 0, top: 0, right: 400, bottom: 212 };
         let body = horizontal_preview_body(landscape, false, true, |v| v * 2);
         let tab = horizontal_preview_detached_tab(body, |v| v * 2);
         assert_eq!(body.top - tab.bottom, PREVIEW_DRAG_TAB_GAP * 2);
