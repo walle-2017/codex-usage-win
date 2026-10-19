@@ -948,6 +948,9 @@ if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*to
     $windowProduction -notmatch 'fn\s+drag_hover_outline_color\(' -or
     $windowProduction -notmatch 'StyleColorTarget::ProgressHigh' -or
     $windowProduction -notmatch 'fn\s+draw_drag_hover_outline\(' -or
+    $windowProduction -notmatch 'fn\s+drag_hover_glow_coverage\(' -or
+    $windowProduction -notmatch 'fn\s+drag_hover_signed_edge_distance\(' -or
+    $windowProduction -notmatch 'drag_hover_glow_coverage\(distance\)' -or
     $windowProduction -notmatch 'if !floating && drag_hovered' -or
     $windowProduction -notmatch 'if hovered && !hidden' -or
     $windowProduction -notmatch 'floating_grip_rect\(' -or
