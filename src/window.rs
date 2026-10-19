@@ -9101,9 +9101,11 @@ mod tests {
         );
         assert_eq!(both_resets, one_reset, "rows share one aligned width");
         assert_eq!(
-            both_resets + sc(DRAG_HANDLE_HIT_W),
+            both_resets + sc(DRAG_HANDLE_HIT_W)
+                - 2 * (sc(DESKTOP_PANEL_CONTENT_PADDING)
+                    - sc(normal.metrics().outer_padding)),
             total_widget_width_for_preset(lang, normal),
-            "desktop must remove only the taskbar drag-strip while showing a reset",
+            "desktop replaces the taskbar drag strip with equal larger content insets",
         );
         let no_reset = desktop_horizontal_content_width(
             lang, normal, true, true, "70%", "88%",
@@ -9113,13 +9115,96 @@ mod tests {
             lang, AppearancePreset::Minimal, true, true, "70%", "88%",
         );
         assert_eq!(
-            minimal + sc(DRAG_HANDLE_HIT_W),
+            minimal + sc(DRAG_HANDLE_HIT_W)
+                - 2 * (sc(DESKTOP_PANEL_CONTENT_PADDING)
+                    - sc(AppearancePreset::Minimal.metrics().outer_padding)),
             total_widget_width_for_preset(lang, AppearancePreset::Minimal),
         );
         assert_eq!(horizontal_content_left(&normal.metrics(), true),
-            sc(normal.metrics().outer_padding));
+            sc(DESKTOP_PANEL_CONTENT_PADDING));
         assert_eq!(horizontal_content_left(&normal.metrics(), false),
             sc(normal.metrics().outer_padding + DRAG_HANDLE_HIT_W));
+    }
+
+    #[test]
+    fn desktop_visual_ink_alignment_avoids_reserved_reset_column_whitespace() {
+        let width = 34;
+        let height = 12;
+        let mut mask = vec![0u8; (width * height) as usize];
+        // Mimic a 5-character time mask with 4 pixels of leading bearing
+        // and trailing blank columns from the fixed-width text rectangle.
+        for y in 2..10 {
+            for x in 4..27 {
+                mask[(y * width + x) as usize] = 255;
+            }
+        }
+        assert_eq!(directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::Start,
+        ), 0);
+        let shift_end = directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::End,
+        );
+        assert_eq!(26 + shift_end, width - 1,
+            "reset text must reach the content inset, not stop at its reserved width");
+        let shift_center = directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::Center,
+        );
+        assert!(((4 + shift_center) - (width - 1 - (26 + shift_center))).abs() <= 1,
+            "the minimal single value must be optically centered");
+        assert_eq!(directwrite_mask_x_offset(
+            &vec![0; (width * height) as usize],
+            width, height, HorizontalTextAlign::End,
+        ), 0);
+    }
+
+    #[test]
+    fn desktop_horizontal_and_vertical_content_margins_are_symmetric() {
+        let preset = AppearancePreset::Default;
+        let metrics = preset.metrics();
+        let left = horizontal_content_left(&metrics, true);
+        let width = desktop_horizontal_content_width(
+            LanguageId::English, preset, true, true, "74%  15:05", "88%  10/25",
+        );
+        let label = sc(metrics.label_width);
+        let bar = row_bar_segment_count(preset)
+            * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+        let rightmost_text_edge = left + label + sc(metrics.label_bar_gap)
+            + bar + sc(metrics.bar_percent_gap)
+            + sc(metrics.percent_width) + sc(metrics.percent_reset_gap)
+            + sc(metrics.reset_width);
+        assert_eq!(left, sc(DESKTOP_PANEL_CONTENT_PADDING));
+        assert_eq!(width - rightmost_text_edge, left,
+            "left and right gutters must match around text ink");
+        for p in [AppearancePreset::Default, AppearancePreset::Minimal] {
+            for (show_session, show_weekly) in [(true, true), (true, false), (false, true)] {
+                let h = desktop_vertical_content_height(p, show_session, show_weekly);
+                let row_height = if p == AppearancePreset::Minimal {
+                    sc(DESKTOP_MINIMAL_ROW_HEIGHT)
+                } else {
+                    sc(VERTICAL_QUOTA_ROW_HEIGHT)
+                };
+                let (first, last) = if p == AppearancePreset::Minimal {
+                    let (a, b) = vertical_minimal_percent_centers_for_layout(
+                        h, show_session, show_weekly, true,
+                    );
+                    let a = a.or(b).unwrap() - row_height / 2;
+                    let b = b.or(Some(a + row_height / 2)).unwrap() + row_height / 2;
+                    (a, b)
+                } else {
+                    let (a, b) = vertical_row_tops_for_layout(
+                        h, show_session, show_weekly, true,
+                    );
+                    let first = a.or(b).unwrap();
+                    let last = b.or(a).unwrap() + row_height;
+                    (first, last)
+                };
+                assert!((first - (h - last)).abs() <= 1,
+                    "vertical visible row envelope must have equal top/bottom padding");
+            }
+        }
+        assert_eq!(horizontal_content_left(&metrics, false),
+            sc(metrics.outer_padding + DRAG_HANDLE_HIT_W),
+            "taskbar mode must preserve its original leading drag strip");
     }
 
     #[test]
