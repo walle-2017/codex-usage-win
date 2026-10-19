@@ -2952,9 +2952,34 @@ fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
     Color::rgba(chosen.r, chosen.g, chosen.b, 255)
 }
 
-/// Paint one translucent outer halo pixel and a narrow rounded highlight ring
-/// *inside* an existing panel. No canvas expansion, layout or hit-test changes.
-/// Works on premultiplied layered pixels with arbitrary RGBA backgrounds.
+/// A narrow highlight stroke sits on a smooth, Gaussian-like falloff.
+/// Because the existing layered surface has just a one-pixel transparent rim,
+/// feathering also continues a few pixels inward. This preserves the widget's
+/// position, content geometry and drag hit-testing while avoiding a solid band.
+fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
+    let distance = distance_from_edge.abs();
+    // Soft halo falls off on either side of the visible panel perimeter.
+    let diffuse = 94.0 * (-(distance / 2.1).powi(2) * 0.5).exp();
+    // The thin central stroke is antialiased rather than a 2px solid band.
+    let hairline = 105.0 * (1.0 - distance / 0.8).max(0.0);
+    (diffuse + hairline).round().clamp(0.0, 200.0) as u8
+}
+
+/// Rounded-rectangle signed distance. Negative is inside the actual panel,
+/// positive is outside; returns zero at its edge.
+fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
+    let inset = sc(1).max(1) as f32;
+    let half_w = (width as f32 / 2.0 - inset).max(0.5);
+    let half_h = (height as f32 / 2.0 - inset).max(0.5);
+    let radius = (radius as f32).min(half_w.min(half_h)).max(0.0);
+    let dx = (x as f32 + 0.5 - width as f32 / 2.0).abs() - (half_w - radius);
+    let dy = (y as f32 + 0.5 - height as f32 / 2.0).abs() - (half_h - radius);
+    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+}
+
+/// Feather the hover feedback across a narrow edge region, not a solid border.
+/// The existing canvas boundary clips most of the outer halo; gradual
+/// feathering inside the edge makes the effect visible without resizing HWNDs.
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
@@ -2963,34 +2988,23 @@ fn draw_drag_hover_outline(
         || bounds.bottom <= bounds.top { return; }
     let w = bounds.right - bounds.left;
     let h = bounds.bottom - bounds.top;
-    let inset = sc(1).max(1);
-    let stroke = sc(2).max(1).min((w.min(h) / 3).max(1));
     let radius = sc(i32::from(corner_radius))
-        .min(((w - 2 * inset).min(h - 2 * inset) / 2).max(0));
-    for y in bounds.top.max(0)..bounds.bottom.min(canvas_h) {
-        for x in bounds.left.max(0)..bounds.right.min(canvas_w) {
+        .min((w.min(h) / 2).max(0));
+    let extent = sc(6).max(2);
+    // Restrict work to the edge envelope, avoiding per-pixel work over the
+    // center of larger horizontal panels.
+    for y in bounds.top.saturating_sub(extent).max(0)
+        ..bounds.bottom.saturating_add(extent).min(canvas_h) {
+        for x in bounds.left.saturating_sub(extent).max(0)
+            ..bounds.right.saturating_add(extent).min(canvas_w) {
             let local_x = x - bounds.left;
             let local_y = y - bounds.top;
-            let inside = |margin: i32, rounded_radius: i32| {
-                if radius == 0 {
-                    local_x >= margin && local_x < w - margin
-                        && local_y >= margin && local_y < h - margin
-                } else {
-                    point_in_rounded_box(w, h, local_x, local_y, margin, rounded_radius.max(1))
-                }
-            };
-            let coverage = if inside(inset, radius)
-                && !inside(inset + stroke, radius.saturating_sub(stroke)) {
-                224
-            } else if inside(0, radius + inset) && !inside(inset, radius) {
-                64
-            } else {
-                0
-            };
-            if coverage != 0 {
-                let idx = (y * canvas_w + x) as usize;
-                pixels[idx] = composite_premultiplied_text(pixels[idx], color, coverage);
-            }
+            let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
+            if distance.abs() > extent as f32 { continue; }
+            let coverage = drag_hover_glow_coverage(distance);
+            if coverage == 0 { continue; }
+            let index = (y * canvas_w + x) as usize;
+            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
         }
     }
 }
