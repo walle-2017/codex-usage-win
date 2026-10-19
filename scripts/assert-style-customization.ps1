@@ -938,14 +938,22 @@ if ([string]::IsNullOrWhiteSpace($desktopBranch) -or
     throw 'Desktop orientation must return before any synchronous Explorer taskbar geometry query.'
 }
 
-# Drag hover belongs exclusively to the six-dot grip, not to a thin
-# highlighted line along the vertical panel edge.
+# V24 keeps the grip dots fixed, moves the feedback to the entire
+# themed widget perimeter, and highlights the separate desktop tab as well.
 if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*top:\s*sc\(2\)' -or
     $windowProduction -notmatch 'fn\s+drag_handle_dot_style\(' -or
     $windowProduction -notmatch 'drag_handle_dot_style\(drag_color, hovered, false\)' -or
     $windowProduction -notmatch 'drag_handle_dot_style\(\*color, hovered, true\)' -or
-    $windowProduction -notmatch 'let\s+\(dot, gap_x, gap_y, dots\)\s*=\s*drag_handle_dot_style') {
-    throw 'Vertical hover indicator lines must stay removed; taskbar and desktop grips must share six-dot hover styling.'
+    $windowProduction -notmatch 'let\s+\(dot, gap_x, gap_y, dots\)\s*=\s*drag_handle_dot_style' -or
+    $windowProduction -notmatch 'fn\s+drag_hover_outline_color\(' -or
+    $windowProduction -notmatch 'StyleColorTarget::ProgressHigh' -or
+    $windowProduction -notmatch 'fn\s+draw_drag_hover_outline\(' -or
+    $windowProduction -notmatch 'if !floating && drag_hovered' -or
+    $windowProduction -notmatch 'if hovered && !hidden' -or
+    $windowProduction -notmatch 'floating_grip_rect\(' -or
+    $windowProduction -notmatch 'draw_drag_hover_outline\(\s*canvas, canvas_w, canvas_h, tab' -or
+    $windowProduction -notmatch 'drag_hover_outline_color\(&style\)') {
+    throw 'V24 must retain stable six-dot grips and provide theme-adaptive perimeter hover on both the panel and desktop tab.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
