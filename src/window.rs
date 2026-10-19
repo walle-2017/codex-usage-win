@@ -91,6 +91,9 @@ struct AppState {
     // Desktop-only: undocked grip is hidden until the pointer hovers the widget.
     floating_grip_alpha: u8,
     floating_grip_hover: bool,
+    // A fresh edge drop must finish retracting and clear the pointer from its
+    // visible tab before mouse hover is allowed to reveal the popup again.
+    floating_first_collapse_guard: bool,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -2304,6 +2307,7 @@ pub fn run() {
                 floating_reveal: 100,
                 floating_grip_alpha: 0,
                 floating_grip_hover: false,
+                floating_first_collapse_guard: false,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -4364,6 +4368,7 @@ fn set_floating_collapsed(collapsed: bool) {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         if !s.floating_mode || s.dragging || s.floating_edge.is_none()
+            || (!collapsed && s.floating_first_collapse_guard)
             || s.floating_collapsed == collapsed { return; }
         s.floating_collapsed = collapsed;
         s.hwnd.to_hwnd()
@@ -4469,7 +4474,8 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_x = x;
             s.floating_y = y;
             s.floating_edge = edge;
-            s.floating_collapsed = false;
+            s.floating_collapsed = edge.is_some();
+            s.floating_first_collapse_guard = edge.is_some();
             s.floating_reveal = 100;
             s.floating_grip_hover = hovered;
             s.floating_grip_alpha = if edge.is_some() || hovered { 100 } else { 0 };
@@ -4482,6 +4488,11 @@ fn finish_floating_drag(hwnd: HWND) {
     // Re-raise the composition pair once on release, never per drag frame.
     if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
         sync_blur_backdrop_zorder(hwnd);
+    }
+    if edge.is_some() {
+        unsafe {
+            SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
+        }
     }
     save_state_settings();
 }
@@ -4507,6 +4518,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.floating_collapsed = false;
             s.floating_reveal = 100;
             s.floating_grip_hover = false;
+            s.floating_first_collapse_guard = false;
             s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
             s.hwnd.to_hwnd()
         };
@@ -4585,6 +4597,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_collapsed = false;
         s.floating_reveal = 100;
         s.floating_grip_hover = false;
+        s.floating_first_collapse_guard = false;
         s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
         s.floating_x = x;
         s.floating_y = y;
@@ -4633,6 +4646,7 @@ fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
         s.floating_collapsed = false;
         s.floating_reveal = 100;
         s.floating_grip_hover = false;
+        s.floating_first_collapse_guard = false;
         s.floating_grip_alpha = 0;
         s.parked_taskbar_foreground = None;
         s.hidden_for_taskbar_space = false;
@@ -5918,6 +5932,7 @@ unsafe extern "system" fn wnd_proc(
                     s.floating_drag_anchor_y = client_y;
                     s.failed_drag_target = None;
                     if s.floating_mode {
+                        s.floating_first_collapse_guard = false;
                         s.floating_collapsed = false;
                         s.floating_reveal = 100;
                         s.floating_grip_hover = true;
@@ -5943,7 +5958,10 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.floating_collapsed) {
+            if lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_collapsed
+                && !s.floating_first_collapse_guard
+            ) {
                 set_floating_collapsed(false);
             }
             let is_dragging = {
