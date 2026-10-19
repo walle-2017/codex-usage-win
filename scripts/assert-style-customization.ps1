@@ -848,13 +848,24 @@ if ($styleWindow -notmatch 'redraw_settings_window\(' -or
 if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.tooltip_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.progress_corner_radius\)' -or
-    $styleWindow -notmatch 'if panel_radius > 0' -or
     $styleWindow -notmatch 'if tooltip_radius > 0' -or
     $styleWindow -notmatch 'if progress_radius > 0' -or
-    $styleWindow -notmatch 'fill\(hdc, preview, canvas_fill\)' -or
+    $styleWindow -notmatch 'fill\(hdc, body, style\.color\(StyleColorTarget::PanelBackground\)\)' -or
     $styleWindow -notmatch 'fill\(hdc, widget, style\.color\(StyleColorTarget::PanelBackground\)\)' -or
     $styleWindow -notmatch 'draw_outline_rect\(hdc, widget, style\.color\(StyleColorTarget::PanelBorder\)\)') {
-    throw 'Preset component previews must render their themed panel, tooltip and progress radii with square-corner fallbacks; vertical widgets must use the actual themed fill and border.'
+    throw 'Preset component previews must preserve their themed body, tooltip, progress radii and square-corner fallbacks.'
+}
+# The card outline is required, but the preview-positioning rectangle must
+# never draw an additional frame around the grip, panel and tooltip.
+$previewCardStart = $styleWindow.IndexOf('unsafe fn paint_style_preview_card(')
+$previewCardEnd = $styleWindow.IndexOf('unsafe fn paint_hex_edit_frames(', $previewCardStart)
+if ($previewCardStart -lt 0 -or $previewCardEnd -le $previewCardStart) {
+    throw 'Unable to isolate preset preview card painting for border regression verification.'
+}
+$previewCardPainter = $styleWindow.Substring($previewCardStart, $previewCardEnd - $previewCardStart)
+if ($previewCardPainter -notmatch 'draw_rounded_outline_rect\(\s*hdc,\s*r,' -or
+    $previewCardPainter -match '(?:draw_rounded_outline_rect|draw_outline_rect|fill_rounded_rect|fill)\(\s*hdc,\s*preview\s*,') {
+    throw 'Preset cards must keep their outer selection border but never paint a secondary enclosing preview frame.'
 }
 if ($settingsModel -notmatch 'panel_corner_radius:\s*u8' -or
     $settingsModel -notmatch 'tooltip_corner_radius:\s*u8' -or
