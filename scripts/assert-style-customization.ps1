@@ -557,7 +557,7 @@ if ($styleWindow -match '"当前自定义"' -or
     $styleWindow -notmatch 'preset_gallery_card_rect\(3, minimal\)' -or
     $styleWindow -notmatch 'portrait_preview_widget_bounds\(' -or
     $styleWindow -notmatch 'desktop_portrait_preview_bounds\(' -or
-    $styleWindow -notmatch 'paint_desktop_horizontal_preview\(' -or
+    $styleWindow -notmatch 'paint_horizontal_style_preview\(' -or
     $styleWindow -notmatch 'paint_preview_horizontal_minimal_text\(' -or
     $styleWindow -notmatch 'paint_preview_drag_tab\(' -or
     $styleWindow -notmatch 'preview_vertical_for_snapshot\(') {
