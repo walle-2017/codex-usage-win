@@ -9145,7 +9145,12 @@ mod tests {
         }
         assert_eq!(directwrite_mask_x_offset(
             &mask, width, height, HorizontalTextAlign::Start,
-        ), 0);
+        ), 0, "embedded taskbar keeps its original layout");
+        let shift_start = directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::InkStart,
+        );
+        assert_eq!(4 + shift_start, 0,
+            "desktop first visible glyph must align to the left content inset");
         let shift_end = directwrite_mask_x_offset(
             &mask, width, height, HorizontalTextAlign::End,
         );
