@@ -4710,8 +4710,22 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
             s.hwnd.to_hwnd()
         };
+        // Diagnostics for the precise native phase if a driver or Explorer
+        // still stalls a future desktop orientation change.
+        if reason == "explicit desktop preference" {
+            diagnose::log_lazy(|| format!(
+                "desktop orientation: moving popup direction={}",
+                if vertical { "Vertical" } else { "Horizontal" },
+            ));
+        }
         move_floating_widget(hwnd);
+        if reason == "explicit desktop preference" {
+            diagnose::log_lazy(|| "desktop orientation: popup moved; painting layered frame".to_string());
+        }
         render_layered();
+        if reason == "explicit desktop preference" {
+            diagnose::log_lazy(|| "desktop orientation: layered frame painted".to_string());
+        }
         return;
     }
     let (existing, old, x, y, language, width, height) = {
