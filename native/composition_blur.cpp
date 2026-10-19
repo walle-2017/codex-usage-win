@@ -215,10 +215,14 @@ struct CompositionBlurContext
     wuc::Compositor compositor{nullptr};
     wucd::DesktopWindowTarget target{nullptr};
     wuc::ContainerVisual root{nullptr};
-    wuc::CompositionRoundedRectangleGeometry clip_geometry{nullptr};
-    wuc::CompositionGeometricClip root_clip{nullptr};
+    wuc::ContainerVisual panel_visual{nullptr};
+    wuc::ContainerVisual grip_visual{nullptr};
+    wuc::CompositionRoundedRectangleGeometry panel_geometry{nullptr};
+    wuc::CompositionRoundedRectangleGeometry grip_geometry{nullptr};
     wuc::SpriteVisual blur_visual{nullptr};
     wuc::SpriteVisual tint_visual{nullptr};
+    wuc::SpriteVisual grip_blur_visual{nullptr};
+    wuc::SpriteVisual grip_tint_visual{nullptr};
     wuc::CompositionEffectBrush blur_brush{nullptr};
     wuc::CompositionColorBrush tint_brush{nullptr};
 
@@ -251,18 +255,32 @@ struct CompositionBlurContext
         blur_brush.SetSourceParameter(L"backdrop", backdrop);
 
         root = compositor.CreateContainerVisual();
-        clip_geometry = compositor.CreateRoundedRectangleGeometry();
-        root_clip = compositor.CreateGeometricClip(clip_geometry);
-        root.Clip(root_clip);
-
-        blur_visual = compositor.CreateSpriteVisual();
-        blur_visual.Brush(blur_brush);
-        root.Children().InsertAtBottom(blur_visual);
+        panel_visual = compositor.CreateContainerVisual();
+        grip_visual = compositor.CreateContainerVisual();
+        panel_geometry = compositor.CreateRoundedRectangleGeometry();
+        grip_geometry = compositor.CreateRoundedRectangleGeometry();
+        panel_visual.Clip(compositor.CreateGeometricClip(panel_geometry));
+        grip_visual.Clip(compositor.CreateGeometricClip(grip_geometry));
 
         tint_brush = compositor.CreateColorBrush(winrt::Windows::UI::Color{a, r, g, b});
+        blur_visual = compositor.CreateSpriteVisual();
+        blur_visual.Brush(blur_brush);
+        panel_visual.Children().InsertAtBottom(blur_visual);
         tint_visual = compositor.CreateSpriteVisual();
         tint_visual.Brush(tint_brush);
-        root.Children().InsertAtTop(tint_visual);
+        panel_visual.Children().InsertAtTop(tint_visual);
+
+        // Same Gaussian backdrop and tint brushes, but a separate rounded
+        // clip and opacity for the external desktop drag grip.
+        grip_blur_visual = compositor.CreateSpriteVisual();
+        grip_blur_visual.Brush(blur_brush);
+        grip_visual.Children().InsertAtBottom(grip_blur_visual);
+        grip_tint_visual = compositor.CreateSpriteVisual();
+        grip_tint_visual.Brush(tint_brush);
+        grip_visual.Children().InsertAtTop(grip_tint_visual);
+        root.Children().InsertAtBottom(panel_visual);
+        root.Children().InsertAtTop(grip_visual);
+        grip_visual.IsVisible(false);
 
         // Do not rely on DesktopWindowTarget's asynchronous resize propagation.
         // Keep the entire visual tree explicitly bounded and clipped.
@@ -270,35 +288,67 @@ struct CompositionBlurContext
         target.Root(root);
     }
 
-    void set_bounds(
-        float width,
-        float height,
-        float clip_inset,
-        float clip_radius)
+    static void set_clip(
+        wuc::CompositionRoundedRectangleGeometry const& geometry,
+        float width, float height, float clip_inset, float clip_radius)
     {
-        const float safe_width = width > 1.0f ? width : 1.0f;
-        const float safe_height = height > 1.0f ? height : 1.0f;
-        const winrt::Windows::Foundation::Numerics::float2 size{
-            safe_width,
-            safe_height,
-        };
-        root.Size(size);
-        blur_visual.Size(size);
-        tint_visual.Size(size);
-
-        // The foreground owns the visible one-pixel border. Clip the
-        // Composition backdrop to the foreground's inner fill geometry rather
-        // than merely rounding the full HWND; otherwise the blur/tint leaks
-        // outside the border at the edges and corners.
+        const float safe_width = (std::max)(1.0f, width);
+        const float safe_height = (std::max)(1.0f, height);
+        // The layered foreground paints the border; only the inner fill
+        // receives the composition backdrop.
         const float max_inset = (std::min)(safe_width, safe_height) * 0.5f;
         const float inset = std::clamp(clip_inset, 0.0f, max_inset);
         const float clip_width = (std::max)(1.0f, safe_width - inset * 2.0f);
         const float clip_height = (std::max)(1.0f, safe_height - inset * 2.0f);
-        const float max_radius = (std::min)(clip_width, clip_height) * 0.5f;
-        const float radius = std::clamp(clip_radius, 0.0f, max_radius);
-        clip_geometry.Offset({inset, inset});
-        clip_geometry.Size({clip_width, clip_height});
-        clip_geometry.CornerRadius({radius, radius});
+        const float radius = std::clamp(
+            clip_radius, 0.0f, (std::min)(clip_width, clip_height) * 0.5f);
+        geometry.Offset({inset, inset});
+        geometry.Size({clip_width, clip_height});
+        geometry.CornerRadius({radius, radius});
+    }
+
+    void set_bounds(float width, float height, float clip_inset, float clip_radius)
+    {
+        const winrt::Windows::Foundation::Numerics::float2 size{
+            (std::max)(1.0f, width), (std::max)(1.0f, height)};
+        root.Size(size);
+        panel_visual.Offset({0.0f, 0.0f, 0.0f});
+        panel_visual.Size(size);
+        blur_visual.Size(size);
+        tint_visual.Size(size);
+        set_clip(panel_geometry, size.x, size.y, clip_inset, clip_radius);
+        panel_visual.IsVisible(true);
+        grip_visual.IsVisible(false);
+    }
+
+    void set_desktop_bounds(
+        float canvas_w, float canvas_h,
+        float panel_x, float panel_y, float panel_w, float panel_h,
+        float grip_x, float grip_y, float grip_w, float grip_h,
+        float panel_inset, float panel_radius,
+        float grip_inset, float grip_radius,
+        float grip_opacity, bool panel_visible)
+    {
+        root.Size({(std::max)(1.0f, canvas_w), (std::max)(1.0f, canvas_h)});
+        const winrt::Windows::Foundation::Numerics::float2 panel_size{
+            (std::max)(1.0f, panel_w), (std::max)(1.0f, panel_h)};
+        panel_visual.Offset({panel_x, panel_y, 0.0f});
+        panel_visual.Size(panel_size);
+        blur_visual.Size(panel_size);
+        tint_visual.Size(panel_size);
+        set_clip(panel_geometry, panel_size.x, panel_size.y, panel_inset, panel_radius);
+        panel_visual.IsVisible(panel_visible);
+
+        const winrt::Windows::Foundation::Numerics::float2 grip_size{
+            (std::max)(1.0f, grip_w), (std::max)(1.0f, grip_h)};
+        grip_visual.Offset({grip_x, grip_y, 0.0f});
+        grip_visual.Size(grip_size);
+        grip_blur_visual.Size(grip_size);
+        grip_tint_visual.Size(grip_size);
+        set_clip(grip_geometry, grip_size.x, grip_size.y, grip_inset, grip_radius);
+        const float alpha = std::clamp(grip_opacity, 0.0f, 1.0f);
+        grip_visual.Opacity(alpha);
+        grip_visual.IsVisible(alpha > 0.0f);
     }
 
     void set_blur(float amount)
@@ -357,6 +407,28 @@ extern "C" __declspec(dllexport) int codex_composition_blur_set_bounds(
             height,
             clip_inset,
             clip_radius);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" __declspec(dllexport) int codex_composition_blur_set_desktop_bounds(
+    void* context, float canvas_w, float canvas_h,
+    float panel_x, float panel_y, float panel_w, float panel_h,
+    float grip_x, float grip_y, float grip_w, float grip_h,
+    float panel_inset, float panel_radius, float grip_inset, float grip_radius,
+    float grip_opacity, int panel_visible) noexcept
+{
+    if (!context || canvas_w <= 0.0f || canvas_h <= 0.0f) {
+        return 0;
+    }
+    try {
+        static_cast<CompositionBlurContext*>(context)->set_desktop_bounds(
+            canvas_w, canvas_h, panel_x, panel_y, panel_w, panel_h,
+            grip_x, grip_y, grip_w, grip_h,
+            panel_inset, panel_radius, grip_inset, grip_radius,
+            grip_opacity, panel_visible != 0);
         return 1;
     } catch (...) {
         return 0;
