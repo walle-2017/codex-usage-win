@@ -7362,6 +7362,17 @@ fn horizontal_preview_body(
     RECT { left, top, right: left + width, bottom: top + height }
 }
 
+fn horizontal_preview_detached_tab(body: RECT, logical: impl Fn(i32) -> i32) -> RECT {
+    let tab_w = logical(PREVIEW_DRAG_TAB_W);
+    let tab_bottom = body.top - logical(PREVIEW_DRAG_TAB_GAP);
+    RECT {
+        left: (body.left + body.right - tab_w) / 2,
+        top: tab_bottom - logical(PREVIEW_DRAG_TAB_H),
+        right: (body.left + body.right + tab_w) / 2,
+        bottom: tab_bottom,
+    }
+}
+
 unsafe fn paint_preview_horizontal_minimal_text(
     hdc: HDC, hwnd: HWND, body: RECT, style: &ThemeStyle,
 ) {
@@ -7392,14 +7403,7 @@ unsafe fn paint_horizontal_style_preview(
         draw_outline_rect(hdc, body, style.color(StyleColorTarget::PanelBorder));
     }
     if desktop {
-        let tab_w = scale(hwnd, PREVIEW_DRAG_TAB_W);
-        let tab_bottom = body.top - scale(hwnd, PREVIEW_DRAG_TAB_GAP);
-        let tab = RECT {
-            left: (body.left + body.right - tab_w) / 2,
-            top: tab_bottom - scale(hwnd, PREVIEW_DRAG_TAB_H),
-            right: (body.left + body.right + tab_w) / 2,
-            bottom: tab_bottom,
-        };
+        let tab = horizontal_preview_detached_tab(body, |v| scale(hwnd, v));
         paint_preview_drag_tab(hdc, hwnd, tab, style);
     } else {
         paint_taskbar_horizontal_preview_grip(hdc, hwnd, body, style);
@@ -8665,10 +8669,11 @@ mod ui_smoke_tests {
                 assert!(body.top >= canvas.top);
                 assert!(body.bottom + 6 + PREVIEW_HORIZONTAL_TOOLTIP_H <= canvas.bottom);
             }
-            let tab_bottom = desktop.top - PREVIEW_DRAG_TAB_GAP;
-            let tab_top = tab_bottom - PREVIEW_DRAG_TAB_H;
-            assert!(tab_top >= canvas.top);
-            assert_eq!(desktop.top - tab_bottom, PREVIEW_DRAG_TAB_GAP);
+            let tab = horizontal_preview_detached_tab(desktop, |v| v);
+            assert!(tab.top >= canvas.top);
+            assert_eq!(desktop.top - tab.bottom, PREVIEW_DRAG_TAB_GAP);
+            assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H);
+            assert!(tab.left >= desktop.left && tab.right <= desktop.right);
         }
     }
 
@@ -8680,8 +8685,9 @@ mod ui_smoke_tests {
         assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H * 2);
         let landscape = RECT { left: 0, top: 0, right: 400, bottom: 184 };
         let body = horizontal_preview_body(landscape, false, true, |v| v * 2);
-        assert_eq!(body.top - (body.top - 2 * PREVIEW_DRAG_TAB_GAP),
-            PREVIEW_DRAG_TAB_GAP * 2);
+        let tab = horizontal_preview_detached_tab(body, |v| v * 2);
+        assert_eq!(body.top - tab.bottom, PREVIEW_DRAG_TAB_GAP * 2);
+        assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H * 2);
         assert!(body.bottom + 2 * (6 + PREVIEW_HORIZONTAL_TOOLTIP_H) <= landscape.bottom);
     }
     #[test]
