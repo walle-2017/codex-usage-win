@@ -9023,9 +9023,12 @@ mod tests {
                     let (a, b) = vertical_row_tops_for_layout(
                         height, session, weekly, true,
                     );
-                    for top in [a, b].into_iter().flatten() {
-                        assert_eq!(top, inset,
-                            "first visible row must begin at the top panel inset");
+                    let first_visible = a.or(b).unwrap();
+                    assert_eq!(first_visible, inset,
+                        "first visible row must begin at the top panel inset");
+                    if let (Some(first), Some(second)) = (a, b) {
+                        assert_eq!(second - first,
+                            sc(VERTICAL_QUOTA_ROW_HEIGHT + VERTICAL_QUOTA_ROW_GAP));
                     }
                 }
                 let (_, weekly) = vertical_row_tops_for_layout(both, true, true, true);
