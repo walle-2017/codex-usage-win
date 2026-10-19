@@ -8860,6 +8860,63 @@ mod tests {
     }
 
     #[test]
+    fn drag_grip_hover_uses_same_taskbar_visual_in_both_modes() {
+        let base = Color::rgba(40, 70, 110, 160);
+        let (normal_dot, normal_x, normal_y, normal_color) =
+            drag_handle_dot_style(base, false, true);
+        let (hover_dot, hover_x, hover_y, hover_color) =
+            drag_handle_dot_style(base, true, true);
+        // Original taskbar grip: larger dots, tighter long-axis spacing
+        // and the same +36 RGB hover emphasis with unchanged alpha.
+        assert_eq!(normal_dot, sc(2).max(1));
+        assert_eq!(hover_dot, sc(3).max(2));
+        assert_eq!(normal_x, hover_x);
+        assert!(hover_y <= normal_y);
+        assert_eq!(normal_color.to_hex_rgba(), base.to_hex_rgba());
+        assert_eq!(hover_color, Color::rgba(76, 106, 146, 160));
+        // The desktop's horizontally oriented grip rotates the dot matrix
+        // but shares exactly the same metrics and brightness.
+        let (_, horizontal_x, horizontal_y, horizontal_color) =
+            drag_handle_dot_style(base, true, false);
+        assert_eq!((horizontal_x, horizontal_y), (hover_y, hover_x));
+        assert_eq!(horizontal_color, hover_color);
+    }
+
+    #[test]
+    fn desktop_grip_hover_changes_dots_without_highlighting_panel_border() {
+        let style = ThemeStyle::dark_default();
+        let width = 220;
+        let height = 180;
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let mut idle = vec![0u32; (width * height) as usize];
+            let mut hovered = idle.clone();
+            render_floating_handle_bitmap(
+                &mut idle, width, height, edge, false, &style, 100,
+            );
+            render_floating_handle_bitmap(
+                &mut hovered, width, height, edge, true, &style, 100,
+            );
+            let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+            let mid_x = (grip.left + grip.right) / 2;
+            let mid_y = (grip.top + grip.bottom) / 2;
+            let mut changed_dots = 0;
+            for y in grip.top..grip.bottom {
+                for x in grip.left..grip.right {
+                    let idx = (y * width + x) as usize;
+                    if idle[idx] != hovered[idx] {
+                        changed_dots += 1;
+                        assert!((x - mid_x).abs() <= sc(12).max(12)
+                            && (y - mid_y).abs() <= sc(12).max(12),
+                            "hover must not alter the tab border");
+                    }
+                }
+            }
+            assert!(changed_dots > 0, "hover must visibly change six dots");
+        }
+    }
+
+    #[test]
     fn desktop_mini_grip_matches_panel_palette_corner_radius_and_alpha() {
         let mut style = ThemeStyle::dark_default();
         style.set_color(StyleColorTarget::PanelBackground, Color::rgba(14, 32, 25, 68));
