@@ -2952,16 +2952,15 @@ fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
     Color::rgba(chosen.r, chosen.g, chosen.b, 255)
 }
 
-/// A narrow highlight stroke sits on a smooth, Gaussian-like falloff.
-/// Because the existing layered surface has just a one-pixel transparent rim,
-/// feathering also continues a few pixels inward. This preserves the widget's
-/// position, content geometry and drag hit-testing while avoiding a solid band.
+/// A narrow highlight stroke sits on a broader Gaussian-like falloff.
+/// Free-floating desktop canvases reserve transparent pixels beyond the body
+/// and tab; attached taskbar and docked edge geometry remain unchanged.
 fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
     let distance = distance_from_edge.abs();
     // Soft halo falls off on either side of the visible panel perimeter.
-    let diffuse = 94.0 * (-(distance / 2.1).powi(2) * 0.5).exp();
-    // The thin central stroke is antialiased rather than a 2px solid band.
-    let hairline = 105.0 * (1.0 - distance / 0.8).max(0.0);
+    let diffuse = 120.0 * (-(distance / 4.6).powi(2) * 0.5).exp();
+    // Retain the antialiased hairline while making the outer halo dominant.
+    let hairline = 65.0 * (1.0 - distance / 0.7).max(0.0);
     (diffuse + hairline).round().clamp(0.0, 200.0) as u8
 }
 
@@ -2977,9 +2976,9 @@ fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radi
     dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
 }
 
-/// Feather the hover feedback across a narrow edge region, not a solid border.
-/// The existing canvas boundary clips most of the outer halo; gradual
-/// feathering inside the edge makes the effect visible without resizing HWNDs.
+/// Feather hover feedback around the actual body or detached grip perimeter.
+/// The free-floating desktop canvas permits 12 logical pixels of outer glow,
+/// while docked and taskbar modes keep their previous hit-test geometry.
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
@@ -2990,7 +2989,7 @@ fn draw_drag_hover_outline(
     let h = bounds.bottom - bounds.top;
     let radius = sc(i32::from(corner_radius))
         .min((w.min(h) / 2).max(0));
-    let extent = sc(6).max(2);
+    let extent = sc(12).max(2);
     // Restrict work to the edge envelope, avoiding per-pixel work over the
     // center of larger horizontal panels.
     for y in bounds.top.saturating_sub(extent).max(0)
@@ -4399,6 +4398,9 @@ fn tray_reposition_is_suppressed() -> bool {
 const FLOAT_EDGE_SNAP: i32 = 24;
 const FLOAT_EDGE_PEEK: i32 = 16;
 const FLOAT_GRIP_LENGTH: i32 = 36;
+// Desktop free-floating mode reserves genuinely transparent space for a
+// wider hover glow. Docked edge peeks preserve their V24 geometry unchanged.
+const FLOAT_FREE_GLOW_MARGIN: i32 = 12;
 const FLOAT_EXPAND_DURATION_MS: u64 = 220;
 const FLOAT_RETRACT_DURATION_MS: u64 = 240;
 const FLOAT_GRIP_FADE_IN_MS: u64 = 140;
@@ -4424,9 +4426,14 @@ fn floating_grip_rect(width: i32, height: i32, edge: Option<FloatingEdge>, peek:
             left: (width - grip_width) / 2, right: (width + grip_width) / 2,
             top: height - peek, bottom: height,
         },
-        Some(FloatingEdge::Bottom) | None => RECT {
+        Some(FloatingEdge::Bottom) => RECT {
             left: (width - grip_width) / 2, right: (width + grip_width) / 2,
             top: 0, bottom: peek,
+        },
+        None => RECT {
+            left: (width - grip_width) / 2, right: (width + grip_width) / 2,
+            top: sc(FLOAT_FREE_GLOW_MARGIN),
+            bottom: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
         },
     }
 }
@@ -4456,10 +4463,21 @@ fn floating_canvas_geometry(
             body_width, body_height + tab,
             RECT { left: 0, top: 0, right: body_width, bottom: body_height },
         ),
-        Some(FloatingEdge::Bottom) | None => (
+        Some(FloatingEdge::Bottom) => (
             body_width, body_height + tab,
             RECT { left: 0, top: tab, right: body_width, bottom: body_height + tab },
         ),
+        None => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (
+                body_width + glow * 2,
+                body_height + tab + glow * 2,
+                RECT {
+                    left: glow, top: tab + glow,
+                    right: body_width + glow, bottom: body_height + tab + glow,
+                },
+            )
+        },
     }
 }
 
