@@ -2802,6 +2802,16 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             last_poll_ok,
         );
 
+        let drag_hovered = lock_state().as_ref().is_some_and(|s| s.drag_handle_hovered);
+        let accent = drag_hover_outline_color(&style);
+        if !floating && drag_hovered {
+            draw_drag_hover_outline(
+                pixel_data, width, height,
+                RECT { left: 0, top: 0, right: width, bottom: height },
+                style.panel_corner_radius, accent,
+            );
+        }
+
         let pt_src = POINT { x: 0, y: 0 };
         let blend = BLENDFUNCTION {
             BlendOp: 0,
@@ -2858,6 +2868,19 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 render_floating_handle_bitmap(
                     canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
                 );
+                if hovered && !hidden {
+                    // Separate visual rings: one around the actual desktop
+                    // body and one around its independently positioned tab.
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, body, style.panel_corner_radius, accent,
+                    );
+                    let tab = floating_grip_rect(
+                        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+                    );
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
+                    );
+                }
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
                     hwnd, screen_dc, desktop_origin.as_ref().map(|p| p as *const POINT), Some(&sz),
@@ -2886,29 +2909,90 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     }
 }
 
-/// Use the established taskbar six-dot hover effect in every drag-grip mode.
-/// Hover enlarges the dots, tightens their spacing, and brightens the original
-/// DragHandle color. Only the dots change; the panel border never highlights.
-fn drag_handle_dot_style(color: Color, hovered: bool, vertical: bool) -> (i32, i32, i32, Color) {
-    let dot = if hovered { sc(3).max(2) } else { sc(2).max(1) };
+/// Keep the drag dots fixed-size. Hover feedback is now on the full panel
+/// outline (and on the independent desktop tab), so it cannot be covered
+/// by the pointer sitting directly above the small grip.
+fn drag_handle_dot_style(color: Color, _hovered: bool, vertical: bool) -> (i32, i32, i32, Color) {
+    let dot = sc(2).max(1);
     let compact_gap = sc(1).max(1);
-    let long_gap = if hovered { sc(1).max(1) } else { sc(2).max(1) };
+    let long_gap = sc(2).max(1);
     let (gap_x, gap_y) = if vertical {
         (compact_gap, long_gap)
     } else {
         (long_gap, compact_gap)
     };
-    let tint = if hovered {
-        Color::rgba(
-            color.r.saturating_add(36),
-            color.g.saturating_add(36),
-            color.b.saturating_add(36),
-            color.a,
-        )
-    } else {
-        color
+    (dot, gap_x, gap_y, color)
+}
+
+/// Derive a legible outline from the selected preset or customized palette.
+/// ProgressHigh is the theme accent; fall back to the text color if a custom
+/// theme makes that accent indistinguishable from its panel background.
+fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
+    let background = style.color(StyleColorTarget::PanelBackground);
+    let accent = style.color(StyleColorTarget::ProgressHigh);
+    let separated = |candidate: Color| {
+        (i32::from(candidate.r) - i32::from(background.r)).abs()
+            + (i32::from(candidate.g) - i32::from(background.g)).abs()
+            + (i32::from(candidate.b) - i32::from(background.b)).abs()
     };
-    (dot, gap_x, gap_y, tint)
+    let mut chosen = if accent.a > 20 && separated(accent) >= 150 {
+        accent
+    } else {
+        style.color(StyleColorTarget::Remaining)
+    };
+    if chosen.a <= 20 || separated(chosen) < 150 {
+        chosen = if u32::from(background.r) * 299
+            + u32::from(background.g) * 587
+            + u32::from(background.b) * 114 > 128_000 {
+            Color::rgba(18, 92, 132, 255)
+        } else {
+            Color::rgba(112, 214, 238, 255)
+        };
+    }
+    Color::rgba(chosen.r, chosen.g, chosen.b, 255)
+}
+
+/// Paint one translucent outer halo pixel and a narrow rounded highlight ring
+/// *inside* an existing panel. No canvas expansion, layout or hit-test changes.
+/// Works on premultiplied layered pixels with arbitrary RGBA backgrounds.
+fn draw_drag_hover_outline(
+    pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
+    bounds: RECT, corner_radius: u8, color: Color,
+) {
+    if canvas_w <= 0 || canvas_h <= 0 || bounds.right <= bounds.left
+        || bounds.bottom <= bounds.top { return; }
+    let w = bounds.right - bounds.left;
+    let h = bounds.bottom - bounds.top;
+    let inset = sc(1).max(1);
+    let stroke = sc(2).max(1).min((w.min(h) / 3).max(1));
+    let radius = sc(i32::from(corner_radius))
+        .min(((w - 2 * inset).min(h - 2 * inset) / 2).max(0));
+    for y in bounds.top.max(0)..bounds.bottom.min(canvas_h) {
+        for x in bounds.left.max(0)..bounds.right.min(canvas_w) {
+            let local_x = x - bounds.left;
+            let local_y = y - bounds.top;
+            let inside = |margin: i32, rounded_radius: i32| {
+                if radius == 0 {
+                    local_x >= margin && local_x < w - margin
+                        && local_y >= margin && local_y < h - margin
+                } else {
+                    point_in_rounded_box(w, h, local_x, local_y, margin, rounded_radius.max(1))
+                }
+            };
+            let coverage = if inside(inset, radius)
+                && !inside(inset + stroke, radius.saturating_sub(stroke)) {
+                224
+            } else if inside(0, radius + inset) && !inside(inset, radius) {
+                64
+            } else {
+                0
+            };
+            if coverage != 0 {
+                let idx = (y * canvas_w + x) as usize;
+                pixels[idx] = composite_premultiplied_text(pixels[idx], color, coverage);
+            }
+        }
+    }
 }
 
 /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
@@ -3914,7 +3998,11 @@ fn paint_content(
             FillRect(hdc, &client_rect, bg_brush);
             let _ = DeleteObject(bg_brush);
 
-            let border = style.color(StyleColorTarget::PanelBorder).blend_over(*bg);
+            let border = if drag_handle_hovered {
+                drag_hover_outline_color(&style)
+            } else {
+                style.color(StyleColorTarget::PanelBorder).blend_over(*bg)
+            };
             draw_panel(
                 hdc,
                 width,
