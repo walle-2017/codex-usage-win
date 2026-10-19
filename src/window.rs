@@ -8995,6 +8995,104 @@ mod tests {
     }
 
     #[test]
+    fn desktop_vertical_panel_height_tracks_visible_rows_and_minimal_preset() {
+        for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+            let one = desktop_vertical_content_height(preset, true, false);
+            let weekly_only = desktop_vertical_content_height(preset, false, true);
+            let both = desktop_vertical_content_height(preset, true, true);
+            assert_eq!(one, weekly_only);
+            assert!(both > one);
+            assert!(both < vertical_widget_height_for_preset(preset));
+            let inset = sc(DESKTOP_VERTICAL_CONTENT_PADDING);
+            if preset == AppearancePreset::Minimal {
+                for (height, session, weekly) in [
+                    (one, true, false), (one, false, true), (both, true, true),
+                ] {
+                    let (a, b) = vertical_minimal_percent_centers_for_layout(
+                        height, session, weekly, true,
+                    );
+                    for center in [a, b].into_iter().flatten() {
+                        assert!(center - sc(12) >= inset - sc(1));
+                        assert!(center + sc(12) <= height - inset + sc(1));
+                    }
+                }
+            } else {
+                for (height, session, weekly) in [
+                    (one, true, false), (one, false, true), (both, true, true),
+                ] {
+                    let (a, b) = vertical_row_tops_for_layout(
+                        height, session, weekly, true,
+                    );
+                    for top in [a, b].into_iter().flatten() {
+                        assert_eq!(top, inset,
+                            "first visible row must begin at the top panel inset");
+                    }
+                }
+                let (_, weekly) = vertical_row_tops_for_layout(both, true, true, true);
+                let last_reset_bottom =
+                    weekly.unwrap() + sc(VERTICAL_RESET_CENTER_Y + 9);
+                assert!(last_reset_bottom <= both - inset + sc(1));
+            }
+        }
+        assert_eq!(
+            vertical_widget_height_for_preset(AppearancePreset::Default),
+            sc(VERTICAL_WIDGET_HEIGHT),
+            "embedded taskbar's legacy height must stay unchanged",
+        );
+    }
+
+    #[test]
+    fn desktop_horizontal_width_tracks_active_usage_text_without_embedded_drag_strip() {
+        let lang = LanguageId::English;
+        let normal = AppearancePreset::Default;
+        let both_resets = desktop_horizontal_content_width(
+            lang, normal, true, true, "70%  15:05", "88%  10/25",
+        );
+        let one_reset = desktop_horizontal_content_width(
+            lang, normal, true, false, "70%  15:05", "88%",
+        );
+        assert_eq!(both_resets, one_reset, "rows share one aligned width");
+        assert_eq!(
+            both_resets + sc(DRAG_HANDLE_HIT_W),
+            total_widget_width_for_preset(lang, normal),
+            "desktop must remove only the taskbar drag-strip while showing a reset",
+        );
+        let no_reset = desktop_horizontal_content_width(
+            lang, normal, true, true, "70%", "88%",
+        );
+        assert!(no_reset < both_resets, "absent reset labels free their whole column");
+        let minimal = desktop_horizontal_content_width(
+            lang, AppearancePreset::Minimal, true, true, "70%", "88%",
+        );
+        assert_eq!(
+            minimal + sc(DRAG_HANDLE_HIT_W),
+            total_widget_width_for_preset(lang, AppearancePreset::Minimal),
+        );
+        assert_eq!(horizontal_content_left(&normal.metrics(), true),
+            sc(normal.metrics().outer_padding));
+        assert_eq!(horizontal_content_left(&normal.metrics(), false),
+            sc(normal.metrics().outer_padding + DRAG_HANDLE_HIT_W));
+    }
+
+    #[test]
+    fn desktop_responsive_tooltip_uses_content_relative_coordinates() {
+        let width = desktop_horizontal_content_width(
+            LanguageId::English, AppearancePreset::Minimal,
+            true, false, "70%", "88%",
+        );
+        let height = sc(AppearancePreset::Minimal.metrics().widget_height);
+        let hit = desktop_horizontal_usage_hover_hit(
+            width, height, AppearancePreset::Minimal, true, false,
+            sc(10), height / 2,
+        );
+        assert_eq!(hit.map(|(target, _)| target), Some(MinimalHoverTarget::Session));
+        assert_eq!(desktop_horizontal_usage_hover_hit(
+            width, height, AppearancePreset::Minimal, true, false,
+            width + 1, height / 2,
+        ), None);
+    }
+
+    #[test]
     fn desktop_repeated_direction_switch_preserves_panel_and_external_grip() {
         // Reproduces the user's rapid horizontal/vertical toggles at the pure
         // geometry layer. Every switch must preserve the panel and its
