@@ -643,9 +643,12 @@ fn save_settings(settings: &SettingsFile) {
 }
 
 fn save_state_settings() {
-    let state = lock_state();
-    if let Some(s) = state.as_ref() {
-        save_settings(&SettingsFile {
+    // Serialize a snapshot, then release STATE before performing file I/O.
+    // Switching desktop orientation must never block state access on the
+    // settings file (e.g. if antivirus scans it simultaneously).
+    let snapshot = {
+        let state = lock_state();
+        state.as_ref().map(|s| SettingsFile {
             // Legacy fields remain serialized for backward compatibility, but
             // new versions use an absolute left-edge offset plus monitor identity.
             tray_offset: 0,
@@ -669,7 +672,10 @@ fn save_state_settings() {
             show_weekly_window: s.show_weekly_window,
             alert_threshold_percent: s.alert_threshold_percent,
             notified_quota_windows: s.notified_quota_windows.iter().cloned().collect(),
-        });
+        })
+    };
+    if let Some(snapshot) = snapshot {
+        save_settings(&snapshot);
     }
 }
 
