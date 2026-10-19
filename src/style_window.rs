@@ -1218,28 +1218,43 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
 const PRESET_GALLERY_LEFT: i32 = 200;
 const PRESET_CARD_TOP: i32 = 266;
 const PRESET_CARD_WIDTH: i32 = 172;
-const PRESET_CARD_HEIGHT: i32 = 390;
+const PRESET_CARD_HEIGHT: i32 = 350;
+const PRESET_CARD_MINIMAL_HEIGHT: i32 = 250;
 const PRESET_CARD_GAP: i32 = 16;
 
-fn preset_gallery_card_rect(index: i32) -> RECT {
+fn preset_gallery_card_rect(index: i32, minimal: bool) -> RECT {
     let left = PRESET_GALLERY_LEFT + index * (PRESET_CARD_WIDTH + PRESET_CARD_GAP);
+    let height = if minimal { PRESET_CARD_MINIMAL_HEIGHT } else { PRESET_CARD_HEIGHT };
     RECT { left, top: PRESET_CARD_TOP, right: left + PRESET_CARD_WIDTH,
-        bottom: PRESET_CARD_TOP + PRESET_CARD_HEIGHT }
+        bottom: PRESET_CARD_TOP + height }
 }
 
-fn preview_is_vertical() -> bool {
-    STATE.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().is_some_and(|s| s.snapshot.vertical_taskbar_mode)
+fn preview_vertical_for_snapshot(snapshot: &StyleWindowSnapshot) -> bool {
+    if snapshot.display_position == DisplayPosition::Desktop {
+        snapshot.desktop_direction == DesktopDirection::Vertical
+    } else {
+        snapshot.vertical_taskbar_mode
+    }
 }
 
-fn preset_card_rect_for_orientation(hwnd: HWND, preset: ThemePreset, vertical: bool) -> RECT {
+fn preview_layout_flags() -> (bool, bool) {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.as_ref().map(|s| (
+        preview_vertical_for_snapshot(&s.snapshot),
+        s.snapshot.appearance_preset.configured() == AppearancePreset::Minimal,
+    )).unwrap_or((false, false))
+}
+
+fn preset_card_rect_for_orientation(
+    hwnd: HWND, preset: ThemePreset, vertical: bool, minimal: bool,
+) -> RECT {
     let index = match preset {
         ThemePreset::Classic => 0,
         ThemePreset::Ocean => 1,
         ThemePreset::Forest => 2,
     };
     if vertical {
-        let r = preset_gallery_card_rect(index);
+        let r = preset_gallery_card_rect(index, minimal);
         rect(hwnd, r.left, r.top, r.right, r.bottom)
     } else {
         // Restore the original three-across horizontal gallery.
@@ -1249,7 +1264,8 @@ fn preset_card_rect_for_orientation(hwnd: HWND, preset: ThemePreset, vertical: b
 }
 
 fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
-    preset_card_rect_for_orientation(hwnd, preset, preview_is_vertical())
+    let (vertical, minimal) = preview_layout_flags();
+    preset_card_rect_for_orientation(hwnd, preset, vertical, minimal)
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -1446,9 +1462,9 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
     rect(hwnd, 812, top, 920, top + 26)
 }
 
-fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool) -> RECT {
+fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: bool) -> RECT {
     if vertical {
-        let r = preset_gallery_card_rect(3);
+        let r = preset_gallery_card_rect(3, minimal);
         rect(hwnd, r.left, r.top, r.right, r.bottom)
     } else {
         // Restore original second-row custom preview for horizontal taskbars.
@@ -1456,7 +1472,8 @@ fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool) -> RECT {
     }
 }
 fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    custom_preset_card_rect_for_orientation(hwnd, preview_is_vertical())
+    let (vertical, minimal) = preview_layout_flags();
+    custom_preset_card_rect_for_orientation(hwnd, vertical, minimal)
 }
 
 fn language_button_rect(hwnd: HWND) -> RECT {
@@ -6886,8 +6903,9 @@ unsafe fn paint_preset_gallery(
             border,
             accent,
             primary,
-            snapshot.vertical_taskbar_mode,
-            snapshot.appearance_preset == AppearancePreset::Minimal,
+            preview_vertical_for_snapshot(snapshot),
+            snapshot.appearance_preset.configured() == AppearancePreset::Minimal,
+            snapshot.display_position == DisplayPosition::Desktop,
         );
     }
 
@@ -6905,8 +6923,9 @@ unsafe fn paint_preset_gallery(
             border,
             accent,
             primary,
-            snapshot.vertical_taskbar_mode,
-            snapshot.appearance_preset == AppearancePreset::Minimal,
+            preview_vertical_for_snapshot(snapshot),
+            snapshot.appearance_preset.configured() == AppearancePreset::Minimal,
+            snapshot.display_position == DisplayPosition::Desktop,
         );
     }
 }
@@ -7112,6 +7131,61 @@ fn portrait_preview_widget_bounds(
     RECT { left, top, right: left + width, bottom: top + height }
 }
 
+
+const DESKTOP_PREVIEW_WIDGET_H: i32 = 164; // V22: 2 * 10px padding + 2 * 70px rows + 4px gap
+const DESKTOP_PREVIEW_MINIMAL_H: i32 = 74; // V22: 2 * 10px padding + 2 * 24px rows + 6px gap
+const PREVIEW_DRAG_TAB_H: i32 = 16;
+const PREVIEW_DRAG_TAB_W: i32 = 36;
+
+fn desktop_portrait_preview_bounds(
+    canvas: RECT, minimal: bool, logical: impl Fn(i32) -> i32,
+) -> (RECT, RECT) {
+    let width = logical(PORTRAIT_PREVIEW_WIDGET_W);
+    let height = logical(if minimal { DESKTOP_PREVIEW_MINIMAL_H }
+        else { DESKTOP_PREVIEW_WIDGET_H });
+    let tab_height = logical(PREVIEW_DRAG_TAB_H);
+    let group_height = tab_height + height + logical(7 + 40);
+    let top = canvas.top + (canvas.bottom - canvas.top - group_height).max(0) / 2;
+    let left = canvas.left + (canvas.right - canvas.left - width) / 2;
+    let body = RECT { left, top: top + tab_height, right: left + width,
+        bottom: top + tab_height + height };
+    let tab_width = logical(PREVIEW_DRAG_TAB_W);
+    let tab = RECT { left: (body.left + body.right - tab_width) / 2, top,
+        right: (body.left + body.right + tab_width) / 2, bottom: body.top };
+    (body, tab)
+}
+
+// The desktop tab has its own panel surface and is never painted inside
+// the body. A single six-dot renderer is shared by both orientations.
+unsafe fn paint_preview_drag_tab(
+    hdc: HDC, hwnd: HWND, tab: RECT, style: &ThemeStyle,
+) {
+    let radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min(((tab.right - tab.left).min(tab.bottom - tab.top) / 2).max(0));
+    if radius > 0 {
+        fill_rounded_rect(hdc, tab, style.color(StyleColorTarget::PanelBackground), radius);
+        draw_rounded_outline_rect(hdc, tab, style.color(StyleColorTarget::PanelBorder), radius, 1);
+    } else {
+        fill(hdc, tab, style.color(StyleColorTarget::PanelBackground));
+        draw_outline_rect(hdc, tab, style.color(StyleColorTarget::PanelBorder));
+    }
+    let dot = scale(hwnd, 2).max(1);
+    let gap_x = scale(hwnd, 2).max(1);
+    let gap_y = scale(hwnd, 1).max(1);
+    let dots_w = 3 * dot + 2 * gap_x;
+    let dots_h = 2 * dot + gap_y;
+    let start_x = (tab.left + tab.right - dots_w) / 2;
+    let start_y = (tab.top + tab.bottom - dots_h) / 2;
+    for row in 0..2 {
+        for col in 0..3 {
+            let x = start_x + col * (dot + gap_x);
+            let y = start_y + row * (dot + gap_y);
+            fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot },
+                style.color(StyleColorTarget::DragHandle));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PortraitPreviewRow {
     label: RECT,
@@ -7120,8 +7194,10 @@ struct PortraitPreviewRow {
     reset: RECT,
 }
 
-fn portrait_preview_row(widget: RECT, index: i32, logical: impl Fn(i32) -> i32) -> PortraitPreviewRow {
-    let top = widget.top + logical(20 + index * 74);
+fn portrait_preview_row_for_mode(
+    widget: RECT, index: i32, desktop: bool, logical: impl Fn(i32) -> i32,
+) -> PortraitPreviewRow {
+    let top = widget.top + logical((if desktop { 10 } else { 20 }) + index * 74);
     PortraitPreviewRow {
         label: RECT {
             left: widget.left + logical(2),
@@ -7140,10 +7216,20 @@ fn portrait_preview_row(widget: RECT, index: i32, logical: impl Fn(i32) -> i32) 
     }
 }
 
+fn portrait_preview_row(widget: RECT, index: i32, logical: impl Fn(i32) -> i32) -> PortraitPreviewRow {
+    portrait_preview_row_for_mode(widget, index, false, logical)
+}
+
 unsafe fn paint_vertical_style_preview(
-    hdc: HDC, hwnd: HWND, preview: RECT, style: &ThemeStyle, minimal: bool,
+    hdc: HDC, hwnd: HWND, preview: RECT, style: &ThemeStyle,
+    minimal: bool, desktop: bool,
 ) {
-    let widget = portrait_preview_widget_bounds(preview, minimal, |v| scale(hwnd, v));
+    let (widget, detached_tab) = if desktop {
+        let (widget, tab) = desktop_portrait_preview_bounds(preview, minimal, |v| scale(hwnd, v));
+        (widget, Some(tab))
+    } else {
+        (portrait_preview_widget_bounds(preview, minimal, |v| scale(hwnd, v)), None)
+    };
     let radius = scale(hwnd, i32::from(style.panel_corner_radius))
         .min(((widget.right - widget.left).min(widget.bottom - widget.top) / 2).max(0));
     if radius > 0 {
@@ -7154,16 +7240,20 @@ unsafe fn paint_vertical_style_preview(
         draw_outline_rect(hdc, widget, style.color(StyleColorTarget::PanelBorder));
     }
 
-    // The drag grip is part of the actual vertical widget and remains at the top.
-    let dot = scale(hwnd, 2).max(1);
-    let dot_gap = scale(hwnd, 3);
-    let grip_color = style.color(StyleColorTarget::DragHandle);
-    for row in 0..2 {
-        for col in 0..3 {
-            let x = (widget.left + widget.right) / 2
-                - (3 * dot + 2 * dot_gap) / 2 + col * (dot + dot_gap);
-            let y = widget.top + scale(hwnd, 5) + row * (dot + dot_gap);
-            fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot }, grip_color);
+    if let Some(tab) = detached_tab {
+        paint_preview_drag_tab(hdc, hwnd, tab, style);
+    } else {
+        // The embedded taskbar grip remains inside the taskbar body.
+        let dot = scale(hwnd, 2).max(1);
+        let dot_gap = scale(hwnd, 3);
+        let grip_color = style.color(StyleColorTarget::DragHandle);
+        for row in 0..2 {
+            for col in 0..3 {
+                let x = (widget.left + widget.right) / 2
+                    - (3 * dot + 2 * dot_gap) / 2 + col * (dot + dot_gap);
+                let y = widget.top + scale(hwnd, 5) + row * (dot + dot_gap);
+                fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot }, grip_color);
+            }
         }
     }
 
@@ -7187,7 +7277,9 @@ unsafe fn paint_vertical_style_preview(
         ("7D", 37.0_f32, "10/22"),
     ].iter().enumerate() {
         if minimal {
-            let center_y = widget.top + scale(hwnd, if index == 0 { 34 } else { 63 });
+            let center_y = widget.top + scale(hwnd, if desktop {
+                if index == 0 { 22 } else { 52 }
+            } else if index == 0 { 34 } else { 63 });
             let _ = SelectObject(hdc, percent_font);
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
             draw_text(hdc, &format!("{remaining:.0}%"), RECT {
@@ -7197,7 +7289,7 @@ unsafe fn paint_vertical_style_preview(
                 bottom: center_y + scale(hwnd, 12),
             }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         } else {
-            let row = portrait_preview_row(widget, index as i32, |v| scale(hwnd, v));
+            let row = portrait_preview_row_for_mode(widget, index as i32, desktop, |v| scale(hwnd, v));
             let _ = SelectObject(hdc, label_font);
             let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
             draw_text(hdc, label, row.label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -7223,6 +7315,120 @@ unsafe fn paint_vertical_style_preview(
     paint_portrait_preview_tooltip(hdc, hwnd, preview, widget, style, minimal);
 }
 
+
+fn horizontal_preview_body(canvas: RECT, minimal: bool, logical: impl Fn(i32) -> i32) -> RECT {
+    let width = logical(if minimal { 56 } else { 184 })
+        .min(canvas.right - canvas.left - logical(8));
+    let height = logical(if minimal { 40 } else { 42 });
+    let tab = logical(PREVIEW_DRAG_TAB_H);
+    let gap = logical(6);
+    let tooltip_height = logical(24);
+    let top = canvas.top + (canvas.bottom - canvas.top - (tab + height + gap + tooltip_height)).max(0) / 2;
+    let left = (canvas.left + canvas.right - width) / 2;
+    RECT { left, top: top + tab, right: left + width, bottom: top + tab + height }
+}
+
+unsafe fn paint_preview_horizontal_minimal_text(
+    hdc: HDC, hwnd: HWND, body: RECT, style: &ThemeStyle,
+) {
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+    let row_height = (body.bottom - body.top) / 2;
+    for (index, percent) in ["82%", "37%"].iter().enumerate() {
+        let top = body.top + index as i32 * row_height;
+        draw_text(hdc, percent, RECT {
+            left: body.left + scale(hwnd, 2), top,
+            right: body.right - scale(hwnd, 2), bottom: top + row_height,
+        }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+unsafe fn paint_desktop_horizontal_preview(
+    hdc: HDC, hwnd: HWND, canvas: RECT, style: &ThemeStyle, minimal: bool,
+) {
+    let body = horizontal_preview_body(canvas, minimal, |v| scale(hwnd, v));
+    let tab_w = scale(hwnd, PREVIEW_DRAG_TAB_W);
+    let tab = RECT {
+        left: (body.left + body.right - tab_w) / 2,
+        top: body.top - scale(hwnd, PREVIEW_DRAG_TAB_H),
+        right: (body.left + body.right + tab_w) / 2, bottom: body.top,
+    };
+    let radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min((body.bottom - body.top) / 2);
+    if radius > 0 {
+        fill_rounded_rect(hdc, body, style.color(StyleColorTarget::PanelBackground), radius);
+        draw_rounded_outline_rect(hdc, body, style.color(StyleColorTarget::PanelBorder), radius, 1);
+    } else {
+        fill(hdc, body, style.color(StyleColorTarget::PanelBackground));
+        draw_outline_rect(hdc, body, style.color(StyleColorTarget::PanelBorder));
+    }
+    paint_preview_drag_tab(hdc, hwnd, tab, style);
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+    let font = CreateFontW(
+        -scale(hwnd, 10).max(1), 0, 0, 0, FW_MEDIUM.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
+    );
+    let old_font = SelectObject(hdc, font);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    if minimal {
+        paint_preview_horizontal_minimal_text(hdc, hwnd, body, style);
+    } else {
+        for (index, (label, percent, reset)) in [
+            ("5H", "82%", "21:30"), ("7D", "37%", "10/22"),
+        ].iter().enumerate() {
+            let y = body.top + scale(hwnd, 3 + index as i32 * 19);
+            let text_rect = |left: i32, right: i32| RECT {
+                left, top: y, right, bottom: y + scale(hwnd, 18),
+            };
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
+            draw_text(hdc, label, text_rect(body.left + scale(hwnd, 9),
+                body.left + scale(hwnd, 31)), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            let progress = RECT {
+                left: body.left + scale(hwnd, 34), top: y + scale(hwnd, 6),
+                right: body.left + scale(hwnd, 86), bottom: y + scale(hwnd, 12),
+            };
+            fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
+            let remaining = if index == 0 { 82 } else { 37 };
+            fill(hdc, RECT { right: progress.left + (progress.right - progress.left)
+                * remaining / 100, ..progress }, style.color(if index == 0 {
+                StyleColorTarget::ProgressHigh
+            } else {
+                StyleColorTarget::ProgressMedium
+            }));
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+            draw_text(hdc, percent, text_rect(body.left + scale(hwnd, 90),
+                body.left + scale(hwnd, 124)), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+            draw_text(hdc, reset, text_rect(body.left + scale(hwnd, 128),
+                body.right - scale(hwnd, 6)), DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    let tip_width = scale(hwnd, 76);
+    let tip_height = scale(hwnd, 24);
+    let tip = RECT {
+        left: (canvas.left + canvas.right - tip_width) / 2,
+        top: body.bottom + scale(hwnd, 6),
+        right: (canvas.left + canvas.right + tip_width) / 2,
+        bottom: body.bottom + scale(hwnd, 6) + tip_height,
+    };
+    let tip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+        .min(tip_height / 2);
+    if tip_radius > 0 {
+        fill_rounded_rect(hdc, tip, style.color(StyleColorTarget::TooltipBackground), tip_radius);
+        draw_rounded_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder), tip_radius, 1);
+    } else {
+        fill(hdc, tip, style.color(StyleColorTarget::TooltipBackground));
+        draw_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder));
+    }
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+    draw_text(hdc, "21:30", tip, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    let _ = SelectObject(hdc, old_font);
+    let _ = DeleteObject(font);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_style_preview_card(
     hdc: HDC,
@@ -7238,6 +7444,7 @@ unsafe fn paint_style_preview_card(
     primary: Color,
     vertical: bool,
     minimal: bool,
+    desktop: bool,
 ) {
     fill_rounded_rect(hdc, r, surface, scale(hwnd, SETTINGS_CARD_RADIUS));
     draw_rounded_outline_rect(
@@ -7273,17 +7480,17 @@ unsafe fn paint_style_preview_card(
         left: r.left + scale(hwnd, 12),
         top: r.top + scale(hwnd, if vertical { 50 } else { 46 }),
         right: r.right - scale(hwnd, 12),
-        bottom: r.top + scale(hwnd, if vertical { 326 } else { 138 }),
+        bottom: if vertical { r.bottom - scale(hwnd, 53) } else { r.top + scale(hwnd, 138) },
     };
     // A neutral canvas frames the actual vertical widget, whose panel
     // background/border are rendered independently below at true proportions.
     let panel_radius = scale(hwnd, if vertical { 8 } else {
         i32::from(style.panel_corner_radius)
     }).min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
-    let canvas_fill = if vertical { surface } else {
+    let canvas_fill = if vertical || desktop { surface } else {
         style.color(StyleColorTarget::PanelBackground)
     };
-    let canvas_border = if vertical { border } else {
+    let canvas_border = if vertical || desktop { border } else {
         style.color(StyleColorTarget::PanelBorder)
     };
     if panel_radius > 0 {
@@ -7306,7 +7513,12 @@ unsafe fn paint_style_preview_card(
     }
 
     if vertical {
-        paint_vertical_style_preview(hdc, hwnd, preview, style, minimal);
+        paint_vertical_style_preview(hdc, hwnd, preview, style, minimal, desktop);
+    } else if desktop {
+        paint_desktop_horizontal_preview(hdc, hwnd, preview, style, minimal);
+    } else if minimal {
+        // Taskbar minimal layout hides labels, segments and reset columns.
+        paint_preview_horizontal_minimal_text(hdc, hwnd, preview, style);
     } else {
     let text_left = preview.left + scale(hwnd, 10);
     let text_right = preview.right - scale(hwnd, 10);
@@ -7427,7 +7639,7 @@ unsafe fn paint_style_preview_card(
         );
     }
 
-    } // Horizontal preview: preserve existing bar and tooltip layout.
+    } // Default taskbar preview retains its original bar and tooltip layout.
     for (index, target) in [
         StyleColorTarget::ProgressHigh,
         StyleColorTarget::ProgressMedium,
@@ -7445,7 +7657,7 @@ unsafe fn paint_style_preview_card(
             (
                 (r.left + r.right - scale(hwnd, total_width)) / 2
                     + scale(hwnd, index as i32 * (swatch_width + swatch_gap)),
-                r.top + scale(hwnd, 346),
+                r.bottom - scale(hwnd, 34),
                 swatch_width,
             )
         } else {
@@ -8473,14 +8685,14 @@ mod ui_smoke_tests {
 
     #[test]
     fn preset_gallery_is_four_tall_equal_cards_in_one_row() {
-        let cards: Vec<_> = (0..4).map(preset_gallery_card_rect).collect();
+        let cards: Vec<_> = (0..4).map(|i| preset_gallery_card_rect(i, false)).collect();
         assert_eq!(cards[0].left, 200);
         assert_eq!(cards[3].right, 936);
         assert!(cards[3].right <= 940);
         for (i, card) in cards.iter().enumerate() {
             assert_eq!(card.right - card.left, PRESET_CARD_WIDTH);
             assert_eq!(card.bottom - card.top, PRESET_CARD_HEIGHT);
-            assert_eq!(card.bottom, 656);
+            assert_eq!(card.bottom, PRESET_CARD_TOP + PRESET_CARD_HEIGHT);
             if i > 0 {
                 assert_eq!(card.left - cards[i - 1].right, PRESET_CARD_GAP);
                 assert_eq!(card.top, cards[i - 1].top);
@@ -8488,6 +8700,50 @@ mod ui_smoke_tests {
         }
     }
 
+
+    #[test]
+    fn v23_vertical_preview_card_height_tracks_default_vs_minimal() {
+        for i in 0..4 {
+            let standard = preset_gallery_card_rect(i, false);
+            let minimal = preset_gallery_card_rect(i, true);
+            assert_eq!(standard.bottom - standard.top, 350);
+            assert_eq!(minimal.bottom - minimal.top, 250);
+            assert_eq!(standard.left, minimal.left);
+            assert_eq!(standard.right, minimal.right);
+        }
+    }
+
+    #[test]
+    fn v23_detached_desktop_portrait_grip_is_outside_body() {
+        for minimal in [false, true] {
+            let canvas = RECT { left: 0, top: 0, right: 148,
+                bottom: if minimal { 147 } else { 247 } };
+            let (body, tab) = desktop_portrait_preview_bounds(canvas, minimal, |v| v);
+            assert_eq!(tab.bottom, body.top);
+            assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H);
+            assert_eq!(body.bottom - body.top,
+                if minimal { DESKTOP_PREVIEW_MINIMAL_H } else { DESKTOP_PREVIEW_WIDGET_H });
+            assert!(tab.left >= canvas.left && tab.right <= canvas.right);
+            let tooltip = portrait_preview_tooltip_rect(canvas, body, |v| v);
+            assert!(tooltip.top > body.bottom);
+            assert!(tooltip.bottom <= canvas.bottom);
+        }
+    }
+
+    #[test]
+    fn v23_horizontal_minimal_preview_is_content_sized() {
+        let canvas = RECT { left: 0, top: 0, right: 200, bottom: 92 };
+        let normal = horizontal_preview_body(canvas, false, |v| v);
+        let minimal = horizontal_preview_body(canvas, true, |v| v);
+        assert_eq!(normal.right - normal.left, 184);
+        assert_eq!(minimal.right - minimal.left, 56);
+        assert_eq!(minimal.bottom - minimal.top, 40);
+        assert!(minimal.left > normal.left);
+        for body in [normal, minimal] {
+            assert!(body.top >= canvas.top + PREVIEW_DRAG_TAB_H);
+            assert!(body.bottom + 6 + 24 <= canvas.bottom);
+        }
+    }
     #[test]
     fn portrait_preview_tooltip_is_visible_without_covering_component() {
         let canvas = RECT { left: 0, top: 0, right: 148, bottom: 276 };
