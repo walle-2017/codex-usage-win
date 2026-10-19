@@ -4228,22 +4228,58 @@ fn floating_usable_bounds(monitor: RECT, work: RECT) -> RECT {
     if work.left >= monitor.left && work.top >= monitor.top
         && work.right <= monitor.right && work.bottom <= monitor.bottom
         && work.right > work.left && work.bottom > work.top {
-        work
+        // The bottom grip must be attached to the physical screen boundary
+        // (including over the taskbar), not to rcWork.bottom above the taskbar.
+        RECT { bottom: monitor.bottom, ..work }
     } else {
         monitor
     }
 }
 
-fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
+fn floating_monitor_geometry(point: POINT) -> Option<(RECT, RECT)> {
     unsafe {
         let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        GetMonitorInfoW(monitor, &mut info).as_bool()
-            .then_some(floating_usable_bounds(info.rcMonitor, info.rcWork))
+        GetMonitorInfoW(monitor, &mut info).as_bool().then_some((
+            info.rcMonitor, floating_usable_bounds(info.rcMonitor, info.rcWork),
+        ))
     }
+}
+
+fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
+    floating_monitor_geometry(point).map(|(_, usable)| usable)
+}
+
+/// A display seam is not a hideable edge: its grip would disappear beneath
+/// the neighboring monitor's desktop. Probe along the physical perimeter at
+/// all three portions of the grip, not merely at the drop cursor position.
+fn floating_edge_exposed(monitor: RECT, edge: FloatingEdge, pointer: POINT) -> bool {
+    let half_grip = sc(FLOAT_GRIP_LENGTH) / 2;
+    let offsets = [-half_grip + 1, 0, half_grip - 1];
+    offsets.into_iter().all(|offset| {
+        let probe = match edge {
+            FloatingEdge::Left => POINT {
+                x: monitor.left.saturating_sub(1),
+                y: (pointer.y + offset).clamp(monitor.top, monitor.bottom - 1),
+            },
+            FloatingEdge::Right => POINT {
+                x: monitor.right,
+                y: (pointer.y + offset).clamp(monitor.top, monitor.bottom - 1),
+            },
+            FloatingEdge::Top => POINT {
+                x: (pointer.x + offset).clamp(monitor.left, monitor.right - 1),
+                y: monitor.top.saturating_sub(1),
+            },
+            FloatingEdge::Bottom => POINT {
+                x: (pointer.x + offset).clamp(monitor.left, monitor.right - 1),
+                y: monitor.bottom,
+            },
+        };
+        unsafe { MonitorFromPoint(probe, MONITOR_DEFAULTTONULL) == HMONITOR::default() }
+    })
 }
 
 fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
@@ -4266,18 +4302,37 @@ fn floating_nearest_edge(bounds: RECT, rect: RECT, threshold: i32) -> Option<Flo
 
 /// Called only on mouse release, including a release while the original
 /// snapped body is still partly outside the monitor.
-fn floating_drop_edge(bounds: RECT, rect: RECT, threshold: i32) -> Option<FloatingEdge> {
-    let offscreen_edges = [
-        (FloatingEdge::Left, rect.left < bounds.left && rect.right > bounds.left),
-        (FloatingEdge::Right, rect.right > bounds.right && rect.left < bounds.right),
-        (FloatingEdge::Top, rect.top < bounds.top && rect.bottom > bounds.top),
-        (FloatingEdge::Bottom, rect.bottom > bounds.bottom && rect.top < bounds.bottom),
+fn floating_drop_edge(
+    bounds: RECT, rect: RECT, threshold: i32, exposed: [bool; 4],
+) -> Option<FloatingEdge> {
+    let edges = [
+        (FloatingEdge::Left, exposed[0],
+            rect.left < bounds.left && rect.right > bounds.left,
+            (rect.left - bounds.left).abs()),
+        (FloatingEdge::Right, exposed[1],
+            rect.right > bounds.right && rect.left < bounds.right,
+            (bounds.right - rect.right).abs()),
+        (FloatingEdge::Top, exposed[2],
+            rect.top < bounds.top && rect.bottom > bounds.top,
+            (rect.top - bounds.top).abs()),
+        (FloatingEdge::Bottom, exposed[3],
+            rect.bottom > bounds.bottom && rect.top < bounds.bottom,
+            (bounds.bottom - rect.bottom).abs()),
     ];
-    if let Some((edge, _)) = offscreen_edges.into_iter().find(|(_, overlaps)| *overlaps) {
-        Some(edge)
-    } else {
-        floating_nearest_edge(bounds, rect, threshold)
+    if let Some((edge, _, _, _)) = edges.iter().find(|(_, allowed, overlaps, _)|
+        *allowed && *overlaps
+    ) {
+        return Some(*edge);
     }
+    // An unexposed seam never qualifies, even if it is the geometrically
+    // nearest edge. A different, real exterior edge may still qualify.
+    if exposed.iter().all(|&allowed| allowed) {
+        return floating_nearest_edge(bounds, rect, threshold);
+    }
+    edges.into_iter()
+        .filter(|(_, allowed, _, distance)| *allowed && *distance <= threshold)
+        .min_by_key(|(_, _, _, distance)| *distance)
+        .map(|(edge, _, _, _)| edge)
 }
 
 // The stable expanded position is always in screen coordinates. Only the
@@ -4314,9 +4369,9 @@ fn move_floating_widget(hwnd: HWND) {
         (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal,
          width, height, s.dragging)
     };
-    let (left, top) = if dragging {
-        // Keep the initial canvas and grab offset at every drag frame.
-        // Edge recognition and grip relocation happen only on mouse release.
+    let (left, top) = if dragging || edge.is_none() {
+        // Keep mouse positioning stable during drag and across connected
+        // displays. A free popup may straddle two screens at a seam.
         (x, y)
     } else {
         let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
@@ -4489,17 +4544,32 @@ fn finish_floating_drag(hwnd: HWND) {
     let (old_w, old_h, old_body) = floating_canvas_geometry(body_w, body_h, old_edge);
     let mut pointer = POINT { x: x + old_w / 2, y: y + old_h / 2 };
     unsafe { let _ = GetCursorPos(&mut pointer); }
-    let Some(bounds) = floating_monitor_bounds(pointer) else { return };
+    let Some((monitor, bounds)) = floating_monitor_geometry(pointer) else { return };
     let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
-    // An edge-grip drag may still leave most of the canvas offscreen when
-    // released. Treat that overlap as a dock instead of discarding the grip.
-    let edge = floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP));
+    // Physical monitor seams must remain a continuous dragging surface. Only
+    // actual outside edges receive collapsed tabs; a neighboring display
+    // blocks docking even when the old popup rectangle straddles the seam.
+    let exposed = [
+        floating_edge_exposed(monitor, FloatingEdge::Left, pointer),
+        floating_edge_exposed(monitor, FloatingEdge::Right, pointer),
+        floating_edge_exposed(monitor, FloatingEdge::Top, pointer),
+        floating_edge_exposed(monitor, FloatingEdge::Bottom, pointer),
+    ];
+    let edge = floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), exposed);
+    let blocked_seam = edge.is_none()
+        && floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), [true; 4]).is_some();
     let (new_w, new_h, new_body) = floating_canvas_geometry(body_w, body_h, edge);
     let desired_x = x + old_body.left - new_body.left;
     let desired_y = y + old_body.top - new_body.top;
-    let (x, y) = floating_edge_position(
-        bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
-    );
+    let (x, y) = if blocked_seam {
+        // Do not snap, clamp, or warp the body to either monitor while it
+        // overlaps their common boundary.
+        (desired_x, desired_y)
+    } else {
+        floating_edge_position(
+            bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
+        )
+    };
     // If the drop is free-floating, preserve its original panel screen
     // position even though the now-detached tab moves to the top edge.
     let hovered = edge.is_none() && point_in_rect(
