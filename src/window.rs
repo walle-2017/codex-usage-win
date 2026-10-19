@@ -8807,6 +8807,35 @@ mod tests {
     }
 
     #[test]
+    fn desktop_repeated_direction_switch_preserves_panel_and_external_grip() {
+        // Reproduces the user's rapid horizontal/vertical toggles at the pure
+        // geometry layer. Every switch must preserve the panel and its
+        // external drag area without accumulating size or offset errors.
+        let horizontal = (240, 42);
+        let vertical = (48, 184);
+        let edges = [
+            None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom),
+        ];
+        for i in 0..1_000 {
+            let (body_w, body_h) = if i % 2 == 0 { horizontal } else { vertical };
+            for edge in edges {
+                let (canvas_w, canvas_h, body) =
+                    floating_canvas_geometry(body_w, body_h, edge);
+                let grip = floating_grip_rect(
+                    canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+                );
+                assert_eq!(body.right - body.left, body_w);
+                assert_eq!(body.bottom - body.top, body_h);
+                assert!(grip.left >= 0 && grip.top >= 0
+                    && grip.right <= canvas_w && grip.bottom <= canvas_h);
+                assert!(grip.right <= body.left || grip.left >= body.right
+                    || grip.bottom <= body.top || grip.top >= body.bottom);
+            }
+        }
+    }
+
+    #[test]
     fn desktop_grip_stays_inside_only_visible_edge_peek() {
         let width = 240;
         let height = 168;
