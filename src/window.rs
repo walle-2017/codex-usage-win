@@ -1950,7 +1950,8 @@ const VERTICAL_QUOTA_ROW_HEIGHT: i32 = 70;
 const VERTICAL_QUOTA_ROW_GAP: i32 = 4;
 // The embedded taskbar reserves an 18px draggable header. Desktop mode has
 // a separate external tab, so content starts at a true panel inset instead.
-const DESKTOP_VERTICAL_CONTENT_PADDING: i32 = 7;
+// Desktop content has equal inset on all sides, distinct from embedded taskbar.
+const DESKTOP_PANEL_CONTENT_PADDING: i32 = 10;
 const DESKTOP_MINIMAL_ROW_HEIGHT: i32 = 24;
 const DESKTOP_MINIMAL_ROW_GAP: i32 = 6;
 const VERTICAL_LABEL_CENTER_Y: i32 = 9;
@@ -2056,13 +2057,13 @@ fn desktop_vertical_content_height(
     preset: AppearancePreset, show_session: bool, show_weekly: bool,
 ) -> i32 {
     let rows = i32::from(show_session) + i32::from(show_weekly);
-    if rows == 0 { return sc(DESKTOP_VERTICAL_CONTENT_PADDING * 2); }
+    if rows == 0 { return sc(DESKTOP_PANEL_CONTENT_PADDING * 2); }
     let (row_height, row_gap) = if preset == AppearancePreset::Minimal {
         (DESKTOP_MINIMAL_ROW_HEIGHT, DESKTOP_MINIMAL_ROW_GAP)
     } else {
         (VERTICAL_QUOTA_ROW_HEIGHT, VERTICAL_QUOTA_ROW_GAP)
     };
-    sc(DESKTOP_VERTICAL_CONTENT_PADDING * 2 + row_height * rows
+    sc(DESKTOP_PANEL_CONTENT_PADDING * 2 + row_height * rows
         + row_gap * (rows - 1))
 }
 
@@ -2161,7 +2162,11 @@ fn total_widget_width_for(language: LanguageId) -> i32 {
 }
 
 fn horizontal_content_left(metrics: &appearance::StyleMetrics, floating: bool) -> i32 {
-    sc(metrics.outer_padding) + if floating { 0 } else { sc(DRAG_HANDLE_HIT_W) }
+    if floating {
+        sc(DESKTOP_PANEL_CONTENT_PADDING)
+    } else {
+        sc(metrics.outer_padding) + sc(DRAG_HANDLE_HIT_W)
+    }
 }
 
 /// The desktop tab is outside the body; no embedded drag-strip width is
@@ -2172,7 +2177,7 @@ fn desktop_horizontal_content_width(
     show_session: bool, show_weekly: bool, session: &str, weekly: &str,
 ) -> i32 {
     let metrics = preset.metrics();
-    let padding = sc(metrics.outer_padding);
+    let padding = sc(DESKTOP_PANEL_CONTENT_PADDING);
     if preset == AppearancePreset::Minimal {
         return padding * 2 + sc(metrics.percent_width);
     }
@@ -3458,7 +3463,7 @@ fn vertical_row_tops_for_layout(
     height: i32, show_session: bool, show_weekly: bool, floating: bool,
 ) -> (Option<i32>, Option<i32>) {
     let first = if floating {
-        sc(DESKTOP_VERTICAL_CONTENT_PADDING)
+        sc(DESKTOP_PANEL_CONTENT_PADDING)
     } else if show_session && show_weekly {
         sc(VERTICAL_FIRST_ROW_TOP)
     } else {
@@ -3484,7 +3489,7 @@ fn vertical_minimal_percent_centers_for_layout(
     height: i32, show_session: bool, show_weekly: bool, floating: bool,
 ) -> (Option<i32>, Option<i32>) {
     if floating {
-        let center = sc(DESKTOP_VERTICAL_CONTENT_PADDING + DESKTOP_MINIMAL_ROW_HEIGHT / 2);
+        let center = sc(DESKTOP_PANEL_CONTENT_PADDING + DESKTOP_MINIMAL_ROW_HEIGHT / 2);
         let second = center + sc(DESKTOP_MINIMAL_ROW_HEIGHT + DESKTOP_MINIMAL_ROW_GAP);
         return (
             show_session.then_some(center),
@@ -9003,7 +9008,7 @@ mod tests {
             assert_eq!(one, weekly_only);
             assert!(both > one);
             assert!(both < vertical_widget_height_for_preset(preset));
-            let inset = sc(DESKTOP_VERTICAL_CONTENT_PADDING);
+            let inset = sc(DESKTOP_PANEL_CONTENT_PADDING);
             if preset == AppearancePreset::Minimal {
                 for (height, session, weekly) in [
                     (one, true, false), (one, false, true), (both, true, true),
