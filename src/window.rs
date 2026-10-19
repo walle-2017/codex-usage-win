@@ -2808,17 +2808,13 @@ fn render_floating_handle_bitmap(
     edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
 ) {
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
-    // Grip remains readable even if the user chose a fully transparent panel.
-    let mut fill = style.color(StyleColorTarget::PanelBackground);
-    let mut border = style.color(StyleColorTarget::PanelBorder);
+    // The tab is a miniature panel, not a separate style. Its fill, border,
+    // corner radius, transparency and glass strength follow ThemeStyle.
     let mut dots = style.color(StyleColorTarget::DragHandle);
-    fill.a = fill.a.max(180);
-    border.a = border.a.max(190);
-    dots.a = dots.a.max(230);
     if hovered {
-        dots.r = dots.r.saturating_add(36);
-        dots.g = dots.g.saturating_add(36);
-        dots.b = dots.b.saturating_add(36);
+        dots.r = dots.r.saturating_add(12);
+        dots.g = dots.g.saturating_add(12);
+        dots.b = dots.b.saturating_add(12);
     }
     let center_x = (grip.left + grip.right) / 2;
     let center_y = (grip.top + grip.bottom) / 2;
@@ -2835,19 +2831,15 @@ fn render_floating_handle_bitmap(
             let local_y = y - grip.top;
             let grip_w = grip.right - grip.left;
             let grip_h = grip.bottom - grip.top;
-            let radius = sc(7).max(2).min(grip_w.min(grip_h) / 2);
-            let outer = point_in_rounded_box(grip_w, grip_h, local_x, local_y, 0, radius);
-            if !outer { continue; }
-            let inner = point_in_rounded_box(
-                grip_w, grip_h, local_x, local_y, 1, (radius - 1).max(1),
-            );
-            let frame = !inner;
+            let Some(panel_color) = panel_color_at(
+                style, grip_w, grip_h, local_x, local_y,
+            ) else { continue };
             let dot_pixel = (0..rows).any(|r| (0..cols).any(|c| {
                 let dx = center_x - dots_w / 2 + c * (dot + gap);
                 let dy = center_y - dots_h / 2 + r * (dot + gap);
                 x >= dx && x < dx + dot && y >= dy && y < dy + dot
             }));
-            let mut color = if dot_pixel { dots } else if frame { border } else { fill };
+            let mut color = if dot_pixel { dots } else { panel_color };
             color.a = ((u16::from(color.a) * u16::from(opacity.min(100)) + 50) / 100) as u8;
             pixels[(y * width + x) as usize] = premultiplied_pixel(color);
         }
@@ -4129,10 +4121,12 @@ fn tray_reposition_is_suppressed() -> bool {
 // Desktop fallback keeps a separately owned popup alive instead of
 // detaching/reparenting Explorer's active taskbar child window.
 const FLOAT_EDGE_SNAP: i32 = 24;
-const FLOAT_EDGE_PEEK: i32 = 20;
-const FLOAT_GRIP_LENGTH: i32 = 46;
-const FLOAT_ANIMATION_STEP: u8 = 14;
-const FLOAT_GRIP_FADE_STEP: u8 = 12;
+const FLOAT_EDGE_PEEK: i32 = 16;
+const FLOAT_GRIP_LENGTH: i32 = 36;
+const FLOAT_EXPAND_DURATION_MS: u64 = 220;
+const FLOAT_RETRACT_DURATION_MS: u64 = 240;
+const FLOAT_GRIP_FADE_IN_MS: u64 = 140;
+const FLOAT_GRIP_FADE_OUT_MS: u64 = 170;
 const TIMER_FLOAT_ANIMATION: usize = 0xF141;
 
 /// This rectangle is used for the rendered tab, pointer hit testing and
