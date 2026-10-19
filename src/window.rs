@@ -5729,7 +5729,7 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     if hdc.0.is_null() {
         // Failed measurement must not fall back to a tiny fixed-width box.
         return tooltip_width_with_render_slack(
-            sc(text.chars().count().try_into().unwrap_or(i32::MAX) * 12),
+            sc((text.chars().count().min(64) as i32) * 12),
             |v| sc(v),
         );
     }
