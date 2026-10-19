@@ -4444,6 +4444,40 @@ fn floating_drag_handle_hit(
     point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
 }
 
+// The desktop tab lives OUTSIDE the panel body. Hover must be checked against
+// its final screen-space rectangle, especially after the canvas origin changes
+// on drop from a docked edge to the free-floating top tab.
+fn floating_drag_grip_contains_screen_point(
+    origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
+    edge: Option<FloatingEdge>, pointer: POINT,
+) -> bool {
+    floating_drag_handle_hit(
+        pointer.x - origin_x, pointer.y - origin_y,
+        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+    )
+}
+
+// A stale WM_MOUSELEAVE can be queued when mouse capture ends or a layered
+// popup is repositioned. Recheck where the pointer actually is, rather than
+// clearing an otherwise valid hover until another WM_MOUSEMOVE arrives.
+fn floating_pointer_still_over_free_grip(hwnd: HWND) -> bool {
+    let (canvas_w, canvas_h) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == hwnd && s.floating_edge.is_none()
+        ) else { return false };
+        floating_canvas_size_for_state(s)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else {
+        return false;
+    };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    floating_drag_grip_contains_screen_point(
+        rect.left, rect.top, canvas_w, canvas_h, None, pointer,
+    )
+}
+
 /// Desktop tabs occupy an independent, transparent gutter. The panel dimensions
 /// remain identical to the taskbar renderer, including progress and ring layout.
 fn floating_canvas_geometry(
@@ -4881,7 +4915,12 @@ fn finish_floating_drag(hwnd: HWND) {
     let (old_w, old_h, old_body) = floating_canvas_geometry(body_w, body_h, old_edge);
     let mut pointer = POINT { x: x + old_w / 2, y: y + old_h / 2 };
     unsafe { let _ = GetCursorPos(&mut pointer); }
-    let Some((monitor, bounds)) = floating_monitor_geometry(pointer) else { return };
+    let Some((monitor, bounds)) = floating_monitor_geometry(pointer) else {
+        // Even if monitor enumeration fails, do not leave the drag state
+        // latched and force the detached tab to flicker on the next move.
+        if let Some(s) = lock_state().as_mut() { s.dragging = false; }
+        return;
+    };
     let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
     // Physical monitor seams must remain a continuous dragging surface. Only
     // actual outside edges receive collapsed tabs; a neighboring display
@@ -4909,16 +4948,16 @@ fn finish_floating_drag(hwnd: HWND) {
     };
     // If the drop is free-floating, preserve its original panel screen
     // position even though the now-detached tab moves to the top edge.
-    let hovered = edge.is_none() && point_in_rect(
-        RECT { left: x + new_body.left, top: y + new_body.top,
-               right: x + new_body.right, bottom: y + new_body.bottom },
-        pointer.x, pointer.y,
+    let hovered = edge.is_none() && floating_drag_grip_contains_screen_point(
+        x, y, new_w, new_h, edge, pointer,
     );
     {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
             s.floating_x = x;
             s.floating_y = y;
+            s.dragging = false;
+            s.drag_handle_hovered = hovered;
             s.floating_edge = edge;
             s.floating_collapsed = edge.is_some();
             s.floating_first_collapse_guard = edge.is_some();
@@ -6785,7 +6824,10 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
-            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging)
+                || floating_pointer_still_over_free_grip(hwnd) {
+                // A capture-change/window-move leave is not a real pointer
+                // departure. Preserve the visible tab and the panel glow.
                 return LRESULT(0);
             }
             {
@@ -6825,17 +6867,27 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_LBUTTONUP => {
             if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
-                let was_dragging = {
-                    let mut state = lock_state();
-                    if let Some(s) = state.as_mut() {
-                        let was = s.dragging;
-                        s.dragging = false;
-                        was
-                    } else { false }
-                };
-                let _ = ReleaseCapture();
+                let was_dragging = lock_state().as_ref().is_some_and(|s| s.dragging);
                 let _ = drag_frame_due(true);
-                if was_dragging { finish_floating_drag(hwnd); }
+                if was_dragging {
+                    // Keep the grip fully visible until its final rectangle
+                    // and hover state are committed in one layered frame.
+                    finish_floating_drag(hwnd);
+                } else if let Some(s) = lock_state().as_mut() {
+                    s.dragging = false;
+                }
+                let _ = ReleaseCapture();
+                if floating_pointer_still_over_free_grip(hwnd) {
+                    // Capture ended but no mouse motion is required to
+                    // maintain hover or re-arm leave tracking.
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tme);
+                }
                 return LRESULT(0);
             }
 
