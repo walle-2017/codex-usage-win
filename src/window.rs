@@ -3151,6 +3151,32 @@ fn restore_text_background_rect(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HorizontalTextAlign { Start, Center, End }
+
+/// Align the visible ink, not the reserved width of a text column.
+fn directwrite_mask_x_offset(
+    mask: &[u8], width: i32, height: i32, align: HorizontalTextAlign,
+) -> i32 {
+    if align == HorizontalTextAlign::Start || width <= 0 || height <= 0 { return 0; }
+    let mut first = width;
+    let mut last = -1;
+    for x in 0..width {
+        if (0..height).any(|y| {
+            mask.get((y * width + x) as usize).is_some_and(|&alpha| alpha != 0)
+        }) {
+            first = first.min(x);
+            last = x;
+        }
+    }
+    if last < 0 { return 0; }
+    match align {
+        HorizontalTextAlign::Start => 0,
+        HorizontalTextAlign::Center => (width - (last - first + 1)) / 2 - first,
+        HorizontalTextAlign::End => width - 1 - last,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_directwrite_text(
     pixels: &mut [u32],
@@ -3162,6 +3188,7 @@ unsafe fn draw_directwrite_text(
     font_height: i32,
     font_weight: i32,
     color: Color,
+    align: HorizontalTextAlign,
 ) {
     let mask_width = rect.right - rect.left;
     let mask_height = rect.bottom - rect.top;
@@ -3184,13 +3211,14 @@ unsafe fn draw_directwrite_text(
         return;
     };
 
+    let x_offset = directwrite_mask_x_offset(&mask, mask_width, mask_height, align);
     for mask_y in 0..mask_height {
         let dst_y = rect.top + mask_y;
         if dst_y < 0 || dst_y >= surface_height {
             continue;
         }
         for mask_x in 0..mask_width {
-            let dst_x = rect.left + mask_x;
+            let dst_x = rect.left + mask_x + x_offset;
             if dst_x < 0 || dst_x >= surface_width {
                 continue;
             }
@@ -3337,6 +3365,10 @@ unsafe fn render_taskbar_text(
 
     let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
     let content_x = horizontal_content_left(&metrics, floating);
+    let visible_reset = floating && (
+        (effective_show_session && codex_session_text.split_once("  ").is_some())
+        || (effective_show_weekly && codex_weekly_text.split_once("  ").is_some())
+    );
     let row2_y = height - sc(4) - sc(SEGMENT_H);
     let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
     let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -3363,6 +3395,7 @@ unsafe fn render_taskbar_text(
                 sc(metrics.value_font_height),
                 FW_SEMIBOLD.0 as i32,
                 primary_color,
+                if floating { HorizontalTextAlign::Center } else { HorizontalTextAlign::Start },
             );
             return;
         }
@@ -3382,6 +3415,7 @@ unsafe fn render_taskbar_text(
             sc(metrics.font_height),
             FW_MEDIUM.0 as i32,
             quota_type_color,
+            HorizontalTextAlign::Start,
         );
 
         let segment_count = row_bar_segment_count(preset);
@@ -3412,6 +3446,11 @@ unsafe fn render_taskbar_text(
             sc(metrics.value_font_height),
             FW_SEMIBOLD.0 as i32,
             primary_color,
+            if floating && !visible_reset {
+                HorizontalTextAlign::End
+            } else {
+                HorizontalTextAlign::Start
+            },
         );
 
         if let Some(secondary) = secondary {
@@ -3432,6 +3471,7 @@ unsafe fn render_taskbar_text(
                 sc(metrics.secondary_font_height),
                 FW_NORMAL.0 as i32,
                 reset_color,
+                if floating { HorizontalTextAlign::End } else { HorizontalTextAlign::Start },
             );
         }
     };
