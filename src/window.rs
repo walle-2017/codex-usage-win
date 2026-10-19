@@ -8819,10 +8819,12 @@ mod tests {
 
     #[test]
     fn desktop_grip_fade_is_reversible_and_never_changes_body_pixels() {
-        assert_eq!(animate_toward(0, 100, 12), 12);
-        assert_eq!(animate_toward(96, 100, 12), 100);
-        assert_eq!(animate_toward(100, 0, 12), 88);
-        assert_eq!(animate_toward(4, 0, 12), 0);
+        assert_eq!(eased_value_at(0, 100, Duration::ZERO, 140), 0);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(70), 140), 88);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(140), 140), 100);
+        assert_eq!(eased_value_at(100, 0, Duration::ZERO, 170), 100);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(85), 170), 50);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(170), 170), 0);
         let width = 240;
         let height = 168;
         let style = ThemeStyle::light_default();
@@ -8856,6 +8858,41 @@ mod tests {
     }
 
     #[test]
+    fn desktop_mini_grip_matches_panel_palette_corner_radius_and_alpha() {
+        let mut style = ThemeStyle::dark_default();
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(14, 32, 25, 68));
+        style.set_color(StyleColorTarget::PanelBorder, Color::rgba(40, 110, 87, 127));
+        style.panel_corner_radius = 2;
+        let w = sc(FLOAT_GRIP_LENGTH);
+        let h = sc(FLOAT_EDGE_PEEK);
+        let expected_w = sc(36);
+        let expected_h = sc(16);
+        assert_eq!((w, h), (expected_w, expected_h));
+        let mut pixels = vec![0u32; (w * h) as usize];
+        render_floating_handle_bitmap(&mut pixels, w, h, None, false, &style, 100);
+        let center = (h / 2 * w + sc(6)) as usize; // clear of the six-dot cluster
+        assert_eq!(pixels[center], premultiplied_pixel(
+            style.color(StyleColorTarget::PanelBackground),
+        ));
+        // Panel corner clipping is applied to the grip too.
+        assert_eq!(pixels[0], 0);
+        let mut transparent = vec![0u32; (w * h) as usize];
+        render_floating_handle_bitmap(&mut transparent, w, h, None, false, &style, 0);
+        assert!(transparent.iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
+    fn desktop_edge_slide_easing_is_time_based_and_directional() {
+        assert_eq!(eased_value_at(0, 100, Duration::ZERO, 220), 0);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(110), 220), 88);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(120), 240), 50);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(220), 220), 100);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(240), 240), 0);
+        assert_eq!(animation_partial_duration(240, 50, 0), 120);
+        assert_eq!(animation_partial_duration(240, 100, 0), 240);
+    }
+
+    #[test]
     fn desktop_first_snap_retraction_ignores_hover_until_rearmed() {
         assert!(!floating_hover_can_reveal(true, true, false));
         assert!(!floating_hover_can_reveal(true, false, true));
@@ -8863,8 +8900,14 @@ mod tests {
         assert!(floating_hover_can_reveal(true, false, false));
         // The first hidden tab remains visible, but the cursor crossing its
         // path during collapse cannot reverse the animation.
-        assert_eq!(animate_toward(100, 0, FLOAT_ANIMATION_STEP), 86);
-        assert_eq!(animate_toward(2, 0, FLOAT_ANIMATION_STEP), 0);
+        assert_eq!(eased_value_at(
+            100, 0, Duration::from_millis(FLOAT_RETRACT_DURATION_MS / 2),
+            FLOAT_RETRACT_DURATION_MS,
+        ), 50);
+        assert_eq!(eased_value_at(
+            100, 0, Duration::from_millis(FLOAT_RETRACT_DURATION_MS),
+            FLOAT_RETRACT_DURATION_MS,
+        ), 0);
     }
 
     #[test]
