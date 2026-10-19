@@ -7543,31 +7543,9 @@ unsafe fn paint_style_preview_card(
         right: r.right - scale(hwnd, 12),
         bottom: if vertical { r.bottom - scale(hwnd, 53) } else { r.top + scale(hwnd, 138) },
     };
-    // A neutral canvas frames the actual vertical widget, whose panel
-    // background/border are rendered independently below at true proportions.
-    let panel_radius = scale(hwnd, if vertical { 8 } else {
-        i32::from(style.panel_corner_radius)
-    }).min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
-    let canvas_fill = surface;
-    let canvas_border = border;
-    if panel_radius > 0 {
-        fill_rounded_rect(
-            hdc,
-            preview,
-            canvas_fill,
-            panel_radius,
-        );
-        draw_rounded_outline_rect(
-            hdc,
-            preview,
-            canvas_border,
-            panel_radius,
-            1,
-        );
-    } else {
-        fill(hdc, preview, canvas_fill);
-        draw_outline_rect(hdc, preview, canvas_border);
-    }
+    // The preview rectangle is only a positioning region. The card itself
+    // provides the backdrop; drawing a second frame here would surround the
+    // grip, panel and tooltip with an unwanted inset outline.
 
     if vertical {
         paint_vertical_style_preview(hdc, hwnd, preview, style, minimal, desktop);
