@@ -7216,6 +7216,7 @@ fn portrait_preview_row_for_mode(
     }
 }
 
+#[cfg(test)]
 fn portrait_preview_row(widget: RECT, index: i32, logical: impl Fn(i32) -> i32) -> PortraitPreviewRow {
     portrait_preview_row_for_mode(widget, index, false, logical)
 }
@@ -7315,6 +7316,29 @@ unsafe fn paint_vertical_style_preview(
     paint_portrait_preview_tooltip(hdc, hwnd, preview, widget, style, minimal);
 }
 
+
+
+unsafe fn paint_taskbar_horizontal_preview_grip(
+    hdc: HDC, hwnd: HWND, canvas: RECT, style: &ThemeStyle,
+) {
+    // The taskbar grip is embedded at the left edge; unlike the separate
+    // desktop tab it uses the taskbar's original 2-column, 3-row dot shape.
+    let dot = scale(hwnd, 2).max(1);
+    let gap_x = scale(hwnd, 1).max(1);
+    let gap_y = scale(hwnd, 2).max(1);
+    let dots_w = 2 * dot + gap_x;
+    let dots_h = 3 * dot + 2 * gap_y;
+    let x0 = canvas.left + scale(hwnd, 6) - dots_w / 2;
+    let y0 = (canvas.top + canvas.bottom - dots_h) / 2;
+    for row in 0..3 {
+        for col in 0..2 {
+            let x = x0 + col * (dot + gap_x);
+            let y = y0 + row * (dot + gap_y);
+            fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot },
+                style.color(StyleColorTarget::DragHandle));
+        }
+    }
+}
 
 fn horizontal_preview_body(canvas: RECT, minimal: bool, logical: impl Fn(i32) -> i32) -> RECT {
     let width = logical(if minimal { 56 } else { 184 })
@@ -7517,9 +7541,11 @@ unsafe fn paint_style_preview_card(
     } else if desktop {
         paint_desktop_horizontal_preview(hdc, hwnd, preview, style, minimal);
     } else if minimal {
+        paint_taskbar_horizontal_preview_grip(hdc, hwnd, preview, style);
         // Taskbar minimal layout hides labels, segments and reset columns.
         paint_preview_horizontal_minimal_text(hdc, hwnd, preview, style);
     } else {
+    paint_taskbar_horizontal_preview_grip(hdc, hwnd, preview, style);
     let text_left = preview.left + scale(hwnd, 10);
     let text_right = preview.right - scale(hwnd, 10);
     let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
