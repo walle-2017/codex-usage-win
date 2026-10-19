@@ -1948,6 +1948,11 @@ const VERTICAL_DRAG_HANDLE_H: i32 = 18;
 const VERTICAL_FIRST_ROW_TOP: i32 = 20;
 const VERTICAL_QUOTA_ROW_HEIGHT: i32 = 70;
 const VERTICAL_QUOTA_ROW_GAP: i32 = 4;
+// The embedded taskbar reserves an 18px draggable header. Desktop mode has
+// a separate external tab, so content starts at a true panel inset instead.
+const DESKTOP_VERTICAL_CONTENT_PADDING: i32 = 7;
+const DESKTOP_MINIMAL_ROW_HEIGHT: i32 = 24;
+const DESKTOP_MINIMAL_ROW_GAP: i32 = 6;
 const VERTICAL_LABEL_CENTER_Y: i32 = 9;
 const VERTICAL_RING_CENTER_Y: i32 = 35;
 const VERTICAL_RESET_CENTER_Y: i32 = 61;
@@ -2047,8 +2052,28 @@ fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
     })
 }
 
+fn desktop_vertical_content_height(
+    preset: AppearancePreset, show_session: bool, show_weekly: bool,
+) -> i32 {
+    let rows = i32::from(show_session) + i32::from(show_weekly);
+    if rows == 0 { return sc(DESKTOP_VERTICAL_CONTENT_PADDING * 2); }
+    let (row_height, row_gap) = if preset == AppearancePreset::Minimal {
+        (DESKTOP_MINIMAL_ROW_HEIGHT, DESKTOP_MINIMAL_ROW_GAP)
+    } else {
+        (VERTICAL_QUOTA_ROW_HEIGHT, VERTICAL_QUOTA_ROW_GAP)
+    };
+    sc(DESKTOP_VERTICAL_CONTENT_PADDING * 2 + row_height * rows
+        + row_gap * (rows - 1))
+}
+
 fn widget_height_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
+        if state.floating_mode {
+            return desktop_vertical_content_height(
+                effective_appearance_preset(state),
+                state.show_session_window, state.show_weekly_window,
+            );
+        }
         return vertical_widget_height_for_preset(effective_appearance_preset(state));
     }
     if state.small_taskbar_mode {
@@ -2135,9 +2160,47 @@ fn total_widget_width_for(language: LanguageId) -> i32 {
     total_widget_width_for_preset(language, AppearancePreset::Default)
 }
 
+fn horizontal_content_left(metrics: &appearance::StyleMetrics, floating: bool) -> i32 {
+    sc(metrics.outer_padding) + if floating { 0 } else { sc(DRAG_HANDLE_HIT_W) }
+}
+
+/// The desktop tab is outside the body; no embedded drag-strip width is
+/// needed. Compute the right edge from the widest *visible* usage row.
+/// A missing reset label also removes its unused column from the panel.
+fn desktop_horizontal_content_width(
+    language: LanguageId, preset: AppearancePreset,
+    show_session: bool, show_weekly: bool, session: &str, weekly: &str,
+) -> i32 {
+    let metrics = preset.metrics();
+    let padding = sc(metrics.outer_padding);
+    if preset == AppearancePreset::Minimal {
+        return padding * 2 + sc(metrics.percent_width);
+    }
+    let (label, reset) = usage_layout_widths(language, preset);
+    let segment_count = row_bar_segment_count(preset);
+    let bar = segment_count * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+    let row_width = |value: &str| {
+        sc(label) + sc(metrics.label_bar_gap) + bar
+            + sc(metrics.bar_percent_gap) + sc(metrics.percent_width)
+            + if value.split_once("  ").is_some() && reset > 0 {
+                sc(metrics.percent_reset_gap) + sc(reset)
+            } else { 0 }
+    };
+    let mut content = 0;
+    if show_session { content = content.max(row_width(session)); }
+    if show_weekly { content = content.max(row_width(weekly)); }
+    padding * 2 + content
+}
+
 fn total_widget_width_for_state(state: &AppState) -> i32 {
     if state.vertical_taskbar_mode {
         state.vertical_widget_width
+    } else if state.floating_mode {
+        desktop_horizontal_content_width(
+            state.language, effective_appearance_preset(state),
+            state.show_session_window, state.show_weekly_window,
+            &state.codex_session_text, &state.codex_weekly_text,
+        )
     } else {
         total_widget_width_for_preset(state.language, effective_appearance_preset(state))
     }
