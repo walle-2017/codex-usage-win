@@ -6305,6 +6305,33 @@ unsafe extern "system" fn wnd_proc(
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     match msg {
+        WM_NCHITTEST if lock_state().as_ref().is_some_and(|s|
+            s.floating_mode && s.floating_edge.is_none()
+        ) => {
+            // V24.2: outer glow pixels are visual-only, not clickable glass.
+            // The body and detached grip keep their original hit targets.
+            let (body, grip) = {
+                let state = lock_state();
+                let s = state.as_ref().expect("free desktop mode checked above");
+                let (w, h, body) = floating_canvas_geometry(
+                    total_widget_width_for_state(s), widget_height_for_state(s), None,
+                );
+                (body, floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK)))
+            };
+            let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let Some(rect) = native_interop::get_window_rect_safe(hwnd) else {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            };
+            let client_x = screen_x - rect.left;
+            let client_y = screen_y - rect.top;
+            if point_in_rect(body, client_x, client_y)
+                || point_in_rect(grip, client_x, client_y) {
+                LRESULT(1) // HTCLIENT
+            } else {
+                LRESULT(-1) // HTTRANSPARENT: ignore the halo-only perimeter
+            }
+        }
         WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) => {
             // Quota content remains a client area for tooltips, while only the
             // top grip starts a drag on WM_LBUTTONDOWN.
@@ -9367,6 +9394,47 @@ mod tests {
     }
 
     #[test]
+    fn v24_2_free_desktop_canvas_has_real_outer_halo_space() {
+        for (width, height) in [(240, 42), (48, 168)] {
+            let halo = sc(FLOAT_FREE_GLOW_MARGIN);
+            let (cw, ch, body) = floating_canvas_geometry(width, height, None);
+            let tab = floating_grip_rect(cw, ch, None, sc(FLOAT_EDGE_PEEK));
+            assert_eq!(cw, width + halo * 2);
+            assert_eq!(ch, height + sc(FLOAT_EDGE_PEEK) + halo * 2);
+            assert_eq!(body.left, halo);
+            assert_eq!(body.top, halo + sc(FLOAT_EDGE_PEEK));
+            assert_eq!(cw - body.right, halo);
+            assert_eq!(ch - body.bottom, halo);
+            assert_eq!(tab.top, halo);
+            assert_eq!(tab.bottom, body.top);
+            assert!(floating_drag_handle_hit(
+                (tab.left + tab.right) / 2, (tab.top + tab.bottom) / 2,
+                cw, ch, None, sc(FLOAT_EDGE_PEEK),
+            ));
+            assert!(!floating_drag_handle_hit(
+                0, tab.top, cw, ch, None, sc(FLOAT_EDGE_PEEK),
+            ));
+            let style = ThemeStyle::preset(true, ThemePreset::Forest);
+            let mut bitmap = vec![0u32; (cw * ch) as usize];
+            draw_drag_hover_outline(&mut bitmap, cw, ch, body,
+                style.panel_corner_radius, drag_hover_outline_color(&style));
+            // A genuine halo pixel exists left of the panel, and fades
+            // completely before the outermost transparent canvas boundary.
+            let y = (body.top + body.bottom) / 2;
+            let alpha_at = |x: i32| bitmap[(y * cw + x) as usize] >> 24;
+            assert!(alpha_at(body.left - 2) > alpha_at(body.left - 6));
+            assert!(alpha_at(body.left - 6) > alpha_at(body.left - 10));
+            assert_eq!(alpha_at(0), 0);
+        }
+        // Docked tab geometry remains bit-for-bit the V24 layout.
+        let (w, h, dock) = floating_canvas_geometry(
+            240, 42, Some(FloatingEdge::Bottom),
+        );
+        assert_eq!((w, h, dock.left, dock.top), (240, 42 + sc(FLOAT_EDGE_PEEK), 0,
+            sc(FLOAT_EDGE_PEEK)));
+    }
+
+    #[test]
     fn desktop_repeated_direction_switch_preserves_panel_and_external_grip() {
         // Reproduces the user's rapid horizontal/vertical toggles at the pure
         // geometry layer. Every switch must preserve the panel and its
@@ -9411,7 +9479,8 @@ mod tests {
                 Some(FloatingEdge::Left) => assert_eq!(r.left, width - peek),
                 Some(FloatingEdge::Right) => assert_eq!(r.right, peek),
                 Some(FloatingEdge::Top) => assert_eq!(r.bottom, height),
-                Some(FloatingEdge::Bottom) | None => assert_eq!(r.top, 0),
+                Some(FloatingEdge::Bottom) => assert_eq!(r.top, 0),
+                None => assert_eq!(r.top, sc(FLOAT_FREE_GLOW_MARGIN)),
             }
         }
     }
