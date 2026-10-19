@@ -7217,20 +7217,45 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE => {
-            {
+            let direction = if wparam.0 == 1 {
+                DesktopDirection::Vertical
+            } else {
+                DesktopDirection::Horizontal
+            };
+            let changed = {
                 let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    if s.display_position == DisplayPosition::Desktop {
-                        s.desktop_direction = if wparam.0 == 1 {
-                            DesktopDirection::Vertical
-                        } else { DesktopDirection::Horizontal };
+                match state.as_mut() {
+                    Some(s) if s.display_position == DisplayPosition::Desktop
+                        && s.desktop_direction != direction => {
+                        s.desktop_direction = direction;
+                        true
                     }
+                    _ => false,
                 }
+            };
+            if !changed {
+                return LRESULT(0);
             }
+            let start = Instant::now();
+            diagnose::log_lazy(|| format!(
+                "desktop orientation switch start direction={direction:?}",
+            ));
             save_state_settings();
+            diagnose::log_lazy(|| "desktop orientation switch: applying window geometry".to_string());
+            // In desktop mode position_at_taskbar() calls
+            // enable_floating_widget(), which already moves and repaints the
+            // popup. A second render_layered() here repeated the expensive
+            // WinRT/DirectComposition updates after every toggle.
             position_at_taskbar();
-            render_layered();
+            diagnose::log_lazy(|| format!(
+                "desktop orientation switch: geometry applied direction={direction:?} elapsed_ms={}",
+                start.elapsed().as_millis(),
+            ));
             style_window::sync(style_settings_snapshot());
+            diagnose::log_lazy(|| format!(
+                "desktop orientation switch complete direction={direction:?} elapsed_ms={}",
+                start.elapsed().as_millis(),
+            ));
             LRESULT(0)
         }
         _ if msg == style_window::WM_STYLE_PRESET_CHANGE => {
