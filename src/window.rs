@@ -4936,18 +4936,18 @@ fn position_vertical_taskbar(
 
 fn position_at_taskbar() {
     refresh_dpi();
-    let desktop_selection = {
-        let state = lock_state();
-        state.as_ref().and_then(|s| {
-            (s.display_position == DisplayPosition::Desktop).then_some(
-                s.taskbar_hwnd.and_then(native_interop::get_taskbar_rect)
-                    .map(|rect| taskbar_axis(rect) == TaskbarAxis::Vertical)
-                    .unwrap_or(s.vertical_taskbar_mode),
-            )
-        })
-    };
-    if let Some(vertical) = desktop_selection {
-        enable_floating_widget("explicit desktop preference", vertical);
+    // A desktop popup does not depend on Explorer's taskbar geometry.
+    // NEVER call SHAppBarMessage(ABM_GETTASKBARPOS) from this branch:
+    // it synchronously enters Explorer while our own UI message is active.
+    // If Explorer is handling one of our embedded child windows concurrently,
+    // the two UI threads can end up waiting for each other and both the
+    // widget and the Windows taskbar become unresponsive.
+    let desktop_selected = lock_state().as_ref()
+        .is_some_and(|s| s.display_position == DisplayPosition::Desktop);
+    if desktop_selected {
+        // The user-selected orientation is resolved inside
+        // enable_floating_widget, not from the current taskbar axis.
+        enable_floating_widget("explicit desktop preference", false);
         return;
     }
     let (
