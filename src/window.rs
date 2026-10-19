@@ -4418,6 +4418,10 @@ fn set_floating_grip_hover(hovered: bool) {
     }
 }
 
+fn floating_hover_can_reveal(collapsed: bool, guard: bool, dragging: bool) -> bool {
+    collapsed && !guard && !dragging
+}
+
 fn set_floating_collapsed(collapsed: bool) {
     let hwnd = {
         let mut state = lock_state();
@@ -6068,8 +6072,9 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_MOUSEMOVE => {
             if lock_state().as_ref().is_some_and(|s|
-                s.floating_mode && s.floating_collapsed
-                && !s.floating_first_collapse_guard
+                s.floating_mode && floating_hover_can_reveal(
+                    s.floating_collapsed, s.floating_first_collapse_guard, s.dragging,
+                )
             ) {
                 set_floating_collapsed(false);
             }
@@ -8791,6 +8796,66 @@ mod tests {
     }
 
     #[test]
+    fn desktop_first_snap_retraction_ignores_hover_until_rearmed() {
+        assert!(!floating_hover_can_reveal(true, true, false));
+        assert!(!floating_hover_can_reveal(true, false, true));
+        assert!(!floating_hover_can_reveal(false, false, false));
+        assert!(floating_hover_can_reveal(true, false, false));
+        // The first hidden tab remains visible, but the cursor crossing its
+        // path during collapse cannot reverse the animation.
+        assert_eq!(animate_toward(100, 0, FLOAT_ANIMATION_STEP), 86);
+        assert_eq!(animate_toward(2, 0, FLOAT_ANIMATION_STEP), 0);
+    }
+
+    #[test]
+    fn desktop_bottom_docks_at_monitor_edge_not_above_taskbar() {
+        let monitor = RECT { left: -1920, top: -100, right: 0, bottom: 980 };
+        let work = RECT { left: -1920, top: -100, right: 0, bottom: 930 };
+        let bounds = floating_usable_bounds(monitor, work);
+        assert_eq!(bounds.bottom, monitor.bottom);
+        let (cw, ch, _) = floating_canvas_geometry(240, 168, Some(FloatingEdge::Bottom));
+        let grip = floating_grip_rect(
+            cw, ch, Some(FloatingEdge::Bottom), sc(FLOAT_EDGE_PEEK),
+        );
+        let (_, y) = floating_edge_position(
+            bounds, -600, 600, cw, ch, Some(FloatingEdge::Bottom),
+            true, sc(FLOAT_EDGE_PEEK),
+        );
+        assert_eq!(y + grip.bottom, monitor.bottom);
+        assert_ne!(y + grip.bottom, work.bottom);
+    }
+
+    #[test]
+    fn desktop_connected_monitors_dont_snap_to_shared_seam() {
+        let left_monitor = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let right_monitor = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        let crossing_from_left = RECT {
+            left: -180, top: 460, right: 18, bottom: 550,
+        };
+        let crossing_from_right = RECT {
+            left: -10, top: 460, right: 210, bottom: 550,
+        };
+        assert_eq!(
+            floating_drop_edge(left_monitor, crossing_from_left, 24, [true, false, true, true]),
+            None,
+        );
+        assert_eq!(
+            floating_drop_edge(right_monitor, crossing_from_right, 24, [false, true, true, true]),
+            None,
+        );
+        // At an outer boundary of the same layouts, genuine dockability stays.
+        assert_eq!(
+            floating_drop_edge(left_monitor,
+                RECT { left: -1930, top: 460, right: -1730, bottom: 550 },
+                24, [true, false, true, true]),
+            Some(FloatingEdge::Left),
+        );
+        // If two displays meet only over part of a side, a free segment can
+        // still dock when its full grip isn't covered by the next screen.
+        assert!(right_monitor.bottom > left_monitor.bottom);
+    }
+
+    #[test]
     fn desktop_left_taskbar_dock_keeps_visible_tab_outside_explorer() {
         let monitor = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
         let work = RECT { left: -1872, top: 0, right: 0, bottom: 1040 };
@@ -8836,9 +8901,9 @@ mod tests {
     fn desktop_drag_drop_recognizes_partially_offscreen_old_canvas() {
         let bounds = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
         let still_peeking = RECT { left: -200, top: 300, right: 20, bottom: 400 };
-        assert_eq!(floating_drop_edge(bounds, still_peeking, 24), Some(FloatingEdge::Left));
+        assert_eq!(floating_drop_edge(bounds, still_peeking, 24, [true; 4]), Some(FloatingEdge::Left));
         let free = RECT { left: 640, top: 300, right: 860, bottom: 400 };
-        assert_eq!(floating_drop_edge(bounds, free, 24), None);
+        assert_eq!(floating_drop_edge(bounds, free, 24, [true; 4]), None);
     }
 
     #[test]
