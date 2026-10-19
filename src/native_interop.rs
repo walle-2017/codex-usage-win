@@ -31,6 +31,14 @@ unsafe extern "C" {
         clip_inset: f32,
         clip_radius: f32,
     ) -> i32;
+    fn codex_composition_blur_set_desktop_bounds(
+        context: *mut std::ffi::c_void,
+        canvas_w: f32, canvas_h: f32,
+        panel_x: f32, panel_y: f32, panel_w: f32, panel_h: f32,
+        grip_x: f32, grip_y: f32, grip_w: f32, grip_h: f32,
+        panel_inset: f32, panel_radius: f32, grip_inset: f32, grip_radius: f32,
+        grip_opacity: f32, panel_visible: i32,
+    ) -> i32;
     fn codex_composition_blur_set_amount(
         context: *mut std::ffi::c_void,
         blur_amount: f32,
@@ -396,6 +404,31 @@ pub fn set_composition_blur_bounds(
             height as f32,
             clip_inset.max(0.0),
             clip_radius.max(0.0),
+        ) != 0
+    }
+}
+
+/// Update the desktop's two independent rounded Gaussian-blur regions in one
+/// DirectComposition transaction, while keeping the Explorer child mode intact.
+#[allow(clippy::too_many_arguments)]
+pub fn set_composition_blur_desktop_bounds(
+    context: usize,
+    canvas_width: i32, canvas_height: i32,
+    panel: RECT, grip: RECT,
+    panel_inset: f32, panel_radius: f32, grip_inset: f32, grip_radius: f32,
+    grip_opacity: u8, panel_visible: bool,
+) -> bool {
+    if context == 0 || canvas_width <= 0 || canvas_height <= 0 { return false; }
+    unsafe {
+        codex_composition_blur_set_desktop_bounds(
+            context as *mut std::ffi::c_void,
+            canvas_width as f32, canvas_height as f32,
+            panel.left as f32, panel.top as f32,
+            (panel.right - panel.left) as f32, (panel.bottom - panel.top) as f32,
+            grip.left as f32, grip.top as f32,
+            (grip.right - grip.left) as f32, (grip.bottom - grip.top) as f32,
+            panel_inset, panel_radius, grip_inset, grip_radius,
+            f32::from(grip_opacity.min(100)) / 100.0, i32::from(panel_visible),
         ) != 0
     }
 }
