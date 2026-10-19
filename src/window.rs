@@ -6824,10 +6824,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
-            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging)
-                || floating_pointer_still_over_free_grip(hwnd) {
-                // A capture-change/window-move leave is not a real pointer
-                // departure. Preserve the visible tab and the panel glow.
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
+                return LRESULT(0);
+            }
+            if floating_pointer_still_over_free_grip(hwnd) {
+                // Capture change or popup movement can dispatch a stale leave
+                // despite the cursor still being over the detached tab.
+                // Re-arm tracking so the *next real exit* still hides the glow.
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
                 return LRESULT(0);
             }
             {
