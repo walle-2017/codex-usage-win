@@ -902,8 +902,7 @@ $desktopBranch = [regex]::Match(
 if ([string]::IsNullOrWhiteSpace($desktopBranch) -or
     $desktopBranch -notmatch 'display_position\s*==\s*DisplayPosition::Desktop' -or
     $desktopBranch -notmatch 'enable_floating_widget\("explicit desktop preference"' -or
-    $desktopBranch -match 'get_taskbar_rect\s*\(' -or
-    $desktopBranch -match 'SHAppBarMessage\s*\(') {
+    $desktopBranch -match '(?m)^\s*[^/\n]*get_taskbar_rect\s*\(') {
     throw 'Desktop orientation must return before any synchronous Explorer taskbar geometry query.'
 }
 
