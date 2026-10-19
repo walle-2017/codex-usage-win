@@ -7047,7 +7047,7 @@ unsafe fn paint_preview_remaining_ring(
 fn preview_reset_tooltip_lines(minimal: bool) -> (String, String) {
     let preset = if minimal { AppearancePreset::Minimal } else { AppearancePreset::Default };
     let sample = crate::appearance::quota_reset_tooltip_text(
-        preset, "5H", "2026-10-19 20:16",
+        preset, "5H", "YYYY-MM-DD HH:mm",
     );
     let (date, time) = sample.rsplit_once(' ')
         .expect("sample full local timestamp contains a time separator");
@@ -8665,12 +8665,12 @@ mod ui_smoke_tests {
     #[test]
     fn preview_tooltip_templates_match_runtime_content_in_all_layouts() {
         for (minimal, expected) in [
-            (false, "2026-10-19 20:16"),
-            (true, "5H · 2026-10-19 20:16"),
+            (false, "YYYY-MM-DD HH:mm"),
+            (true, "5H · YYYY-MM-DD HH:mm"),
         ] {
             let (first_line, second_line) = preview_reset_tooltip_lines(minimal);
             assert_eq!(format!("{first_line} {second_line}"), expected);
-            assert_eq!(second_line, "20:16");
+            assert_eq!(second_line, "HH:mm");
             assert!(!first_line.ends_with(' '));
         }
         // Both orientations and both display positions call the exact same
