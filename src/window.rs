@@ -5461,6 +5461,18 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
     }
 }
 
+// GDI's GetTextExtentPoint32W can measure slightly narrower than the
+// DirectWrite glyph mask used for painting. Reserve asymmetric-safe
+// horizontal inset plus extra width so trailing digits are never clipped.
+const TOOLTIP_TEXT_INSET: i32 = 12;
+const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 20;
+
+fn tooltip_width_with_render_slack(measured_text_px: i32, logical: impl Fn(i32) -> i32) -> i32 {
+    (measured_text_px.max(0)
+        + logical(2 * TOOLTIP_TEXT_INSET + TOOLTIP_TEXT_MEASUREMENT_SLACK))
+        .max(logical(48))
+}
+
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
     let (mut background_color, border_color, text_color, tooltip_corner_radius) = {
         let state = lock_state();
@@ -5541,7 +5553,7 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
         }
     }
 
-    let text_margin = sc(8);
+    let text_margin = sc(TOOLTIP_TEXT_INSET);
     let text_rect = RECT {
         left: text_margin,
         top: 0,
@@ -5715,7 +5727,11 @@ fn hide_minimal_usage_tooltip() {
 unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     let hdc = GetDC(HWND::default());
     if hdc.0.is_null() {
-        return sc(48);
+        // Failed measurement must not fall back to a tiny fixed-width box.
+        return tooltip_width_with_render_slack(
+            sc(text.chars().count().try_into().unwrap_or(i32::MAX) * 12),
+            |v| sc(v),
+        );
     }
     let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
     let font = CreateFontW(
@@ -5741,7 +5757,7 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
     let _ = ReleaseDC(HWND::default(), hdc);
-    (size.cx + sc(16)).max(sc(48))
+    tooltip_width_with_render_slack(size.cx, |v| sc(v))
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
@@ -9896,6 +9912,17 @@ mod tests {
         assert!(!is_small_taskbar_height_at_dpi(35, 96));
         assert!(is_small_taskbar_height_at_dpi(51, 144));
         assert!(!is_small_taskbar_height_at_dpi(52, 144));
+    }
+
+    #[test]
+    fn tooltip_width_keeps_extra_directwrite_trailing_glyph_clearance() {
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v), 144);
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v * 2), 188);
+        assert_eq!(tooltip_width_with_render_slack(0, |v| v), 48);
+        assert_eq!(tooltip_width_with_render_slack(0, |v| v * 2), 96);
+        let allocated = tooltip_width_with_render_slack(124, |v| v);
+        let drawable = allocated - 2 * TOOLTIP_TEXT_INSET;
+        assert!(drawable >= 124 + TOOLTIP_TEXT_MEASUREMENT_SLACK);
     }
 
     #[test]
