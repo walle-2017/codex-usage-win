@@ -90,6 +90,12 @@ struct AppState {
     floating_reveal: u8,
     // Desktop-only: undocked grip is hidden until the pointer hovers the widget.
     floating_grip_alpha: u8,
+    floating_slide_from: u8,
+    floating_slide_target: u8,
+    floating_slide_started: Instant,
+    floating_fade_from: u8,
+    floating_fade_target: u8,
+    floating_fade_started: Instant,
     floating_grip_hover: bool,
     // A fresh edge drop must finish retracting and clear the pointer from its
     // visible tab before mouse hover is allowed to reveal the popup again.
@@ -2306,6 +2312,12 @@ pub fn run() {
                 floating_collapsed: false,
                 floating_reveal: 100,
                 floating_grip_alpha: 0,
+                floating_slide_from: 100,
+                floating_slide_target: 100,
+                floating_slide_started: Instant::now(),
+                floating_fade_from: 0,
+                floating_fade_target: 0,
+                floating_fade_started: Instant::now(),
                 floating_grip_hover: false,
                 floating_first_collapse_guard: false,
                 theme_mode: settings.theme_mode,
@@ -4376,10 +4388,11 @@ fn move_floating_widget(hwnd: HWND) {
         let (collapsed_x, collapsed_y) = floating_edge_position(
             bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
         );
-        let t = f64::from(reveal) / 100.0;
-        let ease = t * t * (3.0 - 2.0 * t);
+        // floating_reveal already contains the time-based eased progress.
+        // Applying a second smoothstep here would distort both curves.
+        let progress = f64::from(reveal) / 100.0;
         let interpolate = |a: i32, b: i32| {
-            a + (f64::from(b - a) * ease).round() as i32
+            a + (f64::from(b - a) * progress).round() as i32
         };
         (interpolate(collapsed_x, expanded_x), interpolate(collapsed_y, expanded_y))
     };
@@ -4442,15 +4455,44 @@ fn step_floating_animation(hwnd: HWND) {
             unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
             return;
         }
+        let now = Instant::now();
         let destination = if s.floating_collapsed { 0 } else { 100 };
         let old_reveal = s.floating_reveal;
         let old_alpha = s.floating_grip_alpha;
-        s.floating_reveal = animate_toward(s.floating_reveal, destination, FLOAT_ANIMATION_STEP);
+        if s.floating_slide_target != destination {
+            s.floating_slide_from = s.floating_reveal;
+            s.floating_slide_target = destination;
+            s.floating_slide_started = now;
+        }
+        let base_ms = if destination == 100 {
+            FLOAT_EXPAND_DURATION_MS
+        } else {
+            FLOAT_RETRACT_DURATION_MS
+        };
+        let slide_duration = animation_partial_duration(
+            base_ms, s.floating_slide_from, destination,
+        );
+        s.floating_reveal = eased_value_at(
+            s.floating_slide_from, destination,
+            now.duration_since(s.floating_slide_started), slide_duration,
+        );
         let grip_target = if s.floating_edge.is_some() || s.dragging || s.floating_grip_hover {
             100
         } else { 0 };
-        s.floating_grip_alpha = animate_toward(
-            s.floating_grip_alpha, grip_target, FLOAT_GRIP_FADE_STEP,
+        if s.floating_fade_target != grip_target {
+            s.floating_fade_from = s.floating_grip_alpha;
+            s.floating_fade_target = grip_target;
+            s.floating_fade_started = now;
+        }
+        let fade_ms = if grip_target == 100 {
+            FLOAT_GRIP_FADE_IN_MS
+        } else {
+            FLOAT_GRIP_FADE_OUT_MS
+        };
+        s.floating_grip_alpha = eased_value_at(
+            s.floating_fade_from, grip_target,
+            now.duration_since(s.floating_fade_started),
+            animation_partial_duration(fade_ms, s.floating_fade_from, grip_target),
         );
         (s.hwnd.to_hwnd(),
          s.floating_reveal == destination && s.floating_grip_alpha == grip_target,
@@ -4502,10 +4544,25 @@ fn floating_pointer_is_outside_grip(hwnd: HWND) -> bool {
     }, point.x, point.y)
 }
 
-fn animate_toward(value: u8, target: u8, step: u8) -> u8 {
-    if value < target { value.saturating_add(step).min(target) }
-    else if value > target { value.saturating_sub(step).max(target) }
-    else { value }
+fn animation_partial_duration(full_ms: u64, from: u8, to: u8) -> u64 {
+    let distance = i32::from(from).abs_diff(i32::from(to));
+    (full_ms * u64::from(distance) / 100).max(48)
+}
+
+/// Time-based cubic easing. Expansion settles quickly (ease-out); retraction
+/// starts and stops gently (ease-in-out), without overshooting screen bounds.
+fn eased_value_at(from: u8, to: u8, elapsed: Duration, duration_ms: u64) -> u8 {
+    if from == to { return to; }
+    let t = (elapsed.as_secs_f64() * 1000.0 / duration_ms.max(1) as f64).clamp(0.0, 1.0);
+    let eased = if to > from {
+        1.0 - (1.0 - t).powi(3)
+    } else if t < 0.5 {
+        4.0 * t.powi(3)
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    };
+    (f64::from(from) + (f64::from(to) - f64::from(from)) * eased)
+        .round().clamp(0.0, 100.0) as u8
 }
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
@@ -4584,8 +4641,13 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_collapsed = edge.is_some();
             s.floating_first_collapse_guard = edge.is_some();
             s.floating_reveal = 100;
+            s.floating_slide_from = 100;
+            s.floating_slide_target = 100;
+            s.floating_slide_started = Instant::now();
             s.floating_grip_hover = hovered;
             s.floating_grip_alpha = if edge.is_some() || hovered { 100 } else { 0 };
+            s.floating_fade_from = s.floating_grip_alpha;
+            s.floating_fade_target = s.floating_grip_alpha;
         }
     }
     // Publish the resized/reoriented tab and the final HWND coordinates in
@@ -6042,8 +6104,12 @@ unsafe extern "system" fn wnd_proc(
                         s.floating_first_collapse_guard = false;
                         s.floating_collapsed = false;
                         s.floating_reveal = 100;
+                        s.floating_slide_from = 100;
+                        s.floating_slide_target = 100;
                         s.floating_grip_hover = true;
                         s.floating_grip_alpha = 100;
+                        s.floating_fade_from = 100;
+                        s.floating_fade_target = 100;
                         true
                     } else { false }
                 } else { false }
