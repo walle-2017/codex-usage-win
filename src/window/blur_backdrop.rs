@@ -15,40 +15,72 @@ fn blur_backdrop_context() -> Option<usize> {
     *state
 }
 
-fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
-    let Some(context) = blur_backdrop_context() else {
-        return false;
-    };
+/// Snapshot the layout under STATE and release that mutex *before* calling
+/// WinRT/DirectComposition. A synchronous COM callback may re-enter the HWND
+/// procedure, so holding STATE across any native call can deadlock the UI when
+/// horizontal/vertical desktop layout is toggled repeatedly.
+#[derive(Clone, Copy)]
+enum BlurBoundsSnapshot {
+    Embedded { inset: f32, radius: f32 },
+    Desktop {
+        panel: RECT, grip: RECT, inset: f32, radius: f32,
+        grip_radius: f32, grip_alpha: u8, panel_visible: bool,
+    },
+}
+
+fn blur_bounds_snapshot() -> Option<BlurBoundsSnapshot> {
     let state = lock_state();
-    let Some(s) = state.as_ref() else { return false };
+    let s = state.as_ref()?;
     let outer_radius = sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius));
-    let outer_inset = sc(1).max(1);
-    let inset = (outer_inset + PANEL_BORDER_WIDTH_PX) as f32;
+    let inset = (sc(1).max(1) + PANEL_BORDER_WIDTH_PX) as f32;
     let radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32;
-    if s.floating_mode {
-        let (canvas_w, canvas_h, panel) = floating_canvas_geometry(
-            total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
-        );
-        let grip = floating_grip_rect(
-            canvas_w, canvas_h, s.floating_edge, sc(FLOAT_EDGE_PEEK),
-        );
-        let tab_radius = sc(i32::from(s.styles.active(s.is_dark).panel_corner_radius))
-            .min(((grip.right - grip.left).min(grip.bottom - grip.top) / 2).max(0));
-        let grip_alpha = if s.floating_edge.is_some() || s.dragging {
+    if !s.floating_mode {
+        return Some(BlurBoundsSnapshot::Embedded { inset, radius });
+    }
+    let (canvas_w, canvas_h, panel) = floating_canvas_geometry(
+        total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
+    );
+    let grip = floating_grip_rect(
+        canvas_w, canvas_h, s.floating_edge, sc(FLOAT_EDGE_PEEK),
+    );
+    let grip_radius = outer_radius.min(
+        ((grip.right - grip.left).min(grip.bottom - grip.top) / 2).max(0),
+    );
+    Some(BlurBoundsSnapshot::Desktop {
+        panel,
+        grip,
+        inset,
+        radius,
+        grip_radius: (grip_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32,
+        grip_alpha: if s.floating_edge.is_some() || s.dragging {
             100
         } else {
             s.floating_grip_alpha
-        };
-        return native_interop::set_composition_blur_desktop_bounds(
-            context, width, height, panel, grip,
-            inset, radius,
-            inset, (tab_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32,
-            grip_alpha, !(s.floating_collapsed && s.floating_reveal == 0),
-        );
+        },
+        panel_visible: !(s.floating_collapsed && s.floating_reveal == 0),
+    })
+}
+
+fn sync_composition_blur_bounds(width: i32, height: i32) -> bool {
+    let Some(context) = blur_backdrop_context() else { return false };
+    let Some(snapshot) = blur_bounds_snapshot() else { return false };
+    // Do not hold STATE or any backdrop mutex while calling the native COM
+    // helper: resize and layout changes must remain re-entrancy safe.
+    match snapshot {
+        BlurBoundsSnapshot::Embedded { inset, radius } => {
+            native_interop::set_composition_blur_bounds(
+                context, width, height, inset, radius,
+            )
+        }
+        BlurBoundsSnapshot::Desktop {
+            panel, grip, inset, radius, grip_radius, grip_alpha, panel_visible,
+        } => {
+            native_interop::set_composition_blur_desktop_bounds(
+                context, width, height, panel, grip,
+                inset, radius, inset, grip_radius, grip_alpha, panel_visible,
+            )
+        }
     }
-    native_interop::set_composition_blur_bounds(
-        context, width, height, inset, radius,
-    )
 }
 
 pub(super) fn destroy_blur_backdrop() {
