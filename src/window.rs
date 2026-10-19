@@ -5686,16 +5686,11 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
         MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
-    if effective_appearance_preset(s) == AppearancePreset::Minimal {
-        let reset = format_precise_reset_time(section.resets_at)
-            .unwrap_or_else(|| "--".to_string());
-        Some(format!("{label} · {reset}"))
-    } else {
-        // Default view: hovering the displayed reset timestamp reveals only
-        // that quota's full local reset date and time.
-        Some(format_precise_reset_time(section.resets_at)
-            .unwrap_or_else(|| "--".to_string()))
-    }
+    let reset = format_precise_reset_time(section.resets_at)
+        .unwrap_or_else(|| "--".to_string());
+    Some(appearance::quota_reset_tooltip_text(
+        effective_appearance_preset(s), label, &reset,
+    ))
 }
 
 fn hide_minimal_usage_tooltip() {
