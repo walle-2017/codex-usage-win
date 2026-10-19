@@ -891,6 +891,22 @@ if ($styleWindow -notmatch 'SETTINGS_EDIT_SUBCLASS_ID' -or
     throw 'Settings must support wheel adjustment, compact JSON-error shake, 5H/7D labels, and Chinese/English-only language selection.'
 }
 
+# Explicit desktop orientation must not make a synchronous Explorer shell
+# query while processing the style-window message on the widget UI thread.
+# SHAppBarMessage(ABM_GETTASKBARPOS) can synchronously wait for Explorer;
+# Explorer can simultaneously be waiting for one of our parked taskbar-child
+# HWNDs, freezing both the desktop widget and Windows taskbar.
+$desktopBranch = [regex]::Match(
+    $window, '(?s)fn\s+position_at_taskbar\(\)\s*\{(.*?)\n    let\s*\('
+).Groups[1].Value
+if ([string]::IsNullOrWhiteSpace($desktopBranch) -or
+    $desktopBranch -notmatch 'display_position\s*==\s*DisplayPosition::Desktop' -or
+    $desktopBranch -notmatch 'enable_floating_widget\("explicit desktop preference"' -or
+    $desktopBranch -match 'get_taskbar_rect\s*\(' -or
+    $desktopBranch -match 'SHAppBarMessage\s*\(') {
+    throw 'Desktop orientation must return before any synchronous Explorer taskbar geometry query.'
+}
+
 # Drag hover belongs exclusively to the six-dot grip, not to a thin
 # highlighted line along the vertical panel edge.
 if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*top:\s*sc\(2\)' -or
