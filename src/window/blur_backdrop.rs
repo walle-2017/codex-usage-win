@@ -283,7 +283,10 @@ pub(super) fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND
         // Like the tooltip popups, desktop glass must be owned by Explorer's
         // taskbar or clicking it can raise the taskbar over the TOPMOST glass.
         let desktop_owner = if desktop {
-            lock_state().as_ref().and_then(|s| s.taskbar_hwnd)
+            // Use the owner already selected from the desktop popup's actual
+            // monitor; the configured embedded taskbar may be on another screen.
+            let foreground = lock_state().as_ref().map(|s| s.hwnd.to_hwnd());
+            foreground.and_then(|hwnd| GetWindow(hwnd, GW_OWNER).ok())
                 .filter(|owner| native_interop::is_taskbar_window(*owner))
         } else {
             None
@@ -387,11 +390,11 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
             }
         }
     } else if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
-        let desktop_owner = lock_state().as_ref()
-            .and_then(|s| s.taskbar_hwnd)
+        let desktop_owner = unsafe { GetWindow(foreground_hwnd, GW_OWNER).ok() }
             .filter(|owner| native_interop::is_taskbar_window(*owner));
         unsafe {
-            // Both parts of the desktop pair must share the taskbar owner.
+            // Both parts of the desktop pair must share the actual monitor's
+            // taskbar owner, not the taskbar configured for embedded mode.
             // That ownership keeps the panel above Explorer on taskbar clicks,
             // even when both windows already have WS_EX_TOPMOST.
             if let Some(owner) = desktop_owner {
