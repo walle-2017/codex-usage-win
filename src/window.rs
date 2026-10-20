@@ -4814,27 +4814,67 @@ fn floating_edge_position(
     }
 }
 
-/// A desktop popup must stay above Explorer even when the taskbar is clicked.
- /// The owner relation keeps this ordering stable without repeated promotions
- /// that would flicker while dragging or changing the rounded glow.
- fn sync_desktop_taskbar_owner(hwnd: HWND) {
-     let taskbar_owner = {
-         let state = lock_state();
-         state.as_ref().filter(|s| s.floating_mode).and_then(|s| s.taskbar_hwnd)
-     };
-     let Some(owner) = taskbar_owner.filter(|owner| native_interop::is_taskbar_window(*owner)) else {
-         // Explorer may be restarting; keep the independent TOPMOST fallback.
-         return;
-     };
-     unsafe {
-         if GetWindow(hwnd, GW_OWNER).ok() != Some(owner) {
-             native_interop::set_popup_owner(hwnd, Some(owner));
-             diagnose::log(format!("desktop popup owner synchronized taskbar={:?}", owner));
-         }
-     }
- }
- 
- fn move_floating_widget(hwnd: HWND) {
+/// Prefer the taskbar that physically overlaps the desktop popup. For a
+/// non-overlapping popup, the taskbar on its current monitor is the owner.
+/// This is separate from the configured taskbar used for embedded mode.
+fn desktop_taskbar_overlap_area(window: RECT, taskbar: RECT) -> i64 {
+    let width = (window.right.min(taskbar.right) - window.left.max(taskbar.left)).max(0);
+    let height = (window.bottom.min(taskbar.bottom) - window.top.max(taskbar.top)).max(0);
+    i64::from(width) * i64::from(height)
+}
+
+fn desktop_taskbar_overlap_index(window: RECT, taskbars: &[RECT]) -> Option<usize> {
+    taskbars.iter().enumerate()
+        .map(|(index, rect)| (index, desktop_taskbar_overlap_area(window, *rect)))
+        .filter(|(_, area)| *area > 0)
+        .max_by_key(|(_, area)| *area)
+        .map(|(index, _)| index)
+}
+
+fn desktop_taskbar_owner_for_rect(window: RECT) -> Option<HWND> {
+    let taskbars = native_interop::find_taskbars();
+    let bounds: Vec<RECT> = taskbars.iter().map(|bar| bar.rect).collect();
+    if let Some(index) = desktop_taskbar_overlap_index(window, &bounds) {
+        return Some(taskbars[index].hwnd);
+    }
+    let center = POINT {
+        x: window.left.saturating_add(window.right.saturating_sub(window.left) / 2),
+        y: window.top.saturating_add(window.bottom.saturating_sub(window.top) / 2),
+    };
+    // If no taskbar intersects, still own the popup to the taskbar on its
+    // monitor. Do not silently substitute the configured primary taskbar.
+    let monitor = unsafe { MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST) };
+    taskbars.into_iter().find(|bar|
+        unsafe { MonitorFromWindow(bar.hwnd, MONITOR_DEFAULTTONEAREST) == monitor }
+    ).map(|bar| bar.hwnd)
+}
+
+/// The owner relation only protects a popup against its ACTUAL taskbar.
+/// A window on a secondary monitor must not remain owned by Shell_TrayWnd
+/// on the primary monitor; doing so lets Shell_SecondaryTrayWnd cover it.
+fn sync_desktop_taskbar_owner(hwnd: HWND) {
+    if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+        return;
+    }
+    let Some(window_rect) = native_interop::get_window_rect_safe(hwnd) else { return };
+    let Some(owner) = desktop_taskbar_owner_for_rect(window_rect) else {
+        // Explorer may be restarting; preserve the independent TOPMOST popup.
+        return;
+    };
+    unsafe {
+        if GetWindow(hwnd, GW_OWNER).ok() != Some(owner) {
+            native_interop::set_popup_owner(hwnd, Some(owner));
+            let actual = GetWindow(hwnd, GW_OWNER).ok();
+            diagnose::log(format!(
+                "desktop popup owner changed expected={:?} actual={:?} rect=({}, {}, {}, {})",
+                owner, actual, window_rect.left, window_rect.top,
+                window_rect.right, window_rect.bottom
+            ));
+        }
+    }
+}
+
+fn move_floating_widget(hwnd: HWND) {
     let (x, y, edge, reveal, width, height, dragging) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
@@ -5165,6 +5205,9 @@ fn finish_floating_drag(hwnd: HWND) {
     // Publish the resized/reoriented tab and the final HWND coordinates in
     // one layered-window update. No intermediate frame uses the old bitmap.
     render_layered_at(Some(POINT { x, y }));
+    // The popup can cross monitors while captured. Bind it to the taskbar
+    // at the completed position, not the taskbar selected for embedded mode.
+    sync_desktop_taskbar_owner(hwnd);
     // Explorer can reorder its taskbar while a desktop grip is being dragged.
     // Re-raise the composition pair once on release, never per drag frame.
     if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
@@ -5211,8 +5254,8 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
                 if vertical { "Vertical" } else { "Horizontal" },
             ));
         }
-        sync_desktop_taskbar_owner(hwnd);
         move_floating_widget(hwnd);
+        sync_desktop_taskbar_owner(hwnd);
         if reason == "explicit desktop preference" {
             diagnose::log_lazy(|| "desktop orientation: popup moved; painting layered frame".to_string());
         }
@@ -5319,8 +5362,8 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     if let Some(backdrop) = blur_backdrop_hwnd() {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
-    sync_desktop_taskbar_owner(hwnd);
     move_floating_widget(hwnd);
+    sync_desktop_taskbar_owner(hwnd);
     style_window::set_preview_orientation(vertical);
     render_layered();
     save_state_settings();
@@ -10982,6 +11025,32 @@ mod tests {
         assert_eq!(legacy_left_offset_from_max(1000, 0), 1000);
         assert_eq!(legacy_left_offset_from_max(1000, 321), 679);
         assert_eq!(legacy_left_offset_from_max(1000, 1200), 0);
+    }
+
+    #[test]
+    fn desktop_popup_uses_overlapping_secondary_taskbar_not_configured_primary() {
+        // Physical HWND rectangles captured in V24.8 field diagnostics.
+        let widget = RECT { left: 2527, top: 851, right: 2762, bottom: 933 };
+        let primary = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
+        let secondary = RECT { left: 2048, top: 912, right: 3755, bottom: 960 };
+        assert_eq!(desktop_taskbar_overlap_area(widget, primary), 0);
+        assert_eq!(desktop_taskbar_overlap_area(widget, secondary), 235 * 21);
+        assert_eq!(desktop_taskbar_overlap_index(widget, &[primary, secondary]), Some(1));
+    }
+
+    #[test]
+    fn desktop_popup_no_intersection_uses_monitor_fallback() {
+        let widget = RECT { left: 700, top: 700, right: 900, bottom: 800 };
+        let bottom_bar = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
+        assert_eq!(desktop_taskbar_overlap_index(widget, &[bottom_bar]), None);
+    }
+
+    #[test]
+    fn desktop_popup_uses_greatest_overlap_at_monitor_seam() {
+        let widget = RECT { left: 2020, top: 910, right: 2070, bottom: 935 };
+        let primary = RECT { left: 0, top: 912, right: 2048, bottom: 960 };
+        let secondary = RECT { left: 2048, top: 912, right: 3755, bottom: 960 };
+        assert_eq!(desktop_taskbar_overlap_index(widget, &[primary, secondary]), Some(0));
     }
 
     #[test]
