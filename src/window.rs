@@ -2867,19 +2867,6 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
                 );
                 canvas.fill(0);
-                let tab = floating_grip_rect(
-                    canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
-                );
-                if hovered && !hidden {
-                    // Compose external-only light BEHIND both solids. Neither
-                    // quota pixels nor detached-grip pixels can be tinted.
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, body, style.panel_corner_radius, accent,
-                    );
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
-                    );
-                }
                 if !hidden {
                     for y in 0..height {
                         let dst = ((y + body.top) * canvas_w + body.left) as usize;
@@ -2892,6 +2879,17 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
                 );
                 if hovered && !hidden {
+                    // Separate visual rings: one around the actual desktop
+                    // body and one around its independently positioned tab.
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, body, style.panel_corner_radius, accent,
+                    );
+                    let tab = floating_grip_rect(
+                        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+                    );
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
+                    );
                     // The glow gutter itself is not draggable. Keep an almost
                     // invisible hit-test probe across the tab's surrounding
                     // strip so WM_NCHITTEST can clear stale hover as the
@@ -2975,10 +2973,8 @@ fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
 /// Desktop canvases reserve transparent pixels beyond the visible panel
 /// and detached grip; physical monitor edges necessarily clip external light.
 fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
-    // A hover effect must never illuminate the widget's interior. The
-    // positive side is the external signed distance from the panel edge.
-    if distance_from_edge <= 0.0 { return 0; }
-    let distance = distance_from_edge;
+    let distance = distance_from_edge.abs();
+    // Soft halo falls off on either side of the visible panel perimeter.
     let diffuse = 120.0 * (-(distance / 4.6).powi(2) * 0.5).exp();
     // Retain the antialiased hairline while making the outer halo dominant.
     let hairline = 65.0 * (1.0 - distance / 0.7).max(0.0);
@@ -3019,9 +3015,8 @@ fn draw_drag_hover_outline(
             ..bounds.right.saturating_add(extent).min(canvas_w) {
             let local_x = x - bounds.left;
             let local_y = y - bounds.top;
-            if point_in_rect(bounds, x, y) { continue; }
             let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
-            if distance <= 0.0 || distance > extent as f32 { continue; }
+            if distance.abs() > extent as f32 { continue; }
             let coverage = drag_hover_glow_coverage(distance);
             if coverage == 0 { continue; }
             let index = (y * canvas_w + x) as usize;
