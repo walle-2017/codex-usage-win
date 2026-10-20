@@ -2953,8 +2953,8 @@ fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
 }
 
 /// A narrow highlight stroke sits on a broader Gaussian-like falloff.
-/// Free-floating desktop canvases reserve transparent pixels beyond the body
-/// and tab; attached taskbar and docked edge geometry remain unchanged.
+/// Desktop canvases reserve transparent pixels beyond the visible panel
+/// and detached grip; physical monitor edges necessarily clip external light.
 fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
     let distance = distance_from_edge.abs();
     // Soft halo falls off on either side of the visible panel perimeter.
@@ -2977,8 +2977,8 @@ fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radi
 }
 
 /// Feather hover feedback around the actual body or detached grip perimeter.
-/// The free-floating desktop canvas permits 12 logical pixels of outer glow,
-/// while docked and taskbar modes keep their previous hit-test geometry.
+/// Desktop canvases provide up to 12 logical pixels of outer glow. Visual-only
+/// transparent margins never extend the component's interactive hit targets.
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
@@ -4398,8 +4398,10 @@ fn tray_reposition_is_suppressed() -> bool {
 const FLOAT_EDGE_SNAP: i32 = 24;
 const FLOAT_EDGE_PEEK: i32 = 16;
 const FLOAT_GRIP_LENGTH: i32 = 36;
-// Desktop free-floating mode reserves genuinely transparent space for a
-// wider hover glow. Docked edge peeks preserve their V24 geometry unchanged.
+// Preserve the component's content size. Transparent canvas gutters allow
+// genuine external glow on free desktops and the three inward-facing sides
+// of a docked panel. The side resting on the physical screen boundary stays
+// flush, and collapsed peeks remain pinned to their original monitor edge.
 const FLOAT_FREE_GLOW_MARGIN: i32 = 12;
 const FLOAT_EXPAND_DURATION_MS: u64 = 220;
 const FLOAT_RETRACT_DURATION_MS: u64 = 240;
@@ -4415,20 +4417,24 @@ fn floating_grip_rect(width: i32, height: i32, edge: Option<FloatingEdge>, peek:
     let grip_height = sc(FLOAT_GRIP_LENGTH).min(height).max(1);
     match edge {
         Some(FloatingEdge::Left) => RECT {
-            left: width - peek, right: width,
+            left: width - sc(FLOAT_FREE_GLOW_MARGIN) - peek,
+            right: width - sc(FLOAT_FREE_GLOW_MARGIN),
             top: (height - grip_height) / 2, bottom: (height + grip_height) / 2,
         },
         Some(FloatingEdge::Right) => RECT {
-            left: 0, right: peek,
+            left: sc(FLOAT_FREE_GLOW_MARGIN),
+            right: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
             top: (height - grip_height) / 2, bottom: (height + grip_height) / 2,
         },
         Some(FloatingEdge::Top) => RECT {
             left: (width - grip_width) / 2, right: (width + grip_width) / 2,
-            top: height - peek, bottom: height,
+            top: height - sc(FLOAT_FREE_GLOW_MARGIN) - peek,
+            bottom: height - sc(FLOAT_FREE_GLOW_MARGIN),
         },
         Some(FloatingEdge::Bottom) => RECT {
             left: (width - grip_width) / 2, right: (width + grip_width) / 2,
-            top: 0, bottom: peek,
+            top: sc(FLOAT_FREE_GLOW_MARGIN),
+            bottom: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
         },
         None => RECT {
             left: (width - grip_width) / 2, right: (width + grip_width) / 2,
@@ -4485,22 +4491,28 @@ fn floating_canvas_geometry(
 ) -> (i32, i32, RECT) {
     let tab = sc(FLOAT_EDGE_PEEK);
     match edge {
-        Some(FloatingEdge::Left) => (
-            body_width + tab, body_height,
-            RECT { left: 0, top: 0, right: body_width, bottom: body_height },
-        ),
-        Some(FloatingEdge::Right) => (
-            body_width + tab, body_height,
-            RECT { left: tab, top: 0, right: body_width + tab, bottom: body_height },
-        ),
-        Some(FloatingEdge::Top) => (
-            body_width, body_height + tab,
-            RECT { left: 0, top: 0, right: body_width, bottom: body_height },
-        ),
-        Some(FloatingEdge::Bottom) => (
-            body_width, body_height + tab,
-            RECT { left: 0, top: tab, right: body_width, bottom: body_height + tab },
-        ),
+        Some(FloatingEdge::Left) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + tab + glow, body_height + 2 * glow,
+                RECT { left: 0, top: glow, right: body_width, bottom: glow + body_height })
+        },
+        Some(FloatingEdge::Right) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + tab + glow, body_height + 2 * glow,
+                RECT { left: tab + glow, top: glow,
+                    right: body_width + tab + glow, bottom: glow + body_height })
+        },
+        Some(FloatingEdge::Top) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + 2 * glow, body_height + tab + glow,
+                RECT { left: glow, top: 0, right: glow + body_width, bottom: body_height })
+        },
+        Some(FloatingEdge::Bottom) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + 2 * glow, body_height + tab + glow,
+                RECT { left: glow, top: tab + glow,
+                    right: glow + body_width, bottom: tab + glow + body_height })
+        },
         None => {
             let glow = sc(FLOAT_FREE_GLOW_MARGIN);
             (
@@ -4665,18 +4677,19 @@ fn floating_edge_position(
     edge: Option<FloatingEdge>, collapsed: bool, peek: i32,
 ) -> (i32, i32) {
     let (x, y) = floating_clamp_position(bounds, width, height, x, y);
+    let grip = floating_grip_rect(width, height, edge, peek);
     match edge {
         Some(FloatingEdge::Left) => (
-            if collapsed { bounds.left - width + peek } else { bounds.left }, y,
+            if collapsed { bounds.left - grip.left } else { bounds.left }, y,
         ),
         Some(FloatingEdge::Right) => (
-            if collapsed { bounds.right - peek } else { bounds.right - width }, y,
+            if collapsed { bounds.right - grip.right } else { bounds.right - width }, y,
         ),
         Some(FloatingEdge::Top) => (
-            x, if collapsed { bounds.top - height + peek } else { bounds.top },
+            x, if collapsed { bounds.top - grip.top } else { bounds.top },
         ),
         Some(FloatingEdge::Bottom) => (
-            x, if collapsed { bounds.bottom - peek } else { bounds.bottom - height },
+            x, if collapsed { bounds.bottom - grip.bottom } else { bounds.bottom - height },
         ),
         None => (x, y),
     }
@@ -6344,18 +6357,16 @@ unsafe extern "system" fn wnd_proc(
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     match msg {
-        WM_NCHITTEST if lock_state().as_ref().is_some_and(|s|
-            s.floating_mode && s.floating_edge.is_none()
-        ) => {
-            // V24.2: outer glow pixels are visual-only, not clickable glass.
-            // The body and detached grip keep their original hit targets.
+        WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.floating_mode) => {
+            // V24.4: both docked and free desktop canvases have a transparent
+            // halo gutter; only the actual panel and drag tab accept clicks.
             let (body, grip) = {
                 let state = lock_state();
-                let s = state.as_ref().expect("free desktop mode checked above");
+                let s = state.as_ref().expect("desktop mode checked above");
                 let (w, h, body) = floating_canvas_geometry(
-                    total_widget_width_for_state(s), widget_height_for_state(s), None,
+                    total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
                 );
-                (body, floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK)))
+                (body, floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK)))
             };
             let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
