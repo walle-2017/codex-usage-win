@@ -9925,7 +9925,7 @@ mod tests {
     }
 
     #[test]
-    fn v24_7_glow_only_outside_panel_and_grip_even_at_adjacent_edges() {
+    fn v24_7_rounded_glow_feathers_inside_and_outside_the_widget() {
         let style = ThemeStyle::preset(false, ThemePreset::Ocean);
         let accent = drag_hover_outline_color(&style);
         for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
@@ -9935,14 +9935,6 @@ mod tests {
             );
             let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
             let mut pixels = vec![0u32; (w * h) as usize];
-            draw_drag_hover_outline(
-                &mut pixels, w, h, body, style.panel_corner_radius, accent,
-            );
-            draw_drag_hover_outline(
-                &mut pixels, w, h, tab, style.panel_corner_radius, accent,
-            );
-            // Same layering as the real renderer: paint solids over their
-            // external halos. Quota ink and the tab remain entirely untouched.
             for y in body.top..body.bottom {
                 for x in body.left..body.right {
                     pixels[(y * w + x) as usize] = 0xFF223344;
@@ -9951,26 +9943,42 @@ mod tests {
             render_floating_handle_bitmap(
                 &mut pixels, w, h, edge, true, &style, 100,
             );
-            assert_eq!(pixels[(((body.top + body.bottom) / 2) * w
-                + (body.left + body.right) / 2) as usize], 0xFF223344);
+            let base = pixels.clone();
+            // Use V24.6 layering: light is composited over both solids.
+            // The softened inner edge is important for rounded corners.
+            draw_drag_hover_outline(
+                &mut pixels, w, h, body, style.panel_corner_radius, accent,
+            );
+            draw_drag_hover_outline(
+                &mut pixels, w, h, tab, style.panel_corner_radius, accent,
+            );
+            let center_y = (body.top + body.bottom) / 2;
+            let center_x = (body.left + body.right) / 2;
+            assert_eq!(
+                pixels[(center_y * w + center_x) as usize],
+                base[(center_y * w + center_x) as usize],
+                "quota panel center must remain unchanged",
+            );
+            let inner_x = body.left + sc(2);
+            assert_ne!(
+                pixels[(center_y * w + inner_x) as usize],
+                base[(center_y * w + inner_x) as usize],
+                "the inner rounded rim must regain its soft illumination",
+            );
+            let outer = match edge {
+                Some(FloatingEdge::Left) => (body.left - 2, center_y),
+                Some(FloatingEdge::Right) => (body.right + 2, center_y),
+                Some(FloatingEdge::Top) => (center_x, body.top - 2),
+                Some(FloatingEdge::Bottom) => (center_x, body.bottom + 2),
+                None => (body.left - 2, center_y),
+            };
+            let alpha = pixels[(outer.1 * w + outer.0) as usize] >> 24;
+            assert!(alpha > 0 && alpha < 255,
+                "the outer halo remains a translucent fade");
             let tab_center = ((tab.top + tab.bottom) / 2 * w
                 + (tab.left + tab.right) / 2) as usize;
-            let mut unlit = vec![0u32; (w * h) as usize];
-            render_floating_handle_bitmap(
-                &mut unlit, w, h, edge, true, &style, 100,
-            );
-            assert_eq!(pixels[tab_center], unlit[tab_center],
-                "the six-dot draggable tab may not be tinted by its halo");
-            // The outer halo is translucent, not another opaque border.
-            let outer = match edge {
-                Some(FloatingEdge::Left) => (body.left - 2, (body.top + body.bottom) / 2),
-                Some(FloatingEdge::Right) => (body.right + 2, (body.top + body.bottom) / 2),
-                Some(FloatingEdge::Top) => ((body.left + body.right) / 2, body.top - 2),
-                Some(FloatingEdge::Bottom) => ((body.left + body.right) / 2, body.bottom + 2),
-                None => (body.left - 2, (body.top + body.bottom) / 2),
-            };
-            let halo = pixels[(outer.1 * w + outer.0) as usize] >> 24;
-            assert!(halo > 0 && halo < 255);
+            assert_ne!(pixels[tab_center], 0,
+                "the separate drag tab remains visible beneath its glow");
         }
     }
 
