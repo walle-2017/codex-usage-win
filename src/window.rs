@@ -242,6 +242,7 @@ const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
 const WM_APP_FOCUS_EXISTING_SETTINGS: u32 = native_interop::WM_APP + 140;
+const WM_APP_DESKTOP_HOVER_EXIT: u32 = native_interop::WM_APP + 141;
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 
 /// How often the watchdog thread polls for an explorer.exe restart (which
@@ -2880,6 +2881,13 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     draw_drag_hover_outline(
                         canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
                     );
+                    // The glow gutter itself is not draggable. Keep an almost
+                    // invisible hit-test probe across the tab's surrounding
+                    // strip so WM_NCHITTEST can clear stale hover as the
+                    // pointer crosses into fully transparent pixels.
+                    paint_floating_hover_hit_probe(
+                        canvas, canvas_w, canvas_h, body, tab, edge,
+                    );
                 }
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
@@ -4442,6 +4450,57 @@ fn floating_grip_rect(width: i32, height: i32, edge: Option<FloatingEdge>, peek:
             bottom: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
         },
     }
+}
+
+/// During hover, fully transparent layered pixels bypass HWND hit-testing.
+/// A near-transparent (alpha=1) probe strip across the panel/tab gap allows
+/// WM_NCHITTEST to observe lateral cursor movement away from the real tab.
+/// Returning HTTRANSPARENT from that strip still forbids dragging there.
+fn floating_hover_probe_rect(body: RECT, grip: RECT, edge: Option<FloatingEdge>) -> RECT {
+    match edge {
+        Some(FloatingEdge::Left) => RECT {
+            left: body.right, right: grip.right,
+            top: body.top, bottom: body.bottom,
+        },
+        Some(FloatingEdge::Right) => RECT {
+            left: grip.left, right: body.left,
+            top: body.top, bottom: body.bottom,
+        },
+        Some(FloatingEdge::Top) => RECT {
+            left: body.left, right: body.right,
+            top: body.bottom, bottom: grip.bottom,
+        },
+        Some(FloatingEdge::Bottom) | None => RECT {
+            left: body.left, right: body.right,
+            top: grip.top, bottom: body.top,
+        },
+    }
+}
+
+fn paint_floating_hover_hit_probe(
+    pixels: &mut [u32], width: i32, height: i32,
+    body: RECT, grip: RECT, edge: Option<FloatingEdge>,
+) {
+    if width <= 0 || height <= 0 { return; }
+    let probe = floating_hover_probe_rect(body, grip, edge);
+    for y in probe.top.max(0)..probe.bottom.min(height) {
+        for x in probe.left.max(0)..probe.right.min(width) {
+            if point_in_rect(body, x, y) || point_in_rect(grip, x, y) { continue; }
+            let index = (y * width + x) as usize;
+            if pixels[index] >> 24 == 0 {
+                // Premultiplied black at 1/255 opacity is not visually
+                // distinguishable from the surrounding desktop.
+                pixels[index] = 0x01000000;
+            }
+        }
+    }
+}
+
+/// One source of truth for where desktop users can start a drag or keep its
+/// glow active, independent of the much larger layered HWND and its halo.
+fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
+    if point_in_rect(body, x, y) || point_in_rect(grip, x, y) { 1 }
+    else { -1 } // HTCLIENT or HTTRANSPARENT
 }
 
 fn floating_drag_handle_hit(
@@ -6360,13 +6419,16 @@ unsafe extern "system" fn wnd_proc(
         WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.floating_mode) => {
             // V24.4: both docked and free desktop canvases have a transparent
             // halo gutter; only the actual panel and drag tab accept clicks.
-            let (body, grip) = {
+            let (body, grip, hover_active) = {
                 let state = lock_state();
                 let s = state.as_ref().expect("desktop mode checked above");
                 let (w, h, body) = floating_canvas_geometry(
                     total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
                 );
-                (body, floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK)))
+                (
+                    body, floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK)),
+                    s.drag_handle_hovered && !s.dragging,
+                )
             };
             let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -6375,12 +6437,54 @@ unsafe extern "system" fn wnd_proc(
             };
             let client_x = screen_x - rect.left;
             let client_y = screen_y - rect.top;
-            if point_in_rect(body, client_x, client_y)
-                || point_in_rect(grip, client_x, client_y) {
-                LRESULT(1) // HTCLIENT
-            } else {
-                LRESULT(-1) // HTTRANSPARENT: ignore the halo-only perimeter
+            let hit_code = floating_drag_tab_hit_code(body, grip, client_x, client_y);
+            if hit_code == -1 && hover_active {
+                // Layered transparent pixels do not reliably generate
+                // WM_MOUSEMOVE/WM_MOUSELEAVE. Defer repaint until AFTER the
+                // native hit test, avoiding reentrant UpdateLayeredWindow.
+                let _ = PostMessageW(
+                    hwnd, WM_APP_DESKTOP_HOVER_EXIT, WPARAM(0), LPARAM(0),
+                );
             }
+            LRESULT(hit_code as isize)
+        }
+        WM_APP_DESKTOP_HOVER_EXIT => {
+            // NCHITTEST can be delivered while layered compositing is still
+            // active, so only the posted message may mutate/repaint the hover.
+            // Recheck the live pointer: a rapid return to the grip or mouse
+            // capture during dragging must not cause another release flicker.
+            let valid = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                    && s.drag_handle_hovered && !s.dragging
+            );
+            if valid {
+                let hovered = {
+                    let geometry = {
+                        let state = lock_state();
+                        state.as_ref().map(|s| {
+                            let (w, h) = floating_canvas_size_for_state(s);
+                            (w, h, s.floating_edge)
+                        })
+                    };
+                    geometry.and_then(|(w, h, edge)| {
+                        let rect = native_interop::get_window_rect_safe(hwnd)?;
+                        let mut cursor = POINT::default();
+                        if GetCursorPos(&mut cursor).is_err() { return None; }
+                        Some(floating_drag_grip_contains_screen_point(
+                            rect.left, rect.top, w, h, edge, cursor,
+                        ))
+                    })
+                };
+                if hovered == Some(false) {
+                    if let Some(s) = lock_state().as_mut() {
+                        if s.floating_mode && s.hwnd.to_hwnd() == hwnd && !s.dragging {
+                            s.drag_handle_hovered = false;
+                        }
+                    }
+                    render_layered();
+                }
+            }
+            LRESULT(0)
         }
         WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) => {
             // Quota content remains a client area for tooltips, while only the
