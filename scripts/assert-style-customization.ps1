@@ -969,7 +969,7 @@ if ($windowProduction -notmatch 'fn floating_hover_probe_rect\(' -or
     $windowProduction -notmatch 'WM_APP_DESKTOP_HOVER_EXIT' -or
     $windowProduction -notmatch 'PostMessageW\(' -or
     $windowProduction -notmatch 'if hovered == Some\(false\)' -or
-    $windowProduction -notmatch 'v24_6_hit_probe_has_no_extra_drag_targets_in_any_orientation') {
+    $window -notmatch 'v24_6_hit_probe_has_no_extra_drag_targets_in_any_orientation') {
     throw 'V24.6 must watch the real draggable rectangle via a transparent hit-test probe and deferred hover cleanup.'
 }
 
