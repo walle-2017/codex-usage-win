@@ -6700,10 +6700,10 @@ unsafe extern "system" fn wnd_proc(
                 if drag_hover_changed {
                     render_layered();
                 }
-                if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                if drag_hover_changed && lock_state().as_ref().is_some_and(|s| s.floating_mode) {
                     // WM_MOUSELEAVE tracks the whole window, including its
-                    // transparent halo. A timer is needed only when the actual
-                    // drag tab is highlighted.
+                    // transparent halo. Arm once on hover state change rather
+                    // than postponing the 50ms check on each mouse movement.
                     set_floating_hover_check_timer(hwnd, drag_hovered);
                 }
                 let mut tme = TRACKMOUSEEVENT {
@@ -9654,6 +9654,48 @@ mod tests {
         assert_eq!((w, h, dock.left, dock.top),
             (240 + glow * 2, 42 + sc(FLOAT_EDGE_PEEK) + glow,
              glow, sc(FLOAT_EDGE_PEEK) + glow));
+    }
+
+    #[test]
+    fn v24_5_hover_exits_when_pointer_enters_undraggable_glow_gutter() {
+        // The tab and halo share one layered window. HTTRANSPARENT pixels
+        // may not deliver WM_MOUSELEAVE or WM_MOUSEMOVE, so our timed screen
+        // pointer check must use the actual drag tab's hit rectangle.
+        let origin = POINT { x: -1650, y: 225 };
+        for (body_w, body_h) in [(240, 42), (48, 168)] {
+            for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+                let (width, height, body) = floating_canvas_geometry(body_w, body_h, edge);
+                let tab = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+                let grip_pointer = POINT {
+                    x: origin.x + (tab.left + tab.right) / 2,
+                    y: origin.y + (tab.top + tab.bottom) / 2,
+                };
+                assert!(floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, grip_pointer,
+                ));
+                // Move from the tab to a neighboring *window pixel* whose
+                // halo is visible but whose drag start hit test must be false.
+                let gutter = if matches!(edge, Some(FloatingEdge::Left | FloatingEdge::Right)) {
+                    POINT { x: grip_pointer.x, y: origin.y + tab.top - sc(5) }
+                } else {
+                    POINT { x: origin.x + tab.left - sc(5), y: grip_pointer.y }
+                };
+                let local_x = gutter.x - origin.x;
+                let local_y = gutter.y - origin.y;
+                assert!(local_x >= 0 && local_x < width);
+                assert!(local_y >= 0 && local_y < height);
+                assert!(!point_in_rect(body, local_x, local_y));
+                assert!(!floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, gutter,
+                ), "halo-only gutter must not retain drag-hover glow");
+                // A still pointer over the actual grip (including after
+                // capture release) must remain hovered without motion.
+                assert!(floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, grip_pointer,
+                ));
+            }
+        }
     }
 
     #[test]
