@@ -959,6 +959,20 @@ if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*to
     throw 'V24 must retain stable six-dot grips and provide theme-adaptive perimeter hover on both the panel and desktop tab.'
 }
 
+# V24.6: halo pixels must never widen actual drag targets. The
+# alpha-1 probe makes otherwise invisible gutter positions observable by
+# WM_NCHITTEST; a deferred notification clears stale highlight safely.
+if ($windowProduction -notmatch 'fn floating_hover_probe_rect\(' -or
+    $windowProduction -notmatch 'fn paint_floating_hover_hit_probe\(' -or
+    $windowProduction -notmatch 'pixels\[index\] = 0x01000000' -or
+    $windowProduction -notmatch 'fn floating_drag_tab_hit_code\(' -or
+    $windowProduction -notmatch 'WM_APP_DESKTOP_HOVER_EXIT' -or
+    $windowProduction -notmatch 'PostMessageW\(' -or
+    $windowProduction -notmatch 'if hovered == Some\(false\)' -or
+    $windowProduction -notmatch 'v24_6_hit_probe_has_no_extra_drag_targets_in_any_orientation') {
+    throw 'V24.6 must watch the real draggable rectangle via a transparent hit-test probe and deferred hover cleanup.'
+}
+
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 
 
