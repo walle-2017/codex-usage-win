@@ -9678,6 +9678,72 @@ mod tests {
     }
 
     #[test]
+    fn v24_6_hit_probe_has_no_extra_drag_targets_in_any_orientation() {
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+                let (w, h, body) = floating_canvas_geometry(bw, bh, edge);
+                let grip = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                let probe = floating_hover_probe_rect(body, grip, edge);
+                let mut canvas = vec![0u32; (w * h) as usize];
+                paint_floating_hover_hit_probe(&mut canvas, w, h, body, grip, edge);
+                let grip_center = ((grip.left + grip.right) / 2,
+                    (grip.top + grip.bottom) / 2);
+                assert_eq!(floating_drag_tab_hit_code(
+                    body, grip, grip_center.0, grip_center.1,
+                ), 1, "rendered draggable tab must stay clickable");
+                // The grab hotspot stays identical between actual dragging,
+                // hover rendering and the non-client mouse hit classification.
+                assert!(floating_drag_handle_hit(
+                    grip_center.0, grip_center.1, w, h, edge, sc(FLOAT_EDGE_PEEK),
+                ));
+                assert_eq!(canvas[(grip_center.1 * w + grip_center.0) as usize], 0,
+                    "hit-test probe must not paint over the real draggable tab");
+                let body_center = ((body.left + body.right) / 2,
+                    (body.top + body.bottom) / 2);
+                assert_eq!(floating_drag_tab_hit_code(
+                    body, grip, body_center.0, body_center.1,
+                ), 1, "component panel remains interactive");
+                for y in probe.top.max(0)..probe.bottom.min(h) {
+                    for x in probe.left.max(0)..probe.right.min(w) {
+                        if point_in_rect(grip, x, y) || point_in_rect(body, x, y) {
+                            continue;
+                        }
+                        assert_eq!(canvas[(y * w + x) as usize], 0x01000000,
+                            "fully transparent hover probe must be alpha=1 only");
+                        assert_eq!(floating_drag_tab_hit_code(body, grip, x, y), -1);
+                        assert!(!floating_drag_handle_hit(
+                            x, y, w, h, edge, sc(FLOAT_EDGE_PEEK),
+                        ), "probe region must not allow drag start");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_6_free_tab_lateral_exit_probe_extends_beyond_grip_width() {
+        let (w, h, body) = floating_canvas_geometry(240, 42, None);
+        let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+        let probe = floating_hover_probe_rect(body, grip, None);
+        assert_eq!(probe.left, body.left);
+        assert_eq!(probe.right, body.right);
+        assert_eq!(probe.top, grip.top);
+        assert_eq!(probe.bottom, body.top);
+        let y = (grip.top + grip.bottom) / 2;
+        let red_box_x = (body.left + grip.left) / 2;
+        assert!(red_box_x < grip.left, "lateral point must be left of the tab");
+        assert!(point_in_rect(probe, red_box_x, y));
+        assert!(!floating_drag_handle_hit(
+            red_box_x, y, w, h, None, sc(FLOAT_EDGE_PEEK),
+        ));
+        let mut pixels = vec![0u32; (w * h) as usize];
+        paint_floating_hover_hit_probe(&mut pixels, w, h, body, grip, None);
+        assert_eq!(pixels[(y * w + red_box_x) as usize], 0x01000000);
+        assert_eq!(floating_drag_tab_hit_code(body, grip, red_box_x, y), -1);
+    }
+
+    #[test]
     fn v24_4_docked_glow_gutters_respect_physical_monitor_edges() {
         let g = sc(FLOAT_FREE_GLOW_MARGIN);
         let peek = sc(FLOAT_EDGE_PEEK);
