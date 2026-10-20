@@ -5019,26 +5019,60 @@ fn eased_value_at(from: u8, to: u8, elapsed: Duration, duration_ms: u64) -> u8 {
 }
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
-    let (anchor_x, anchor_y) = {
+    let (anchor_x, anchor_y, edge, body_w, body_h, unlocked) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
-        (s.floating_drag_anchor_x, s.floating_drag_anchor_y)
+        (
+            s.floating_drag_anchor_x, s.floating_drag_anchor_y, s.floating_edge,
+            total_widget_width_for_state(s), widget_height_for_state(s),
+            s.floating_drag_glow_detached,
+        )
     };
+    let mut new_anchor_x = anchor_x;
+    let mut new_anchor_y = anchor_y;
+    let window_x = pointer.x - anchor_x;
+    let window_y = pointer.y - anchor_y;
+    let (old_w, old_h, old_body) =
+        floating_drag_canvas_geometry(body_w, body_h, edge, unlocked);
+    let should_unlock = !unlocked && floating_monitor_geometry(pointer)
+        .is_some_and(|(monitor, _)| floating_drag_has_cleared_edge(
+            window_x, window_y, old_body, monitor, edge,
+        ));
+    if should_unlock {
+        let (_, _, expanded_body) =
+            floating_drag_canvas_geometry(body_w, body_h, edge, true);
+        // Expanding the canvas must not move the actual panel or the tab
+        // under the pointer. Rebase the original mouse-to-HWND offset by
+        // precisely the shift of the real panel content.
+        new_anchor_x += expanded_body.left - old_body.left;
+        new_anchor_y += expanded_body.top - old_body.top;
+    }
+    let new_x = pointer.x - new_anchor_x;
+    let new_y = pointer.y - new_anchor_y;
     {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
-        // Deliberately do not touch floating_edge or the mouse grab anchor.
-        // A docked side grip remains on that side throughout the drag.
-        s.floating_x = pointer.x - anchor_x;
-        s.floating_y = pointer.y - anchor_y;
+        s.floating_x = new_x;
+        s.floating_y = new_y;
+        s.floating_drag_anchor_x = new_anchor_x;
+        s.floating_drag_anchor_y = new_anchor_y;
+        if should_unlock { s.floating_drag_glow_detached = true; }
         s.floating_collapsed = false;
         s.floating_reveal = 100;
     }
-    // No full-window clamping: a collapsed edge tab begins with most of its
-    // panel offscreen. Clamping would teleport the panel on the first frame.
-    // Reconcile the desktop bounds and grip direction only on button release.
-    move_floating_widget(hwnd);
+    // A docked tab starts partly outside the monitor. Preserve its original
+    // orientation and allow crossing monitor seams without a window clamp.
+    if should_unlock {
+        // Update canvas dimensions and HWND origin atomically to avoid a
+        // stale bitmap or a one-frame jump when restoring external glow.
+        render_layered_at(Some(POINT { x: new_x, y: new_y }));
+        diagnose::log_lazy(|| format!(
+            "desktop drag left dock: restored full outer glow edge={edge:?} prior=({old_w},{old_h})"
+        ));
+    } else {
+        move_floating_widget(hwnd);
+    }
 }
 
 fn finish_floating_drag(hwnd: HWND) {
