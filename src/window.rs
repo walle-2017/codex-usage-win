@@ -4408,6 +4408,8 @@ const FLOAT_RETRACT_DURATION_MS: u64 = 240;
 const FLOAT_GRIP_FADE_IN_MS: u64 = 140;
 const FLOAT_GRIP_FADE_OUT_MS: u64 = 170;
 const TIMER_FLOAT_ANIMATION: usize = 0xF141;
+const TIMER_FLOAT_HOVER_CHECK: usize = 0xF142;
+const FLOAT_HOVER_CHECK_INTERVAL_MS: u32 = 50;
 
 /// This rectangle is used for the rendered tab, pointer hit testing and
 /// collapsed alpha mask. Desktop-only, independent of the embedded taskbar grip.
@@ -4466,6 +4468,70 @@ fn floating_drag_grip_contains_screen_point(
 // A stale WM_MOUSELEAVE can be queued when mouse capture ends or a layered
 // popup is repositioned. Recheck where the pointer actually is, rather than
 // clearing an otherwise valid hover until another WM_MOUSEMOVE arrives.
+/// Unlike WM_MOUSELEAVE, this check is based on the actual six-dot tab
+/// rectangle, not on the larger window/canvas (whose glow pixels use
+/// HTTRANSPARENT). It also handles docked tabs on every physical edge.
+fn floating_pointer_over_drag_tab(hwnd: HWND) -> Option<bool> {
+    let (canvas_w, canvas_h, edge) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd { return None; }
+        let (width, height) = floating_canvas_size_for_state(s);
+        (width, height, s.floating_edge)
+    };
+    let rect = native_interop::get_window_rect_safe(hwnd)?;
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) }.is_err() { return None; }
+    Some(floating_drag_grip_contains_screen_point(
+        rect.left, rect.top, canvas_w, canvas_h, edge, cursor,
+    ))
+}
+
+/// Poll only while a desktop drag tab is highlighted. Moving from the tab to
+/// the noninteractive glow gutter can stop mouse messages entirely, leaving
+/// the hover ring stuck unless we independently check the screen pointer.
+fn set_floating_hover_check_timer(hwnd: HWND, hovered: bool) {
+    unsafe {
+        let service = taskbar_replica_service_hwnd(hwnd);
+        if hovered {
+            SetTimer(service, TIMER_FLOAT_HOVER_CHECK,
+                FLOAT_HOVER_CHECK_INTERVAL_MS, None);
+        } else {
+            let _ = KillTimer(service, TIMER_FLOAT_HOVER_CHECK);
+        }
+    }
+}
+
+fn verify_floating_hover_on_timer(hwnd: HWND) {
+    let active = {
+        let state = lock_state();
+        state.as_ref().filter(|s| s.floating_mode && !s.dragging
+            && s.drag_handle_hovered).map(|s| s.hwnd.to_hwnd())
+    };
+    let Some(active) = active else {
+        set_floating_hover_check_timer(hwnd, false);
+        return;
+    };
+    // A transient failure reading a HWND/cursor must not reproduce V24.3's
+    // disappear-and-reappear flicker when the mouse has not actually left.
+    if floating_pointer_over_drag_tab(active) != Some(false) { return; }
+    let changed = {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == active
+                && !s.dragging && s.drag_handle_hovered
+        ) {
+            s.drag_handle_hovered = false;
+            true
+        } else { false }
+    };
+    if changed {
+        set_floating_grip_hover(false);
+        render_layered();
+    }
+    set_floating_hover_check_timer(active, false);
+}
+
 fn floating_pointer_still_over_free_grip(hwnd: HWND) -> bool {
     let (canvas_w, canvas_h) = {
         let state = lock_state();
@@ -6429,6 +6495,9 @@ unsafe extern "system" fn wnd_proc(
                 TIMER_FLOAT_ANIMATION => {
                     step_floating_animation(hwnd);
                 }
+                TIMER_FLOAT_HOVER_CHECK => {
+                    verify_floating_hover_on_timer(hwnd);
+                }
                 TIMER_POLL => {
                     let auth_watch = {
                         let state = lock_state();
@@ -6586,6 +6655,9 @@ unsafe extern "system" fn wnd_proc(
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
                 *last = None;
             }
+            if reveal_hidden_panel {
+                set_floating_hover_check_timer(hwnd, false);
+            }
             let previous_capture = SetCapture(hwnd);
             diagnose::log_lazy(|| format!(
                 "drag start hwnd={:?} vertical={} client=({}, {}) previous_capture={:?}",
@@ -6627,6 +6699,12 @@ unsafe extern "system" fn wnd_proc(
                 update_minimal_hover(hwnd, client_x, client_y);
                 if drag_hover_changed {
                     render_layered();
+                }
+                if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                    // WM_MOUSELEAVE tracks the whole window, including its
+                    // transparent halo. A timer is needed only when the actual
+                    // drag tab is highlighted.
+                    set_floating_hover_check_timer(hwnd, drag_hovered);
                 }
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -6860,6 +6938,7 @@ unsafe extern "system" fn wnd_proc(
             }
             hide_minimal_usage_tooltip();
             set_floating_grip_hover(false);
+            set_floating_hover_check_timer(hwnd, false);
             set_floating_collapsed(true);
             render_layered();
             LRESULT(0)
@@ -6898,6 +6977,10 @@ unsafe extern "system" fn wnd_proc(
                     s.dragging = false;
                 }
                 let _ = ReleaseCapture();
+                let keep_hover = lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.drag_handle_hovered
+                );
+                set_floating_hover_check_timer(hwnd, keep_hover);
                 if floating_pointer_still_over_free_grip(hwnd) {
                     // Capture ended but no mouse motion is required to
                     // maintain hover or re-arm leave tracking.
