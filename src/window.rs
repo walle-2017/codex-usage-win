@@ -85,6 +85,10 @@ struct AppState {
     floating_x: i32,
     floating_y: i32,
     floating_edge: Option<FloatingEdge>,
+    // During an edge-tab drag, unlock the previously screen-clipped side's
+    // external glow once the panel is clear of the physical monitor boundary.
+    // The tab stays on the grabbed side until mouse-up.
+    floating_drag_glow_detached: bool,
     floating_collapsed: bool,
     // 0 = hidden edge tab, 100 = fully expanded; updated by the popup timer.
     floating_reveal: u8,
@@ -2384,6 +2388,7 @@ pub fn run() {
                 floating_x: settings.floating_x.unwrap_or(i32::MIN),
                 floating_y: settings.floating_y.unwrap_or(i32::MIN),
                 floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
+                floating_drag_glow_detached: false,
                 floating_collapsed: false,
                 floating_reveal: 100,
                 floating_grip_alpha: 0,
@@ -2834,7 +2839,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             // Composite the already rendered taskbar-size panel into a separate
             // transparent desktop canvas. Neither the panel border nor quota
             // graphics are ever stretched or shifted to make room for the tab.
-            let (canvas_w, canvas_h, body) = floating_canvas_geometry(width, height, edge);
+            let (canvas_w, canvas_h, body) = {
+                let state = lock_state();
+                state.as_ref().map(floating_canvas_geometry_for_state)
+                    .unwrap_or_else(|| floating_canvas_geometry(width, height, edge))
+            };
             let canvas_info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -2858,6 +2867,19 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
                 );
                 canvas.fill(0);
+                let tab = floating_grip_rect(
+                    canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+                );
+                if hovered && !hidden {
+                    // Compose external-only light BEHIND both solids. Neither
+                    // quota pixels nor detached-grip pixels can be tinted.
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, body, style.panel_corner_radius, accent,
+                    );
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
+                    );
+                }
                 if !hidden {
                     for y in 0..height {
                         let dst = ((y + body.top) * canvas_w + body.left) as usize;
@@ -2870,17 +2892,6 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
                 );
                 if hovered && !hidden {
-                    // Separate visual rings: one around the actual desktop
-                    // body and one around its independently positioned tab.
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, body, style.panel_corner_radius, accent,
-                    );
-                    let tab = floating_grip_rect(
-                        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
-                    );
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
-                    );
                     // The glow gutter itself is not draggable. Keep an almost
                     // invisible hit-test probe across the tab's surrounding
                     // strip so WM_NCHITTEST can clear stale hover as the
@@ -2964,8 +2975,10 @@ fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
 /// Desktop canvases reserve transparent pixels beyond the visible panel
 /// and detached grip; physical monitor edges necessarily clip external light.
 fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
-    let distance = distance_from_edge.abs();
-    // Soft halo falls off on either side of the visible panel perimeter.
+    // A hover effect must never illuminate the widget's interior. The
+    // positive side is the external signed distance from the panel edge.
+    if distance_from_edge <= 0.0 { return 0; }
+    let distance = distance_from_edge;
     let diffuse = 120.0 * (-(distance / 4.6).powi(2) * 0.5).exp();
     // Retain the antialiased hairline while making the outer halo dominant.
     let hairline = 65.0 * (1.0 - distance / 0.7).max(0.0);
@@ -3006,8 +3019,9 @@ fn draw_drag_hover_outline(
             ..bounds.right.saturating_add(extent).min(canvas_w) {
             let local_x = x - bounds.left;
             let local_y = y - bounds.top;
+            if point_in_rect(bounds, x, y) { continue; }
             let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
-            if distance.abs() > extent as f32 { continue; }
+            if distance <= 0.0 || distance > extent as f32 { continue; }
             let coverage = drag_hover_glow_coverage(distance);
             if coverage == 0 { continue; }
             let index = (y * canvas_w + x) as usize;
@@ -4586,10 +4600,61 @@ fn floating_canvas_geometry(
     }
 }
 
+/// During dragging, the existing edge orientation is preserved for a stable
+/// grip. Once the panel has cleared the monitor edge, add transparent pixels
+/// only on the formerly screen-clipped side. The unchanged body dimensions
+/// and original tab orientation then gain an external halo on all sides.
+fn floating_drag_canvas_geometry(
+    body_width: i32, body_height: i32, edge: Option<FloatingEdge>,
+    drag_glow_detached: bool,
+) -> (i32, i32, RECT) {
+    let (width, height, mut body) =
+        floating_canvas_geometry(body_width, body_height, edge);
+    if !drag_glow_detached { return (width, height, body); }
+    let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+    match edge {
+        Some(FloatingEdge::Left) => {
+            body.left += glow;
+            body.right += glow;
+            (width + glow, height, body)
+        }
+        Some(FloatingEdge::Right) => (width + glow, height, body),
+        Some(FloatingEdge::Top) => {
+            body.top += glow;
+            body.bottom += glow;
+            (width, height + glow, body)
+        }
+        Some(FloatingEdge::Bottom) => (width, height + glow, body),
+        None => (width, height, body),
+    }
+}
+
+fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
+    floating_drag_canvas_geometry(
+        total_widget_width_for_state(s), widget_height_for_state(s),
+        s.floating_edge, s.dragging && s.floating_drag_glow_detached,
+    )
+}
+
+/// Check the actual body against the monitor's physical edge, not the HWND
+/// boundary or work area (which can contain a taskbar). Do not unlock the
+/// clipped halo while any part of the panel still touches its docked edge.
+fn floating_drag_has_cleared_edge(
+    window_x: i32, window_y: i32, body: RECT,
+    monitor: RECT, edge: Option<FloatingEdge>,
+) -> bool {
+    let threshold = sc(2);
+    match edge {
+        Some(FloatingEdge::Left) => window_x + body.left >= monitor.left + threshold,
+        Some(FloatingEdge::Right) => window_x + body.right <= monitor.right - threshold,
+        Some(FloatingEdge::Top) => window_y + body.top >= monitor.top + threshold,
+        Some(FloatingEdge::Bottom) => window_y + body.bottom <= monitor.bottom - threshold,
+        None => false,
+    }
+}
+
 fn floating_canvas_size_for_state(state: &AppState) -> (i32, i32) {
-    let (width, height, _) = floating_canvas_geometry(
-        total_widget_width_for_state(state), widget_height_for_state(state), state.floating_edge,
-    );
+    let (width, height, _) = floating_canvas_geometry_for_state(state);
     (width, height)
 }
 
@@ -4984,7 +5049,11 @@ fn finish_floating_drag(hwnd: HWND) {
         (s.floating_x, s.floating_y,
          total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge)
     };
-    let (old_w, old_h, old_body) = floating_canvas_geometry(body_w, body_h, old_edge);
+    let (old_w, old_h, old_body) = {
+        let state = lock_state();
+        state.as_ref().map(floating_canvas_geometry_for_state)
+            .unwrap_or_else(|| floating_canvas_geometry(body_w, body_h, old_edge))
+    };
     let mut pointer = POINT { x: x + old_w / 2, y: y + old_h / 2 };
     unsafe { let _ = GetCursorPos(&mut pointer); }
     let Some((monitor, bounds)) = floating_monitor_geometry(pointer) else {
@@ -5031,6 +5100,7 @@ fn finish_floating_drag(hwnd: HWND) {
             s.dragging = false;
             s.drag_handle_hovered = hovered;
             s.floating_edge = edge;
+            s.floating_drag_glow_detached = false;
             s.floating_collapsed = edge.is_some();
             s.floating_first_collapse_guard = edge.is_some();
             s.floating_reveal = 100;
@@ -6422,9 +6492,7 @@ unsafe extern "system" fn wnd_proc(
             let (body, grip, hover_active) = {
                 let state = lock_state();
                 let s = state.as_ref().expect("desktop mode checked above");
-                let (w, h, body) = floating_canvas_geometry(
-                    total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
-                );
+                let (w, h, body) = floating_canvas_geometry_for_state(s);
                 (
                     body, floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK)),
                     s.drag_handle_hovered && !s.dragging,
@@ -6670,6 +6738,7 @@ unsafe extern "system" fn wnd_proc(
                     s.floating_drag_anchor_y = client_y;
                     s.failed_drag_target = None;
                     if s.floating_mode {
+                        s.floating_drag_glow_detached = false;
                         s.floating_first_collapse_guard = false;
                         s.floating_collapsed = false;
                         s.floating_reveal = 100;
