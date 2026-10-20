@@ -9562,12 +9562,132 @@ mod tests {
             assert!(alpha_at(body.left - 6) > alpha_at(body.left - 10));
             assert_eq!(alpha_at(0), 0);
         }
-        // Docked tab geometry remains bit-for-bit the V24 layout.
+        // All docked edges now have a transparent halo gutter on the three
+        // inward-facing sides, while keeping the actual body at its monitor edge.
         let (w, h, dock) = floating_canvas_geometry(
             240, 42, Some(FloatingEdge::Bottom),
         );
-        assert_eq!((w, h, dock.left, dock.top), (240, 42 + sc(FLOAT_EDGE_PEEK), 0,
-            sc(FLOAT_EDGE_PEEK)));
+        let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+        assert_eq!((w, h, dock.left, dock.top),
+            (240 + glow * 2, 42 + sc(FLOAT_EDGE_PEEK) + glow,
+             glow, sc(FLOAT_EDGE_PEEK) + glow));
+    }
+
+    #[test]
+    fn v24_4_docked_glow_gutters_respect_physical_monitor_edges() {
+        let g = sc(FLOAT_FREE_GLOW_MARGIN);
+        let peek = sc(FLOAT_EDGE_PEEK);
+        let bounds = RECT { left: -1920, top: -80, right: 0, bottom: 1000 };
+        let style = ThemeStyle::preset(true, ThemePreset::Forest);
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom] {
+                let (cw, ch, body) = floating_canvas_geometry(bw, bh, Some(edge));
+                let grip = floating_grip_rect(cw, ch, Some(edge), peek);
+                assert_eq!(body.right - body.left, bw);
+                assert_eq!(body.bottom - body.top, bh);
+                // Outer gutter on the three sides facing the inside of the
+                // monitor; no fake blank strip against the physical edge.
+                match edge {
+                    FloatingEdge::Left => {
+                        assert_eq!(body.left, 0);
+                        assert_eq!(body.top, g);
+                        assert_eq!(ch - body.bottom, g);
+                        assert_eq!(cw - grip.right, g);
+                        assert_eq!(grip.left, body.right);
+                    }
+                    FloatingEdge::Right => {
+                        assert_eq!(cw - body.right, 0);
+                        assert_eq!(body.top, g);
+                        assert_eq!(ch - body.bottom, g);
+                        assert_eq!(grip.left, g);
+                        assert_eq!(grip.right, body.left);
+                    }
+                    FloatingEdge::Top => {
+                        assert_eq!(body.top, 0);
+                        assert_eq!(body.left, g);
+                        assert_eq!(cw - body.right, g);
+                        assert_eq!(ch - grip.bottom, g);
+                        assert_eq!(grip.top, body.bottom);
+                    }
+                    FloatingEdge::Bottom => {
+                        assert_eq!(ch - body.bottom, 0);
+                        assert_eq!(body.left, g);
+                        assert_eq!(cw - body.right, g);
+                        assert_eq!(grip.top, g);
+                        assert_eq!(grip.bottom, body.top);
+                    }
+                }
+                let expanded = floating_edge_position(
+                    bounds, bounds.left + 300, bounds.top + 300, cw, ch,
+                    Some(edge), false, peek,
+                );
+                let collapsed = floating_edge_position(
+                    bounds, bounds.left + 300, bounds.top + 300, cw, ch,
+                    Some(edge), true, peek,
+                );
+                let grip_screen = RECT {
+                    left: collapsed.0 + grip.left, right: collapsed.0 + grip.right,
+                    top: collapsed.1 + grip.top, bottom: collapsed.1 + grip.bottom,
+                };
+                match edge {
+                    FloatingEdge::Left => {
+                        assert_eq!(expanded.0 + body.left, bounds.left);
+                        assert_eq!(grip_screen.left, bounds.left);
+                    }
+                    FloatingEdge::Right => {
+                        assert_eq!(expanded.0 + body.right, bounds.right);
+                        assert_eq!(grip_screen.right, bounds.right);
+                    }
+                    FloatingEdge::Top => {
+                        assert_eq!(expanded.1 + body.top, bounds.top);
+                        assert_eq!(grip_screen.top, bounds.top);
+                    }
+                    FloatingEdge::Bottom => {
+                        assert_eq!(expanded.1 + body.bottom, bounds.bottom);
+                        assert_eq!(grip_screen.bottom, bounds.bottom);
+                    }
+                }
+                assert!(floating_drag_handle_hit(
+                    (grip.left + grip.right) / 2, (grip.top + grip.bottom) / 2,
+                    cw, ch, Some(edge), peek,
+                ));
+                let mut pixels = vec![0u32; (cw * ch) as usize];
+                draw_drag_hover_outline(
+                    &mut pixels, cw, ch, body,
+                    style.panel_corner_radius, drag_hover_outline_color(&style),
+                );
+                let center_y = (body.top + body.bottom) / 2;
+                let center_x = (body.left + body.right) / 2;
+                let al = |x: i32, y: i32| -> u32 {
+                    pixels[(y * cw + x) as usize] >> 24
+                };
+                match edge {
+                    FloatingEdge::Left => {
+                        assert!(al(body.right + 2, center_y) > 0);
+                        assert!(al(center_x, body.top - 2) > 0);
+                        assert!(al(center_x, body.bottom + 2) > 0);
+                    }
+                    FloatingEdge::Right => {
+                        assert!(al(body.left - 2, center_y) > 0);
+                        assert!(al(center_x, body.top - 2) > 0);
+                        assert!(al(center_x, body.bottom + 2) > 0);
+                    }
+                    FloatingEdge::Top => {
+                        assert!(al(body.left - 2, center_y) > 0);
+                        assert!(al(body.right + 2, center_y) > 0);
+                        assert!(al(center_x, body.bottom + 2) > 0);
+                    }
+                    FloatingEdge::Bottom => {
+                        assert!(al(body.left - 2, center_y) > 0);
+                        assert!(al(body.right + 2, center_y) > 0);
+                        assert!(al(center_x, body.top - 2) > 0);
+                    }
+                }
+                // Glow stays visual-only: the component center remains clear.
+                assert_eq!(al(center_x, center_y), 0);
+            }
+        }
     }
 
     #[test]
@@ -9612,10 +9732,18 @@ mod tests {
                 (r.top + r.bottom) / 2, width, height, edge, peek));
             assert!(!floating_drag_handle_hit(-1, -1, width, height, edge, peek));
             match edge {
-                Some(FloatingEdge::Left) => assert_eq!(r.left, width - peek),
-                Some(FloatingEdge::Right) => assert_eq!(r.right, peek),
-                Some(FloatingEdge::Top) => assert_eq!(r.bottom, height),
-                Some(FloatingEdge::Bottom) => assert_eq!(r.top, 0),
+                Some(FloatingEdge::Left) => {
+                    assert_eq!(r.left, width - sc(FLOAT_FREE_GLOW_MARGIN) - peek);
+                }
+                Some(FloatingEdge::Right) => {
+                    assert_eq!(r.right, sc(FLOAT_FREE_GLOW_MARGIN) + peek);
+                }
+                Some(FloatingEdge::Top) => {
+                    assert_eq!(r.bottom, height - sc(FLOAT_FREE_GLOW_MARGIN));
+                }
+                Some(FloatingEdge::Bottom) => {
+                    assert_eq!(r.top, sc(FLOAT_FREE_GLOW_MARGIN));
+                },
                 None => assert_eq!(r.top, sc(FLOAT_FREE_GLOW_MARGIN)),
             }
         }
@@ -10018,15 +10146,19 @@ mod tests {
         assert_eq!(floating_nearest_edge(bounds,
             RECT { left: -1100, top: 200, right: -1052, bottom: 368 }, 24), None);
         assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
-            Some(FloatingEdge::Left), true, 15), (-1953, 100));
+            Some(FloatingEdge::Left), true, 15),
+            (bounds.left - floating_grip_rect(48, 168, Some(FloatingEdge::Left), 15).left, 100));
         assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
             Some(FloatingEdge::Left), false, 15), (-1920, 100));
         assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
-            Some(FloatingEdge::Right), true, 15), (-15, 100));
+            Some(FloatingEdge::Right), true, 15),
+            (bounds.right - floating_grip_rect(48, 168, Some(FloatingEdge::Right), 15).right, 100));
         assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
-            Some(FloatingEdge::Top), true, 15), (-1500, -233));
+            Some(FloatingEdge::Top), true, 15),
+            (-1500, bounds.top - floating_grip_rect(48, 168, Some(FloatingEdge::Top), 15).top));
         assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
-            Some(FloatingEdge::Bottom), true, 15), (-1500, 985));
+            Some(FloatingEdge::Bottom), true, 15),
+            (-1500, bounds.bottom - floating_grip_rect(48, 168, Some(FloatingEdge::Bottom), 15).bottom));
         assert_eq!(FloatingEdge::parse("right"), Some(FloatingEdge::Right));
         assert_eq!(FloatingEdge::parse("unknown"), None);
     }
