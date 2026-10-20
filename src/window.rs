@@ -6435,14 +6435,13 @@ fn usage_hover_hit(
         state.as_ref().filter(|s| s.floating_mode).map(|s| (
             total_widget_width_for_state(s),
             widget_height_for_state(s),
-            s.floating_edge,
+            floating_canvas_geometry_for_state(s).2,
             s.vertical_taskbar_mode,
             effective_appearance_preset(s),
             s.show_session_window, s.show_weekly_window,
         ))
     };
-    if let Some((width, height, edge, vertical, preset, show_session, show_weekly)) = desktop {
-        let (_, _, body) = floating_canvas_geometry(width, height, edge);
+    if let Some((width, height, body, vertical, preset, show_session, show_weekly)) = desktop {
         if !point_in_rect(body, x, y) { return None; }
         let local_x = x - body.left;
         let local_y = y - body.top;
@@ -9731,7 +9730,7 @@ mod tests {
         draw_drag_hover_outline(
             &mut canvas, width, height, body, style.panel_corner_radius, accent,
         );
-        let ring_pixel = ((body.top + 1) * width + (body.left + body.right) / 2)
+        let ring_pixel = ((body.top + body.bottom) / 2 * width + body.left - 1)
             as usize;
         assert_ne!(canvas[ring_pixel], 0, "body hover glow stays visible");
     }
@@ -10126,12 +10125,13 @@ mod tests {
 
     #[test]
     fn v24_1_glow_is_feathered_not_a_thick_solid_outline() {
-        assert!(drag_hover_glow_coverage(0.0) > drag_hover_glow_coverage(1.0));
+        assert_eq!(drag_hover_glow_coverage(0.0), 0);
+        assert_eq!(drag_hover_glow_coverage(-1.0), 0);
+        assert_eq!(drag_hover_glow_coverage(-2.0), 0);
+        assert!(drag_hover_glow_coverage(0.5) > drag_hover_glow_coverage(1.0));
         assert!(drag_hover_glow_coverage(1.0) > drag_hover_glow_coverage(2.0));
         assert!(drag_hover_glow_coverage(2.0) > drag_hover_glow_coverage(3.0));
         assert!(drag_hover_glow_coverage(3.0) > drag_hover_glow_coverage(4.0));
-        assert_eq!(drag_hover_glow_coverage(0.0), drag_hover_glow_coverage(-0.0));
-        assert_eq!(drag_hover_glow_coverage(2.0), drag_hover_glow_coverage(-2.0));
         let style = ThemeStyle::preset(true, ThemePreset::Forest);
         let mut pixels = vec![0u32; 190 * 62];
         let body = RECT { left: 7, top: 7, right: 183, bottom: 55 };
@@ -10141,9 +10141,9 @@ mod tests {
         // There is real translucent glow outside a panel when canvas space
         // exists, but it never paints the center or expands the body geometry.
         assert!(sample_alpha(6) > 0, "halo should extend beyond outer body edge");
-        assert!(sample_alpha(6) < sample_alpha(8));
-        assert!(sample_alpha(8) > sample_alpha(10));
-        assert!(sample_alpha(10) > sample_alpha(12));
+        assert_eq!(sample_alpha(8), 0, "inside panel never receives glow");
+        assert_eq!(sample_alpha(10), 0);
+        assert_eq!(sample_alpha(12), 0);
         assert_eq!(sample_alpha(20), 0);
         assert_eq!(pixels.len(), 190 * 62);
     }
@@ -10153,17 +10153,17 @@ mod tests {
         let style = ThemeStyle::preset(true, ThemePreset::Forest);
         let accent = drag_hover_outline_color(&style);
         for (w, h) in [(180, 40), (50, 168)] {
-            let bounds = RECT { left: 0, top: 0, right: w, bottom: h };
-            let mut pixels = vec![0xFF14211Du32; (w * h) as usize];
-            let idle = pixels.clone();
-            draw_drag_hover_outline(&mut pixels, w, h, bounds,
+            let cw = w + 24;
+            let ch = h + 24;
+            let bounds = RECT { left: 12, top: 12, right: w + 12, bottom: h + 12 };
+            let mut pixels = vec![0u32; (cw * ch) as usize];
+            draw_drag_hover_outline(&mut pixels, cw, ch, bounds,
                 style.panel_corner_radius, accent);
-            assert_ne!(pixels, idle);
-            assert_eq!(pixels[(h / 2 * w + w / 2) as usize],
-                idle[(h / 2 * w + w / 2) as usize],
-                "center content must never be covered by the hover ring");
-            assert_ne!(pixels[(w + w / 2) as usize],
-                idle[(w + w / 2) as usize], "top border must highlight");
+            assert_ne!(pixels[(11 * cw + cw / 2) as usize], 0,
+                "external top halo must remain visible");
+            assert_eq!(pixels[(13 * cw + cw / 2) as usize], 0,
+                "the actual panel and its contents cannot be lit from inside");
+            assert_eq!(pixels[((h / 2 + 12) * cw + cw / 2) as usize], 0);
         }
         for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
             Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
