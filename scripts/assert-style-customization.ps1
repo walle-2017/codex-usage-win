@@ -955,8 +955,14 @@ if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*to
     $windowProduction -notmatch 'if hovered && !hidden' -or
     $windowProduction -notmatch 'floating_grip_rect\(' -or
     $windowProduction -notmatch 'draw_drag_hover_outline\(\s*canvas, canvas_w, canvas_h, tab' -or
-    $windowProduction -notmatch 'drag_hover_outline_color\(&style\)') {
-    throw 'V24 must retain stable six-dot grips and provide theme-adaptive perimeter hover on both the panel and desktop tab.'
+    $windowProduction -notmatch 'drag_hover_outline_color\(&style\)' -or
+    $windowProduction -notmatch 'const TIMER_FLOAT_HOVER_CHECK:' -or
+    $windowProduction -notmatch 'fn floating_pointer_over_drag_tab\(' -or
+    $windowProduction -notmatch 'fn verify_floating_hover_on_timer\(' -or
+    $windowProduction -notmatch 'floating_drag_grip_contains_screen_point\(' -or
+    $windowProduction -notmatch 'set_floating_hover_check_timer\(hwnd, drag_hovered\)' -or
+    $windowProduction -notmatch 'TIMER_FLOAT_HOVER_CHECK =>') {
+    throw 'V24.5 must retain the themed drag glow and independently clear stale hover over noninteractive halo pixels.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
