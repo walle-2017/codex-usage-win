@@ -9846,6 +9846,137 @@ mod tests {
     }
 
     #[test]
+    fn v24_7_drag_clears_physical_edge_and_restores_all_outer_gutters() {
+        let g = sc(FLOAT_FREE_GLOW_MARGIN);
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom] {
+                let (ow, oh, old) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), false);
+                let (nw, nh, new) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), true);
+                assert_eq!(new.right - new.left, bw);
+                assert_eq!(new.bottom - new.top, bh);
+                let shift_x = new.left - old.left;
+                let shift_y = new.top - old.top;
+                assert_eq!((nw - ow, nh - oh), match edge {
+                    FloatingEdge::Left | FloatingEdge::Right => (g, 0),
+                    FloatingEdge::Top | FloatingEdge::Bottom => (0, g),
+                });
+                assert_eq!((shift_x, shift_y), match edge {
+                    FloatingEdge::Left => (g, 0),
+                    FloatingEdge::Top => (0, g),
+                    _ => (0, 0),
+                });
+                // Keep both the panel and the grabbed tab in exactly the
+                // same screen coordinates when transparent gutter is added.
+                let old_tab = floating_grip_rect(ow, oh, Some(edge), sc(FLOAT_EDGE_PEEK));
+                let new_tab = floating_grip_rect(nw, nh, Some(edge), sc(FLOAT_EDGE_PEEK));
+                assert_eq!(old_tab.left + shift_x, new_tab.left);
+                assert_eq!(old_tab.top + shift_y, new_tab.top);
+                assert_eq!(old_tab.right + shift_x, new_tab.right);
+                assert_eq!(old_tab.bottom + shift_y, new_tab.bottom);
+                let old_x = 250;
+                let old_y = 250;
+                let new_x = old_x - shift_x;
+                let new_y = old_y - shift_y;
+                assert_eq!(old_x + old.left, new_x + new.left);
+                assert_eq!(old_y + old.top, new_y + new.top);
+                assert_eq!(old_x + old_tab.left, new_x + new_tab.left);
+                assert_eq!(old_y + old_tab.top, new_y + new_tab.top);
+
+                let (flush_x, flush_y) = match edge {
+                    FloatingEdge::Left => (monitor.left - old.left, 250),
+                    FloatingEdge::Right => (monitor.right - old.right, 250),
+                    FloatingEdge::Top => (250, monitor.top - old.top),
+                    FloatingEdge::Bottom => (250, monitor.bottom - old.bottom),
+                };
+                assert!(!floating_drag_has_cleared_edge(
+                    flush_x, flush_y, old, monitor, Some(edge),
+                ), "glow must stay clipped while the panel is flush");
+                let (moved_x, moved_y) = match edge {
+                    FloatingEdge::Left => (flush_x + sc(2), flush_y),
+                    FloatingEdge::Right => (flush_x - sc(2), flush_y),
+                    FloatingEdge::Top => (flush_x, flush_y + sc(2)),
+                    FloatingEdge::Bottom => (flush_x, flush_y - sc(2)),
+                };
+                assert!(floating_drag_has_cleared_edge(
+                    moved_x, moved_y, old, monitor, Some(edge),
+                ), "external glow must unlock during the drag, not on release");
+
+                let style = ThemeStyle::preset(true, ThemePreset::Forest);
+                let accent = drag_hover_outline_color(&style);
+                let mut pixels = vec![0u32; (nw * nh) as usize];
+                draw_drag_hover_outline(
+                    &mut pixels, nw, nh, new, style.panel_corner_radius, accent,
+                );
+                let mx = (new.left + new.right) / 2;
+                let my = (new.top + new.bottom) / 2;
+                assert_eq!(pixels[(my * nw + mx) as usize], 0,
+                    "glow must not color the actual panel interior");
+                let outside = match edge {
+                    FloatingEdge::Left => (new.left - 2, my),
+                    FloatingEdge::Right => (new.right + 2, my),
+                    FloatingEdge::Top => (mx, new.top - 2),
+                    FloatingEdge::Bottom => (mx, new.bottom + 2),
+                };
+                assert!((outside.0 >= 0) && (outside.0 < nw)
+                    && (outside.1 >= 0) && (outside.1 < nh));
+                assert!(pixels[(outside.1 * nw + outside.0) as usize] >> 24 > 0,
+                    "newly unlocked side must have real external glow");
+            }
+        }
+    }
+
+    #[test]
+    fn v24_7_glow_only_outside_panel_and_grip_even_at_adjacent_edges() {
+        let style = ThemeStyle::preset(false, ThemePreset::Ocean);
+        let accent = drag_hover_outline_color(&style);
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let (w, h, body) = floating_drag_canvas_geometry(
+                240, 42, edge, edge.is_some(),
+            );
+            let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+            let mut pixels = vec![0u32; (w * h) as usize];
+            draw_drag_hover_outline(
+                &mut pixels, w, h, body, style.panel_corner_radius, accent,
+            );
+            draw_drag_hover_outline(
+                &mut pixels, w, h, tab, style.panel_corner_radius, accent,
+            );
+            // Same layering as the real renderer: paint solids over their
+            // external halos. Quota ink and the tab remain entirely untouched.
+            for y in body.top..body.bottom {
+                for x in body.left..body.right {
+                    pixels[(y * w + x) as usize] = 0xFF223344;
+                }
+            }
+            render_floating_handle_bitmap(
+                &mut pixels, w, h, edge, true, &style, 100,
+            );
+            assert_eq!(pixels[(((body.top + body.bottom) / 2) * w
+                + (body.left + body.right) / 2) as usize], 0xFF223344);
+            let tab_center = ((tab.top + tab.bottom) / 2 * w
+                + (tab.left + tab.right) / 2) as usize;
+            assert_eq!(pixels[tab_center], premultiplied_pixel(
+                style.color(StyleColorTarget::PanelBackground),
+            ).max(1).min(u32::MAX));
+            // The outer halo is translucent, not another opaque border.
+            let outer = match edge {
+                Some(FloatingEdge::Left) => (body.left - 2, (body.top + body.bottom) / 2),
+                Some(FloatingEdge::Right) => (body.right + 2, (body.top + body.bottom) / 2),
+                Some(FloatingEdge::Top) => ((body.left + body.right) / 2, body.top - 2),
+                Some(FloatingEdge::Bottom) => ((body.left + body.right) / 2, body.bottom + 2),
+                None => (body.left - 2, (body.top + body.bottom) / 2),
+            };
+            let halo = pixels[(outer.1 * w + outer.0) as usize] >> 24;
+            assert!(halo > 0 && halo < 255);
+        }
+    }
+
+    #[test]
     fn v24_4_docked_glow_gutters_respect_physical_monitor_edges() {
         let g = sc(FLOAT_FREE_GLOW_MARGIN);
         let peek = sc(FLOAT_EDGE_PEEK);
