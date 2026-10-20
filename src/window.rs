@@ -9960,9 +9960,12 @@ mod tests {
                 + (body.left + body.right) / 2) as usize], 0xFF223344);
             let tab_center = ((tab.top + tab.bottom) / 2 * w
                 + (tab.left + tab.right) / 2) as usize;
-            assert_eq!(pixels[tab_center], premultiplied_pixel(
-                style.color(StyleColorTarget::PanelBackground),
-            ).max(1).min(u32::MAX));
+            let mut unlit = vec![0u32; (w * h) as usize];
+            render_floating_handle_bitmap(
+                &mut unlit, w, h, edge, true, &style, 100,
+            );
+            assert_eq!(pixels[tab_center], unlit[tab_center],
+                "the six-dot draggable tab may not be tinted by its halo");
             // The outer halo is translucent, not another opaque border.
             let outer = match edge {
                 Some(FloatingEdge::Left) => (body.left - 2, (body.top + body.bottom) / 2),
