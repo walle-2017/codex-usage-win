@@ -4814,7 +4814,27 @@ fn floating_edge_position(
     }
 }
 
-fn move_floating_widget(hwnd: HWND) {
+/// A desktop popup must stay above Explorer even when the taskbar is clicked.
+ /// The owner relation keeps this ordering stable without repeated promotions
+ /// that would flicker while dragging or changing the rounded glow.
+ fn sync_desktop_taskbar_owner(hwnd: HWND) {
+     let taskbar_owner = {
+         let state = lock_state();
+         state.as_ref().filter(|s| s.floating_mode).and_then(|s| s.taskbar_hwnd)
+     };
+     let Some(owner) = taskbar_owner.filter(|owner| native_interop::is_taskbar_window(*owner)) else {
+         // Explorer may be restarting; keep the independent TOPMOST fallback.
+         return;
+     };
+     unsafe {
+         if GetWindow(hwnd, GW_OWNER).ok() != Some(owner) {
+             native_interop::set_popup_owner(hwnd, Some(owner));
+             diagnose::log(format!("desktop popup owner synchronized taskbar={:?}", owner));
+         }
+     }
+ }
+ 
+ fn move_floating_widget(hwnd: HWND) {
     let (x, y, edge, reveal, width, height, dragging) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
@@ -5191,6 +5211,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
                 if vertical { "Vertical" } else { "Horizontal" },
             ));
         }
+        sync_desktop_taskbar_owner(hwnd);
         move_floating_widget(hwnd);
         if reason == "explicit desktop preference" {
             diagnose::log_lazy(|| "desktop orientation: popup moved; painting layered frame".to_string());
@@ -5298,6 +5319,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     if let Some(backdrop) = blur_backdrop_hwnd() {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
+    sync_desktop_taskbar_owner(hwnd);
     move_floating_widget(hwnd);
     style_window::set_preview_orientation(vertical);
     render_layered();
