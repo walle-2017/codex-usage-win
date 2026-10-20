@@ -973,6 +973,21 @@ if ($windowProduction -notmatch 'fn floating_hover_probe_rect\(' -or
     throw 'V24.6 must watch the real draggable rectangle via a transparent hit-test probe and deferred hover cleanup.'
 }
 
+# V24.7 restores the physically clipped outer halo as soon as a docked
+# drag leaves the monitor, while keeping the grip anchor and panel contents
+# fixed. Glow must stay outside the actual widget and detached tab.
+if ($windowProduction -notmatch 'floating_drag_glow_detached' -or
+    $windowProduction -notmatch 'fn floating_drag_canvas_geometry\(' -or
+    $windowProduction -notmatch 'fn floating_drag_has_cleared_edge\(' -or
+    $windowProduction -notmatch 'if should_unlock' -or
+    $windowProduction -notmatch 'render_layered_at\(Some\(POINT \{ x: new_x, y: new_y \}\)\)' -or
+    $windowProduction -notmatch 'if point_in_rect\(bounds, x, y\) \{ continue; \}' -or
+    $windowProduction -notmatch 'if distance_from_edge <= 0\.0 \{ return 0; \}' -or
+    $window -notmatch 'v24_7_drag_clears_physical_edge_and_restores_all_outer_gutters' -or
+    $window -notmatch 'v24_7_glow_only_outside_panel_and_grip_even_at_adjacent_edges') {
+    throw 'V24.7 must restore full external-only hover glow during an undocking drag without moving the grab point.'
+}
+
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
 
 
