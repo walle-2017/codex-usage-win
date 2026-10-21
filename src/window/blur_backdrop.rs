@@ -37,7 +37,7 @@ fn blur_bounds_snapshot() -> Option<BlurBoundsSnapshot> {
     if !s.floating_mode {
         return Some(BlurBoundsSnapshot::Embedded { inset, radius });
     }
-    let (canvas_w, canvas_h, full_panel) = floating_canvas_geometry_for_state(s);
+    let (_, _, full_panel) = floating_canvas_geometry_for_state(s);
     let panel = if s.floating_reserved_dock && !s.dragging {
         s.floating_edge.map(|edge| floating_reserved_visible_body(
             full_panel, edge, s.floating_reveal,
