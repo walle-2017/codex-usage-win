@@ -4919,11 +4919,18 @@ fn floating_edge_exposed(monitor: RECT, edge: FloatingEdge, pointer: POINT) -> b
 /// A taskbar or an adjacent display makes the edge a visual clip
 /// boundary, not a no-dock boundary. Only the mouse's chosen monitor may
 /// show the retracted tab; the other screen receives no overflow pixels.
+fn floating_edge_needs_clip(
+    monitor: RECT, bounds: RECT, edge: FloatingEdge, has_neighbor: bool,
+) -> bool {
+    floating_edge_is_reserved(monitor, bounds, edge) || has_neighbor
+}
+
 fn floating_edge_requires_clip(
     monitor: RECT, bounds: RECT, edge: FloatingEdge, pointer: POINT,
 ) -> bool {
-    floating_edge_is_reserved(monitor, bounds, edge)
-        || !floating_edge_exposed(monitor, edge, pointer)
+    floating_edge_needs_clip(
+        monitor, bounds, edge, !floating_edge_exposed(monitor, edge, pointer),
+    )
 }
 
 fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
@@ -4995,6 +5002,12 @@ fn floating_drop_edge_at_pointer(
 ) -> Option<FloatingEdge> {
     let within_monitor = pointer.x >= monitor.left && pointer.x < monitor.right
         && pointer.y >= monitor.top && pointer.y < monitor.bottom;
+    if !within_monitor {
+        // A drag released beyond every monitor retains the legacy nearest
+        // monitor rectangle fallback. Inside any monitor the actual cursor
+        // distance and chosen display's four sides always take precedence.
+        return floating_drop_edge(bounds, rect, threshold, exposed);
+    }
     let distances = [
         pointer.x.abs_diff(bounds.left),
         pointer.x.abs_diff(bounds.right),
@@ -10857,23 +10870,26 @@ mod tests {
     }
 
     #[test]
-    fn desktop_corner_snap_ignores_unexposed_monitor_seams() {
+    fn desktop_shared_seam_corner_uses_nearest_mouse_edge_including_taskbar() {
+        // A seam is a normal candidate. The mouse-selected display owns the
+        // dock; at its corner the shorter perpendicular distance wins.
         let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
         let bottom = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
         let widget = RECT { left: -10, top: 1010, right: 210, bottom: 1080 };
-        let mouse = POINT { x: 2, y: 1040 };
-        // The left side is a seam shared with another monitor, so even
-        // though its distance is 2px (versus bottom=8px), it isn't dockable.
         assert_eq!(floating_drop_edge_at_pointer(
-            monitor, bottom, widget, mouse, 24, [false, true, true, true],
-        ), Some(FloatingEdge::Bottom));
-        // A corner with both sides blocked cannot trigger either side.
+            monitor, bottom, widget, POINT { x: 2, y: 1040 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left), "left seam is closer than taskbar");
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 16, y: 1035 }, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom), "taskbar boundary is closer than seam");
         let full = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
         let widget = RECT { left: -10, top: -10, right: 210, bottom: 100 };
         assert_eq!(floating_drop_edge_at_pointer(
-            monitor, full, widget, POINT { x: 1, y: 3 }, 24,
-            [false, true, false, true],
-        ), None);
+            monitor, full, widget, POINT { x: 1, y: 3 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, full, widget, POINT { x: 8, y: 1 }, 24, [true; 4],
+        ), Some(FloatingEdge::Top));
     }
 
     #[test]
@@ -10938,12 +10954,13 @@ mod tests {
         assert_eq!(floating_drop_edge_at_pointer(
             monitor, work, off_work, POINT { x: 730, y: 700 }, 24, [true; 4],
         ), None);
-        // A physical seam or a neighboring monitor must not become a dock.
+        // A free widget must not snap just because it was dragged toward a
+        // neighboring monitor earlier; the current pointer and popup are
+        // both far from all four candidate edges.
         let inset = RECT { left: 48, top: 0, right: 1920, bottom: 1080 };
         let free_widget = RECT { left: 500, top: 400, right: 720, bottom: 500 };
         assert_eq!(floating_drop_edge_at_pointer(
-            monitor, inset, free_widget, POINT { x: 15, y: 700 }, 24,
-            [false, true, true, true],
+            monitor, inset, free_widget, POINT { x: 200, y: 700 }, 24, [true; 4],
         ), None);
         // At an actual free screen edge, retain the original algorithm.
         let free = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
@@ -11137,33 +11154,86 @@ mod tests {
     }
 
     #[test]
-    fn desktop_connected_monitors_dont_snap_to_shared_seam() {
-        let left_monitor = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
-        let right_monitor = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
-        let crossing_from_left = RECT {
-            left: -180, top: 460, right: 18, bottom: 550,
-        };
-        let crossing_from_right = RECT {
-            left: -10, top: 460, right: 210, bottom: 550,
-        };
-        assert_eq!(
-            floating_drop_edge(left_monitor, crossing_from_left, 24, [true, false, true, true]),
-            None,
-        );
-        assert_eq!(
-            floating_drop_edge(right_monitor, crossing_from_right, 24, [false, true, true, true]),
-            None,
-        );
-        // At an outer boundary of the same layouts, genuine dockability stays.
-        assert_eq!(
-            floating_drop_edge(left_monitor,
-                RECT { left: -1930, top: 460, right: -1730, bottom: 550 },
-                24, [true, false, true, true]),
-            Some(FloatingEdge::Left),
-        );
-        // If two displays meet only over part of a side, a free segment can
-        // still dock when its full grip isn't covered by the next screen.
-        assert!(right_monitor.bottom > left_monitor.bottom);
+    fn desktop_shared_seam_docks_to_monitor_under_cursor_and_auto_hides() {
+        // Left monitor ends where right monitor starts (x=0); when the
+        // cursor is on the left side the chosen edge is Right, on the
+        // other monitor it is Left. The rendered grip never crosses x=0.
+        let left = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let right = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        for (monitor, widget, pointer, edge) in [
+            (
+                left, RECT { left: -180, top: 460, right: 18, bottom: 550 },
+                POINT { x: -2, y: 505 }, FloatingEdge::Right,
+            ),
+            (
+                right, RECT { left: -10, top: 460, right: 210, bottom: 550 },
+                POINT { x: 3, y: 505 }, FloatingEdge::Left,
+            ),
+        ] {
+            assert_eq!(floating_drop_edge_at_pointer(
+                monitor, monitor, widget, pointer, 24, [true; 4],
+            ), Some(edge), "release screen alone selects docking monitor");
+            assert!(floating_edge_needs_clip(monitor, monitor, edge, true),
+                "shared seam must alpha-clip the popup into the mouse screen");
+            let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
+            let (expanded_x, expanded_y) = floating_edge_position(
+                monitor, pointer.x, pointer.y, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let tab = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let collapsed = floating_slid_canvas_rect(tab, w, h, edge, 0);
+            let panel = floating_slid_canvas_rect(body, w, h, edge, 0);
+            assert!(panel.right == panel.left || panel.bottom == panel.top,
+                "panel must fully retract at the shared seam");
+            let grip_x = match edge {
+                FloatingEdge::Right => expanded_x + collapsed.right,
+                FloatingEdge::Left => expanded_x + collapsed.left,
+                _ => unreachable!(),
+            };
+            assert_eq!(grip_x, 0, "retracted tab must be flush with shared seam");
+            assert!(expanded_y >= monitor.top && expanded_y + h <= monitor.bottom);
+            assert!(expanded_x >= monitor.left && expanded_x + w <= monitor.right);
+        }
+    }
+
+    #[test]
+    fn desktop_shared_seam_dock_clips_sliding_pixels_inside_chosen_monitor() {
+        let monitor_left = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let monitor_right = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        for (monitor, edge) in [
+            (monitor_left, FloatingEdge::Right),
+            (monitor_right, FloatingEdge::Left),
+        ] {
+            let (w, h, _) = floating_canvas_geometry(240, 72, Some(edge));
+            let (x, y) = floating_edge_position(
+                monitor, monitor.left, 360, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let source = vec![0xFFFFFFFF; (w * h) as usize];
+            for reveal in [0_u8, 15, 50, 85, 100] {
+                let mut bitmap = source.clone();
+                floating_slide_layered_bitmap(&mut bitmap, w, h, edge, reveal);
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                assert!(bitmap.iter().any(|&pixel| pixel != 0),
+                    "drag tab must remain visible even when panel is hidden");
+                for py in 0..h {
+                    for px in 0..w {
+                        let sx = px - dx;
+                        let sy = py - dy;
+                        let pixel = bitmap[(py * w + px) as usize];
+                        assert_eq!(pixel != 0, sx >= 0 && sx < w && sy >= 0 && sy < h);
+                        assert!(x + px >= monitor.left && x + px < monitor.right);
+                        assert!(y + py >= monitor.top && y + py < monitor.bottom);
+                    }
+                }
+            }
+        }
+        // Independent external edges need no clipping, unless Explorer
+        // reserves that edge for its own taskbar.
+        assert!(!floating_edge_needs_clip(
+            monitor_right, monitor_right, FloatingEdge::Top, false,
+        ));
+        assert!(floating_edge_needs_clip(
+            monitor_right, RECT { top: 48, ..monitor_right }, FloatingEdge::Top, false,
+        ));
     }
 
     #[test]
