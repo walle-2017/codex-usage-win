@@ -16,15 +16,21 @@ if ($window -notmatch 'floating_reserved_dock: bool' -or
     $window -match '\(collapsed && s\.floating_reserved_dock\)') {
     throw 'Reserved taskbar-side docks must be allowed to retract normally.'
 }
-if ($window -notmatch 'fn floating_reserved_visible_body\(' -or
-    $window -notmatch 'fn floating_reserved_grip_rect\(' -or
-    $window -notmatch 'render_floating_handle_bitmap_at\(' -or
-    $window -notmatch '(?s)if reserved \{\s*// Keep HWND fixed within the taskbar-free work area\.') {
-    throw 'Reserved retract must clip content inside a stationary window and move its grip.'
+if ($window -notmatch 'fn floating_slide_offset\(' -or
+    $window -notmatch 'fn floating_slide_layered_bitmap\(' -or
+    $window -notmatch 'fn floating_slid_canvas_rect\(' -or
+    $window -notmatch 'floating_slide_layered_bitmap\(' -or
+    $window -notmatch '(?s)if reserved \{\s*// For Explorer edges, move the rendered bitmap instead of HWND\.' -or
+    $window -notmatch 'floating_reserved_drag_reveal = 100') {
+    throw 'Taskbar docking must use physical-edge slide offsets and alpha-clipped canvas, including zero-jump drag rebasing.'
 }
-if ($blur -notmatch 'floating_reserved_visible_body\(' -or
+if ($blur -notmatch 'floating_slid_canvas_rect\(' -or
     $blur -notmatch 'floating_state_grip_rect\(s\)') {
-    throw 'Frosted panel and tab must be clipped and moved with the same geometry.'
+    throw 'Frosted panel and grip must use the same slide offset and work-area clip.'
+}
+if ($window -match 'fn floating_reserved_visible_body\(' -or
+    $window -match 'fn floating_reserved_grip_rect\(') {
+    throw 'Obsolete taskbar-only contraction and grip geometry must not return.'
 }
 if ($window -notmatch 'fn floating_drop_edge_at_pointer\(' -or
     $window -notmatch 'let edge = floating_drop_edge_at_pointer\(' -or
@@ -34,7 +40,9 @@ if ($window -notmatch 'fn floating_drop_edge_at_pointer\(' -or
     throw 'Taskbar drop must use the cursor reserved band even when the entire dragged HWND is beyond rcWork.'
 }
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
-    $window -notmatch 'desktop_reserved_tabs_retract_flush_to_taskbar_all_four_edges') {
+    $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
+    $window -notmatch 'desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides' -or
+    $window -notmatch 'desktop_taskbar_tab_grab_anchor_stays_fixed_when_virtual_slide_becomes_real') {
     throw 'Missing exact-gap and four-edge animation regressions.'
 }
 if ($window -notmatch 'geometry_changed = geometry != last_taskbar_geometry' -or
@@ -48,4 +56,4 @@ if ($window -match 'sync_desktop_taskbar_owner|desktop_taskbar_overlap_area|desk
 if ($blur -notmatch '(?s)fn move_frosted_pair\(.*?SWP_NOZORDER \| SWP_NOACTIVATE') {
     throw 'Drag-time frosted positioning must retain its no-flicker Z-order.'
 }
-Write-Host 'PASS: exact Explorer-edge snap, in-place retract, four-edge grip and blur synchronization.'
+Write-Host 'PASS: exact Explorer-edge snap, unified sliding animation, four-edge clipping, drag anchoring, and glass synchronization.'
