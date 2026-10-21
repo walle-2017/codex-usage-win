@@ -39,6 +39,12 @@ if ($window -notmatch 'fn floating_drop_edge_at_pointer\(' -or
     $window -notmatch 'desktop_taskbar_drop_does_not_snap_when_cursor_not_in_reserved_band') {
     throw 'Taskbar drop must use the cursor reserved band even when the entire dragged HWND is beyond rcWork.'
 }
+if ($window -notmatch 'fn floating_drag_has_crossed_taskbar_edge\(' -or
+    $window -notmatch '(?s)let should_unlock = !unlocked.*?floating_drag_has_cleared_edge\(.*?\|\| \(reserved && floating_drag_has_crossed_taskbar_edge\(' -or
+    $window -notmatch 'desktop_taskbar_drag_restores_clipped_glow_in_both_directions' -or
+    $window -notmatch 'desktop_taskbar_drag_does_not_unlock_from_small_jitter') {
+    throw 'Dragging into Explorer must restore the clipped external glow, without changing physical-edge behavior.'
+}
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
     $window -notmatch 'desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides' -or
