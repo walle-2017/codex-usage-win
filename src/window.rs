@@ -5048,20 +5048,15 @@ fn move_floating_widget(hwnd: HWND) {
             bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
         );
         if reserved {
-            // Keep HWND fixed within the taskbar-free work area. Only the
-            // contents of the layered bitmap animate when retracting.
+            // For Explorer edges, move the rendered bitmap instead of HWND.
+            // This keeps all pixels inside the taskbar-free desktop canvas.
             (expanded_x, expanded_y)
         } else {
-            let (collapsed_x, collapsed_y) = floating_edge_position(
-                bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
-            );
-            // floating_reveal is already eased: avoid applying a second
-            // nonlinear curve and preserve V24.3's no-flicker release.
-            let progress = f64::from(reveal) / 100.0;
-            let interpolate = |a: i32, b: i32| {
-                a + (f64::from(b - a) * progress).round() as i32
-            };
-            (interpolate(collapsed_x, expanded_x), interpolate(collapsed_y, expanded_y))
+            // Both paths use the exact same signed slide distance and easing.
+            let (dx, dy) = edge.map(|edge|
+                floating_slide_offset(width, height, edge, reveal)
+            ).unwrap_or((0, 0));
+            (expanded_x + dx, expanded_y + dy)
         }
     };
     let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
@@ -5232,22 +5227,31 @@ fn eased_value_at(from: u8, to: u8, elapsed: Duration, duration_ms: u64) -> u8 {
 }
 
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
-    let (anchor_x, anchor_y, edge, body_w, body_h, unlocked) = {
+    let (anchor_x, anchor_y, edge, body_w, body_h, unlocked, reserved, drag_reveal) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return; }
         (
             s.floating_drag_anchor_x, s.floating_drag_anchor_y, s.floating_edge,
             total_widget_width_for_state(s), widget_height_for_state(s),
-            s.floating_drag_glow_detached,
+            s.floating_drag_glow_detached, s.floating_reserved_dock,
+            s.floating_reserved_drag_reveal,
         )
     };
-    let mut new_anchor_x = anchor_x;
-    let mut new_anchor_y = anchor_y;
-    let window_x = pointer.x - anchor_x;
-    let window_y = pointer.y - anchor_y;
     let (old_w, old_h, old_body) =
         floating_drag_canvas_geometry(body_w, body_h, edge, unlocked);
+    // A collapsed taskbar grip has a virtual pixel offset inside a stationary
+    // HWND. On the first drag frame, transfer that offset to the HWND origin
+    // and rebase the mouse anchor atomically, without moving the actual grip
+    // on the screen. After this the normal drag path is identical everywhere.
+    let (slide_x, slide_y) = if reserved {
+        edge.map(|edge| floating_slide_offset(old_w, old_h, edge, drag_reveal))
+            .unwrap_or((0, 0))
+    } else { (0, 0) };
+    let mut new_anchor_x = anchor_x - slide_x;
+    let mut new_anchor_y = anchor_y - slide_y;
+    let window_x = pointer.x - new_anchor_x;
+    let window_y = pointer.y - new_anchor_y;
     let should_unlock = !unlocked && floating_monitor_geometry(pointer)
         .is_some_and(|(_, bounds)| floating_drag_has_cleared_edge(
             window_x, window_y, old_body, bounds, edge,
@@ -5271,12 +5275,14 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         s.floating_drag_anchor_x = new_anchor_x;
         s.floating_drag_anchor_y = new_anchor_y;
         if should_unlock { s.floating_drag_glow_detached = true; }
+        s.floating_reserved_drag_reveal = 100;
         s.floating_collapsed = false;
         s.floating_reveal = 100;
     }
-    // A docked tab starts partly outside the monitor. Preserve its original
-    // orientation and allow crossing monitor seams without a window clamp.
-    if should_unlock {
+    // The first reserved-edge drag frame rebases the bitmap's virtual slide
+    // to real coordinates. Commit the new position with the new bitmap so
+    // the drag tab doesn't jump, just like V24.7 halo restoration.
+    if should_unlock || slide_x != 0 || slide_y != 0 {
         // Update canvas dimensions and HWND origin atomically to avoid a
         // stale bitmap or a one-frame jump when restoring external glow.
         render_layered_at(Some(POINT { x: new_x, y: new_y }));
