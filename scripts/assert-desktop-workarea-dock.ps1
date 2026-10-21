@@ -48,8 +48,16 @@ if ($window -notmatch 'fn floating_drag_has_crossed_taskbar_edge\(' -or
 if ($window -notmatch '(?s)fn floating_drop_edge_at_pointer\(.*?pointer\.x\.abs_diff\(bounds\.left\).*?pointer\.y\.abs_diff\(bounds\.bottom\).*?\.min_by_key\(\|\(_, _, _, _, distance\)\| \*distance\)' -or
     $window -notmatch 'desktop_corner_snap_picks_nearest_mouse_edge_at_all_four_corners' -or
     $window -notmatch 'desktop_taskbar_corner_snap_uses_actual_inner_taskbar_edge_distances' -or
-    $window -notmatch 'desktop_corner_snap_ignores_unexposed_monitor_seams') {
-    throw 'Corner docking must compare cursor-to-edge distances for every eligible physical/taskbar edge and preserve monitor seams.'
+    $window -notmatch 'desktop_shared_seam_corner_uses_nearest_mouse_edge_including_taskbar') {
+    throw 'Corner docking must compare cursor distances even where a display seam meets a taskbar.'
+}
+if ($window -notmatch 'fn floating_edge_needs_clip\(' -or
+    $window -notmatch 'fn floating_edge_requires_clip\(' -or
+    $window -notmatch '(?s)fn finish_floating_drag\(.*?floating_monitor_geometry\(pointer\).*?floating_drop_edge_at_pointer\(\s*monitor, bounds, rect, pointer, sc\(FLOAT_EDGE_SNAP\), \[true; 4\]' -or
+    $window -match 'let blocked_seam =' -or
+    $window -notmatch 'desktop_shared_seam_docks_to_monitor_under_cursor_and_auto_hides' -or
+    $window -notmatch 'desktop_shared_seam_dock_clips_sliding_pixels_inside_chosen_monitor') {
+    throw 'Each monitor seam must be dockable, use the mouse-selected monitor, and clip autohide instead of crossing screens.'
 }
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
@@ -68,4 +76,4 @@ if ($window -match 'sync_desktop_taskbar_owner|desktop_taskbar_overlap_area|desk
 if ($blur -notmatch '(?s)fn move_frosted_pair\(.*?SWP_NOZORDER \| SWP_NOACTIVATE') {
     throw 'Drag-time frosted positioning must retain its no-flicker Z-order.'
 }
-Write-Host 'PASS: exact Explorer-edge snap, unified sliding animation, four-edge clipping, drag anchoring, and glass synchronization.'
+Write-Host 'PASS: cursor-selected monitor seam docking, nearest corner, cross-screen clipping, unified slide and glass synchronization.'
