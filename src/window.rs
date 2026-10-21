@@ -4679,63 +4679,77 @@ fn floating_drag_canvas_geometry(
     }
 }
 
-/// The reserved-edge popup stays wholly inside the desktop work area. Its
-/// visible body contracts toward the taskbar and its draggable tab follows the
-/// retreating edge. At reveal=0 only the tab remains, flush against Explorer.
-fn floating_reserved_visible_body(body: RECT, edge: FloatingEdge, reveal: u8) -> RECT {
-    let progress = i64::from(reveal.min(100));
-    let width = body.right - body.left;
-    let height = body.bottom - body.top;
-    let visible_width = (i64::from(width) * progress / 100) as i32;
-    let visible_height = (i64::from(height) * progress / 100) as i32;
-    match edge {
-        FloatingEdge::Left => RECT { right: body.left + visible_width, ..body },
-        FloatingEdge::Right => RECT { left: body.right - visible_width, ..body },
-        FloatingEdge::Top => RECT { bottom: body.top + visible_height, ..body },
-        FloatingEdge::Bottom => RECT { top: body.bottom - visible_height, ..body },
+/// Shared slide distance for physical screen edges and Explorer taskbar edges.
+/// At reveal=0 the grip is flush with the boundary; at reveal=100 the
+/// original content and tab occupy their fully expanded coordinates.
+fn floating_slide_offset(
+    width: i32, height: i32, edge: FloatingEdge, reveal: u8,
+) -> (i32, i32) {
+    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
+    let (dx, dy) = match edge {
+        FloatingEdge::Left => (-grip.left, 0),
+        FloatingEdge::Right => (width - grip.right, 0),
+        FloatingEdge::Top => (0, -grip.top),
+        FloatingEdge::Bottom => (0, height - grip.bottom),
+    };
+    let fraction = f64::from(100 - reveal.min(100)) / 100.0;
+    (
+        (f64::from(dx) * fraction).round() as i32,
+        (f64::from(dy) * fraction).round() as i32,
+    )
+}
+
+/// Clip moving desktop pixels to the taskbar-free canvas. The panel and grip
+/// use the exact same offset as physical-edge docking, not a second
+/// shortening/stretching animation invented for reserved work-area edges.
+fn floating_slid_canvas_rect(
+    rect: RECT, width: i32, height: i32, edge: FloatingEdge, reveal: u8,
+) -> RECT {
+    let (dx, dy) = floating_slide_offset(width, height, edge, reveal);
+    RECT {
+        left: (rect.left + dx).clamp(0, width),
+        right: (rect.right + dx).clamp(0, width),
+        top: (rect.top + dy).clamp(0, height),
+        bottom: (rect.bottom + dy).clamp(0, height),
     }
 }
 
-fn floating_reserved_grip_rect(
-    width: i32, height: i32, body: RECT, edge: FloatingEdge, reveal: u8,
-) -> RECT {
-    let visible = floating_reserved_visible_body(body, edge, reveal);
-    let mut grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
-    match edge {
-        FloatingEdge::Left => {
-            let delta = visible.right - grip.left;
-            grip.left += delta;
-            grip.right += delta;
-        }
-        FloatingEdge::Right => {
-            let delta = visible.left - grip.right;
-            grip.left += delta;
-            grip.right += delta;
-        }
-        FloatingEdge::Top => {
-            let delta = visible.bottom - grip.top;
-            grip.top += delta;
-            grip.bottom += delta;
-        }
-        FloatingEdge::Bottom => {
-            let delta = visible.top - grip.bottom;
-            grip.top += delta;
-            grip.bottom += delta;
-        }
+/// Shift the *completed* premultiplied foreground bitmap as one unit. It
+/// preserves text, rounded corners, double-sided halo, and the six-dot tab,
+/// while the taskbar-facing pixels outside the desktop canvas stay alpha=0.
+fn floating_slide_layered_bitmap(
+    canvas: &mut [u32], width: i32, height: i32,
+    edge: FloatingEdge, reveal: u8,
+) {
+    let (dx, dy) = floating_slide_offset(width, height, edge, reveal);
+    if dx == 0 && dy == 0 { return; }
+    let src = canvas.to_vec();
+    canvas.fill(0);
+    let copy_width = width - dx.abs();
+    if copy_width <= 0 { return; }
+    let dst_left = dx.max(0);
+    let src_left = (-dx).max(0);
+    for dst_y in dy.max(0)..(height + dy).min(height) {
+        let src_y = dst_y - dy;
+        let dst_index = (dst_y * width + dst_left) as usize;
+        let src_index = (src_y * width + src_left) as usize;
+        let count = copy_width as usize;
+        canvas[dst_index..dst_index + count]
+            .copy_from_slice(&src[src_index..src_index + count]);
     }
-    grip
 }
 
 fn floating_state_grip_rect(s: &AppState) -> RECT {
-    let (w, h, body) = floating_canvas_geometry_for_state(s);
+    let (w, h, _) = floating_canvas_geometry_for_state(s);
+    let grip = floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK));
     if s.floating_reserved_dock {
         if let Some(edge) = s.floating_edge {
             let reveal = if s.dragging { s.floating_reserved_drag_reveal }
                 else { s.floating_reveal };
-            return floating_reserved_grip_rect(w, h, body, edge, reveal);
+            return floating_slid_canvas_rect(grip, w, h, edge, reveal);
         }
     }
-    floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK))
+    grip
 }
 
 fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
