@@ -10680,8 +10680,9 @@ mod tests {
         ), None);
         // A physical seam or a neighboring monitor must not become a dock.
         let inset = RECT { left: 48, top: 0, right: 1920, bottom: 1080 };
+        let free_widget = RECT { left: 500, top: 400, right: 720, bottom: 500 };
         assert_eq!(floating_drop_edge_at_pointer(
-            monitor, inset, off_work, POINT { x: 15, y: 700 }, 24,
+            monitor, inset, free_widget, POINT { x: 15, y: 700 }, 24,
             [false, true, true, true],
         ), None);
         // At an actual free screen edge, retain the original algorithm.
