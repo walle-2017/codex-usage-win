@@ -2898,6 +2898,14 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
                 );
                 canvas.fill(0);
+                if hovered && !hidden {
+                    // Paint the external halo FIRST. The body and tab occupy
+                    // exactly the mask used for the glow, so no colored pixels
+                    // can enter the semi-transparent glass or rounded corners.
+                    draw_drag_hover_outer_glow(
+                        canvas, canvas_w, canvas_h, body, grip, &style, accent,
+                    );
+                }
                 if !hidden {
                     for y in 0..height {
                         let dst = ((y + body.top) * canvas_w + body.left) as usize;
@@ -2910,17 +2918,10 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
                 );
                 if hovered && !hidden {
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, body,
-                        style.panel_corner_radius, accent,
-                    );
-                    // Keep the physical-edge glow shape and hit probe identical.
-                    let tab = grip;
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
-                    );
+                    // Preserve V24.6's alpha-1 transition probe: light is
+                    // visual-only and must never enlarge drag hit targets.
                     paint_floating_hover_hit_probe(
-                        canvas, canvas_w, canvas_h, body, tab, edge,
+                        canvas, canvas_w, canvas_h, body, grip, edge,
                     );
                 }
                 if reserved {
@@ -3236,6 +3237,20 @@ fn point_in_rounded_box(
     dx * dx + dy * dy <= radius * radius
 }
 
+/// Single source of truth for the *actual painted pixels* of a rounded
+/// panel or drag tab. Reused by the panel renderer and desktop glow mask.
+fn panel_outer_shape_contains(
+    width: i32, height: i32, x: i32, y: i32, corner_radius: u8,
+) -> bool {
+    let inset = sc(1).max(1);
+    if x < inset || x >= width - inset || y < inset || y >= height - inset {
+        return false;
+    }
+    let radius = sc(i32::from(corner_radius))
+        .min(((width - inset * 2).min(height - inset * 2) / 2).max(0));
+    radius == 0 || point_in_rounded_box(width, height, x, y, inset, radius)
+}
+
 fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
     let outer_inset = sc(1).max(1);
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
@@ -3246,8 +3261,9 @@ fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &Theme
     let fill = style.color(StyleColorTarget::PanelBackground);
     for y in outer_inset..(height - outer_inset).max(outer_inset) {
         for x in outer_inset..(width - outer_inset).max(outer_inset) {
-            let outer_inside = outer_radius == 0
-                || point_in_rounded_box(width, height, x, y, outer_inset, outer_radius);
+            let outer_inside = panel_outer_shape_contains(
+                width, height, x, y, style.panel_corner_radius,
+            );
             if !outer_inside {
                 continue;
             }
@@ -3270,10 +3286,10 @@ fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
     let outer_radius = sc(i32::from(style.panel_corner_radius))
         .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
+    if !panel_outer_shape_contains(width, height, x, y, style.panel_corner_radius) {
+        return None;
+    }
     if outer_radius > 0 {
-        if !point_in_rounded_box(width, height, x, y, outer_inset, outer_radius) {
-            return None;
-        }
         let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
         if point_in_rounded_box(width, height, x, y, inner_inset, inner_radius) {
             Some(style.color(StyleColorTarget::PanelBackground))
