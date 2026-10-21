@@ -954,7 +954,9 @@ if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*to
     $windowProduction -notmatch 'if !floating && drag_hovered' -or
     $windowProduction -notmatch 'if hovered && !hidden' -or
     $windowProduction -notmatch 'floating_grip_rect\(' -or
-    $windowProduction -notmatch 'draw_drag_hover_outline\(\s*canvas, canvas_w, canvas_h, tab' -or
+    $windowProduction -notmatch 'draw_drag_hover_outer_glow\(\s*canvas, canvas_w, canvas_h, body, grip, &style, accent' -or
+    $windowProduction -notmatch 'fn\s+panel_outer_shape_contains\(' -or
+    $windowProduction -notmatch 'fn\s+draw_drag_hover_outer_glow\(' -or
     $windowProduction -notmatch 'drag_hover_outline_color\(&style\)') {
     throw 'V24 must retain stable six-dot grips and provide theme-adaptive perimeter hover on both the panel and desktop tab.'
 }
@@ -973,19 +975,23 @@ if ($windowProduction -notmatch 'fn floating_hover_probe_rect\(' -or
     throw 'V24.6 must watch the real draggable rectangle via a transparent hit-test probe and deferred hover cleanup.'
 }
 
-# V24.7 restores the physically clipped halo when a docked drag clears
-# the monitor edge, without changing grab anchors. Retain the pre-V24.7 soft
-# inner AND outer rim illumination, especially around rounded corners.
+# V24.7 retains the formerly clipped glow gutter on undocking.
+# V24.18 renders a perimeter halo BEHIND the real rounded body and tab,
+# sharing their exact exterior mask and never coloring transparent interiors.
 if ($windowProduction -notmatch 'floating_drag_glow_detached' -or
     $windowProduction -notmatch 'fn floating_drag_canvas_geometry\(' -or
     $windowProduction -notmatch 'fn floating_drag_has_cleared_edge\(' -or
     $windowProduction -notmatch 'if should_unlock' -or
     $windowProduction -notmatch 'render_layered_at\(Some\(POINT \{ x: new_x, y: new_y \}\)\)' -or
-    $windowProduction -notmatch 'let distance = distance_from_edge\.abs\(\)' -or
-    $windowProduction -notmatch 'if distance\.abs\(\) > extent as f32' -or
+    $windowProduction -notmatch 'fn draw_drag_hover_outer_glow\(' -or
+    $windowProduction -notmatch 'fn panel_outer_shape_contains\(' -or
+    $windowProduction -notmatch 'if occupied\[other\] \{ continue; \}' -or
+    $windowProduction -notmatch 'if !hidden \{' -or
     $window -notmatch 'v24_7_drag_clears_physical_edge_and_restores_all_outer_gutters' -or
-    $window -notmatch 'v24_7_rounded_glow_feathers_inside_and_outside_the_widget') {
-    throw 'V24.7 must restore both the inner rounded rim glow and full outer halo during undocking without shifting the grip.'
+    $window -notmatch 'v24_18_outer_glow_leaves_all_panel_and_tab_pixels_untinted' -or
+    $window -notmatch 'v24_18_outer_glow_contacts_actual_rounded_contour_without_any_gap' -or
+    $window -notmatch 'v24_18_nearby_panel_and_tab_glows_do_not_tint_each_other') {
+    throw 'V24.18 must retain undocking halo recovery while sharing the real rounded silhouette and avoiding interior tint.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
