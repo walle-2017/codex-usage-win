@@ -4677,10 +4677,13 @@ fn floating_slide_offset(
         FloatingEdge::Top => (0, -grip.top),
         FloatingEdge::Bottom => (0, height - grip.bottom),
     };
-    let fraction = f64::from(100 - reveal.min(100)) / 100.0;
+    // Use the physical-edge interpolation's original integer rounding
+    // (including halfway frames). This avoids one-pixel differences between
+    // the taskbar slide and the ordinary popup slide.
+    let progress = f64::from(reveal.min(100)) / 100.0;
     (
-        (f64::from(dx) * fraction).round() as i32,
-        (f64::from(dy) * fraction).round() as i32,
+        dx + (f64::from(-dx) * progress).round() as i32,
+        dy + (f64::from(-dy) * progress).round() as i32,
     )
 }
 
