@@ -88,6 +88,9 @@ struct AppState {
     // A reserved work-area edge (e.g. Explorer taskbar) cannot accept a
     // sliding popup: keep the entire desktop canvas on the desktop side.
     floating_reserved_dock: bool,
+    // Preserve the exact clicked tab location while expanding a collapsed
+    // taskbar-edge popup into a captured drag.
+    floating_reserved_drag_reveal: u8,
     // During an edge-tab drag, unlock the previously screen-clipped side's
     // external glow once the panel is clear of the physical monitor boundary.
     // The tab stays on the grabbed side until mouse-up.
@@ -292,6 +295,9 @@ struct TaskbarLayoutSnapshot {
 }
 
 static TASKBAR_LAYOUT_CACHE: Mutex<Vec<TaskbarLayoutSnapshot>> = Mutex::new(Vec::new());
+// Collected by the existing background taskbar worker. Geometry-only reads on
+// the UI thread never synchronously enter Explorer or enumerate every window.
+static TASKBAR_EDGE_RECTS: Mutex<Vec<RECT>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -1496,6 +1502,10 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
                 .collect();
             let geometry_changed = geometry != last_taskbar_geometry;
             last_taskbar_geometry = geometry;
+            if !taskbars.is_empty() {
+                *TASKBAR_EDGE_RECTS.lock().unwrap_or_else(|e| e.into_inner()) =
+                    taskbars.iter().map(|bar| bar.rect).collect();
+            }
             let mut active_taskbars: BTreeSet<isize> = taskbars
                 .iter()
                 .map(|taskbar| taskbar.hwnd.0 as isize)
@@ -1995,11 +2005,8 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
                 if s.floating_edge.is_none() && s.floating_grip_alpha == 0 {
                     return false;
                 }
-                return floating_drag_handle_hit(
-                    client_x, client_y,
-                    floating_canvas_size_for_state(s).0,
-                    floating_canvas_size_for_state(s).1,
-                    s.floating_edge, sc(FLOAT_EDGE_PEEK),
+                return point_in_rect(
+                    floating_state_grip_rect(s), client_x, client_y,
                 );
             }
         }
@@ -2403,6 +2410,7 @@ pub fn run() {
                 floating_y: settings.floating_y.unwrap_or(i32::MIN),
                 floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
                 floating_reserved_dock: false,
+                floating_reserved_drag_reveal: 100,
                 floating_drag_glow_detached: false,
                 floating_collapsed: false,
                 floating_reveal: 100,
@@ -4425,14 +4433,14 @@ fn tray_reposition_is_suppressed() -> bool {
     }
 }
 
-// Desktop fallback keeps a separately owned popup alive instead of
+// Desktop fallback keeps an independent popup alive instead of
 // detaching/reparenting Explorer's active taskbar child window.
 const FLOAT_EDGE_SNAP: i32 = 24;
 const FLOAT_EDGE_PEEK: i32 = 16;
 const FLOAT_GRIP_LENGTH: i32 = 36;
 // Preserve the component's content size. Transparent canvas gutters allow
 // external glow on free desktops and on the inward-facing sides of docked
-// panels. An occupied work-area edge (taskbar) never accepts a collapsed panel.
+// panels. Reserved taskbar edges use an in-place clip instead of sliding.
 const FLOAT_FREE_GLOW_MARGIN: i32 = 12;
 const FLOAT_EXPAND_DURATION_MS: u64 = 220;
 const FLOAT_RETRACT_DURATION_MS: u64 = 240;
@@ -4638,6 +4646,65 @@ fn floating_drag_canvas_geometry(
     }
 }
 
+/// The reserved-edge popup stays wholly inside the desktop work area. Its
+/// visible body contracts toward the taskbar and its draggable tab follows the
+/// retreating edge. At reveal=0 only the tab remains, flush against Explorer.
+fn floating_reserved_visible_body(body: RECT, edge: FloatingEdge, reveal: u8) -> RECT {
+    let progress = i64::from(reveal.min(100));
+    let width = body.right - body.left;
+    let height = body.bottom - body.top;
+    let visible_width = (i64::from(width) * progress / 100) as i32;
+    let visible_height = (i64::from(height) * progress / 100) as i32;
+    match edge {
+        FloatingEdge::Left => RECT { right: body.left + visible_width, ..body },
+        FloatingEdge::Right => RECT { left: body.right - visible_width, ..body },
+        FloatingEdge::Top => RECT { bottom: body.top + visible_height, ..body },
+        FloatingEdge::Bottom => RECT { top: body.bottom - visible_height, ..body },
+    }
+}
+
+fn floating_reserved_grip_rect(
+    width: i32, height: i32, body: RECT, edge: FloatingEdge, reveal: u8,
+) -> RECT {
+    let visible = floating_reserved_visible_body(body, edge, reveal);
+    let mut grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
+    match edge {
+        FloatingEdge::Left => {
+            let delta = visible.right - grip.left;
+            grip.left += delta;
+            grip.right += delta;
+        }
+        FloatingEdge::Right => {
+            let delta = visible.left - grip.right;
+            grip.left += delta;
+            grip.right += delta;
+        }
+        FloatingEdge::Top => {
+            let delta = visible.bottom - grip.top;
+            grip.top += delta;
+            grip.bottom += delta;
+        }
+        FloatingEdge::Bottom => {
+            let delta = visible.top - grip.bottom;
+            grip.top += delta;
+            grip.bottom += delta;
+        }
+    }
+    grip
+}
+
+fn floating_state_grip_rect(s: &AppState) -> RECT {
+    let (w, h, body) = floating_canvas_geometry_for_state(s);
+    if s.floating_reserved_dock {
+        if let Some(edge) = s.floating_edge {
+            let reveal = if s.dragging { s.floating_reserved_drag_reveal }
+                else { s.floating_reveal };
+            return floating_reserved_grip_rect(w, h, body, edge, reveal);
+        }
+    }
+    floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK))
+}
+
 fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
     floating_drag_canvas_geometry(
         total_widget_width_for_state(s), widget_height_for_state(s),
@@ -4687,10 +4754,10 @@ fn vertical_placement_for_gaps(
     None
 }
 
-/// Windows updates rcWork when a taskbar moves between the top, bottom,
-/// left and right sides of a particular display. Never override its bottom
-/// boundary with the physical monitor boundary: doing so allowed the desktop
-/// popup to sit underneath a bottom taskbar.
+/// rcWork is useful for finding reserved edges but can differ from the
+/// actual Explorer taskbar rectangle by a few pixels. For a taskbar attached
+/// to the physical monitor edge, place the desktop popup at the taskbar's
+/// *real* inner face; never leave a visible gap or enter the taskbar.
 fn floating_usable_bounds(monitor: RECT, work: RECT) -> RECT {
     if work.left >= monitor.left && work.top >= monitor.top
         && work.right <= monitor.right && work.bottom <= monitor.bottom
@@ -4701,8 +4768,37 @@ fn floating_usable_bounds(monitor: RECT, work: RECT) -> RECT {
     }
 }
 
-/// An inset boundary is reserved by Windows. The slide-out animation may
-/// extend beyond a physical screen edge, but never into the taskbar/work area.
+fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> RECT {
+    let mut bounds = floating_usable_bounds(monitor, work);
+    let mw = monitor.right - monitor.left;
+    let mh = monitor.bottom - monitor.top;
+    for bar in taskbars {
+        let overlap_x = (bar.right.min(monitor.right) - bar.left.max(monitor.left)).max(0);
+        let overlap_y = (bar.bottom.min(monitor.bottom) - bar.top.max(monitor.top)).max(0);
+        // Ignore taskbars on other monitors, tiny toolbars and interior windows.
+        if overlap_x >= mw / 2 && bar.bottom >= monitor.bottom - 8
+            && bar.top > monitor.top && bar.top < monitor.bottom {
+            bounds.bottom = bar.top;
+        } else if overlap_x >= mw / 2 && bar.top <= monitor.top + 8
+            && bar.bottom > monitor.top && bar.bottom < monitor.bottom {
+            bounds.top = bar.bottom;
+        } else if overlap_y >= mh / 2 && bar.left <= monitor.left + 8
+            && bar.right > monitor.left && bar.right < monitor.right {
+            bounds.left = bar.right;
+        } else if overlap_y >= mh / 2 && bar.right >= monitor.right - 8
+            && bar.left > monitor.left && bar.left < monitor.right {
+            bounds.right = bar.left;
+        }
+    }
+    if bounds.right > bounds.left && bounds.bottom > bounds.top {
+        bounds
+    } else {
+        floating_usable_bounds(monitor, work)
+    }
+}
+
+/// An inset boundary is reserved by Windows. Collapse at a reserved edge
+/// clips the panel inside the desktop, rather than sliding under Explorer.
 fn floating_edge_is_reserved(monitor: RECT, bounds: RECT, edge: FloatingEdge) -> bool {
     match edge {
         FloatingEdge::Left => bounds.left > monitor.left,
@@ -4719,9 +4815,13 @@ fn floating_monitor_geometry(point: POINT) -> Option<(RECT, RECT)> {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        GetMonitorInfoW(monitor, &mut info).as_bool().then_some((
-            info.rcMonitor, floating_usable_bounds(info.rcMonitor, info.rcWork),
-        ))
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let taskbars = TASKBAR_EDGE_RECTS.lock().unwrap_or_else(|e| e.into_inner());
+        Some((info.rcMonitor, floating_bounds_at_taskbar(
+            info.rcMonitor, info.rcWork, &taskbars,
+        )))
     }
 }
 
@@ -4855,13 +4955,8 @@ fn refresh_floating_reserved_dock(hwnd: HWND) {
         if !s.floating_mode || s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
         s.floating_reserved_dock = reserved;
         if reserved {
-            // Suppress any slide left over from the previous taskbar position.
-            s.floating_collapsed = false;
-            s.floating_first_collapse_guard = false;
-            s.floating_reveal = 100;
-            s.floating_slide_from = 100;
-            s.floating_slide_target = 100;
-            s.floating_grip_alpha = 100;
+            // Keep the current reveal state while recomputing the new
+            // taskbar position. A reserved tab can collapse normally.
         }
     }
 }
@@ -4875,6 +4970,7 @@ fn move_floating_widget(hwnd: HWND) {
         (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal,
          width, height, s.dragging)
     };
+    let reserved = lock_state().as_ref().is_some_and(|s| s.floating_reserved_dock);
     let (left, top) = if dragging || edge.is_none() {
         // Keep mouse positioning stable during drag and across connected
         // displays. A free popup may straddle two screens at a seam.
@@ -4885,6 +4981,11 @@ fn move_floating_widget(hwnd: HWND) {
         let (expanded_x, expanded_y) = floating_edge_position(
             bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
         );
+        if reserved {
+            // All HWND pixels stay on the desktop side of the taskbar.
+            // The layered bitmap animates the visible body and tab in place.
+            (expanded_x, expanded_y)
+        } else {
         let (collapsed_x, collapsed_y) = floating_edge_position(
             bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
         );
@@ -4895,6 +4996,7 @@ fn move_floating_widget(hwnd: HWND) {
             a + (f64::from(b - a) * progress).round() as i32
         };
         (interpolate(collapsed_x, expanded_x), interpolate(collapsed_y, expanded_y))
+        }
     };
     let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
     if blur {
@@ -4934,7 +5036,6 @@ fn set_floating_collapsed(collapsed: bool) {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         if !s.floating_mode || s.dragging || s.floating_edge.is_none()
-            || (collapsed && s.floating_reserved_dock)
             || (!collapsed && s.floating_first_collapse_guard)
             || s.floating_collapsed == collapsed { return; }
         s.floating_collapsed = collapsed;
@@ -5026,17 +5127,15 @@ fn step_floating_animation(hwnd: HWND) {
 
 /// False while the pointer still overlaps the collapsed exposed edge grip.
 fn floating_pointer_is_outside_grip(hwnd: HWND) -> bool {
-    let (edge, width, height) = {
+    let grip = {
         let state = lock_state();
         let Some(s) = state.as_ref().filter(|s| s.floating_mode) else { return false };
-        let (width, height) = floating_canvas_size_for_state(s);
-        (s.floating_edge, width, height)
+        if s.floating_edge.is_none() { return true; }
+        floating_state_grip_rect(s)
     };
-    let Some(edge) = edge else { return true };
     let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
     let mut point = POINT::default();
     if unsafe { GetCursorPos(&mut point) }.is_err() { return false; }
-    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
     !point_in_rect(RECT {
         left: rect.left + grip.left,
         top: rect.top + grip.top,
@@ -5189,10 +5288,10 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_edge = edge;
             s.floating_reserved_dock = reserved_dock;
             s.floating_drag_glow_detached = false;
-            // A taskbar edge stays expanded: no HWND pixels, including the
-            // glow and grip, may slide into the taskbar's rectangle.
-            s.floating_collapsed = edge.is_some() && !reserved_dock;
-            s.floating_first_collapse_guard = edge.is_some() && !reserved_dock;
+            // Reserved edges retract by pixel clipping, not by moving the
+            // popup underneath Explorer.
+            s.floating_collapsed = edge.is_some();
+            s.floating_first_collapse_guard = edge.is_some();
             s.floating_reveal = 100;
             s.floating_slide_from = 100;
             s.floating_slide_target = 100;
@@ -5211,7 +5310,7 @@ fn finish_floating_drag(hwnd: HWND) {
     if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
         sync_blur_backdrop_zorder(hwnd);
     }
-    if edge.is_some() && !reserved_dock {
+    if edge.is_some() {
         unsafe {
             SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
         }
@@ -6585,7 +6684,12 @@ unsafe extern "system" fn wnd_proc(
                 let s = state.as_ref().expect("desktop mode checked above");
                 let (w, h, body) = floating_canvas_geometry_for_state(s);
                 (
-                    body, floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK)),
+                    if s.floating_reserved_dock && !s.dragging {
+                        s.floating_edge.map(|edge| floating_reserved_visible_body(
+                            body, edge, s.floating_reveal,
+                        )).unwrap_or(body)
+                    } else { body },
+                    floating_state_grip_rect(s),
                     s.drag_handle_hovered && !s.dragging,
                 )
             };
@@ -6829,6 +6933,7 @@ unsafe extern "system" fn wnd_proc(
                     s.floating_drag_anchor_y = client_y;
                     s.failed_drag_target = None;
                     if s.floating_mode {
+                        s.floating_reserved_drag_reveal = s.floating_reveal;
                         s.floating_drag_glow_detached = false;
                         s.floating_first_collapse_guard = false;
                         s.floating_collapsed = false;
