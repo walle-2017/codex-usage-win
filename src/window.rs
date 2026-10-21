@@ -10721,56 +10721,121 @@ mod tests {
     }
 
     #[test]
-    fn desktop_reserved_tabs_retract_flush_to_taskbar_all_four_edges() {
-        let bounds = RECT { left: 100, top: 50, right: 1100, bottom: 750 };
+    fn desktop_taskbar_and_physical_edges_use_identical_slide_offsets() {
+        let bounds = RECT { left: -200, top: 60, right: 1100, bottom: 850 };
         for edge in [
             FloatingEdge::Left, FloatingEdge::Right,
             FloatingEdge::Top, FloatingEdge::Bottom,
         ] {
             let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
-            let (x, y) = floating_edge_position(
+            let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let (expanded_x, expanded_y) = floating_edge_position(
                 bounds, 450, 350, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
             );
-            let fully_visible = floating_reserved_visible_body(body, edge, 100);
-            assert_eq!(fully_visible, body);
-            let hidden = floating_reserved_visible_body(body, edge, 0);
-            let tab_expanded = floating_reserved_grip_rect(w, h, body, edge, 100);
-            let tab_collapsed = floating_reserved_grip_rect(w, h, body, edge, 0);
-            assert_eq!(tab_expanded, floating_grip_rect(
-                w, h, Some(edge), sc(FLOAT_EDGE_PEEK),
-            ));
-            let tab_mid = floating_reserved_grip_rect(w, h, body, edge, 50);
-            let half = floating_reserved_visible_body(body, edge, 50);
-            match edge {
-                FloatingEdge::Left => {
-                    assert_eq!(x, bounds.left);
-                    assert_eq!(hidden.right, body.left);
-                    assert_eq!(x + tab_collapsed.left, bounds.left);
-                    assert_eq!(tab_mid.left, half.right);
-                }
-                FloatingEdge::Right => {
-                    assert_eq!(x + w, bounds.right);
-                    assert_eq!(hidden.left, body.right);
-                    assert_eq!(x + tab_collapsed.right, bounds.right);
-                    assert_eq!(tab_mid.right, half.left);
-                }
-                FloatingEdge::Top => {
-                    assert_eq!(y, bounds.top);
-                    assert_eq!(hidden.bottom, body.top);
-                    assert_eq!(y + tab_collapsed.top, bounds.top);
-                    assert_eq!(tab_mid.top, half.bottom);
-                }
-                FloatingEdge::Bottom => {
-                    assert_eq!(y + h, bounds.bottom);
-                    assert_eq!(hidden.top, body.bottom);
-                    assert_eq!(y + tab_collapsed.bottom, bounds.bottom);
-                    assert_eq!(tab_mid.bottom, half.top);
+            let (collapsed_x, collapsed_y) = floating_edge_position(
+                bounds, 450, 350, w, h, Some(edge), true, sc(FLOAT_EDGE_PEEK),
+            );
+            for reveal in [0_u8, 12, 30, 50, 70, 91, 100] {
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                let fraction = f64::from(reveal) / 100.0;
+                let physical_x = collapsed_x
+                    + (f64::from(expanded_x - collapsed_x) * fraction).round() as i32;
+                let physical_y = collapsed_y
+                    + (f64::from(expanded_y - collapsed_y) * fraction).round() as i32;
+                assert_eq!((expanded_x + dx, expanded_y + dy), (physical_x, physical_y),
+                    "all dock edges must have the same slide travel and easing");
+                let moving_tab = floating_slid_canvas_rect(grip, w, h, edge, reveal);
+                assert_eq!(moving_tab.left, (grip.left + dx).clamp(0, w));
+                assert_eq!(moving_tab.top, (grip.top + dy).clamp(0, h));
+                let body_visible = floating_slid_canvas_rect(body, w, h, edge, reveal);
+                if reveal == 0 {
+                    assert!(body_visible.right == body_visible.left
+                        || body_visible.top == body_visible.bottom,
+                        "the panel must be completely out of the work area at rest");
+                    match edge {
+                        FloatingEdge::Left => {
+                            assert_eq!(expanded_x, bounds.left);
+                            assert_eq!(expanded_x + moving_tab.left, bounds.left);
+                        }
+                        FloatingEdge::Right => {
+                            assert_eq!(expanded_x + w, bounds.right);
+                            assert_eq!(expanded_x + moving_tab.right, bounds.right);
+                        }
+                        FloatingEdge::Top => {
+                            assert_eq!(expanded_y, bounds.top);
+                            assert_eq!(expanded_y + moving_tab.top, bounds.top);
+                        }
+                        FloatingEdge::Bottom => {
+                            assert_eq!(expanded_y + h, bounds.bottom);
+                            assert_eq!(expanded_y + moving_tab.bottom, bounds.bottom);
+                        }
+                    }
                 }
             }
-            assert_eq!(tab_collapsed.right - tab_collapsed.left,
-                tab_expanded.right - tab_expanded.left);
-            assert_eq!(tab_collapsed.bottom - tab_collapsed.top,
-                tab_expanded.bottom - tab_expanded.top);
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides() {
+        // Every colored pixel moves precisely as it would when the HWND itself
+        // slides beyond a physical screen edge. Work-area pixels alone survive.
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, _) = floating_canvas_geometry(84, 42, Some(edge));
+            let original: Vec<u32> = (0..w*h).map(|i| 0xAA000000 | i as u32).collect();
+            for reveal in [0_u8, 15, 40, 60, 85, 100] {
+                let mut pixels = original.clone();
+                floating_slide_layered_bitmap(&mut pixels, w, h, edge, reveal);
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                for y in 0..h {
+                    for x in 0..w {
+                        let src_x = x - dx;
+                        let src_y = y - dy;
+                        let expected = if src_x >= 0 && src_x < w
+                            && src_y >= 0 && src_y < h {
+                            original[(src_y*w + src_x) as usize]
+                        } else { 0 };
+                        assert_eq!(pixels[(y*w + x) as usize], expected,
+                            "taskbar edge must be the same slide, only alpha-clipped");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_tab_grab_anchor_stays_fixed_when_virtual_slide_becomes_real() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, _) = floating_canvas_geometry(240, 72, Some(edge));
+            let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let hwnd_origin = POINT { x: 200, y: 400 };
+            for reveal in [0_u8, 25, 50, 85, 100] {
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                let anchor = POINT {
+                    x: (grip.left + grip.right) / 2 + dx,
+                    y: (grip.top + grip.bottom) / 2 + dy,
+                };
+                let cursor = POINT {
+                    x: hwnd_origin.x + anchor.x,
+                    y: hwnd_origin.y + anchor.y,
+                };
+                // This is the rebasing performed on the very first drag frame.
+                let new_anchor = POINT { x: anchor.x - dx, y: anchor.y - dy };
+                let new_origin = POINT {
+                    x: cursor.x - new_anchor.x,
+                    y: cursor.y - new_anchor.y,
+                };
+                assert_eq!(new_origin, POINT {
+                    x: hwnd_origin.x + dx, y: hwnd_origin.y + dy,
+                });
+                assert_eq!(new_origin.x + (grip.left + grip.right) / 2, cursor.x);
+                assert_eq!(new_origin.y + (grip.top + grip.bottom) / 2, cursor.y);
+            }
         }
     }
 
@@ -10788,8 +10853,8 @@ mod tests {
         );
         assert_eq!(y + ch, work.bottom);
         assert!(y + body.bottom <= work.bottom);
-        // Both expanded and collapsed states keep the HWND at this same
-        // safe coordinate; only visible pixels contract during animation.
+        // The stationary HWND is kept out of the taskbar, while translated
+        // foreground and backdrop pixels are clipped at its real boundary.
     }
 
     #[test]
