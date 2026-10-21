@@ -4466,6 +4466,12 @@ const FLOAT_RETRACT_DURATION_MS: u64 = 240;
 const FLOAT_GRIP_FADE_IN_MS: u64 = 140;
 const FLOAT_GRIP_FADE_OUT_MS: u64 = 170;
 const TIMER_FLOAT_ANIMATION: usize = 0xF141;
+// Armed only after a docked popup receives a potentially spurious mouse-leave.
+// A 140ms recheck prevents edge-pixel expand/retract oscillation without the
+// permanent 50ms cursor polling removed in V24.5.
+const TIMER_FLOAT_HOVER_RECHECK: usize = 0xF142;
+const FLOAT_HOVER_RECHECK_MS: u32 = 140;
+const FLOAT_HOVER_EDGE_SLOP: i32 = 3;
 
 /// This rectangle is used for the rendered tab, pointer hit testing and
 /// collapsed alpha mask. Desktop-only, independent of the embedded taskbar grip.
@@ -5264,6 +5270,85 @@ fn step_floating_animation(hwnd: HWND) {
 }
 
 /// False while the pointer still overlaps the collapsed exposed edge grip.
+/// The cursor's hover *retention* area must not change with animation.
+/// In particular a transparent pixel at the physical monitor edge can stop
+/// receiving WM_MOUSEMOVE after expansion despite still being inside the
+/// visually expanded panel. Include both the expanded panel and the collapsed
+/// tab, allowing only a small inward tolerance and never crossing the chosen
+/// monitor's work-area boundary.
+fn floating_docked_hover_rect(
+    expanded_body: RECT, collapsed_grip: RECT, bounds: RECT, slack: i32,
+) -> RECT {
+    let slack = slack.max(0);
+    RECT {
+        left: expanded_body.left.min(collapsed_grip.left)
+            .saturating_sub(slack).max(bounds.left),
+        right: expanded_body.right.max(collapsed_grip.right)
+            .saturating_add(slack).min(bounds.right),
+        top: expanded_body.top.min(collapsed_grip.top)
+            .saturating_sub(slack).max(bounds.top),
+        bottom: expanded_body.bottom.max(collapsed_grip.bottom)
+            .saturating_add(slack).min(bounds.bottom),
+    }
+}
+
+fn floating_docked_hover_rect_for_state(s: &AppState) -> Option<RECT> {
+    let edge = s.floating_edge?;
+    let (width, height, body) = floating_canvas_geometry_for_state(s);
+    let center = POINT {
+        x: s.floating_x.saturating_add(width / 2),
+        y: s.floating_y.saturating_add(height / 2),
+    };
+    let (_, bounds) = floating_monitor_geometry(center)?;
+    let (x, y) = floating_edge_position(
+        bounds, s.floating_x, s.floating_y, width, height,
+        Some(edge), false, sc(FLOAT_EDGE_PEEK),
+    );
+    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
+    let (dx, dy) = floating_slide_offset(width, height, edge, 0);
+    let expanded_body = RECT {
+        left: x + body.left, right: x + body.right,
+        top: y + body.top, bottom: y + body.bottom,
+    };
+    let collapsed_grip = RECT {
+        left: x + grip.left + dx, right: x + grip.right + dx,
+        top: y + grip.top + dy, bottom: y + grip.bottom + dy,
+    };
+    Some(floating_docked_hover_rect(
+        expanded_body, collapsed_grip, bounds, sc(FLOAT_HOVER_EDGE_SLOP),
+    ))
+}
+
+/// Unlike HWND alpha-hit testing, the docked hover envelope is stable for the
+/// entire slide. In the rare case WM_MOUSELEAVE fires inside this envelope,
+/// keep checking *only while the leave is unresolved*, so a later exit from
+/// transparent pixels can still collapse the widget.
+fn floating_pointer_in_docked_hover_zone(hwnd: HWND) -> bool {
+    let hover = {
+        let state = lock_state();
+        state.as_ref().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == hwnd && !s.dragging
+        ).and_then(floating_docked_hover_rect_for_state)
+    };
+    let Some(hover) = hover else { return false; };
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) }.is_err() { return false; }
+    point_in_rect(hover, cursor.x, cursor.y)
+}
+
+fn floating_arm_hover_recheck(hwnd: HWND) {
+    unsafe {
+        let _ = SetTimer(taskbar_replica_service_hwnd(hwnd),
+            TIMER_FLOAT_HOVER_RECHECK, FLOAT_HOVER_RECHECK_MS, None);
+    }
+}
+
+fn floating_cancel_hover_recheck(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_HOVER_RECHECK);
+    }
+}
+
 fn floating_pointer_is_outside_grip(hwnd: HWND) -> bool {
     let grip = {
         let state = lock_state();
@@ -6945,6 +7030,30 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_FLOAT_HOVER_RECHECK => {
+                    let active = lock_state().as_ref().and_then(|s|
+                        (s.floating_mode && s.floating_edge.is_some()
+                            && !s.floating_collapsed && !s.dragging)
+                            .then(|| s.hwnd.to_hwnd())
+                    );
+                    if let Some(active) = active {
+                        if !floating_pointer_in_docked_hover_zone(active) {
+                            floating_cancel_hover_recheck(active);
+                            // The mouse really left the stable docked envelope:
+                            // this timer has already provided the 140ms
+                            // debounce; do not start an additional delay.
+                            if let Some(s) = lock_state().as_mut() {
+                                s.minimal_hover_target = None;
+                                s.drag_handle_hovered = false;
+                            }
+                            hide_minimal_usage_tooltip();
+                            set_floating_collapsed(true);
+                            render_layered();
+                        }
+                    } else {
+                        let _ = KillTimer(hwnd, TIMER_FLOAT_HOVER_RECHECK);
+                    }
+                }
                 TIMER_FLOAT_ANIMATION => {
                     step_floating_animation(hwnd);
                 }
@@ -7074,6 +7183,7 @@ unsafe extern "system" fn wnd_proc(
             let anchor_logical_x = (client_x as f64 * 96.0 / dpi as f64).round() as i32;
             let anchor_logical_y = (client_y as f64 * 96.0 / dpi as f64).round() as i32;
 
+            floating_cancel_hover_recheck(hwnd);
             let reveal_hidden_panel = {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -7117,11 +7227,21 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let docked_hover = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_edge.is_some() && !s.dragging
+            );
+            let in_docked_hover_zone = docked_hover
+                && floating_pointer_in_docked_hover_zone(hwnd);
+            if in_docked_hover_zone {
+                // Real mouse movement resumed over the stable docked region.
+                // The leave-only fallback timer is no longer necessary.
+                floating_cancel_hover_recheck(hwnd);
+            }
             if lock_state().as_ref().is_some_and(|s|
                 s.floating_mode && floating_hover_can_reveal(
                     s.floating_collapsed, s.floating_first_collapse_guard, s.dragging,
                 )
-            ) {
+            ) && (!docked_hover || in_docked_hover_zone) {
                 set_floating_collapsed(false);
             }
             let is_dragging = {
@@ -7359,6 +7479,18 @@ unsafe extern "system" fn wnd_proc(
             if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
                 return LRESULT(0);
             }
+            // A docked HWND can lose alpha hit-testing at its very first
+            // physical pixel when expanding (especially at a display seam).
+            // Defer collapse until the cursor really leaves the *unchanging*
+            // expanded-panel + collapsed-tab envelope. While this ambiguous
+            // leave exists, the short recheck timer handles a later exit even
+            // if Windows sends no second WM_MOUSELEAVE.
+            if lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_edge.is_some() && !s.floating_collapsed
+            ) {
+                floating_arm_hover_recheck(hwnd);
+                return LRESULT(0);
+            }
             if floating_pointer_still_over_free_grip(hwnd) {
                 // Capture change or popup movement can dispatch a stale leave
                 // despite the cursor still being over the detached tab.
@@ -7386,7 +7518,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CANCELMODE => {
-            
+            floating_cancel_hover_recheck(hwnd);
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -7398,7 +7530,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
-            
+            floating_cancel_hover_recheck(hwnd);
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 if !s.drag_reparenting {
