@@ -26,6 +26,13 @@ if ($blur -notmatch 'floating_reserved_visible_body\(' -or
     $blur -notmatch 'floating_state_grip_rect\(s\)') {
     throw 'Frosted panel and tab must be clipped and moved with the same geometry.'
 }
+if ($window -notmatch 'fn floating_drop_edge_at_pointer\(' -or
+    $window -notmatch 'let edge = floating_drop_edge_at_pointer\(' -or
+    $window -notmatch 'desktop_taskbar_drop_with_entire_canvas_beyond_work_area_still_snaps' -or
+    $window -notmatch 'desktop_taskbar_drop_overshoot_detects_all_four_reserved_edges' -or
+    $window -notmatch 'desktop_taskbar_drop_does_not_snap_when_cursor_not_in_reserved_band') {
+    throw 'Taskbar drop must use the cursor reserved band even when the entire dragged HWND is beyond rcWork.'
+}
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_reserved_tabs_retract_flush_to_taskbar_all_four_edges') {
     throw 'Missing exact-gap and four-edge animation regressions.'
