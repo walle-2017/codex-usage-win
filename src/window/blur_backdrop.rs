@@ -280,17 +280,6 @@ pub(super) fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND
             .filter(|s| s.embedded).and_then(|s| s.taskbar_hwnd);
         if taskbar_parent.is_none() && !desktop { return None; }
         let child_mode = taskbar_parent.is_some();
-        // Like the tooltip popups, desktop glass must be owned by Explorer's
-        // taskbar or clicking it can raise the taskbar over the TOPMOST glass.
-        let desktop_owner = if desktop {
-            // Use the owner already selected from the desktop popup's actual
-            // monitor; the configured embedded taskbar may be on another screen.
-            let foreground = lock_state().as_ref().map(|s| s.hwnd.to_hwnd());
-            foreground.and_then(|hwnd| GetWindow(hwnd, GW_OWNER).ok())
-                .filter(|owner| native_interop::is_taskbar_window(*owner))
-        } else {
-            None
-        };
         let ex_style = WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP
             | if child_mode { WINDOW_EX_STYLE(0) } else { WS_EX_TOOLWINDOW };
         let window_style = if child_mode { WS_CHILD | WS_CLIPSIBLINGS } else { WS_POPUP };
@@ -303,7 +292,7 @@ pub(super) fn ensure_blur_backdrop(blur_amount: f32, tint: Color) -> Option<HWND
             0,
             1,
             1,
-            taskbar_parent.or(desktop_owner).unwrap_or_default(),
+            taskbar_parent.unwrap_or_default(),
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
             None,
@@ -390,22 +379,10 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
             }
         }
     } else if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
-        let desktop_owner = unsafe { GetWindow(foreground_hwnd, GW_OWNER).ok() }
-            .filter(|owner| native_interop::is_taskbar_window(*owner));
         unsafe {
-            // Both parts of the desktop pair must share the actual monitor's
-            // taskbar owner, not the taskbar configured for embedded mode.
-            // That ownership keeps the panel above Explorer on taskbar clicks,
-            // even when both windows already have WS_EX_TOPMOST.
-            if let Some(owner) = desktop_owner {
-                if GetWindow(backdrop_hwnd, GW_OWNER).ok() != Some(owner) {
-                    native_interop::set_popup_owner(backdrop_hwnd, Some(owner));
-                }
-                if GetWindow(foreground_hwnd, GW_OWNER).ok() != Some(owner) {
-                    native_interop::set_popup_owner(foreground_hwnd, Some(owner));
-                }
-            }
             // Desktop blur belongs directly behind the TOPMOST foreground.
+            // The desktop geometry never overlaps a reserved taskbar edge,
+            // so neither popup needs to be owned by Explorer.
             // If Explorer hasn't disturbed the pair, don't change Z-order:
             // needless promotion is visible as a flash when the mouse is
             // released and the detached grip changes side.
@@ -418,8 +395,8 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
             if fg_topmost && bg_topmost && directly_behind {
                 return;
             }
-            // Promote the backdrop first and foreground last so both remain
-            // above taskbar windows, with the handle always in front.
+            // Keep the foreground above its backdrop without reordering on
+            // every drag frame.
             let _ = SetWindowPos(
                 backdrop_hwnd, HWND_TOPMOST,
                 panel_x, panel_y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW,
