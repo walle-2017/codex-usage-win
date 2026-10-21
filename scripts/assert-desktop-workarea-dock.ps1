@@ -20,7 +20,7 @@ if ($window -notmatch 'fn floating_slide_offset\(' -or
     $window -notmatch 'fn floating_slide_layered_bitmap\(' -or
     $window -notmatch 'fn floating_slid_canvas_rect\(' -or
     $window -notmatch 'floating_slide_layered_bitmap\(' -or
-    $window -notmatch '(?s)if reserved \{\s*// For Explorer edges, move the rendered bitmap instead of HWND\.' -or
+    $window -notmatch '(?s)if reserved \{\s*// For Explorer or adjacent-monitor edges, slide bitmap pixels' -or
     $window -notmatch 'floating_reserved_drag_reveal = 100') {
     throw 'Taskbar docking must use physical-edge slide offsets and alpha-clipped canvas, including zero-jump drag rebasing.'
 }
