@@ -45,6 +45,12 @@ if ($window -notmatch 'fn floating_drag_has_crossed_taskbar_edge\(' -or
     $window -notmatch 'desktop_taskbar_drag_does_not_unlock_from_small_jitter') {
     throw 'Dragging into Explorer must restore the clipped external glow, without changing physical-edge behavior.'
 }
+if ($window -notmatch '(?s)fn floating_drop_edge_at_pointer\(.*?pointer\.x\.abs_diff\(bounds\.left\).*?pointer\.y\.abs_diff\(bounds\.bottom\).*?\.min_by_key\(\|\(_, _, _, _, distance\)\| \*distance\)' -or
+    $window -notmatch 'desktop_corner_snap_picks_nearest_mouse_edge_at_all_four_corners' -or
+    $window -notmatch 'desktop_taskbar_corner_snap_uses_actual_inner_taskbar_edge_distances' -or
+    $window -notmatch 'desktop_corner_snap_ignores_unexposed_monitor_seams') {
+    throw 'Corner docking must compare cursor-to-edge distances for every eligible physical/taskbar edge and preserve monitor seams.'
+}
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
     $window -notmatch 'desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides' -or
