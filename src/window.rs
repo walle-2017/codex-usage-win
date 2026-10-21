@@ -4984,10 +4984,6 @@ fn refresh_floating_reserved_dock(hwnd: HWND) {
     if let Some(s) = state.as_mut() {
         if !s.floating_mode || s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
         s.floating_reserved_dock = reserved;
-        if reserved {
-            // Keep the current reveal state while recomputing the new
-            // taskbar position. A reserved tab can collapse normally.
-        }
     }
 }
 
@@ -5012,20 +5008,20 @@ fn move_floating_widget(hwnd: HWND) {
             bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
         );
         if reserved {
-            // All HWND pixels stay on the desktop side of the taskbar.
-            // The layered bitmap animates the visible body and tab in place.
+            // Keep HWND fixed within the taskbar-free work area. Only the
+            // contents of the layered bitmap animate when retracting.
             (expanded_x, expanded_y)
         } else {
-        let (collapsed_x, collapsed_y) = floating_edge_position(
-            bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
-        );
-        // floating_reveal already contains the time-based eased progress.
-        // Applying a second smoothstep here would distort both curves.
-        let progress = f64::from(reveal) / 100.0;
-        let interpolate = |a: i32, b: i32| {
-            a + (f64::from(b - a) * progress).round() as i32
-        };
-        (interpolate(collapsed_x, expanded_x), interpolate(collapsed_y, expanded_y))
+            let (collapsed_x, collapsed_y) = floating_edge_position(
+                bounds, x, y, width, height, edge, true, sc(FLOAT_EDGE_PEEK),
+            );
+            // floating_reveal is already eased: avoid applying a second
+            // nonlinear curve and preserve V24.3's no-flicker release.
+            let progress = f64::from(reveal) / 100.0;
+            let interpolate = |a: i32, b: i32| {
+                a + (f64::from(b - a) * progress).round() as i32
+            };
+            (interpolate(collapsed_x, expanded_x), interpolate(collapsed_y, expanded_y))
         }
     };
     let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
@@ -10573,6 +10569,79 @@ mod tests {
     }
 
     #[test]
+    fn desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge() {
+        let monitor = RECT { left: 2048, top: 0, right: 3755, bottom: 960 };
+        let bottom = RECT { left: 2048, top: 912, right: 3755, bottom: 960 };
+        let work = RECT { left: 2048, top: 0, right: 3755, bottom: 900 };
+        assert_eq!(floating_bounds_at_taskbar(monitor, work, &[bottom]).bottom, 912);
+        let top = RECT { left: 2048, top: 0, right: 3755, bottom: 48 };
+        let top_work = RECT { top: 60, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, top_work, &[top]).top, 48);
+        let left = RECT { left: 2048, top: 0, right: 2096, bottom: 960 };
+        let left_work = RECT { left: 2108, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, left_work, &[left]).left, 2096);
+        let right = RECT { left: 3707, top: 0, right: 3755, bottom: 960 };
+        let right_work = RECT { right: 3695, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, right_work, &[right]).right, 3707);
+        let other_monitor_bar = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
+        assert_eq!(floating_bounds_at_taskbar(monitor, work, &[other_monitor_bar]).bottom, 900);
+    }
+
+    #[test]
+    fn desktop_reserved_tabs_retract_flush_to_taskbar_all_four_edges() {
+        let bounds = RECT { left: 100, top: 50, right: 1100, bottom: 750 };
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
+            let (x, y) = floating_edge_position(
+                bounds, 450, 350, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let fully_visible = floating_reserved_visible_body(body, edge, 100);
+            assert_eq!(fully_visible, body);
+            let hidden = floating_reserved_visible_body(body, edge, 0);
+            let tab_expanded = floating_reserved_grip_rect(w, h, body, edge, 100);
+            let tab_collapsed = floating_reserved_grip_rect(w, h, body, edge, 0);
+            assert_eq!(tab_expanded, floating_grip_rect(
+                w, h, Some(edge), sc(FLOAT_EDGE_PEEK),
+            ));
+            let tab_mid = floating_reserved_grip_rect(w, h, body, edge, 50);
+            let half = floating_reserved_visible_body(body, edge, 50);
+            match edge {
+                FloatingEdge::Left => {
+                    assert_eq!(x, bounds.left);
+                    assert_eq!(hidden.right, body.left);
+                    assert_eq!(x + tab_collapsed.left, bounds.left);
+                    assert_eq!(tab_mid.left, half.right);
+                }
+                FloatingEdge::Right => {
+                    assert_eq!(x + w, bounds.right);
+                    assert_eq!(hidden.left, body.right);
+                    assert_eq!(x + tab_collapsed.right, bounds.right);
+                    assert_eq!(tab_mid.right, half.left);
+                }
+                FloatingEdge::Top => {
+                    assert_eq!(y, bounds.top);
+                    assert_eq!(hidden.bottom, body.top);
+                    assert_eq!(y + tab_collapsed.top, bounds.top);
+                    assert_eq!(tab_mid.top, half.bottom);
+                }
+                FloatingEdge::Bottom => {
+                    assert_eq!(y + h, bounds.bottom);
+                    assert_eq!(hidden.top, body.bottom);
+                    assert_eq!(y + tab_collapsed.bottom, bounds.bottom);
+                    assert_eq!(tab_mid.bottom, half.top);
+                }
+            }
+            assert_eq!(tab_collapsed.right - tab_collapsed.left,
+                tab_expanded.right - tab_expanded.left);
+            assert_eq!(tab_collapsed.bottom - tab_collapsed.top,
+                tab_expanded.bottom - tab_expanded.top);
+        }
+    }
+
+    #[test]
     fn desktop_bottom_taskbar_docks_above_taskbar_without_sliding_into_it() {
         let monitor = RECT { left: -1920, top: -100, right: 0, bottom: 980 };
         let work = RECT { left: -1920, top: -100, right: 0, bottom: 930 };
@@ -10586,8 +10655,8 @@ mod tests {
         );
         assert_eq!(y + ch, work.bottom);
         assert!(y + body.bottom <= work.bottom);
-        // This reserved edge stays expanded; moving to the old collapsed
-        // coordinate would instead overlap the bottom taskbar.
+        // Both expanded and collapsed states keep the HWND at this same
+        // safe coordinate; only visible pixels contract during animation.
     }
 
     #[test]
