@@ -5292,17 +5292,12 @@ fn floating_docked_hover_rect(
     }
 }
 
-fn floating_docked_hover_rect_for_state(s: &AppState) -> Option<RECT> {
-    let edge = s.floating_edge?;
-    let (width, height, body) = floating_canvas_geometry_for_state(s);
-    let center = POINT {
-        x: s.floating_x.saturating_add(width / 2),
-        y: s.floating_y.saturating_add(height / 2),
-    };
-    let (_, bounds) = floating_monitor_geometry(center)?;
+fn floating_docked_hover_rect_for_geometry(
+    bounds: RECT, x: i32, y: i32, width: i32, height: i32,
+    body: RECT, edge: FloatingEdge,
+) -> RECT {
     let (x, y) = floating_edge_position(
-        bounds, s.floating_x, s.floating_y, width, height,
-        Some(edge), false, sc(FLOAT_EDGE_PEEK),
+        bounds, x, y, width, height, Some(edge), false, sc(FLOAT_EDGE_PEEK),
     );
     let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
     let (dx, dy) = floating_slide_offset(width, height, edge, 0);
@@ -5314,8 +5309,21 @@ fn floating_docked_hover_rect_for_state(s: &AppState) -> Option<RECT> {
         left: x + grip.left + dx, right: x + grip.right + dx,
         top: y + grip.top + dy, bottom: y + grip.bottom + dy,
     };
-    Some(floating_docked_hover_rect(
+    floating_docked_hover_rect(
         expanded_body, collapsed_grip, bounds, sc(FLOAT_HOVER_EDGE_SLOP),
+    )
+}
+
+fn floating_docked_hover_rect_for_state(s: &AppState) -> Option<RECT> {
+    let edge = s.floating_edge?;
+    let (width, height, body) = floating_canvas_geometry_for_state(s);
+    let center = POINT {
+        x: s.floating_x.saturating_add(width / 2),
+        y: s.floating_y.saturating_add(height / 2),
+    };
+    let (_, bounds) = floating_monitor_geometry(center)?;
+    Some(floating_docked_hover_rect_for_geometry(
+        bounds, s.floating_x, s.floating_y, width, height, body, edge,
     ))
 }
 
@@ -11283,6 +11291,107 @@ mod tests {
         assert!(!floating_edge_is_reserved(monitor, monitor, FloatingEdge::Bottom));
         assert_eq!(floating_usable_bounds(monitor,
             RECT { left: -100, top: 0, right: 1920, bottom: 1080 }).left, monitor.left);
+    }
+
+    #[test]
+    fn desktop_docked_hover_envelope_is_stable_at_extreme_monitor_pixels() {
+        // Simulate cursor at the first/last physical pixel of the selected
+        // monitor, including on a seam where the other screen continues.
+        // The body can move/clip but this envelope is independent of reveal.
+        let bounds = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
+            let hover = floating_docked_hover_rect_for_geometry(
+                bounds, 700, 450, w, h, body, edge,
+            );
+            let (dock_x, dock_y) = floating_edge_position(
+                bounds, 700, 450, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let expanded_body = RECT {
+                left: dock_x + body.left,
+                right: dock_x + body.right,
+                top: dock_y + body.top,
+                bottom: dock_y + body.bottom,
+            };
+            let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let (dx, dy) = floating_slide_offset(w, h, edge, 0);
+            let tab_center = POINT {
+                x: dock_x + (grip.left + grip.right) / 2 + dx,
+                y: dock_y + (grip.top + grip.bottom) / 2 + dy,
+            };
+            assert!(point_in_rect(hover, tab_center.x, tab_center.y));
+            let panel_corner = POINT {
+                x: match edge {
+                    FloatingEdge::Right => bounds.right - 1,
+                    _ => expanded_body.left,
+                },
+                y: match edge {
+                    FloatingEdge::Bottom => bounds.bottom - 1,
+                    _ => expanded_body.top,
+                },
+            };
+            assert!(point_in_rect(hover, panel_corner.x, panel_corner.y),
+                "an alpha-transparent rounded corner at the screen boundary must retain hover");
+            let outside_monitor = match edge {
+                FloatingEdge::Left => POINT { x: bounds.left - 1, y: tab_center.y },
+                FloatingEdge::Right => POINT { x: bounds.right, y: tab_center.y },
+                FloatingEdge::Top => POINT { x: tab_center.x, y: bounds.top - 1 },
+                FloatingEdge::Bottom => POINT { x: tab_center.x, y: bounds.bottom },
+            };
+            assert!(!point_in_rect(hover, outside_monitor.x, outside_monitor.y),
+                "hover must not leak into the adjacent screen");
+            assert!(hover.left >= bounds.left && hover.top >= bounds.top);
+            assert!(hover.right <= bounds.right && hover.bottom <= bounds.bottom);
+            // Move strictly beyond the 3px inward tolerance, in the
+            // direction perpendicular to the dock line, to request collapse.
+            let beyond = POINT {
+                x: match edge {
+                    FloatingEdge::Left => hover.right.saturating_add(1),
+                    FloatingEdge::Right => hover.left.saturating_sub(1),
+                    _ => tab_center.x,
+                },
+                y: match edge {
+                    FloatingEdge::Top => hover.bottom.saturating_add(1),
+                    FloatingEdge::Bottom => hover.top.saturating_sub(1),
+                    _ => tab_center.y,
+                },
+            };
+            assert!(!point_in_rect(hover, beyond.x, beyond.y),
+                "a real departure must still be allowed to collapse");
+        }
+    }
+
+    #[test]
+    fn desktop_docked_hover_respects_taskbar_work_area_and_partial_slide() {
+        let monitor = RECT { left: 2048, top: 0, right: 3755, bottom: 960 };
+        let work = RECT { left: 2048, top: 0, right: 3755, bottom: 912 };
+        let (w, h, body) = floating_canvas_geometry(240, 72, Some(FloatingEdge::Bottom));
+        let hover = floating_docked_hover_rect_for_geometry(
+            work, 2550, 900, w, h, body, FloatingEdge::Bottom,
+        );
+        assert_eq!(hover.bottom, work.bottom);
+        let point = POINT { x: (hover.left + hover.right) / 2, y: 911 };
+        assert!(point_in_rect(hover, point.x, point.y));
+        assert!(!point_in_rect(hover, point.x, 912),
+            "hover must not extend into Explorer's reserved taskbar");
+        for reveal in [0_u8, 10, 35, 65, 90, 100] {
+            // Current opaque pixels translate; the logical retention area
+            // remains exactly the same across all animation frames.
+            let (_, dy) = floating_slide_offset(w, h, FloatingEdge::Bottom, reveal);
+            let moving = floating_slid_canvas_rect(
+                body, w, h, FloatingEdge::Bottom, reveal,
+            );
+            assert!(moving.top + dy >= body.top.saturating_sub(h));
+            assert_eq!(floating_docked_hover_rect_for_geometry(
+                work, 2550, 900, w, h, body, FloatingEdge::Bottom,
+            ), hover);
+        }
+        // One-pixel work-area boundaries on taskbar-less physical edges
+        // must be included too.
+        assert!(monitor.right > hover.right);
     }
 
     #[test]
