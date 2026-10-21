@@ -2849,7 +2849,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             AlphaFormat: 1,
         };
         if floating {
-            let (edge, hidden, hovered, grip_alpha) = {
+            let (edge, hidden, hovered, grip_alpha, reserved, reveal, dragging, drag_reveal) = {
                 let state = lock_state();
                 state.as_ref().map(|s| (
                     s.floating_edge,
@@ -2857,7 +2857,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     s.drag_handle_hovered,
                     if s.floating_edge.is_some() || s.dragging { 100 }
                     else { s.floating_grip_alpha },
-                )).unwrap_or((None, false, false, 0))
+                    s.floating_reserved_dock,
+                    s.floating_reveal,
+                    s.dragging,
+                    s.floating_reserved_drag_reveal,
+                )).unwrap_or((None, false, false, 0, false, 100, false, 100))
             };
             // Composite the already rendered taskbar-size panel into a separate
             // transparent desktop canvas. Neither the panel border nor quota
@@ -2866,6 +2870,20 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 let state = lock_state();
                 state.as_ref().map(floating_canvas_geometry_for_state)
                     .unwrap_or_else(|| floating_canvas_geometry(width, height, edge))
+            };
+            let visible_body = if reserved && !dragging {
+                edge.map(|edge| floating_reserved_visible_body(body, edge, reveal))
+                    .unwrap_or(body)
+            } else { body };
+            let grip = if reserved {
+                edge.map(|edge| floating_reserved_grip_rect(
+                    canvas_w, canvas_h, body, edge,
+                    if dragging { drag_reveal } else { reveal },
+                )).unwrap_or_else(|| floating_grip_rect(
+                    canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+                ))
+            } else {
+                floating_grip_rect(canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK))
             };
             let canvas_info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -2891,34 +2909,39 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 );
                 canvas.fill(0);
                 if !hidden {
-                    for y in 0..height {
-                        let dst = ((y + body.top) * canvas_w + body.left) as usize;
-                        let src = (y * width) as usize;
-                        canvas[dst..dst + width as usize]
-                            .copy_from_slice(&pixel_data[src..src + width as usize]);
+                    // When docked at Explorer, clip the animated panel to
+                    // the desktop side of the taskbar. Never move the HWND or
+                    // its opaque pixels through the taskbar during retraction.
+                    for y in visible_body.top..visible_body.bottom {
+                        let dst = (y * canvas_w + visible_body.left) as usize;
+                        let src = ((y - body.top) * width
+                            + visible_body.left - body.left) as usize;
+                        let count = (visible_body.right - visible_body.left) as usize;
+                        canvas[dst..dst + count]
+                            .copy_from_slice(&pixel_data[src..src + count]);
                     }
                 }
-                render_floating_handle_bitmap(
-                    canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
-                );
+                if reserved {
+                    render_floating_handle_bitmap_at(
+                        canvas, canvas_w, canvas_h, grip, hovered, &style, grip_alpha,
+                    );
+                } else {
+                    render_floating_handle_bitmap(
+                        canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
+                    );
+                }
                 if hovered && !hidden {
-                    // Separate visual rings: one around the actual desktop
-                    // body and one around its independently positioned tab.
+                    if !reserved || reveal == 100 || dragging {
+                        draw_drag_hover_outline(
+                            canvas, canvas_w, canvas_h, body,
+                            style.panel_corner_radius, accent,
+                        );
+                    }
                     draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, body, style.panel_corner_radius, accent,
+                        canvas, canvas_w, canvas_h, grip, style.panel_corner_radius, accent,
                     );
-                    let tab = floating_grip_rect(
-                        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
-                    );
-                    draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
-                    );
-                    // The glow gutter itself is not draggable. Keep an almost
-                    // invisible hit-test probe across the tab's surrounding
-                    // strip so WM_NCHITTEST can clear stale hover as the
-                    // pointer crosses into fully transparent pixels.
                     paint_floating_hover_hit_probe(
-                        canvas, canvas_w, canvas_h, body, tab, edge,
+                        canvas, canvas_w, canvas_h, visible_body, grip, edge,
                     );
                 }
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
@@ -3056,6 +3079,13 @@ fn render_floating_handle_bitmap(
     edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
 ) {
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+    render_floating_handle_bitmap_at(pixels, width, height, grip, hovered, style, opacity);
+}
+
+fn render_floating_handle_bitmap_at(
+    pixels: &mut [u32], width: i32, height: i32,
+    grip: RECT, hovered: bool, style: &ThemeStyle, opacity: u8,
+) {
     // The tab is a miniature panel, not a separate style. Its fill, border,
     // corner radius, transparency and glass strength follow ThemeStyle.
     let center_x = (grip.left + grip.right) / 2;
@@ -5098,7 +5128,7 @@ fn step_floating_animation(hwnd: HWND) {
         );
         (s.hwnd.to_hwnd(),
          s.floating_reveal == destination && s.floating_grip_alpha == grip_target,
-         s.floating_reveal != old_reveal,
+         s.floating_reveal != old_reveal && !s.floating_reserved_dock,
          s.floating_reveal != old_reveal || s.floating_grip_alpha != old_alpha,
          s.floating_first_collapse_guard && s.floating_collapsed)
     };
