@@ -4763,6 +4763,27 @@ fn floating_drag_has_cleared_edge(
     }
 }
 
+/// Physical screen edges only need to restore the outer gutter when the
+/// body moves back onto the desktop. A taskbar edge is INSIDE the monitor,
+/// so the mouse can also pull the body across the reserved boundary toward
+/// Explorer. That direction must restore the formerly clipped halo too.
+///
+/// Test the body's formerly clipped outer edge, not the cursor: a tab grabbed
+/// away from the body can move the HWND by a different distance.
+fn floating_drag_has_crossed_taskbar_edge(
+    window_x: i32, window_y: i32, body: RECT,
+    bounds: RECT, edge: Option<FloatingEdge>,
+) -> bool {
+    let threshold = sc(2);
+    match edge {
+        Some(FloatingEdge::Left) => window_x + body.left <= bounds.left - threshold,
+        Some(FloatingEdge::Right) => window_x + body.right >= bounds.right + threshold,
+        Some(FloatingEdge::Top) => window_y + body.top <= bounds.top - threshold,
+        Some(FloatingEdge::Bottom) => window_y + body.bottom >= bounds.bottom + threshold,
+        None => false,
+    }
+}
+
 fn floating_canvas_size_for_state(state: &AppState) -> (i32, i32) {
     let (width, height, _) = floating_canvas_geometry_for_state(state);
     (width, height)
@@ -5256,9 +5277,13 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
     let window_x = pointer.x - new_anchor_x;
     let window_y = pointer.y - new_anchor_y;
     let should_unlock = !unlocked && floating_monitor_geometry(pointer)
-        .is_some_and(|(_, bounds)| floating_drag_has_cleared_edge(
-            window_x, window_y, old_body, bounds, edge,
-        ));
+        .is_some_and(|(_, bounds)| {
+            floating_drag_has_cleared_edge(
+                window_x, window_y, old_body, bounds, edge,
+            ) || (reserved && floating_drag_has_crossed_taskbar_edge(
+                window_x, window_y, old_body, bounds, edge,
+            ))
+        });
     if should_unlock {
         let (_, _, expanded_body) =
             floating_drag_canvas_geometry(body_w, body_h, edge, true);
@@ -5290,7 +5315,7 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         // stale bitmap or a one-frame jump when restoring external glow.
         render_layered_at(Some(POINT { x: new_x, y: new_y }));
         diagnose::log_lazy(|| format!(
-            "desktop drag left dock: restored full outer glow edge={edge:?} prior=({old_w},{old_h})"
+            "desktop drag: restored formerly clipped glow edge={edge:?} taskbar={reserved} prior=({old_w},{old_h})"
         ));
     } else {
         move_floating_widget(hwnd);
@@ -10175,6 +10200,102 @@ mod tests {
                     "newly unlocked side must have real external glow");
             }
         }
+    }
+
+    #[test]
+    fn desktop_taskbar_drag_restores_clipped_glow_in_both_directions() {
+        // V24.14: on the bottom taskbar an outward (downward) drag must
+        // unlock its missing lower glow, just like an inward (upward) drag.
+        // Preserve the old inward-only physical-screen-edge contract.
+        let bounds = RECT { left: 100, top: 100, right: 1100, bottom: 850 };
+        let threshold = sc(2);
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [
+                FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom,
+            ] {
+                let (w, h, body) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), false);
+                let (flush_x, flush_y) = match edge {
+                    FloatingEdge::Left => (bounds.left - body.left, 300),
+                    FloatingEdge::Right => (bounds.right - body.right, 300),
+                    FloatingEdge::Top => (300, bounds.top - body.top),
+                    FloatingEdge::Bottom => (300, bounds.bottom - body.bottom),
+                };
+                assert!(!floating_drag_has_cleared_edge(
+                    flush_x, flush_y, body, bounds, Some(edge),
+                ));
+                assert!(!floating_drag_has_crossed_taskbar_edge(
+                    flush_x, flush_y, body, bounds, Some(edge),
+                ));
+                // Outward movement into the taskbar, including the lower
+                // side shown in the user's screenshot.
+                let (out_x, out_y) = match edge {
+                    FloatingEdge::Left => (flush_x - threshold, flush_y),
+                    FloatingEdge::Right => (flush_x + threshold, flush_y),
+                    FloatingEdge::Top => (flush_x, flush_y - threshold),
+                    FloatingEdge::Bottom => (flush_x, flush_y + threshold),
+                };
+                assert!(floating_drag_has_crossed_taskbar_edge(
+                    out_x, out_y, body, bounds, Some(edge),
+                ), "taskbar-side movement must unlock the clipped glow");
+                assert!(!floating_drag_has_cleared_edge(
+                    out_x, out_y, body, bounds, Some(edge),
+                ), "old one-sided check must still identify only inward motion");
+                let (in_x, in_y) = match edge {
+                    FloatingEdge::Left => (flush_x + threshold, flush_y),
+                    FloatingEdge::Right => (flush_x - threshold, flush_y),
+                    FloatingEdge::Top => (flush_x, flush_y + threshold),
+                    FloatingEdge::Bottom => (flush_x, flush_y - threshold),
+                };
+                assert!(floating_drag_has_cleared_edge(
+                    in_x, in_y, body, bounds, Some(edge),
+                ));
+                assert!(!floating_drag_has_crossed_taskbar_edge(
+                    in_x, in_y, body, bounds, Some(edge),
+                ));
+                // The restored canvas really does contain a drawable gutter
+                // beyond the previously taskbar-facing panel edge.
+                let (nw, nh, full_body) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), true);
+                let accent = drag_hover_outline_color(
+                    &ThemeStyle::preset(true, ThemePreset::Forest),
+                );
+                let mut pixels = vec![0u32; (nw * nh) as usize];
+                draw_drag_hover_outline(
+                    &mut pixels, nw, nh, full_body, 8, accent,
+                );
+                let (px, py) = match edge {
+                    FloatingEdge::Left => (full_body.left - 2, (full_body.top + full_body.bottom)/2),
+                    FloatingEdge::Right => (full_body.right + 2, (full_body.top + full_body.bottom)/2),
+                    FloatingEdge::Top => ((full_body.left + full_body.right)/2, full_body.top - 2),
+                    FloatingEdge::Bottom => ((full_body.left + full_body.right)/2, full_body.bottom + 2),
+                };
+                assert!(px >= 0 && px < nw && py >= 0 && py < nh);
+                assert!(pixels[(py*nw + px) as usize] >> 24 > 0,
+                    "full glow must be drawable on formerly clipped side");
+                assert!(w <= nw && h <= nh);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_drag_does_not_unlock_from_small_jitter() {
+        let bounds = RECT { left: 100, top: 100, right: 1100, bottom: 850 };
+        let (_, _, body) = floating_canvas_geometry(240, 42, Some(FloatingEdge::Bottom));
+        let flush_y = bounds.bottom - body.bottom;
+        let t = sc(2);
+        for delta in (-t + 1)..t {
+            assert!(!floating_drag_has_cleared_edge(
+                300, flush_y + delta, body, bounds, Some(FloatingEdge::Bottom),
+            ));
+            assert!(!floating_drag_has_crossed_taskbar_edge(
+                300, flush_y + delta, body, bounds, Some(FloatingEdge::Bottom),
+            ));
+        }
+        assert!(!floating_drag_has_crossed_taskbar_edge(
+            300, flush_y + t, body, bounds, None,
+        ));
     }
 
     #[test]
