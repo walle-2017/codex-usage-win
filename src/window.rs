@@ -3093,7 +3093,7 @@ fn render_floating_handle_bitmap_at(
     // corner radius, transparency and glass strength follow ThemeStyle.
     let center_x = (grip.left + grip.right) / 2;
     let center_y = (grip.top + grip.bottom) / 2;
-    let vertical_grip = matches!(edge, Some(FloatingEdge::Left | FloatingEdge::Right));
+    let vertical_grip = grip.bottom - grip.top > grip.right - grip.left;
     let (dot, gap_x, gap_y, dots) = drag_handle_dot_style(
         style.color(StyleColorTarget::DragHandle), hovered, vertical_grip,
     );
@@ -6711,7 +6711,7 @@ unsafe extern "system" fn wnd_proc(
             let (body, grip, hover_active) = {
                 let state = lock_state();
                 let s = state.as_ref().expect("desktop mode checked above");
-                let (w, h, body) = floating_canvas_geometry_for_state(s);
+                let (_, _, body) = floating_canvas_geometry_for_state(s);
                 (
                     if s.floating_reserved_dock && !s.dragging {
                         s.floating_edge.map(|edge| floating_reserved_visible_body(
