@@ -85,6 +85,9 @@ struct AppState {
     floating_x: i32,
     floating_y: i32,
     floating_edge: Option<FloatingEdge>,
+    // A reserved work-area edge (e.g. Explorer taskbar) cannot accept a
+    // sliding popup: keep the entire desktop canvas on the desktop side.
+    floating_reserved_dock: bool,
     // During an edge-tab drag, unlock the previously screen-clipped side's
     // external glow once the panel is clear of the physical monitor boundary.
     // The tab stays on the grabbed side until mouse-up.
@@ -2388,6 +2391,7 @@ pub fn run() {
                 floating_x: settings.floating_x.unwrap_or(i32::MIN),
                 floating_y: settings.floating_y.unwrap_or(i32::MIN),
                 floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
+                floating_reserved_dock: false,
                 floating_drag_glow_detached: false,
                 floating_collapsed: false,
                 floating_reveal: 100,
@@ -4416,9 +4420,8 @@ const FLOAT_EDGE_SNAP: i32 = 24;
 const FLOAT_EDGE_PEEK: i32 = 16;
 const FLOAT_GRIP_LENGTH: i32 = 36;
 // Preserve the component's content size. Transparent canvas gutters allow
-// genuine external glow on free desktops and the three inward-facing sides
-// of a docked panel. The side resting on the physical screen boundary stays
-// flush, and collapsed peeks remain pinned to their original monitor edge.
+// external glow on free desktops and on the inward-facing sides of docked
+// panels. An occupied work-area edge (taskbar) never accepts a collapsed panel.
 const FLOAT_FREE_GLOW_MARGIN: i32 = 12;
 const FLOAT_EXPAND_DURATION_MS: u64 = 220;
 const FLOAT_RETRACT_DURATION_MS: u64 = 240;
@@ -4631,19 +4634,18 @@ fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
     )
 }
 
-/// Check the actual body against the monitor's physical edge, not the HWND
-/// boundary or work area (which can contain a taskbar). Do not unlock the
-/// clipped halo while any part of the panel still touches its docked edge.
+/// Check the body against the current docking boundary. At a taskbar edge
+/// this is the desktop side of the taskbar, not the physical screen edge.
 fn floating_drag_has_cleared_edge(
     window_x: i32, window_y: i32, body: RECT,
-    monitor: RECT, edge: Option<FloatingEdge>,
+    bounds: RECT, edge: Option<FloatingEdge>,
 ) -> bool {
     let threshold = sc(2);
     match edge {
-        Some(FloatingEdge::Left) => window_x + body.left >= monitor.left + threshold,
-        Some(FloatingEdge::Right) => window_x + body.right <= monitor.right - threshold,
-        Some(FloatingEdge::Top) => window_y + body.top >= monitor.top + threshold,
-        Some(FloatingEdge::Bottom) => window_y + body.bottom <= monitor.bottom - threshold,
+        Some(FloatingEdge::Left) => window_x + body.left >= bounds.left + threshold,
+        Some(FloatingEdge::Right) => window_x + body.right <= bounds.right - threshold,
+        Some(FloatingEdge::Top) => window_y + body.top >= bounds.top + threshold,
+        Some(FloatingEdge::Bottom) => window_y + body.bottom <= bounds.bottom - threshold,
         None => false,
     }
 }
@@ -4674,18 +4676,28 @@ fn vertical_placement_for_gaps(
     None
 }
 
-/// Keep edge tabs in the monitor's *work area*, not under a vertical taskbar.
-/// A left-side Explorer taskbar otherwise covers the docked grip even when
-/// the desktop popup itself is in the topmost band.
+/// Windows updates rcWork when a taskbar moves between the top, bottom,
+/// left and right sides of a particular display. Never override its bottom
+/// boundary with the physical monitor boundary: doing so allowed the desktop
+/// popup to sit underneath a bottom taskbar.
 fn floating_usable_bounds(monitor: RECT, work: RECT) -> RECT {
     if work.left >= monitor.left && work.top >= monitor.top
         && work.right <= monitor.right && work.bottom <= monitor.bottom
         && work.right > work.left && work.bottom > work.top {
-        // The bottom grip must be attached to the physical screen boundary
-        // (including over the taskbar), not to rcWork.bottom above the taskbar.
-        RECT { bottom: monitor.bottom, ..work }
+        work
     } else {
         monitor
+    }
+}
+
+/// An inset boundary is reserved by Windows. The slide-out animation may
+/// extend beyond a physical screen edge, but never into the taskbar/work area.
+fn floating_edge_is_reserved(monitor: RECT, bounds: RECT, edge: FloatingEdge) -> bool {
+    match edge {
+        FloatingEdge::Left => bounds.left > monitor.left,
+        FloatingEdge::Right => bounds.right < monitor.right,
+        FloatingEdge::Top => bounds.top > monitor.top,
+        FloatingEdge::Bottom => bounds.bottom < monitor.bottom,
     }
 }
 
@@ -4814,66 +4826,6 @@ fn floating_edge_position(
     }
 }
 
-/// Prefer the taskbar that physically overlaps the desktop popup. For a
-/// non-overlapping popup, the taskbar on its current monitor is the owner.
-/// This is separate from the configured taskbar used for embedded mode.
-fn desktop_taskbar_overlap_area(window: RECT, taskbar: RECT) -> i64 {
-    let width = (window.right.min(taskbar.right) - window.left.max(taskbar.left)).max(0);
-    let height = (window.bottom.min(taskbar.bottom) - window.top.max(taskbar.top)).max(0);
-    i64::from(width) * i64::from(height)
-}
-
-fn desktop_taskbar_overlap_index(window: RECT, taskbars: &[RECT]) -> Option<usize> {
-    taskbars.iter().enumerate()
-        .map(|(index, rect)| (index, desktop_taskbar_overlap_area(window, *rect)))
-        .filter(|(_, area)| *area > 0)
-        .max_by_key(|(_, area)| *area)
-        .map(|(index, _)| index)
-}
-
-fn desktop_taskbar_owner_for_rect(window: RECT) -> Option<HWND> {
-    let taskbars = native_interop::find_taskbars();
-    let bounds: Vec<RECT> = taskbars.iter().map(|bar| bar.rect).collect();
-    if let Some(index) = desktop_taskbar_overlap_index(window, &bounds) {
-        return Some(taskbars[index].hwnd);
-    }
-    let center = POINT {
-        x: window.left.saturating_add(window.right.saturating_sub(window.left) / 2),
-        y: window.top.saturating_add(window.bottom.saturating_sub(window.top) / 2),
-    };
-    // If no taskbar intersects, still own the popup to the taskbar on its
-    // monitor. Do not silently substitute the configured primary taskbar.
-    let monitor = unsafe { MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST) };
-    taskbars.into_iter().find(|bar|
-        unsafe { MonitorFromWindow(bar.hwnd, MONITOR_DEFAULTTONEAREST) == monitor }
-    ).map(|bar| bar.hwnd)
-}
-
-/// The owner relation only protects a popup against its ACTUAL taskbar.
-/// A window on a secondary monitor must not remain owned by Shell_TrayWnd
-/// on the primary monitor; doing so lets Shell_SecondaryTrayWnd cover it.
-fn sync_desktop_taskbar_owner(hwnd: HWND) {
-    if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
-        return;
-    }
-    let Some(window_rect) = native_interop::get_window_rect_safe(hwnd) else { return };
-    let Some(owner) = desktop_taskbar_owner_for_rect(window_rect) else {
-        // Explorer may be restarting; preserve the independent TOPMOST popup.
-        return;
-    };
-    unsafe {
-        if GetWindow(hwnd, GW_OWNER).ok() != Some(owner) {
-            native_interop::set_popup_owner(hwnd, Some(owner));
-            let actual = GetWindow(hwnd, GW_OWNER).ok();
-            diagnose::log(format!(
-                "desktop popup owner changed expected={:?} actual={:?} rect=({}, {}, {}, {})",
-                owner, actual, window_rect.left, window_rect.top,
-                window_rect.right, window_rect.bottom
-            ));
-        }
-    }
-}
-
 fn move_floating_widget(hwnd: HWND) {
     let (x, y, edge, reveal, width, height, dragging) = {
         let state = lock_state();
@@ -4942,6 +4894,7 @@ fn set_floating_collapsed(collapsed: bool) {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         if !s.floating_mode || s.dragging || s.floating_edge.is_none()
+            || (collapsed && s.floating_reserved_dock)
             || (!collapsed && s.floating_first_collapse_guard)
             || s.floating_collapsed == collapsed { return; }
         s.floating_collapsed = collapsed;
@@ -5091,8 +5044,8 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
     let (old_w, old_h, old_body) =
         floating_drag_canvas_geometry(body_w, body_h, edge, unlocked);
     let should_unlock = !unlocked && floating_monitor_geometry(pointer)
-        .is_some_and(|(monitor, _)| floating_drag_has_cleared_edge(
-            window_x, window_y, old_body, monitor, edge,
+        .is_some_and(|(_, bounds)| floating_drag_has_cleared_edge(
+            window_x, window_y, old_body, bounds, edge,
         ));
     if should_unlock {
         let (_, _, expanded_body) =
@@ -5156,12 +5109,17 @@ fn finish_floating_drag(hwnd: HWND) {
     // actual outside edges receive collapsed tabs; a neighboring display
     // blocks docking even when the old popup rectangle straddles the seam.
     let exposed = [
-        floating_edge_exposed(monitor, FloatingEdge::Left, pointer),
-        floating_edge_exposed(monitor, FloatingEdge::Right, pointer),
-        floating_edge_exposed(monitor, FloatingEdge::Top, pointer),
-        floating_edge_exposed(monitor, FloatingEdge::Bottom, pointer),
+        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Left)
+            || floating_edge_exposed(monitor, FloatingEdge::Left, pointer),
+        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Right)
+            || floating_edge_exposed(monitor, FloatingEdge::Right, pointer),
+        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Top)
+            || floating_edge_exposed(monitor, FloatingEdge::Top, pointer),
+        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Bottom)
+            || floating_edge_exposed(monitor, FloatingEdge::Bottom, pointer),
     ];
     let edge = floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), exposed);
+    let reserved_dock = edge.is_some_and(|edge| floating_edge_is_reserved(monitor, bounds, edge));
     let blocked_seam = edge.is_none()
         && floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), [true; 4]).is_some();
     let (new_w, new_h, new_body) = floating_canvas_geometry(body_w, body_h, edge);
@@ -5189,9 +5147,12 @@ fn finish_floating_drag(hwnd: HWND) {
             s.dragging = false;
             s.drag_handle_hovered = hovered;
             s.floating_edge = edge;
+            s.floating_reserved_dock = reserved_dock;
             s.floating_drag_glow_detached = false;
-            s.floating_collapsed = edge.is_some();
-            s.floating_first_collapse_guard = edge.is_some();
+            // A taskbar edge stays expanded: no HWND pixels, including the
+            // glow and grip, may slide into the taskbar's rectangle.
+            s.floating_collapsed = edge.is_some() && !reserved_dock;
+            s.floating_first_collapse_guard = edge.is_some() && !reserved_dock;
             s.floating_reveal = 100;
             s.floating_slide_from = 100;
             s.floating_slide_target = 100;
@@ -5205,15 +5166,12 @@ fn finish_floating_drag(hwnd: HWND) {
     // Publish the resized/reoriented tab and the final HWND coordinates in
     // one layered-window update. No intermediate frame uses the old bitmap.
     render_layered_at(Some(POINT { x, y }));
-    // The popup can cross monitors while captured. Bind it to the taskbar
-    // at the completed position, not the taskbar selected for embedded mode.
-    sync_desktop_taskbar_owner(hwnd);
-    // Explorer can reorder its taskbar while a desktop grip is being dragged.
-    // Re-raise the composition pair once on release, never per drag frame.
+    // The frosted pair keeps its existing Z order. The dock geometry now
+    // avoids taskbar overlap instead of attempting taskbar ownership.
     if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
         sync_blur_backdrop_zorder(hwnd);
     }
-    if edge.is_some() {
+    if edge.is_some() && !reserved_dock {
         unsafe {
             SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
         }
@@ -5255,7 +5213,6 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             ));
         }
         move_floating_widget(hwnd);
-        sync_desktop_taskbar_owner(hwnd);
         if reason == "explicit desktop preference" {
             diagnose::log_lazy(|| "desktop orientation: popup moved; painting layered frame".to_string());
         }
@@ -5363,7 +5320,6 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
     move_floating_widget(hwnd);
-    sync_desktop_taskbar_owner(hwnd);
     style_window::set_preview_orientation(vertical);
     render_layered();
     save_state_settings();
@@ -11025,32 +10981,6 @@ mod tests {
         assert_eq!(legacy_left_offset_from_max(1000, 0), 1000);
         assert_eq!(legacy_left_offset_from_max(1000, 321), 679);
         assert_eq!(legacy_left_offset_from_max(1000, 1200), 0);
-    }
-
-    #[test]
-    fn desktop_popup_uses_overlapping_secondary_taskbar_not_configured_primary() {
-        // Physical HWND rectangles captured in V24.8 field diagnostics.
-        let widget = RECT { left: 2527, top: 851, right: 2762, bottom: 933 };
-        let primary = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
-        let secondary = RECT { left: 2048, top: 912, right: 3755, bottom: 960 };
-        assert_eq!(desktop_taskbar_overlap_area(widget, primary), 0);
-        assert_eq!(desktop_taskbar_overlap_area(widget, secondary), 235 * 21);
-        assert_eq!(desktop_taskbar_overlap_index(widget, &[primary, secondary]), Some(1));
-    }
-
-    #[test]
-    fn desktop_popup_no_intersection_uses_monitor_fallback() {
-        let widget = RECT { left: 700, top: 700, right: 900, bottom: 800 };
-        let bottom_bar = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
-        assert_eq!(desktop_taskbar_overlap_index(widget, &[bottom_bar]), None);
-    }
-
-    #[test]
-    fn desktop_popup_uses_greatest_overlap_at_monitor_seam() {
-        let widget = RECT { left: 2020, top: 910, right: 2070, bottom: 935 };
-        let primary = RECT { left: 0, top: 912, right: 2048, bottom: 960 };
-        let secondary = RECT { left: 2048, top: 912, right: 3755, bottom: 960 };
-        assert_eq!(desktop_taskbar_overlap_index(widget, &[primary, secondary]), Some(0));
     }
 
     #[test]
