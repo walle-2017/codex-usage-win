@@ -37,12 +37,13 @@ fn blur_bounds_snapshot() -> Option<BlurBoundsSnapshot> {
     if !s.floating_mode {
         return Some(BlurBoundsSnapshot::Embedded { inset, radius });
     }
-    let (canvas_w, canvas_h, panel) = floating_canvas_geometry(
-        total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge,
-    );
-    let grip = floating_grip_rect(
-        canvas_w, canvas_h, s.floating_edge, sc(FLOAT_EDGE_PEEK),
-    );
+    let (canvas_w, canvas_h, full_panel) = floating_canvas_geometry_for_state(s);
+    let panel = if s.floating_reserved_dock && !s.dragging {
+        s.floating_edge.map(|edge| floating_reserved_visible_body(
+            full_panel, edge, s.floating_reveal,
+        )).unwrap_or(full_panel)
+    } else { full_panel };
+    let grip = floating_state_grip_rect(s);
     let grip_radius = outer_radius.min(
         ((grip.right - grip.left).min(grip.bottom - grip.top) / 2).max(0),
     );
