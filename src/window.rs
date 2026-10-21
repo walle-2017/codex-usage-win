@@ -4944,6 +4944,44 @@ fn floating_drop_edge(
         .map(|(edge, _, _, _)| edge)
 }
 
+/// Detect a release *inside* a reserved taskbar band before testing the
+/// current layered HWND rectangle. Dragging by the detached tab can move the
+/// entire HWND beyond rcWork. The old rectangle-only test then falsely returned
+/// None, clamped a free popup and never started its dock retraction.
+fn floating_drop_edge_at_pointer(
+    monitor: RECT, bounds: RECT, rect: RECT, pointer: POINT,
+    threshold: i32, exposed: [bool; 4],
+) -> Option<FloatingEdge> {
+    // The cursor must be on this physical monitor. Never interpret a cursor
+    // beyond a connected monitor seam as a taskbar-side snap.
+    let within_monitor = pointer.x >= monitor.left && pointer.x < monitor.right
+        && pointer.y >= monitor.top && pointer.y < monitor.bottom;
+    if within_monitor {
+        let within_work_y = pointer.y >= bounds.top && pointer.y < bounds.bottom;
+        let within_work_x = pointer.x >= bounds.left && pointer.x < bounds.right;
+        let reserved_edges = [
+            (FloatingEdge::Left,
+                exposed[0] && bounds.left > monitor.left
+                    && pointer.x < bounds.left && within_work_y),
+            (FloatingEdge::Right,
+                exposed[1] && bounds.right < monitor.right
+                    && pointer.x >= bounds.right && within_work_y),
+            (FloatingEdge::Top,
+                exposed[2] && bounds.top > monitor.top
+                    && pointer.y < bounds.top && within_work_x),
+            (FloatingEdge::Bottom,
+                exposed[3] && bounds.bottom < monitor.bottom
+                    && pointer.y >= bounds.bottom && within_work_x),
+        ];
+        if let Some((edge, _)) = reserved_edges.into_iter().find(|(_, hit)| *hit) {
+            return Some(edge);
+        }
+    }
+    // Retain all original physical-edge snapping, edge distance tolerances,
+    // and connected-monitor seam guards for releases outside taskbar bands.
+    floating_drop_edge(bounds, rect, threshold, exposed)
+}
+
 // The stable expanded position is always in screen coordinates. Only the
 // visible sliver of a docked popup is on-screen while collapsed.
 #[allow(clippy::too_many_arguments)]
@@ -5286,8 +5324,15 @@ fn finish_floating_drag(hwnd: HWND) {
         floating_edge_is_reserved(monitor, bounds, FloatingEdge::Bottom)
             || floating_edge_exposed(monitor, FloatingEdge::Bottom, pointer),
     ];
-    let edge = floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), exposed);
+    let edge = floating_drop_edge_at_pointer(
+        monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), exposed,
+    );
     let reserved_dock = edge.is_some_and(|edge| floating_edge_is_reserved(monitor, bounds, edge));
+    diagnose::log_lazy(|| format!(
+        "desktop drop pointer=({}, {}) hwnd=({}, {}, {}, {}) work=({}, {}, {}, {}) edge={edge:?} reserved={reserved_dock}",
+        pointer.x, pointer.y, rect.left, rect.top, rect.right, rect.bottom,
+        bounds.left, bounds.top, bounds.right, bounds.bottom,
+    ));
     let blocked_seam = edge.is_none()
         && floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), [true; 4]).is_some();
     let (new_w, new_h, new_body) = floating_canvas_geometry(body_w, body_h, edge);
@@ -10569,6 +10614,82 @@ mod tests {
             100, 0, Duration::from_millis(FLOAT_RETRACT_DURATION_MS),
             FLOAT_RETRACT_DURATION_MS,
         ), 0);
+    }
+
+    #[test]
+    fn desktop_taskbar_drop_with_entire_canvas_beyond_work_area_still_snaps() {
+        // V24.11 field failure: secondary display taskbar occupies y=912..960.
+        // The cursor is inside Explorer; the detached window is completely
+        // below the work area, so the old rectangle-only test returns None.
+        let monitor = RECT { left: 2048, top: 0, right: 3755, bottom: 960 };
+        let work = RECT { left: 2048, top: 0, right: 3755, bottom: 912 };
+        let widget = RECT { left: 2500, top: 925, right: 2760, bottom: 1025 };
+        let cursor = POINT { x: 2550, y: 954 };
+        assert_eq!(floating_drop_edge(work, widget, 24, [true; 4]), None);
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, work, widget, cursor, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom));
+        let (canvas_w, canvas_h, _) =
+            floating_canvas_geometry(240, 48, Some(FloatingEdge::Bottom));
+        let (_, snapped_y) = floating_edge_position(
+            work, widget.left, widget.top, canvas_w, canvas_h,
+            Some(FloatingEdge::Bottom), false, 16,
+        );
+        assert_eq!(snapped_y + canvas_h, work.bottom);
+    }
+
+    #[test]
+    fn desktop_taskbar_drop_overshoot_detects_all_four_reserved_edges() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let rect = RECT { left: 650, top: 800, right: 880, bottom: 915 };
+        for (work, cursor, expected) in [
+            (
+                RECT { left: 0, top: 0, right: 1920, bottom: 1032 },
+                POINT { x: 720, y: 1070 },
+                FloatingEdge::Bottom,
+            ),
+            (
+                RECT { left: 0, top: 48, right: 1920, bottom: 1080 },
+                POINT { x: 720, y: 5 },
+                FloatingEdge::Top,
+            ),
+            (
+                RECT { left: 48, top: 0, right: 1920, bottom: 1080 },
+                POINT { x: 4, y: 670 },
+                FloatingEdge::Left,
+            ),
+            (
+                RECT { left: 0, top: 0, right: 1872, bottom: 1080 },
+                POINT { x: 1915, y: 670 },
+                FloatingEdge::Right,
+            ),
+        ] {
+            assert_eq!(floating_drop_edge_at_pointer(
+                monitor, work, rect, cursor, 24, [true; 4],
+            ), Some(expected));
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_drop_does_not_snap_when_cursor_not_in_reserved_band() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let off_work = RECT { left: 650, top: 1040, right: 880, bottom: 1135 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, work, off_work, POINT { x: 730, y: 700 }, 24, [true; 4],
+        ), None);
+        // A physical seam or a neighboring monitor must not become a dock.
+        let inset = RECT { left: 48, top: 0, right: 1920, bottom: 1080 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, inset, off_work, POINT { x: 15, y: 700 }, 24,
+            [false, true, true, true],
+        ), None);
+        // At an actual free screen edge, retain the original algorithm.
+        let free = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let near_left = RECT { left: -5, top: 400, right: 225, bottom: 500 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, free, near_left, POINT { x: 15, y: 440 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
     }
 
     #[test]
