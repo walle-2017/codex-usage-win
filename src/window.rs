@@ -2937,11 +2937,14 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                             style.panel_corner_radius, accent,
                         );
                     }
+                    // Both physical-edge and work-area tabs share the same
+                    // themed perimeter glow, with the live animated hitbox.
+                    let tab = grip;
                     draw_drag_hover_outline(
-                        canvas, canvas_w, canvas_h, grip, style.panel_corner_radius, accent,
+                        canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
                     );
                     paint_floating_hover_hit_probe(
-                        canvas, canvas_w, canvas_h, visible_body, grip, edge,
+                        canvas, canvas_w, canvas_h, visible_body, tab, edge,
                     );
                 }
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
