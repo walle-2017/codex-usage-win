@@ -3031,6 +3031,76 @@ fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radi
 /// Feather hover feedback around the actual body or detached grip perimeter.
 /// Desktop canvases provide up to 12 logical pixels of outer glow. Visual-only
 /// transparent margins never extend the component's interactive hit targets.
+/// Place the desktop hover glow BEHIND the foreground, never on top of
+/// partially transparent panel/drag-tab pixels. The occupancy mask uses
+/// exactly the same corner geometry as panel_color_at(), so the nearest
+/// exterior glow pixel is adjacent to the actual border even at rounded
+/// corners. The two silhouettes are unioned before glowing: panel light
+/// cannot bleed into the neighboring tab (or vice versa).
+fn draw_drag_hover_outer_glow(
+    pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
+    body: RECT, tab: RECT, style: &ThemeStyle, color: Color,
+) {
+    if canvas_w <= 0 || canvas_h <= 0 { return; }
+    let area = (canvas_w * canvas_h) as usize;
+    let mut occupied = vec![false; area];
+    for rect in [body, tab] {
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 { continue; }
+        for y in rect.top.max(0)..rect.bottom.min(canvas_h) {
+            for x in rect.left.max(0)..rect.right.min(canvas_w) {
+                if panel_outer_shape_contains(
+                    width, height, x - rect.left, y - rect.top,
+                    style.panel_corner_radius,
+                ) {
+                    occupied[(y * canvas_w + x) as usize] = true;
+                }
+            }
+        }
+    }
+    let extent = sc(12).max(2);
+    let extent_squared = extent * extent;
+    let mut glow = vec![0_u8; area];
+    for y in 0..canvas_h {
+        for x in 0..canvas_w {
+            let index = (y * canvas_w + x) as usize;
+            if !occupied[index] { continue; }
+            // Only a real silhouette boundary casts exterior light. A shared
+            // panel/tab contact cannot create an internal glowing seam.
+            let boundary = x == 0 || x == canvas_w - 1
+                || y == 0 || y == canvas_h - 1
+                || !occupied[(y * canvas_w + (x - 1)) as usize]
+                || !occupied[(y * canvas_w + (x + 1)) as usize]
+                || !occupied[((y - 1) * canvas_w + x) as usize]
+                || !occupied[((y + 1) * canvas_w + x) as usize];
+            if !boundary { continue; }
+            for dy in -extent..=extent {
+                let ny = y + dy;
+                if ny < 0 || ny >= canvas_h { continue; }
+                for dx in -extent..=extent {
+                    let nx = x + dx;
+                    if nx < 0 || nx >= canvas_w || dx * dx + dy * dy > extent_squared {
+                        continue;
+                    }
+                    let other = (ny * canvas_w + nx) as usize;
+                    if occupied[other] { continue; }
+                    // The mask is pixel-exact, so the first outside pixel
+                    // touches the rounded contour. Subtract one pixel of
+                    // center-to-center distance to avoid a dark gap.
+                    let distance = (((dx * dx + dy * dy) as f32).sqrt() - 1.0).max(0.0);
+                    glow[other] = glow[other].max(drag_hover_glow_coverage(distance));
+                }
+            }
+        }
+    }
+    for (index, coverage) in glow.into_iter().enumerate() {
+        if coverage != 0 {
+            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+        }
+    }
+}
+
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
