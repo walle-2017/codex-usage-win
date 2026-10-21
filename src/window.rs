@@ -85,8 +85,9 @@ struct AppState {
     floating_x: i32,
     floating_y: i32,
     floating_edge: Option<FloatingEdge>,
-    // A reserved work-area edge (e.g. Explorer taskbar) cannot accept a
-    // sliding popup: keep the entire desktop canvas on the desktop side.
+    // Whether an edge must be clipped within this monitor: either Explorer
+    // reserves it for a taskbar, or another display shares the physical edge.
+    // Both dock normally with in-place sliding, never bleeding to the next screen.
     floating_reserved_dock: bool,
     // Preserve the exact clicked tab location while expanding a collapsed
     // taskbar-edge popup into a captured drag.
@@ -2924,8 +2925,8 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 }
                 if reserved {
                     if let Some(edge) = edge {
-                        // Same slide as a physical monitor edge, but alpha-clip
-                        // the translated result before it reaches Explorer.
+                        // Same slide as an exposed monitor edge, alpha-clipped
+                        // before reaching Explorer or an adjacent display.
                         floating_slide_layered_bitmap(
                             canvas, canvas_w, canvas_h, edge,
                             if dragging { drag_reveal } else { reveal },
@@ -4885,9 +4886,10 @@ fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
     floating_monitor_geometry(point).map(|(_, usable)| usable)
 }
 
-/// A display seam is not a hideable edge: its grip would disappear beneath
-/// the neighboring monitor's desktop. Probe along the physical perimeter at
-/// all three portions of the grip, not merely at the drop cursor position.
+/// Detect whether the selected monitor's edge is physically exposed.
+/// At a shared display seam we still DOCK; the neighboring monitor only
+/// determines whether to alpha-clip the slide inside the selected monitor.
+/// Sample all three portions of the grip to handle partially shared edges.
 fn floating_edge_exposed(monitor: RECT, edge: FloatingEdge, pointer: POINT) -> bool {
     let half_grip = sc(FLOAT_GRIP_LENGTH) / 2;
     let offsets = [-half_grip + 1, 0, half_grip - 1];
@@ -4912,6 +4914,16 @@ fn floating_edge_exposed(monitor: RECT, edge: FloatingEdge, pointer: POINT) -> b
         };
         unsafe { MonitorFromPoint(probe, MONITOR_DEFAULTTONULL) == HMONITOR::default() }
     })
+}
+
+/// A taskbar or an adjacent display makes the edge a visual clip
+/// boundary, not a no-dock boundary. Only the mouse's chosen monitor may
+/// show the retracted tab; the other screen receives no overflow pixels.
+fn floating_edge_requires_clip(
+    monitor: RECT, bounds: RECT, edge: FloatingEdge, pointer: POINT,
+) -> bool {
+    floating_edge_is_reserved(monitor, bounds, edge)
+        || !floating_edge_exposed(monitor, edge, pointer)
 }
 
 fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
@@ -5069,7 +5081,9 @@ fn refresh_floating_reserved_dock(hwnd: HWND) {
         y: y.saturating_add(h / 2),
     };
     let reserved = edge.is_some_and(|edge| floating_monitor_geometry(point)
-        .is_some_and(|(monitor, bounds)| floating_edge_is_reserved(monitor, bounds, edge)));
+        .is_some_and(|(monitor, bounds)| {
+            floating_edge_requires_clip(monitor, bounds, edge, point)
+        }));
     let mut state = lock_state();
     if let Some(s) = state.as_mut() {
         if !s.floating_mode || s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
@@ -5098,8 +5112,8 @@ fn move_floating_widget(hwnd: HWND) {
             bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
         );
         if reserved {
-            // For Explorer edges, move the rendered bitmap instead of HWND.
-            // This keeps all pixels inside the taskbar-free desktop canvas.
+            // For Explorer or adjacent-monitor edges, slide bitmap pixels
+            // inside the chosen monitor instead of moving HWND across a seam.
             (expanded_x, expanded_y)
         } else {
             // Both paths use the exact same signed slide distance and easing.
@@ -5290,8 +5304,8 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
     };
     let (old_w, old_h, old_body) =
         floating_drag_canvas_geometry(body_w, body_h, edge, unlocked);
-    // A collapsed taskbar grip has a virtual pixel offset inside a stationary
-    // HWND. On the first drag frame, transfer that offset to the HWND origin
+    // A clipped grip (taskbar or monitor seam) has a virtual pixel offset
+    // inside a stationary HWND. On the first drag frame, transfer that to the HWND origin
     // and rebase the mouse anchor atomically, without moving the actual grip
     // on the screen. After this the normal drag path is identical everywhere.
     let (slide_x, slide_y) = if reserved {
@@ -5370,45 +5384,31 @@ fn finish_floating_drag(hwnd: HWND) {
         return;
     };
     let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
-    // Physical monitor seams must remain a continuous dragging surface. Only
-    // actual outside edges receive collapsed tabs; a neighboring display
-    // blocks docking even when the old popup rectangle straddles the seam.
-    let exposed = [
-        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Left)
-            || floating_edge_exposed(monitor, FloatingEdge::Left, pointer),
-        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Right)
-            || floating_edge_exposed(monitor, FloatingEdge::Right, pointer),
-        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Top)
-            || floating_edge_exposed(monitor, FloatingEdge::Top, pointer),
-        floating_edge_is_reserved(monitor, bounds, FloatingEdge::Bottom)
-            || floating_edge_exposed(monitor, FloatingEdge::Bottom, pointer),
-    ];
+    // MonitorFromPoint(pointer) above chooses the target monitor. ALL of its
+    // four sides are dockable, including seams connected to another display.
+    // This also preserves V24.15's nearest-cursor corner selection.
     let edge = floating_drop_edge_at_pointer(
-        monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), exposed,
+        monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
     );
-    let reserved_dock = edge.is_some_and(|edge| floating_edge_is_reserved(monitor, bounds, edge));
+    let reserved_dock = edge.is_some_and(|edge|
+        floating_edge_requires_clip(monitor, bounds, edge, pointer));
     diagnose::log_lazy(|| format!(
-        "desktop drop pointer=({}, {}) distances=[L{}, R{}, T{}, B{}] hwnd=({}, {}, {}, {}) work=({}, {}, {}, {}) edge={edge:?} reserved={reserved_dock}",
+        "desktop drop pointer=({}, {}) monitor=({}, {}, {}, {}) distances=[L{}, R{}, T{}, B{}] hwnd=({}, {}, {}, {}) work=({}, {}, {}, {}) edge={edge:?} clipped={reserved_dock}",
         pointer.x, pointer.y,
+        monitor.left, monitor.top, monitor.right, monitor.bottom,
         pointer.x.abs_diff(bounds.left), pointer.x.abs_diff(bounds.right),
         pointer.y.abs_diff(bounds.top), pointer.y.abs_diff(bounds.bottom),
         rect.left, rect.top, rect.right, rect.bottom,
         bounds.left, bounds.top, bounds.right, bounds.bottom,
     ));
-    let blocked_seam = edge.is_none()
-        && floating_drop_edge(bounds, rect, sc(FLOAT_EDGE_SNAP), [true; 4]).is_some();
     let (new_w, new_h, new_body) = floating_canvas_geometry(body_w, body_h, edge);
     let desired_x = x + old_body.left - new_body.left;
     let desired_y = y + old_body.top - new_body.top;
-    let (x, y) = if blocked_seam {
-        // Do not snap, clamp, or warp the body to either monitor while it
-        // overlaps their common boundary.
-        (desired_x, desired_y)
-    } else {
-        floating_edge_position(
-            bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
-        )
-    };
+    // Keep undocked popups on the mouse's monitor too: there is no longer a
+    // special cross-seam placement path.
+    let (x, y) = floating_edge_position(
+        bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
+    );
     // If the drop is free-floating, preserve its original panel screen
     // position even though the now-detached tab moves to the top edge.
     let hovered = edge.is_none() && floating_drag_grip_contains_screen_point(
