@@ -1482,9 +1482,20 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
         // Track only failure-state transitions so a persistent Explorer/UIA
         // condition does not flood the runtime log once per second.
         let mut last_failures: BTreeMap<isize, Option<i32>> = BTreeMap::new();
+        let mut last_taskbar_geometry: BTreeMap<isize, (i32, i32, i32, i32)> = BTreeMap::new();
 
         loop {
             let taskbars = native_interop::find_taskbars();
+            // Moving the Windows taskbar between screen edges can change its
+            // rectangle without changing its UIA controls. Refresh desktop
+            // docking on geometry changes too (without a new polling timer).
+            let geometry: BTreeMap<isize, (i32, i32, i32, i32)> = taskbars.iter()
+                .map(|bar| (bar.hwnd.0 as isize, (
+                    bar.rect.left, bar.rect.top, bar.rect.right, bar.rect.bottom,
+                )))
+                .collect();
+            let geometry_changed = geometry != last_taskbar_geometry;
+            last_taskbar_geometry = geometry;
             let mut active_taskbars: BTreeSet<isize> = taskbars
                 .iter()
                 .map(|taskbar| taskbar.hwnd.0 as isize)
@@ -1554,7 +1565,7 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
                 merge_taskbar_layout_cache(&mut cache, &active_taskbars, successful_updates)
             };
 
-            if changed {
+            if changed || geometry_changed {
                 unsafe {
                     let _ = PostMessageW(
                         target.to_hwnd(),
@@ -4826,6 +4837,35 @@ fn floating_edge_position(
     }
 }
 
+fn refresh_floating_reserved_dock(hwnd: HWND) {
+    let (x, y, w, h, edge) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s| s.floating_mode && !s.dragging) else { return };
+        let (w, h) = floating_canvas_size_for_state(s);
+        (s.floating_x, s.floating_y, w, h, s.floating_edge)
+    };
+    let point = POINT {
+        x: x.saturating_add(w / 2),
+        y: y.saturating_add(h / 2),
+    };
+    let reserved = edge.is_some_and(|edge| floating_monitor_geometry(point)
+        .is_some_and(|(monitor, bounds)| floating_edge_is_reserved(monitor, bounds, edge)));
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        if !s.floating_mode || s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
+        s.floating_reserved_dock = reserved;
+        if reserved {
+            // Suppress any slide left over from the previous taskbar position.
+            s.floating_collapsed = false;
+            s.floating_first_collapse_guard = false;
+            s.floating_reveal = 100;
+            s.floating_slide_from = 100;
+            s.floating_slide_target = 100;
+            s.floating_grip_alpha = 100;
+        }
+    }
+}
+
 fn move_floating_widget(hwnd: HWND) {
     let (x, y, edge, reveal, width, height, dragging) = {
         let state = lock_state();
@@ -5212,6 +5252,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
                 if vertical { "Vertical" } else { "Horizontal" },
             ));
         }
+        refresh_floating_reserved_dock(hwnd);
         move_floating_widget(hwnd);
         if reason == "explicit desktop preference" {
             diagnose::log_lazy(|| "desktop orientation: popup moved; painting layered frame".to_string());
@@ -5319,6 +5360,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     if let Some(backdrop) = blur_backdrop_hwnd() {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
+    refresh_floating_reserved_dock(hwnd);
     move_floating_widget(hwnd);
     style_window::set_preview_orientation(vertical);
     render_layered();
@@ -10396,21 +10438,48 @@ mod tests {
     }
 
     #[test]
-    fn desktop_bottom_docks_at_monitor_edge_not_above_taskbar() {
+    fn desktop_bottom_taskbar_docks_above_taskbar_without_sliding_into_it() {
         let monitor = RECT { left: -1920, top: -100, right: 0, bottom: 980 };
         let work = RECT { left: -1920, top: -100, right: 0, bottom: 930 };
         let bounds = floating_usable_bounds(monitor, work);
-        assert_eq!(bounds.bottom, monitor.bottom);
-        let (cw, ch, _) = floating_canvas_geometry(240, 168, Some(FloatingEdge::Bottom));
-        let grip = floating_grip_rect(
-            cw, ch, Some(FloatingEdge::Bottom), sc(FLOAT_EDGE_PEEK),
-        );
+        assert_eq!(bounds.bottom, work.bottom);
+        assert!(floating_edge_is_reserved(monitor, bounds, FloatingEdge::Bottom));
+        let (cw, ch, body) = floating_canvas_geometry(240, 168, Some(FloatingEdge::Bottom));
         let (_, y) = floating_edge_position(
-            bounds, -600, 600, cw, ch, Some(FloatingEdge::Bottom),
-            true, sc(FLOAT_EDGE_PEEK),
+            bounds, -600, 850, cw, ch, Some(FloatingEdge::Bottom),
+            false, sc(FLOAT_EDGE_PEEK),
         );
-        assert_eq!(y + grip.bottom, monitor.bottom);
-        assert_ne!(y + grip.bottom, work.bottom);
+        assert_eq!(y + ch, work.bottom);
+        assert!(y + body.bottom <= work.bottom);
+        // This reserved edge stays expanded; moving to the old collapsed
+        // coordinate would instead overlap the bottom taskbar.
+    }
+
+    #[test]
+    fn desktop_taskbar_dock_respects_top_right_and_left_work_boundaries() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        for (work, edge) in [
+            (RECT { left: 0, top: 48, right: 1920, bottom: 1080 }, FloatingEdge::Top),
+            (RECT { left: 0, top: 0, right: 1860, bottom: 1080 }, FloatingEdge::Right),
+            (RECT { left: 55, top: 0, right: 1920, bottom: 1080 }, FloatingEdge::Left),
+        ] {
+            let bounds = floating_usable_bounds(monitor, work);
+            assert!(floating_edge_is_reserved(monitor, bounds, edge));
+            let (w, h, _) = floating_canvas_geometry(240, 80, Some(edge));
+            let (x, y) = floating_edge_position(bounds, 900, 300, w, h,
+                Some(edge), false, sc(FLOAT_EDGE_PEEK));
+            assert!(x >= work.left && y >= work.top);
+            assert!(x + w <= work.right && y + h <= work.bottom);
+            match edge {
+                FloatingEdge::Left => assert_eq!(x, work.left),
+                FloatingEdge::Right => assert_eq!(x + w, work.right),
+                FloatingEdge::Top => assert_eq!(y, work.top),
+                FloatingEdge::Bottom => unreachable!(),
+            }
+        }
+        assert!(!floating_edge_is_reserved(monitor, monitor, FloatingEdge::Bottom));
+        assert_eq!(floating_usable_bounds(monitor,
+            RECT { left: -100, top: 0, right: 1920, bottom: 1080 }).left, monitor.left);
     }
 
     #[test]
@@ -10444,27 +10513,19 @@ mod tests {
     }
 
     #[test]
-    fn desktop_left_taskbar_dock_keeps_visible_tab_outside_explorer() {
+    fn desktop_left_taskbar_dock_never_crosses_work_area() {
         let monitor = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
         let work = RECT { left: -1872, top: 0, right: 0, bottom: 1040 };
         let bounds = floating_usable_bounds(monitor, work);
-        assert_eq!(bounds.left, -1872);
+        assert_eq!(bounds.left, work.left);
         let (width, height, _) = floating_canvas_geometry(
-            240, 168, Some(FloatingEdge::Left),
-        );
+            240, 168, Some(FloatingEdge::Left));
         let (x, y) = floating_edge_position(
             bounds, -1860, 140, width, height,
-            Some(FloatingEdge::Left), true, sc(FLOAT_EDGE_PEEK),
-        );
-        let grip = floating_grip_rect(
-            width, height, Some(FloatingEdge::Left), sc(FLOAT_EDGE_PEEK),
-        );
-        assert_eq!(x + grip.left, work.left);
-        assert!(x + grip.right <= work.right);
-        assert!(y + grip.top >= work.top && y + grip.bottom <= work.bottom);
-
-        let invalid = RECT { left: -3000, top: 0, right: 10, bottom: 1080 };
-        assert_eq!(floating_usable_bounds(monitor, invalid).left, monitor.left);
+            Some(FloatingEdge::Left), false, sc(FLOAT_EDGE_PEEK));
+        assert_eq!(x, work.left);
+        assert!(y >= work.top && y + height <= work.bottom);
+        assert!(floating_edge_is_reserved(monitor, bounds, FloatingEdge::Left));
     }
 
     #[test]
