@@ -2871,20 +2871,9 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 state.as_ref().map(floating_canvas_geometry_for_state)
                     .unwrap_or_else(|| floating_canvas_geometry(width, height, edge))
             };
-            let visible_body = if reserved && !dragging {
-                edge.map(|edge| floating_reserved_visible_body(body, edge, reveal))
-                    .unwrap_or(body)
-            } else { body };
-            let grip = if reserved {
-                edge.map(|edge| floating_reserved_grip_rect(
-                    canvas_w, canvas_h, body, edge,
-                    if dragging { drag_reveal } else { reveal },
-                )).unwrap_or_else(|| floating_grip_rect(
-                    canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
-                ))
-            } else {
-                floating_grip_rect(canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK))
-            };
+            let grip = floating_grip_rect(
+                canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+            );
             let canvas_info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -2909,43 +2898,39 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 );
                 canvas.fill(0);
                 if !hidden {
-                    // When docked at Explorer, clip the animated panel to
-                    // the desktop side of the taskbar. Never move the HWND or
-                    // its opaque pixels through the taskbar during retraction.
-                    for y in visible_body.top..visible_body.bottom {
-                        let dst = (y * canvas_w + visible_body.left) as usize;
-                        let src = ((y - body.top) * width
-                            + visible_body.left - body.left) as usize;
-                        let count = (visible_body.right - visible_body.left) as usize;
-                        canvas[dst..dst + count]
-                            .copy_from_slice(&pixel_data[src..src + count]);
+                    for y in 0..height {
+                        let dst = ((y + body.top) * canvas_w + body.left) as usize;
+                        let src = (y * width) as usize;
+                        canvas[dst..dst + width as usize]
+                            .copy_from_slice(&pixel_data[src..src + width as usize]);
                     }
                 }
-                if reserved {
-                    render_floating_handle_bitmap_at(
-                        canvas, canvas_w, canvas_h, grip, hovered, &style, grip_alpha,
-                    );
-                } else {
-                    render_floating_handle_bitmap(
-                        canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
-                    );
-                }
+                render_floating_handle_bitmap(
+                    canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
+                );
                 if hovered && !hidden {
-                    if !reserved || reveal == 100 || dragging {
-                        draw_drag_hover_outline(
-                            canvas, canvas_w, canvas_h, body,
-                            style.panel_corner_radius, accent,
-                        );
-                    }
-                    // Both physical-edge and work-area tabs share the same
-                    // themed perimeter glow, with the live animated hitbox.
+                    draw_drag_hover_outline(
+                        canvas, canvas_w, canvas_h, body,
+                        style.panel_corner_radius, accent,
+                    );
+                    // Keep the physical-edge glow shape and hit probe identical.
                     let tab = grip;
                     draw_drag_hover_outline(
                         canvas, canvas_w, canvas_h, tab, style.panel_corner_radius, accent,
                     );
                     paint_floating_hover_hit_probe(
-                        canvas, canvas_w, canvas_h, visible_body, tab, edge,
+                        canvas, canvas_w, canvas_h, body, tab, edge,
                     );
+                }
+                if reserved {
+                    if let Some(edge) = edge {
+                        // Same slide as a physical monitor edge, but alpha-clip
+                        // the translated result before it reaches Explorer.
+                        floating_slide_layered_bitmap(
+                            canvas, canvas_w, canvas_h, edge,
+                            if dragging { drag_reveal } else { reveal },
+                        );
+                    }
                 }
                 let sz = SIZE { cx: canvas_w, cy: canvas_h };
                 let _ = UpdateLayeredWindow(
@@ -6772,9 +6757,12 @@ unsafe extern "system" fn wnd_proc(
                 let s = state.as_ref().expect("desktop mode checked above");
                 let (_, _, body) = floating_canvas_geometry_for_state(s);
                 (
-                    if s.floating_reserved_dock && !s.dragging {
-                        s.floating_edge.map(|edge| floating_reserved_visible_body(
-                            body, edge, s.floating_reveal,
+                    if s.floating_reserved_dock {
+                        s.floating_edge.map(|edge| floating_slid_canvas_rect(
+                            body, floating_canvas_size_for_state(s).0,
+                            floating_canvas_size_for_state(s).1, edge,
+                            if s.dragging { s.floating_reserved_drag_reveal }
+                                else { s.floating_reveal },
                         )).unwrap_or(body)
                     } else { body },
                     floating_state_grip_rect(s),
