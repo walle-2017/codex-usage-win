@@ -4967,42 +4967,68 @@ fn floating_drop_edge(
         .map(|(edge, _, _, _)| edge)
 }
 
-/// Detect a release *inside* a reserved taskbar band before testing the
-/// current layered HWND rectangle. Dragging by the detached tab can move the
-/// entire HWND beyond rcWork. The old rectangle-only test then falsely returned
-/// None, clamped a free popup and never started its dock retraction.
+/// Select the edge by the RELEASE CURSOR's perpendicular distance.
+/// At screen corners two eligible boundaries can meet. The old logic picked
+/// Left before Top/Bottom regardless of the actual cursor position, while a
+/// reserved taskbar band could suppress the adjoining physical-screen edge.
+/// Use the same distance rule for all four corners and every taskbar location.
+///
+/// The layered HWND rectangle remains an eligibility signal so detached-grip
+/// drags retain their previous snapping behavior. The cursor additionally
+/// qualifies an edge when close to its line or inside a reserved taskbar band,
+/// even if the entire HWND has passed outside the work area.
 fn floating_drop_edge_at_pointer(
     monitor: RECT, bounds: RECT, rect: RECT, pointer: POINT,
     threshold: i32, exposed: [bool; 4],
 ) -> Option<FloatingEdge> {
-    // The cursor must be on this physical monitor. Never interpret a cursor
-    // beyond a connected monitor seam as a taskbar-side snap.
     let within_monitor = pointer.x >= monitor.left && pointer.x < monitor.right
         && pointer.y >= monitor.top && pointer.y < monitor.bottom;
-    if within_monitor {
-        let within_work_y = pointer.y >= bounds.top && pointer.y < bounds.bottom;
-        let within_work_x = pointer.x >= bounds.left && pointer.x < bounds.right;
-        let reserved_edges = [
-            (FloatingEdge::Left,
-                exposed[0] && bounds.left > monitor.left
-                    && pointer.x < bounds.left && within_work_y),
-            (FloatingEdge::Right,
-                exposed[1] && bounds.right < monitor.right
-                    && pointer.x >= bounds.right && within_work_y),
-            (FloatingEdge::Top,
-                exposed[2] && bounds.top > monitor.top
-                    && pointer.y < bounds.top && within_work_x),
-            (FloatingEdge::Bottom,
-                exposed[3] && bounds.bottom < monitor.bottom
-                    && pointer.y >= bounds.bottom && within_work_x),
-        ];
-        if let Some((edge, _)) = reserved_edges.into_iter().find(|(_, hit)| *hit) {
-            return Some(edge);
-        }
-    }
-    // Retain all original physical-edge snapping, edge distance tolerances,
-    // and connected-monitor seam guards for releases outside taskbar bands.
-    floating_drop_edge(bounds, rect, threshold, exposed)
+    let distances = [
+        pointer.x.abs_diff(bounds.left),
+        pointer.x.abs_diff(bounds.right),
+        pointer.y.abs_diff(bounds.top),
+        pointer.y.abs_diff(bounds.bottom),
+    ];
+    let snap_distance = threshold.max(0) as u32;
+    let eligible = [
+        (
+            FloatingEdge::Left, exposed[0],
+            (rect.left < bounds.left && rect.right > bounds.left)
+                || rect.left.abs_diff(bounds.left) <= snap_distance,
+            within_monitor && (distances[0] <= snap_distance
+                || (bounds.left > monitor.left && pointer.x < bounds.left)),
+            distances[0],
+        ),
+        (
+            FloatingEdge::Right, exposed[1],
+            (rect.right > bounds.right && rect.left < bounds.right)
+                || rect.right.abs_diff(bounds.right) <= snap_distance,
+            within_monitor && (distances[1] <= snap_distance
+                || (bounds.right < monitor.right && pointer.x >= bounds.right)),
+            distances[1],
+        ),
+        (
+            FloatingEdge::Top, exposed[2],
+            (rect.top < bounds.top && rect.bottom > bounds.top)
+                || rect.top.abs_diff(bounds.top) <= snap_distance,
+            within_monitor && (distances[2] <= snap_distance
+                || (bounds.top > monitor.top && pointer.y < bounds.top)),
+            distances[2],
+        ),
+        (
+            FloatingEdge::Bottom, exposed[3],
+            (rect.bottom > bounds.bottom && rect.top < bounds.bottom)
+                || rect.bottom.abs_diff(bounds.bottom) <= snap_distance,
+            within_monitor && (distances[3] <= snap_distance
+                || (bounds.bottom < monitor.bottom && pointer.y >= bounds.bottom)),
+            distances[3],
+        ),
+    ];
+    eligible.into_iter()
+        .filter(|(_, allowed, hwnd_near, mouse_near, _)|
+            *allowed && (*hwnd_near || *mouse_near))
+        .min_by_key(|(_, _, _, _, distance)| *distance)
+        .map(|(edge, _, _, _, _)| edge)
 }
 
 // The stable expanded position is always in screen coordinates. Only the
@@ -5362,8 +5388,11 @@ fn finish_floating_drag(hwnd: HWND) {
     );
     let reserved_dock = edge.is_some_and(|edge| floating_edge_is_reserved(monitor, bounds, edge));
     diagnose::log_lazy(|| format!(
-        "desktop drop pointer=({}, {}) hwnd=({}, {}, {}, {}) work=({}, {}, {}, {}) edge={edge:?} reserved={reserved_dock}",
-        pointer.x, pointer.y, rect.left, rect.top, rect.right, rect.bottom,
+        "desktop drop pointer=({}, {}) distances=[L{}, R{}, T{}, B{}] hwnd=({}, {}, {}, {}) work=({}, {}, {}, {}) edge={edge:?} reserved={reserved_dock}",
+        pointer.x, pointer.y,
+        pointer.x.abs_diff(bounds.left), pointer.x.abs_diff(bounds.right),
+        pointer.y.abs_diff(bounds.top), pointer.y.abs_diff(bounds.bottom),
+        rect.left, rect.top, rect.right, rect.bottom,
         bounds.left, bounds.top, bounds.right, bounds.bottom,
     ));
     let blocked_seam = edge.is_none()
