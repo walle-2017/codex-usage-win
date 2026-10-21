@@ -59,6 +59,16 @@ if ($window -notmatch 'fn floating_edge_needs_clip\(' -or
     $window -notmatch 'desktop_shared_seam_dock_clips_sliding_pixels_inside_chosen_monitor') {
     throw 'Each monitor seam must be dockable, use the mouse-selected monitor, and clip autohide instead of crossing screens.'
 }
+if ($window -notmatch 'fn floating_docked_hover_rect\(' -or
+    $window -notmatch 'fn floating_docked_hover_rect_for_geometry\(' -or
+    $window -notmatch 'fn floating_pointer_in_docked_hover_zone\(' -or
+    $window -notmatch 'TIMER_FLOAT_HOVER_RECHECK' -or
+    $window -notmatch '(?s)WM_MOUSEMOVE => \{.*?in_docked_hover_zone.*?floating_cancel_hover_recheck\(hwnd\)' -or
+    $window -notmatch '(?s)_ if msg == WM_MOUSELEAVE_MSG => \{.*?floating_arm_hover_recheck\(hwnd\)' -or
+    $window -notmatch 'desktop_docked_hover_envelope_is_stable_at_extreme_monitor_pixels' -or
+    $window -notmatch 'desktop_docked_hover_respects_taskbar_work_area_and_partial_slide') {
+    throw 'Docked hover must use a stable work-area envelope, delayed leave recheck and edge-pixel regression coverage.'
+}
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
     $window -notmatch 'desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides' -or
