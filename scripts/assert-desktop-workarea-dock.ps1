@@ -69,6 +69,13 @@ if ($window -notmatch 'fn floating_docked_hover_rect\(' -or
     $window -notmatch 'desktop_docked_hover_respects_taskbar_work_area_and_partial_slide') {
     throw 'Docked hover must use a stable work-area envelope, delayed leave recheck and edge-pixel regression coverage.'
 }
+if ($window -notmatch 'fn draw_drag_hover_outer_glow\(' -or
+    $window -notmatch 'fn panel_outer_shape_contains\(' -or
+    $window -notmatch '(?s)canvas\.fill\(0\);\s*if hovered && !hidden \{\s*// Paint the external halo FIRST' -or
+    $window -notmatch 'v24_18_outer_glow_leaves_all_panel_and_tab_pixels_untinted' -or
+    $window -notmatch 'v24_18_outer_glow_contacts_actual_rounded_contour_without_any_gap') {
+    throw 'V24.18 must render a true exterior halo first, using the same rounded mask as body and tab.'
+}
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
     $window -notmatch 'desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides' -or
