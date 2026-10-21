@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/vertical-taskbar-support
   pull_request:
     branches:
       - main
@@ -75,9 +76,9 @@ jobs:
         shell: pwsh
         run: ./scripts/assert-runtime-log.ps1
 
-      - name: Verify desktop widget stays above the taskbar
+      - name: Verify taskbar-safe desktop work-area docking
         shell: pwsh
-        run: ./scripts/assert-desktop-taskbar-topmost.ps1
+        run: ./scripts/assert-desktop-workarea-dock.ps1
 
       - name: Verify permanent embedded taskbar architecture
         shell: pwsh
