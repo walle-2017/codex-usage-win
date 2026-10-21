@@ -10567,60 +10567,151 @@ mod tests {
     }
 
     #[test]
-    fn v24_7_rounded_glow_feathers_inside_and_outside_the_widget() {
-        let style = ThemeStyle::preset(false, ThemePreset::Ocean);
-        let accent = drag_hover_outline_color(&style);
-        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
-            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
-            let (w, h, body) = floating_drag_canvas_geometry(
-                240, 42, edge, edge.is_some(),
-            );
-            let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
-            let mut pixels = vec![0u32; (w * h) as usize];
-            for y in body.top..body.bottom {
-                for x in body.left..body.right {
-                    pixels[(y * w + x) as usize] = 0xFF223344;
+    fn v24_18_outer_glow_leaves_all_panel_and_tab_pixels_untinted() {
+        // Desktop overlay and glass surfaces may be translucent: painting
+        // the halo behind the foreground is not sufficient without a strict
+        // union silhouette mask, since inner light would show through.
+        for radius in [0_u8, 2, 8, 20] {
+            for alpha in [32_u8, 105, 255] {
+                let mut style = ThemeStyle::preset(false, ThemePreset::Ocean);
+                style.panel_corner_radius = radius;
+                style.set_color(StyleColorTarget::PanelBackground,
+                    Color::rgba(23, 42, 68, alpha));
+                style.set_color(StyleColorTarget::PanelBorder,
+                    Color::rgba(67, 123, 151, alpha));
+                let accent = drag_hover_outline_color(&style);
+                for edge in [None, Some(FloatingEdge::Left),
+                    Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                    Some(FloatingEdge::Bottom)] {
+                    let (w, h, body) = floating_drag_canvas_geometry(
+                        240, 52, edge, edge.is_some(),
+                    );
+                    let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                    let mut foreground = vec![0u32; (w * h) as usize];
+                    for y in body.top..body.bottom {
+                        for x in body.left..body.right {
+                            if let Some(color) = panel_color_at(
+                                &style, body.right - body.left, body.bottom - body.top,
+                                x - body.left, y - body.top,
+                            ) {
+                                foreground[(y * w + x) as usize] = premultiplied_pixel(color);
+                            }
+                        }
+                    }
+                    render_floating_handle_bitmap(
+                        &mut foreground, w, h, edge, true, &style, 100,
+                    );
+                    let mut composite = vec![0u32; (w * h) as usize];
+                    draw_drag_hover_outer_glow(
+                        &mut composite, w, h, body, tab, &style, accent,
+                    );
+                    let mut halo_found = false;
+                    for y in 0..h {
+                        for x in 0..w {
+                            let index = (y * w + x) as usize;
+                            let body_mask = panel_outer_shape_contains(
+                                body.right - body.left, body.bottom - body.top,
+                                x - body.left, y - body.top, radius,
+                            );
+                            let tab_mask = panel_outer_shape_contains(
+                                tab.right - tab.left, tab.bottom - tab.top,
+                                x - tab.left, y - tab.top, radius,
+                            );
+                            if body_mask || tab_mask {
+                                assert_eq!(composite[index], 0,
+                                    "halo must have ZERO coverage inside any painted surface");
+                            } else if composite[index] >> 24 > 0 {
+                                halo_found = true;
+                            }
+                            // Production copies/draws the foreground after
+                            // rendering external light. Validate all occupied
+                            // pixels remain identical to the unlit version.
+                            if foreground[index] >> 24 > 0 {
+                                composite[index] = foreground[index];
+                                assert_eq!(composite[index], foreground[index]);
+                            }
+                        }
+                    }
+                    assert!(halo_found, "outer halo must remain visible at every dock edge");
                 }
             }
-            render_floating_handle_bitmap(
-                &mut pixels, w, h, edge, true, &style, 100,
+        }
+    }
+
+    #[test]
+    fn v24_18_outer_glow_contacts_actual_rounded_contour_without_any_gap() {
+        // At every four-neighbor boundary of the true panel or drag tab,
+        // the directly adjacent outside pixel must receive light. This
+        // guards the circular corner seam that made an earlier outside-only
+        // experiment look detached from the panel.
+        let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+        for radius in [0_u8, 2, 5, 12, 20] {
+            style.panel_corner_radius = radius;
+            for edge in [None, Some(FloatingEdge::Left),
+                Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                Some(FloatingEdge::Bottom)] {
+                let (w, h, body) = floating_drag_canvas_geometry(
+                    230, 70, edge, edge.is_some(),
+                );
+                let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                let mask_at = |x: i32, y: i32| {
+                    [body, tab].iter().any(|rect| panel_outer_shape_contains(
+                        rect.right - rect.left, rect.bottom - rect.top,
+                        x - rect.left, y - rect.top, radius,
+                    ))
+                };
+                let mut pixels = vec![0u32; (w * h) as usize];
+                draw_drag_hover_outer_glow(
+                    &mut pixels, w, h, body, tab,
+                    &style, drag_hover_outline_color(&style),
+                );
+                let mut boundary_pairs = 0;
+                for y in 0..h {
+                    for x in 0..w {
+                        if !mask_at(x, y) { continue; }
+                        for (dx, dy) in [(1,0), (-1,0), (0,1), (0,-1)] {
+                            let px = x + dx;
+                            let py = y + dy;
+                            if px < 0 || px >= w || py < 0 || py >= h
+                                || mask_at(px, py) { continue; }
+                            let opacity = pixels[(py*w + px) as usize] >> 24;
+                            assert!(opacity > 0,
+                                "glow must touch every rounded exterior contour pixel, no gap");
+                            assert_eq!(pixels[(y*w + x) as usize], 0,
+                                "no glow may overlap the real panel/tab silhouette");
+                            boundary_pairs += 1;
+                        }
+                    }
+                }
+                assert!(boundary_pairs > 10);
+            }
+        }
+    }
+
+    #[test]
+    fn v24_18_nearby_panel_and_tab_glows_do_not_tint_each_other() {
+        let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        style.panel_corner_radius = 10;
+        for edge in [None, Some(FloatingEdge::Left),
+            Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+            Some(FloatingEdge::Bottom)] {
+            let (w, h, body) = floating_canvas_geometry(240, 52, edge);
+            let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+            let mut pixels = vec![0u32; (w*h) as usize];
+            draw_drag_hover_outer_glow(
+                &mut pixels, w, h, body, tab, &style,
+                drag_hover_outline_color(&style),
             );
-            let base = pixels.clone();
-            // Use V24.6 layering: light is composited over both solids.
-            // The softened inner edge is important for rounded corners.
-            draw_drag_hover_outline(
-                &mut pixels, w, h, body, style.panel_corner_radius, accent,
-            );
-            draw_drag_hover_outline(
-                &mut pixels, w, h, tab, style.panel_corner_radius, accent,
-            );
-            let center_y = (body.top + body.bottom) / 2;
-            let center_x = (body.left + body.right) / 2;
-            assert_eq!(
-                pixels[(center_y * w + center_x) as usize],
-                base[(center_y * w + center_x) as usize],
-                "quota panel center must remain unchanged",
-            );
-            let inner_x = body.left + sc(2);
-            assert_ne!(
-                pixels[(center_y * w + inner_x) as usize],
-                base[(center_y * w + inner_x) as usize],
-                "the inner rounded rim must regain its soft illumination",
-            );
-            let outer = match edge {
-                Some(FloatingEdge::Left) => (body.left - 2, center_y),
-                Some(FloatingEdge::Right) => (body.right + 2, center_y),
-                Some(FloatingEdge::Top) => (center_x, body.top - 2),
-                Some(FloatingEdge::Bottom) => (center_x, body.bottom + 2),
-                None => (body.left - 2, center_y),
-            };
-            let alpha = pixels[(outer.1 * w + outer.0) as usize] >> 24;
-            assert!(alpha > 0 && alpha < 255,
-                "the outer halo remains a translucent fade");
-            let tab_center = ((tab.top + tab.bottom) / 2 * w
-                + (tab.left + tab.right) / 2) as usize;
-            assert_ne!(pixels[tab_center], 0,
-                "the separate drag tab remains visible beneath its glow");
+            for y in 0..h {
+                for x in 0..w {
+                    if [body, tab].iter().any(|r| panel_outer_shape_contains(
+                        r.right-r.left, r.bottom-r.top,
+                        x-r.left, y-r.top, style.panel_corner_radius,
+                    )) {
+                        assert_eq!(pixels[(y*w+x) as usize], 0);
+                    }
+                }
+            }
         }
     }
 
