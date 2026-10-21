@@ -10778,6 +10778,105 @@ mod tests {
     }
 
     #[test]
+    fn desktop_corner_snap_picks_nearest_mouse_edge_at_all_four_corners() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        // Both HWND edges cross each physical corner. The old fixed
+        // left/right/top/bottom priority was independent of cursor position.
+        let scenarios = [
+            (RECT { left: -10, top: -10, right: 220, bottom: 120 },
+                POINT { x: 4, y: 18 }, FloatingEdge::Left),
+            (RECT { left: -10, top: -10, right: 220, bottom: 120 },
+                POINT { x: 18, y: 4 }, FloatingEdge::Top),
+            (RECT { left: 1800, top: -10, right: 1950, bottom: 120 },
+                POINT { x: 1916, y: 20 }, FloatingEdge::Right),
+            (RECT { left: 1800, top: -10, right: 1950, bottom: 120 },
+                POINT { x: 1895, y: 2 }, FloatingEdge::Top),
+            (RECT { left: -10, top: 980, right: 220, bottom: 1110 },
+                POINT { x: 3, y: 1056 }, FloatingEdge::Left),
+            (RECT { left: -10, top: 980, right: 220, bottom: 1110 },
+                POINT { x: 24, y: 1078 }, FloatingEdge::Bottom),
+            (RECT { left: 1790, top: 950, right: 1950, bottom: 1110 },
+                POINT { x: 1918, y: 1045 }, FloatingEdge::Right),
+            (RECT { left: 1790, top: 950, right: 1950, bottom: 1110 },
+                POINT { x: 1880, y: 1077 }, FloatingEdge::Bottom),
+        ];
+        for (widget, cursor, expected) in scenarios {
+            assert_eq!(floating_drop_edge_at_pointer(
+                monitor, monitor, widget, cursor, 24, [true; 4],
+            ), Some(expected), "mouse=({}, {}) should choose nearest corner edge",
+                cursor.x, cursor.y);
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_corner_snap_uses_actual_inner_taskbar_edge_distances() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        // Bottom and left taskbars both inset from the physical monitor.
+        // The mouse lies inside both reserved bands: compare distances to
+        // x=48 and y=1032 instead of taking the old hard-coded Left.
+        let work = RECT { left: 48, top: 0, right: 1920, bottom: 1032 };
+        let widget = RECT { left: 35, top: 1000, right: 235, bottom: 1060 };
+        for (mouse, edge) in [
+            (POINT { x: 46, y: 1035 }, FloatingEdge::Left),
+            (POINT { x: 45, y: 1033 }, FloatingEdge::Bottom),
+            (POINT { x: 20, y: 1050 }, FloatingEdge::Bottom),
+        ] {
+            let dx = mouse.x.abs_diff(work.left);
+            let dy = mouse.y.abs_diff(work.bottom);
+            let actual = floating_drop_edge_at_pointer(
+                monitor, work, widget, mouse, 24, [true; 4]);
+            assert_eq!(actual, Some(edge), "left distance={dx}, bottom distance={dy}");
+        }
+        // Bottom taskbar meets an unreserved physical screen side.
+        let bottom = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let widget = RECT { left: -10, top: 1000, right: 200, bottom: 1070 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 3, y: 1052 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 30, y: 1038 }, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom));
+        // Left-side taskbar meets top: choose mouse distance to x=48/y=0.
+        let left = RECT { left: 48, top: 0, right: 1920, bottom: 1080 };
+        let widget = RECT { left: 20, top: -8, right: 220, bottom: 90 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, left, widget, POINT { x: 60, y: 4 }, 24, [true; 4],
+        ), Some(FloatingEdge::Top));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, left, widget, POINT { x: 49, y: 22 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+        // Right-side taskbar meets bottom.
+        let right = RECT { left: 0, top: 0, right: 1872, bottom: 1080 };
+        let widget = RECT { left: 1810, top: 980, right: 1900, bottom: 1110 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, right, widget, POINT { x: 1900, y: 1079 }, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, right, widget, POINT { x: 1874, y: 1045 }, 24, [true; 4],
+        ), Some(FloatingEdge::Right));
+    }
+
+    #[test]
+    fn desktop_corner_snap_ignores_unexposed_monitor_seams() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let bottom = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let widget = RECT { left: -10, top: 1010, right: 210, bottom: 1080 };
+        let mouse = POINT { x: 2, y: 1040 };
+        // The left side is a seam shared with another monitor, so even
+        // though its distance is 2px (versus bottom=8px), it isn't dockable.
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, mouse, 24, [false, true, true, true],
+        ), Some(FloatingEdge::Bottom));
+        // A corner with both sides blocked cannot trigger either side.
+        let full = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let widget = RECT { left: -10, top: -10, right: 210, bottom: 100 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, full, widget, POINT { x: 1, y: 3 }, 24,
+            [false, true, false, true],
+        ), None);
+    }
+
+    #[test]
     fn desktop_taskbar_drop_with_entire_canvas_beyond_work_area_still_snaps() {
         // V24.11 field failure: secondary display taskbar occupies y=912..960.
         // The cursor is inside Explorer; the detached window is completely
