@@ -11247,6 +11247,92 @@ mod tests {
     }
 
     #[test]
+    fn desktop_transparent_drag_tab_whole_rounded_surface_remains_hit_testable() {
+        // UpdateLayeredWindow discards alpha-zero pixels before WM_NCHITTEST.
+        // An invisible 1/255 alpha probe in the *real* grip silhouette must
+        // make empty background cells draggable, without showing a fill.
+        for (body_w, body_h) in [(240, 42), (48, 168)] {
+            for edge in [None, Some(FloatingEdge::Left),
+                Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                Some(FloatingEdge::Bottom)] {
+                let (w, h, _) = floating_canvas_geometry(body_w, body_h, edge);
+                let grip = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                for radius in [0_u8, 3, 10, 20] {
+                    let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+                    style.panel_corner_radius = radius;
+                    style.set_color(StyleColorTarget::PanelBackground,
+                        Color::rgba(25, 42, 66, 0));
+                    style.set_color(StyleColorTarget::PanelBorder,
+                        Color::rgba(61, 103, 143, 255));
+                    for hovered in [false, true] {
+                        let mut pixels = vec![0u32; (w * h) as usize];
+                        render_floating_handle_bitmap(
+                            &mut pixels, w, h, edge, hovered, &style, 100,
+                        );
+                        let mut empty_cells = 0;
+                        for y in 0..h {
+                            for x in 0..w {
+                                let index = (y * w + x) as usize;
+                                let inside = panel_outer_shape_contains(
+                                    grip.right - grip.left, grip.bottom - grip.top,
+                                    x - grip.left, y - grip.top, radius,
+                                );
+                                if inside {
+                                    assert!(pixels[index] >> 24 > 0,
+                                        "even a fully transparent grip interior must receive mouse events");
+                                    assert_eq!(floating_drag_tab_hit_code(
+                                        RECT::default(), grip, x, y,
+                                    ), 1);
+                                    assert!(floating_drag_handle_hit(
+                                        x, y, w, h, edge, sc(FLOAT_EDGE_PEEK),
+                                    ));
+                                    if panel_inner_shape_contains(
+                                        grip.right - grip.left, grip.bottom - grip.top,
+                                        x - grip.left, y - grip.top, radius,
+                                    ) && pixels[index] == 0x01000000 {
+                                        empty_cells += 1;
+                                    }
+                                } else {
+                                    assert_eq!(pixels[index], 0,
+                                        "rounded transparent corners and external glow gutter must remain click-through");
+                                }
+                            }
+                        }
+                        assert!(empty_cells > 0,
+                            "a transparent drag tab must contain invisible clickable blank pixels");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_transparent_drag_tab_probe_respects_fade_out_and_rounded_corners() {
+        let (w, h, _) = floating_canvas_geometry(240, 42, None);
+        let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+        let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        style.panel_corner_radius = 10;
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(0, 0, 0, 0));
+        style.set_color(StyleColorTarget::PanelBorder, Color::rgba(50, 80, 120, 0));
+        for opacity in [1_u8, 25, 100] {
+            let mut pixels = vec![0u32; (w * h) as usize];
+            render_floating_handle_bitmap(&mut pixels, w, h, None, false, &style, opacity);
+            let x = grip.left + sc(6);
+            let y = (grip.top + grip.bottom) / 2;
+            let pixel = pixels[(y * w + x) as usize];
+            assert!(pixel >> 24 > 0);
+            assert!(pixels.iter().any(|px| *px == 0x01000000),
+                "transparent tab retains an imperceptible premultiplied mouse-hit surface");
+            assert_eq!(pixels[0], 0,
+                "outside the actual drag block remains transparent");
+        }
+        let mut faded_out = vec![0u32; (w * h) as usize];
+        render_floating_handle_bitmap(&mut faded_out, w, h, None, false, &style, 0);
+        assert!(faded_out.iter().all(|pixel| *pixel == 0),
+            "a genuinely faded-out free tab must remain noninteractive");
+    }
+
+    #[test]
     fn desktop_mini_grip_matches_panel_palette_corner_radius_and_alpha() {
         let mut style = ThemeStyle::dark_default();
         style.set_color(StyleColorTarget::PanelBackground, Color::rgba(14, 32, 25, 68));
