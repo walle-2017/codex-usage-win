@@ -1,5 +1,7 @@
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 use std::{fs, path::PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
