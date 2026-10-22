@@ -10602,6 +10602,134 @@ mod tests {
     }
 
     #[test]
+    fn v24_19_transparent_round_corners_do_not_erase_underlying_halo() {
+        // The V24.18 source bitmap was copied over a prepainted glow, so
+        // alpha-zero corner pixels erased the halo and left a visible gap.
+        // At any exterior pixel with glow, source-over must preserve it.
+        let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        for radius in [0_u8, 3, 8, 16, 22] {
+            style.panel_corner_radius = radius;
+            for edge in [None, Some(FloatingEdge::Left),
+                Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                Some(FloatingEdge::Bottom)] {
+                let (w, h, body) = floating_drag_canvas_geometry(
+                    240, 60, edge, edge.is_some(),
+                );
+                let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                let mut halo = vec![0_u32; (w * h) as usize];
+                draw_drag_hover_outer_glow(
+                    &mut halo, w, h, body, tab, &style,
+                    drag_hover_outline_color(&style),
+                );
+                let mut corner_pixels = 0;
+                for rect in [body, tab] {
+                    let rw = rect.right - rect.left;
+                    let rh = rect.bottom - rect.top;
+                    for y in rect.top.max(0)..rect.bottom.min(h) {
+                        for x in rect.left.max(0)..rect.right.min(w) {
+                            if panel_outer_shape_contains(
+                                rw, rh, x - rect.left, y - rect.top, radius,
+                            ) { continue; }
+                            let index = (y * w + x) as usize;
+                            if halo[index] >> 24 == 0 { continue; }
+                            assert_eq!(composite_premultiplied_pixel(halo[index], 0),
+                                halo[index],
+                                "transparent rounded corner must not punch a dark gap");
+                            corner_pixels += 1;
+                        }
+                    }
+                }
+                assert!(corner_pixels > 0,
+                    "halo must pass through transparent pixels beside the rounded contour");
+            }
+        }
+    }
+
+    #[test]
+    fn v24_19_border_underside_continuity_without_inner_tint() {
+        for radius in [0_u8, 2, 7, 15, 22] {
+            for alpha in [24_u8, 96, 180, 255] {
+                let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+                style.panel_corner_radius = radius;
+                style.set_color(StyleColorTarget::PanelBorder,
+                    Color::rgba(68, 108, 136, alpha));
+                style.set_color(StyleColorTarget::PanelBackground,
+                    Color::rgba(20, 35, 52, alpha));
+                for edge in [None, Some(FloatingEdge::Left),
+                    Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                    Some(FloatingEdge::Bottom)] {
+                    let (w, h, body) = floating_drag_canvas_geometry(
+                        240, 64, edge, edge.is_some(),
+                    );
+                    let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                    let mut halo = vec![0_u32; (w*h) as usize];
+                    draw_drag_hover_outer_glow(
+                        &mut halo, w, h, body, tab, &style,
+                        drag_hover_outline_color(&style),
+                    );
+                    let mut border_count = 0;
+                    for rect in [body, tab] {
+                        let rw = rect.right - rect.left;
+                        let rh = rect.bottom - rect.top;
+                        for y in rect.top.max(0)..rect.bottom.min(h) {
+                            for x in rect.left.max(0)..rect.right.min(w) {
+                                let lx = x - rect.left;
+                                let ly = y - rect.top;
+                                let index = (y*w + x) as usize;
+                                let is_border = panel_outer_shape_contains(
+                                    rw, rh, lx, ly, radius,
+                                ) && !panel_inner_shape_contains(
+                                    rw, rh, lx, ly, radius,
+                                );
+                                let is_content = panel_inner_shape_contains(
+                                    rw, rh, lx, ly, radius,
+                                );
+                                if is_content {
+                                    assert_eq!(halo[index], 0,
+                                        "no underpaint under the translucent panel content");
+                                } else if is_border && halo[index] >> 24 > 0 {
+                                    border_count += 1;
+                                    let border = premultiplied_pixel(
+                                        style.color(StyleColorTarget::PanelBorder),
+                                    );
+                                    let result = composite_premultiplied_pixel(
+                                        halo[index], border,
+                                    );
+                                    if alpha == 255 {
+                                        assert_eq!(result, border,
+                                            "opaque border completely obscures underpaint");
+                                    } else {
+                                        assert_ne!(result, border,
+                                            "semi-transparent border keeps a narrow seamless glow");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    assert!(border_count > 0,
+                        "underpaint must contact the actual outer border");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_19_premultiplied_foreground_source_over_preserves_color_rules() {
+        let under = premultiplied_pixel(Color::rgba(20, 180, 240, 175));
+        assert_eq!(composite_premultiplied_pixel(under, 0), under);
+        assert_eq!(composite_premultiplied_pixel(0, under), under);
+        let solid = premultiplied_pixel(Color::rgba(30, 50, 70, 255));
+        assert_eq!(composite_premultiplied_pixel(under, solid), solid);
+        let translucent = premultiplied_pixel(Color::rgba(100, 120, 160, 85));
+        let mixed = composite_premultiplied_pixel(under, translucent);
+        assert!(mixed >> 24 > under >> 24);
+        for shift in [0, 8, 16] {
+            assert!((mixed >> shift) & 255 <= mixed >> 24,
+                "result must remain premultiplied for UpdateLayeredWindow");
+        }
+    }
+
+    #[test]
     fn v24_18_outer_glow_leaves_all_panel_and_tab_pixels_untinted() {
         // Desktop overlay and glass surfaces may be translucent: painting
         // the halo behind the foreground is not sufficient without a strict
