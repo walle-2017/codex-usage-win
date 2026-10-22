@@ -5605,6 +5605,37 @@ fn floating_transition_corridor_contains(
         && point_in_rect(floating_hover_probe_rect(body, grip, Some(edge)), x, y)
 }
 
+/// Geometry rectangles abut, but their actual rounded silhouettes each
+/// have an entirely transparent one-pixel outer inset. The two adjacent
+/// alpha-zero pixel rows/columns form a native mouse-leave seam that is NOT
+/// covered by the rectangle-only hover transition probe above.
+///
+/// This is a *hover recheck* region, never an extra hit-test surface: no
+/// pixels are painted and no drag targets are widened.
+fn floating_transparent_panel_grip_seam_contains(
+    body: RECT, grip: RECT, edge: FloatingEdge, x: i32, y: i32,
+) -> bool {
+    let inset = sc(1).max(1);
+    match edge {
+        FloatingEdge::Left => {
+            y >= body.top.max(grip.top) && y < body.bottom.min(grip.bottom)
+                && x >= body.right - inset && x < grip.left + inset
+        }
+        FloatingEdge::Right => {
+            y >= body.top.max(grip.top) && y < body.bottom.min(grip.bottom)
+                && x >= grip.right - inset && x < body.left + inset
+        }
+        FloatingEdge::Top => {
+            x >= body.left.max(grip.left) && x < body.right.min(grip.right)
+                && y >= body.bottom - inset && y < grip.top + inset
+        }
+        FloatingEdge::Bottom => {
+            x >= body.left.max(grip.left) && x < body.right.min(grip.right)
+                && y >= grip.bottom - inset && y < body.top + inset
+        }
+    }
+}
+
 fn floating_pointer_in_expanded_docked_transition(hwnd: HWND) -> bool {
     let (body, grip, edge) = {
         let state = lock_state();
@@ -5627,9 +5658,10 @@ fn floating_pointer_in_expanded_docked_transition(hwnd: HWND) -> bool {
     let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
     let mut pointer = POINT::default();
     if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
-    floating_transition_corridor_contains(
-        body, grip, edge, pointer.x - rect.left, pointer.y - rect.top,
-    )
+    let x = pointer.x - rect.left;
+    let y = pointer.y - rect.top;
+    floating_transition_corridor_contains(body, grip, edge, x, y)
+        || floating_transparent_panel_grip_seam_contains(body, grip, edge, x, y)
 }
 
 fn floating_pointer_over_actual_grip(hwnd: HWND) -> bool {
@@ -7944,9 +7976,11 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
             if floating_pointer_in_expanded_docked_transition(hwnd) {
-                // A transparent gutter between body and tab is a real
-                // WM_MOUSELEAVE, not a request to fade the visible tab.
-                // One bounded recheck lets a normal body-to-tab motion finish.
+                // Either a free transparent gutter OR the two alpha-zero
+                // edge pixels within the adjacent body/tab rectangles can
+                // deliver WM_MOUSELEAVE. Both need the same timed recheck.
+                // Re-arming TrackMouseEvent here (the old fallback below)
+                // cannot recover events lost to alpha-zero hit testing.
                 floating_arm_hover_recheck(hwnd);
                 return LRESULT(0);
             }
@@ -12450,6 +12484,93 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn v24_27_real_alpha_zero_seam_receives_hover_recheck_on_every_edge() {
+        // V24.26 missed this case: the nominal rectangles are adjacent,
+        // and the *two transparent contour pixels are INSIDE those RECTs*.
+        // The rectangle-only gap test therefore returns false, while Windows
+        // may issue WM_MOUSELEAVE before the cursor reaches the visible tab.
+        let inset = sc(1).max(1);
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [
+                FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom,
+            ] {
+                let (_, _, body) = floating_canvas_geometry(bw, bh, Some(edge));
+                let (canvas_w, canvas_h, _) =
+                    floating_canvas_geometry(bw, bh, Some(edge));
+                let grip = floating_grip_rect(
+                    canvas_w, canvas_h, Some(edge), sc(FLOAT_EDGE_PEEK),
+                );
+                let (body_x, body_y, grip_x, grip_y) = match edge {
+                    FloatingEdge::Left => (
+                        body.right - 1, (grip.top + grip.bottom) / 2,
+                        grip.left, (grip.top + grip.bottom) / 2,
+                    ),
+                    FloatingEdge::Right => (
+                        body.left, (grip.top + grip.bottom) / 2,
+                        grip.right - 1, (grip.top + grip.bottom) / 2,
+                    ),
+                    FloatingEdge::Top => (
+                        (grip.left + grip.right) / 2, body.bottom - 1,
+                        (grip.left + grip.right) / 2, grip.top,
+                    ),
+                    FloatingEdge::Bottom => (
+                        (grip.left + grip.right) / 2, body.top,
+                        (grip.left + grip.right) / 2, grip.bottom - 1,
+                    ),
+                };
+                assert_eq!(match edge {
+                    FloatingEdge::Left => body.right,
+                    FloatingEdge::Right => body.left,
+                    FloatingEdge::Top => body.bottom,
+                    FloatingEdge::Bottom => body.top,
+                }, match edge {
+                    FloatingEdge::Left => grip.left,
+                    FloatingEdge::Right => grip.right,
+                    FloatingEdge::Top => grip.top,
+                    FloatingEdge::Bottom => grip.bottom,
+                }, "the geometric rectangles must touch, not leave a gap");
+                let body_w = body.right - body.left;
+                let body_h = body.bottom - body.top;
+                let grip_w = grip.right - grip.left;
+                let grip_h = grip.bottom - grip.top;
+                for (x, y, rect, w, h) in [
+                    (body_x, body_y, body, body_w, body_h),
+                    (grip_x, grip_y, grip, grip_w, grip_h),
+                ] {
+                    assert!(point_in_rect(rect, x, y),
+                        "native bounds label the pixel as inside the panel/tab");
+                    assert!(!panel_outer_shape_contains(
+                        w, h, x - rect.left, y - rect.top, 8,
+                    ), "actual shape paints alpha zero at this boundary pixel");
+                    assert!(!floating_transition_corridor_contains(
+                        body, grip, edge, x, y,
+                    ), "old V24.26 transition incorrectly ignored these pixels");
+                    assert!(floating_transparent_panel_grip_seam_contains(
+                        body, grip, edge, x, y,
+                    ), "actual transparent seam needs timed mouse hover recovery");
+                    assert_eq!(floating_drag_tab_hit_code(body, grip, x, y), 1,
+                        "the existing geometrical hit code remains unchanged");
+                }
+                // Neighboring visible pixels and other halo gutters must
+                // never be treated as a transition into the drag tab.
+                let (x, y) = match edge {
+                    FloatingEdge::Left => (body.right - inset - 1, body_y),
+                    FloatingEdge::Right => (body.left + inset, body_y),
+                    FloatingEdge::Top => (body_x, body.bottom - inset - 1),
+                    FloatingEdge::Bottom => (body_x, body.top + inset),
+                };
+                assert!(!floating_transparent_panel_grip_seam_contains(
+                    body, grip, edge, x, y,
+                ));
+                assert!(!floating_transparent_panel_grip_seam_contains(
+                    body, grip, edge, 0, 0,
+                ), "faraway transparent halo gutter must stay unaffected");
+            }
+        }
+    }
 
     #[test]
     fn v24_26_direct_body_to_grip_uses_visual_corridor_without_enlarging_drag_hit() {
