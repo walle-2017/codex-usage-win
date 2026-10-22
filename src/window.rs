@@ -3027,7 +3027,7 @@ fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
 
 /// Rounded-rectangle signed distance. Negative is inside the actual panel,
 /// positive is outside; returns zero at its edge.
-#[cfg(test)]
+#[allow(dead_code)]
 fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
     let inset = sc(1).max(1) as f32;
     let half_w = (width as f32 / 2.0 - inset).max(0.5);
@@ -3178,7 +3178,40 @@ fn draw_taskbar_hover_inner_glow(
     }
 }
 
-#[cfg(test)]
+/// Fallback GDI taskbar mode must match the embedded layered mode. The GDI
+/// panel is opaque and already painted; blend only inner-fill pixels into the
+/// memory DC, before dots, progress bars and text are drawn.
+fn draw_taskbar_hover_inner_glow_gdi(
+    hdc: HDC, width: i32, height: i32, style: &ThemeStyle, base: Color,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let base_pixel = premultiplied_pixel(Color::rgba(base.r, base.g, base.b, 255));
+    let mut pixels = vec![base_pixel; (width * height) as usize];
+    draw_taskbar_hover_inner_glow(
+        &mut pixels, width, height, style, drag_hover_outline_color(style),
+    );
+    unsafe {
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = pixels[(y * width + x) as usize];
+                if pixel == base_pixel {
+                    continue;
+                }
+                let color = Color::rgba(
+                    ((pixel >> 16) & 255) as u8,
+                    ((pixel >> 8) & 255) as u8,
+                    (pixel & 255) as u8,
+                    255,
+                );
+                let _ = SetPixelV(hdc, x, y, COLORREF(color.to_colorref()));
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
@@ -4258,11 +4291,9 @@ fn paint_content(
             FillRect(hdc, &client_rect, bg_brush);
             let _ = DeleteObject(bg_brush);
 
-            let border = if drag_handle_hovered {
-                drag_hover_outline_color(&style)
-            } else {
-                style.color(StyleColorTarget::PanelBorder).blend_over(*bg)
-            };
+            // Keep the original border color. Hover light must only occupy
+            // the actual fill *inside* that border, never recolor the outline.
+            let border = style.color(StyleColorTarget::PanelBorder).blend_over(*bg);
             draw_panel(
                 hdc,
                 width,
@@ -4271,6 +4302,13 @@ fn paint_content(
                 &panel_base,
                 style.panel_corner_radius,
             );
+            if drag_handle_hovered
+                && !lock_state().as_ref().is_some_and(|s| s.floating_mode)
+            {
+                draw_taskbar_hover_inner_glow_gdi(
+                    hdc, width, height, &style, panel_base,
+                );
+            }
         }
 
         let vertical_mode = lock_state()
