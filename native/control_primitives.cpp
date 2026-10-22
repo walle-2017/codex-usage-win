@@ -913,6 +913,26 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             line(8.0f, 18.0f, 16.0f, 18.0f);
             break;
 
+        case 26: // Desktop: landscape orientation (wide panel).
+            rounded_rect(2.0f, 6.0f, 22.0f, 18.0f, 2.8f);
+            line(5.0f, 10.0f, 19.0f, 10.0f);
+            break;
+
+        case 27: // Desktop: portrait orientation (tall panel).
+            rounded_rect(7.0f, 2.0f, 17.0f, 22.0f, 2.8f);
+            line(9.5f, 6.0f, 14.5f, 6.0f);
+            break;
+
+        case 28: // Auto-collapse enabled: switch with thumb to the right.
+            rounded_rect(2.0f, 6.5f, 22.0f, 17.5f, 5.5f);
+            ellipse(16.5f, 12.0f, 3.0f);
+            break;
+
+        case 29: // Auto-collapse disabled: switch with thumb to the left.
+            rounded_rect(2.0f, 6.5f, 22.0f, 17.5f, 5.5f);
+            ellipse(7.5f, 12.0f, 3.0f);
+            break;
+
         default:
             break;
         }
