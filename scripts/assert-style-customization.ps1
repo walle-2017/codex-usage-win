@@ -975,6 +975,20 @@ if ($windowProduction -notmatch 'fn floating_hover_probe_rect\(' -or
     throw 'V24.6 must watch the real draggable rectangle via a transparent hit-test probe and deferred hover cleanup.'
 }
 
+# V24.19: glow starts beneath the REAL rounded border (not the inner
+# content), with premultiplied source-over. An alpha-zero corner pixel must
+# never punch out the backing glow.
+if ($windowProduction -notmatch 'fn composite_premultiplied_pixel\(' -or
+    $windowProduction -notmatch 'fn panel_inner_shape_contains\(' -or
+    $windowProduction -notmatch 'glow\[index\] = glow\[index\]\.max\(drag_hover_glow_coverage\(0\.75\)\)' -or
+    $windowProduction -notmatch 'canvas\[index\] = composite_premultiplied_pixel\(' -or
+    $windowProduction -notmatch 'pixels\[index\] = composite_premultiplied_pixel\(' -or
+    $window -notmatch 'v24_19_transparent_round_corners_do_not_erase_underlying_halo' -or
+    $window -notmatch 'v24_19_border_underside_continuity_without_inner_tint' -or
+    $window -notmatch 'v24_19_premultiplied_foreground_source_over_preserves_color_rules') {
+    throw 'V24.19 must underpaint real rounded border, alpha-compose foreground and preserve content.'
+}
+
 # V24.7 retains the formerly clipped glow gutter on undocking.
 # V24.18 renders a perimeter halo BEHIND the real rounded body and tab,
 # sharing their exact exterior mask and never coloring transparent interiors.
