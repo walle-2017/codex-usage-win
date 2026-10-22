@@ -334,7 +334,7 @@ impl DesktopSubmenuAnimation {
         true
     }
     fn hit_enabled(&self) -> bool {
-        self.target > 0.5 && self.progress >= 0.90
+        self.target > 0.5 && self.progress >= 0.98
     }
 }
 
@@ -357,12 +357,12 @@ fn desktop_submenu_layout() -> DesktopSubmenuLayout {
         well: RECT { left: 636, top: 65, right: 930, bottom: 201 },
         foot: RECT { left: 414, top: 155, right: 654, bottom: 201 },
         title: RECT { left: 652, top: 73, right: 918, bottom: 96 },
-        direction_label: RECT { left: 652, top: 105, right: 750, bottom: 139 },
-        collapse_label: RECT { left: 652, top: 151, right: 752, bottom: 185 },
-        horizontal: RECT { left: 755, top: 105, right: 833, bottom: 139 },
-        vertical: RECT { left: 840, top: 105, right: 918, bottom: 139 },
-        enabled: RECT { left: 755, top: 151, right: 833, bottom: 185 },
-        disabled: RECT { left: 840, top: 151, right: 918, bottom: 185 },
+        direction_label: RECT { left: 652, top: 105, right: 770, bottom: 139 },
+        collapse_label: RECT { left: 652, top: 151, right: 770, bottom: 185 },
+        horizontal: RECT { left: 775, top: 105, right: 840, bottom: 139 },
+        vertical: RECT { left: 846, top: 105, right: 918, bottom: 139 },
+        enabled: RECT { left: 775, top: 151, right: 840, bottom: 185 },
+        disabled: RECT { left: 846, top: 151, right: 918, bottom: 185 },
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -943,7 +943,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             *state = Some(PanelState {
                 hwnd: SendHwnd::from_hwnd(hwnd),
                 parent: SendHwnd::from_hwnd(parent),
-                snapshot,
+                snapshot: snapshot.clone(),
                 section: Section::General,
                 editor: EditorSelection::Color(StyleColorTarget::PanelBackground),
                 dragging_slider: None,
@@ -6594,6 +6594,113 @@ unsafe fn paint_json_page(
     );
 }
 
+
+fn submenu_mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let c = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    Color::rgba(c(a.r,b.r),c(a.g,b.g),c(a.b,b.b),c(a.a,b.a))
+}
+fn submenu_content_alpha(progress: f32) -> f32 {
+    let p = ((progress - 0.68) / 0.32).clamp(0.0, 1.0);
+    p*p*(3.0-2.0*p)
+}
+fn submenu_reveal_right(progress: f32) -> i32 {
+    let l = desktop_submenu_layout();
+    l.foot.left + ((l.well.right - l.foot.left) as f32 * progress.clamp(0.0,1.0)).round() as i32
+}
+
+/// Continuous L-shape: two overlapping same-color fills and no border,
+/// connector or arrow. Shading exists only at exposed top/left edges,
+/// never where the foot and right-hand well join.
+unsafe fn paint_submenu_well(hdc: HDC, hwnd: HWND, progress: f32, card: Color, dark: bool) -> Color {
+    let target = if dark { Color::from_hex("#1A1E24FF") }
+                 else { Color::from_hex("#DCE4EDFF") };
+    if progress <= 0.0 { return target; }
+    let l = desktop_submenu_layout();
+    let inset = submenu_mix(card, target, progress);
+    let shade = submenu_mix(inset, if dark { Color::from_hex("#10141AFF") }
+        else { Color::from_hex("#A9B7C6FF") }, 0.48*progress);
+    let saved = SaveDC(hdc);
+    let _ = IntersectClipRect(hdc, scale(hwnd,l.foot.left),scale(hwnd,l.well.top),
+        scale(hwnd,submenu_reveal_right(progress)),scale(hwnd,l.foot.bottom));
+    fill_rounded_rect(hdc,scaled_rect(hwnd,l.well),inset,scale(hwnd,12));
+    fill_rounded_rect(hdc,scaled_rect(hwnd,l.foot),inset,scale(hwnd,12));
+    fill(hdc,rect(hwnd,640,164,651,193),inset);
+    fill(hdc,rect(hwnd,648,67,918,70),shade);
+    fill(hdc,rect(hwnd,638,79,641,150),shade);
+    fill(hdc,rect(hwnd,426,157,634,160),shade);
+    fill(hdc,rect(hwnd,416,168,419,189),shade);
+    let _ = RestoreDC(hdc,saved);
+    inset
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_choice(hdc:HDC,hwnd:HWND,bounds:RECT,icon:SettingsIcon,
+    label:&str,selected:bool,target:HitTarget,hovered:Option<HitTarget>,
+    pressed:Option<HitTarget>,alpha:f32,inset:Color,palette:ButtonPalette,primary:Color) {
+    if alpha<=0.005 {return;}
+    let mut r=scaled_rect(hwnd,bounds);
+    let shift=scale(hwnd,((1.0-alpha)*5.0).round() as i32);
+    r.left+=shift; r.right+=shift;
+    let desired=button_background(target,selected,hovered,pressed,palette);
+    let bg=submenu_mix(inset,desired,alpha);
+    let fg=submenu_mix(inset,if selected {Color::from_hex("#FFFFFFFF")}else{primary},alpha);
+    fill_rounded_rect(hdc,r,bg,scale(hwnd,7));
+    let outline=submenu_mix(inset,if selected{Color::from_hex("#76A7FFFF")}
+        else{subtle_control_border(desired)},alpha);
+    draw_rounded_outline_rect(hdc,r,outline,scale(hwnd,7),1);
+    let size=scale(hwnd,14);
+    let gap=scale(hwnd,3);
+    let group=size+gap+text_width_px(hwnd,label);
+    let left=r.left+((r.right-r.left-group)/2).max(scale(hwnd,3));
+    let top=r.top+(r.bottom-r.top-size)/2;
+    let ir=RECT{left,top,right:left+size,bottom:top+size};
+    draw_settings_icon(hdc,hwnd,icon,ir,fg,bg);
+    let _=SetTextColor(hdc,COLORREF(fg.to_colorref()));
+    draw_text(hdc,label,RECT{left:ir.right+gap,top:r.top,right:r.right-scale(hwnd,2),
+        bottom:r.bottom},DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+}
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
+    progress:f32,inset:Color,hovered:Option<HitTarget>,pressed:Option<HitTarget>,
+    palette:ButtonPalette,primary:Color,secondary:Color) {
+    let opacity=submenu_content_alpha(progress);
+    if opacity<=0.005 {return;}
+    let l=desktop_submenu_layout();
+    let saved=SaveDC(hdc);
+    let _=IntersectClipRect(hdc,scale(hwnd,l.well.left),scale(hwnd,l.well.top),
+        scale(hwnd,submenu_reveal_right(progress)),scale(hwnd,l.well.bottom));
+    let zh=snapshot.language==LanguageId::SimplifiedChinese;
+    let dx=scale(hwnd,((1.0-opacity)*5.0).round() as i32);
+    let txt=|mut r:RECT|{r.left+=dx;r.right+=dx;r};
+    let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,primary,opacity).to_colorref()));
+    draw_text(hdc,if zh{"桌面专属设置"}else{"Desktop settings"},
+        txt(scaled_rect(hwnd,l.title)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
+    draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
+        DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    draw_text(hdc,if zh{"贴边自动收缩"}else{"Auto-collapse"},
+        txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
+        let horizontal=direction==DesktopDirection::Horizontal;
+        paint_submenu_choice(hdc,hwnd,if horizontal{l.horizontal}else{l.vertical},
+            if horizontal{SettingsIcon::Panel}else{SettingsIcon::ThemeSystem},
+            match(zh,horizontal){(true,true)=>"横向",(true,false)=>"纵向",
+                (false,true)=>"Horz",(false,false)=>"Vert"},
+            snapshot.desktop_direction==direction,HitTarget::DesktopDirection(direction),
+            hovered,pressed,opacity,inset,palette,primary);
+    }
+    for enabled in [true,false] {
+        paint_submenu_choice(hdc,hwnd,if enabled{l.enabled}else{l.disabled},
+            if enabled{SettingsIcon::LayoutDefault}else{SettingsIcon::LayoutMinimal},
+            match(zh,enabled){(true,true)=>"开启",(true,false)=>"关闭",
+                (false,true)=>"On",(false,false)=>"Off"},
+            snapshot.desktop_auto_collapse==enabled,HitTarget::DesktopAutoCollapse(enabled),
+            hovered,pressed,opacity,inset,palette,primary);
+    }
+    let _=RestoreDC(hdc,saved);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_appearance_page(
     hdc: HDC,
@@ -6634,6 +6741,9 @@ unsafe fn paint_appearance_page(
         settings_card_rect(hwnd, 58, 206),
         card,
         scale(hwnd, SETTINGS_CARD_RADIUS),
+    );
+    let submenu_inset = paint_submenu_well(
+        hdc, hwnd, desktop_submenu_progress, card, snapshot.is_dark,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
@@ -6728,49 +6838,6 @@ unsafe fn paint_appearance_page(
     }
 
 
-    if snapshot.display_position == DisplayPosition::Desktop {
-        // Desktop-only switch shares the otherwise empty right side of the
-        // layout row. It does not affect the fixed settings card size, editor
-        // rows, or preset gallery positions.
-        let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-        draw_text(
-            hdc,
-            if zh { "贴边自动收缩" } else { "Edge auto-hide" },
-            rect(hwnd, 562, 116, 748, 150),
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-        for enabled in [true, false] {
-            let selected = snapshot.desktop_auto_collapse == enabled;
-            let target = HitTarget::DesktopAutoCollapse(enabled);
-            let background = button_background(
-                target, selected, hovered, pressed,
-                ButtonPalette {
-                    normal: card_hover, hover: card_pressed, pressed: card_pressed,
-                    selected: accent, selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            );
-            draw_segment_with_icon(
-                hdc, hwnd, desktop_auto_collapse_rect(hwnd, enabled), selected,
-                background,
-                if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-                if enabled { SettingsIcon::LayoutDefault } else { SettingsIcon::LayoutMinimal },
-                match (zh, enabled) {
-                    (true, true) => "开启",
-                    (true, false) => "关闭",
-                    (false, true) => "On",
-                    (false, false) => "Off",
-                },
-            );
-        }
-    }
-
-    draw_text(
-        hdc,
-        if zh { "方向" } else { "Direction" },
-        rect(hwnd, 562, 162, 638, 196),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
     for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
         let selected = snapshot.display_position == position;
         let target = HitTarget::Position(position);
@@ -6800,39 +6867,13 @@ unsafe fn paint_appearance_page(
         );
     }
 
-    for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
-        let enabled = snapshot.display_position == DisplayPosition::Desktop;
-        let selected = enabled && snapshot.desktop_direction == direction;
-        let target = HitTarget::DesktopDirection(direction);
-        let background = if enabled {
-            button_background(
-                target, selected, hovered, pressed,
-                ButtonPalette {
-                    normal: card_hover, hover: card_pressed, pressed: card_pressed,
-                    selected: accent, selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            )
-        } else {
-            card
-        };
-        draw_segment_with_icon(
-            hdc, hwnd, desktop_direction_rect(hwnd, direction), selected,
-            background,
-            if selected { Color::from_hex("#FFFFFFFF") }
-            else if enabled { primary } else { secondary },
-            if direction == DesktopDirection::Horizontal {
-                SettingsIcon::Panel
-            } else {
-                SettingsIcon::ThemeSystem
-            },
-            match (zh, direction) {
-                (true, DesktopDirection::Horizontal) => "横向",
-                (true, DesktopDirection::Vertical) => "纵向",
-                (false, DesktopDirection::Horizontal) => "Horizontal",
-                (false, DesktopDirection::Vertical) => "Vertical",
-            },
-        );
+    if desktop_submenu_progress > 0.0 {
+        paint_submenu_content(hdc,hwnd,snapshot,desktop_submenu_progress,
+            submenu_inset,hovered,pressed,
+            ButtonPalette{
+                normal:card_hover,hover:card_pressed,pressed:card_pressed,
+                selected:accent,selected_hover:accent_hover,selected_pressed:accent_pressed,
+            },primary,secondary);
     }
 
     if section == Section::Preset {
