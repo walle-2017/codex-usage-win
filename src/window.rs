@@ -3296,10 +3296,6 @@ fn panel_inner_shape_contains(
 
 fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
     let outer_inset = sc(1).max(1);
-    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    let outer_radius = sc(i32::from(style.panel_corner_radius))
-        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
-    let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
     let border = style.color(StyleColorTarget::PanelBorder);
     let fill = style.color(StyleColorTarget::PanelBackground);
     for y in outer_inset..(height - outer_inset).max(outer_inset) {
@@ -3320,10 +3316,6 @@ fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &Theme
 }
 
 fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -> Option<Color> {
-    let outer_inset = sc(1).max(1);
-    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    let outer_radius = sc(i32::from(style.panel_corner_radius))
-        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
     if !panel_outer_shape_contains(width, height, x, y, style.panel_corner_radius) {
         return None;
     }
@@ -10660,19 +10652,31 @@ mod tests {
                                 tab.right - tab.left, tab.bottom - tab.top,
                                 x - tab.left, y - tab.top, radius,
                             );
-                            if body_mask || tab_mask {
+                            let in_content = panel_inner_shape_contains(
+                                body.right - body.left, body.bottom - body.top,
+                                x - body.left, y - body.top, radius,
+                            ) || panel_inner_shape_contains(
+                                tab.right - tab.left, tab.bottom - tab.top,
+                                x - tab.left, y - tab.top, radius,
+                            );
+                            if in_content {
                                 assert_eq!(composite[index], 0,
-                                    "halo must have ZERO coverage inside any painted surface");
-                            } else if composite[index] >> 24 > 0 {
+                                    "halo must never underpaint the inner fill area");
+                            } else if !(body_mask || tab_mask)
+                                && composite[index] >> 24 > 0 {
                                 halo_found = true;
                             }
-                            // Production copies/draws the foreground after
-                            // rendering external light. Validate all occupied
-                            // pixels remain identical to the unlit version.
-                            if foreground[index] >> 24 > 0 {
-                                composite[index] = foreground[index];
-                                assert_eq!(composite[index], foreground[index]);
+                            // Production uses source-over, not direct copy.
+                            // Inner fill has no light behind and must remain
+                            // bit-for-bit identical across translucent themes.
+                            let blended = composite_premultiplied_pixel(
+                                composite[index], foreground[index],
+                            );
+                            if in_content {
+                                assert_eq!(blended, foreground[index],
+                                    "inner text and panel colors must remain untinted");
                             }
+                            composite[index] = blended;
                         }
                     }
                     assert!(halo_found, "outer halo must remain visible at every dock edge");
@@ -10720,8 +10724,16 @@ mod tests {
                             let opacity = pixels[(py*w + px) as usize] >> 24;
                             assert!(opacity > 0,
                                 "glow must touch every rounded exterior contour pixel, no gap");
-                            assert_eq!(pixels[(y*w + x) as usize], 0,
-                                "no glow may overlap the real panel/tab silhouette");
+                            if [body, tab].iter().any(|rect| panel_inner_shape_contains(
+                                rect.right - rect.left, rect.bottom - rect.top,
+                                x - rect.left, y - rect.top, radius,
+                            )) {
+                                assert_eq!(pixels[(y*w + x) as usize], 0,
+                                    "halo cannot reach the painted content region");
+                            } else {
+                                assert!(pixels[(y*w + x) as usize] >> 24 > 0,
+                                    "the narrow outer border needs a subpixel underpaint");
+                            }
                             boundary_pairs += 1;
                         }
                     }
@@ -10747,7 +10759,7 @@ mod tests {
             );
             for y in 0..h {
                 for x in 0..w {
-                    if [body, tab].iter().any(|r| panel_outer_shape_contains(
+                    if [body, tab].iter().any(|r| panel_inner_shape_contains(
                         r.right-r.left, r.bottom-r.top,
                         x-r.left, y-r.top, style.panel_corner_radius,
                     )) {
