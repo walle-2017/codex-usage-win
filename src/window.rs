@@ -2008,7 +2008,7 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             if s.floating_mode {
-                if s.floating_edge.is_none() && s.floating_grip_alpha == 0 {
+                if floating_grip_uses_hover_fade(s) && s.floating_grip_alpha == 0 {
                     return false;
                 }
                 return point_in_rect(
@@ -2863,7 +2863,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     s.floating_edge,
                     s.floating_collapsed && s.floating_reveal == 0,
                     s.drag_handle_hovered,
-                    if s.floating_edge.is_some() || s.dragging { 100 }
+                    if s.dragging || !floating_grip_uses_hover_fade(s) { 100 }
                     else { s.floating_grip_alpha },
                     s.floating_reserved_dock,
                     s.floating_reveal,
@@ -5390,11 +5390,25 @@ fn move_floating_widget(hwnd: HWND) {
     }
 }
 
+// A docked panel whose auto-collapse is disabled stays fully expanded, but
+// its separate drag tab behaves visually just like a free desktop tab.
+fn floating_grip_uses_hover_fade(s: &AppState) -> bool {
+    s.floating_edge.is_none() || !floating_auto_collapse_allowed(
+        s.display_position, s.desktop_auto_collapse,
+    )
+}
+
+fn floating_grip_should_show(
+    edge: Option<FloatingEdge>, auto_collapse: bool, hovered: bool, dragging: bool,
+) -> bool {
+    dragging || (edge.is_some() && auto_collapse) || hovered
+}
+
 fn set_floating_grip_hover(hovered: bool) {
     let hwnd = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
-        if !s.floating_mode || s.dragging || s.floating_edge.is_some()
+        if !s.floating_mode || s.dragging || !floating_grip_uses_hover_fade(s)
             || s.floating_grip_hover == hovered { return; }
         s.floating_grip_hover = hovered;
         s.hwnd.to_hwnd()
@@ -5423,6 +5437,9 @@ fn sync_desktop_auto_collapse() {
         let collapse = floating_auto_collapse_allowed(
             s.display_position, s.desktop_auto_collapse,
         );
+        if !collapse {
+            s.floating_grip_hover = false;
+        }
         s.floating_first_collapse_guard = false;
         (s.hwnd.to_hwnd(), collapse)
     };
@@ -5480,9 +5497,11 @@ fn step_floating_animation(hwnd: HWND) {
             s.floating_slide_from, destination,
             now.duration_since(s.floating_slide_started), slide_duration,
         );
-        let grip_target = if s.floating_edge.is_some() || s.dragging || s.floating_grip_hover {
-            100
-        } else { 0 };
+        let grip_target = if floating_grip_should_show(
+            s.floating_edge,
+            floating_auto_collapse_allowed(s.display_position, s.desktop_auto_collapse),
+            s.floating_grip_hover, s.dragging,
+        ) { 100 } else { 0 };
         if s.floating_fade_target != grip_target {
             s.floating_fade_from = s.floating_grip_alpha;
             s.floating_fade_target = grip_target;
@@ -5773,10 +5792,16 @@ fn finish_floating_drag(hwnd: HWND) {
     let (x, y) = floating_edge_position(
         bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
     );
-    // If the drop is free-floating, preserve its original panel screen
-    // position even though the now-detached tab moves to the top edge.
-    let hovered = edge.is_none() && floating_drag_grip_contains_screen_point(
+    // On expanded edge-docked desktops the body stays visible, and the
+    // six-dot tab must follow the same hover fade as a free desktop tab.
+    let grip_hovered = floating_drag_grip_contains_screen_point(
         x, y, new_w, new_h, edge, pointer,
+    );
+    let body_hovered = point_in_rect(
+        RECT {
+            left: x + new_body.left, top: y + new_body.top,
+            right: x + new_body.right, bottom: y + new_body.bottom,
+        }, pointer.x, pointer.y,
     );
     {
         let mut state = lock_state();
@@ -5784,7 +5809,6 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_x = x;
             s.floating_y = y;
             s.dragging = false;
-            s.drag_handle_hovered = hovered;
             s.floating_edge = edge;
             s.floating_reserved_dock = reserved_dock;
             s.floating_drag_glow_detached = false;
@@ -5799,10 +5823,17 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_slide_from = 100;
             s.floating_slide_target = 100;
             s.floating_slide_started = Instant::now();
-            s.floating_grip_hover = hovered;
-            s.floating_grip_alpha = if edge.is_some() || hovered { 100 } else { 0 };
+            let fade_grip = floating_grip_uses_hover_fade(s);
+            s.drag_handle_hovered = grip_hovered && fade_grip;
+            s.floating_grip_hover = fade_grip && (grip_hovered || body_hovered);
+            s.floating_grip_alpha = if floating_grip_should_show(
+                edge, floating_auto_collapse_allowed(
+                    s.display_position, s.desktop_auto_collapse,
+                ), s.floating_grip_hover, false,
+            ) { 100 } else { 0 };
             s.floating_fade_from = s.floating_grip_alpha;
             s.floating_fade_target = s.floating_grip_alpha;
+            s.floating_fade_started = Instant::now();
         }
     }
     // Publish the resized/reoriented tab and the final HWND coordinates in
@@ -5843,7 +5874,10 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.floating_reveal = 100;
             s.floating_grip_hover = false;
             s.floating_first_collapse_guard = false;
-            s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
+            s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
+            s.floating_fade_from = s.floating_grip_alpha;
+            s.floating_fade_target = s.floating_grip_alpha;
+            s.floating_fade_started = Instant::now();
             s.hwnd.to_hwnd()
         };
         // Diagnostics for the precise native phase if a driver or Explorer
@@ -5946,7 +5980,10 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_reveal = 100;
         s.floating_grip_hover = false;
         s.floating_first_collapse_guard = false;
-        s.floating_grip_alpha = if s.floating_edge.is_some() { 100 } else { 0 };
+        s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
+        s.floating_fade_from = s.floating_grip_alpha;
+        s.floating_fade_target = s.floating_grip_alpha;
+        s.floating_fade_started = Instant::now();
         s.floating_x = x;
         s.floating_y = y;
         s.vertical_taskbar_mode = vertical;
@@ -12258,6 +12295,24 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn docked_expanded_grip_fades_like_free_desktop_without_changing_auto_hide() {
+        assert!(floating_grip_should_show(None, false, true, false));
+        assert!(!floating_grip_should_show(None, false, false, false));
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            assert!(!floating_grip_should_show(Some(edge), false, false, false),
+                "expanded docked desktop must hide its grip off-hover");
+            assert!(floating_grip_should_show(Some(edge), false, true, false));
+            assert!(floating_grip_should_show(Some(edge), false, false, true),
+                "grip must remain visible for the duration of a drag");
+            assert!(floating_grip_should_show(Some(edge), true, false, false),
+                "legacy auto-collapsed edge grip must stay visible");
+        }
+    }
 
     #[test]
     fn desktop_auto_collapse_defaults_enabled_round_trips_and_respects_mode() {
