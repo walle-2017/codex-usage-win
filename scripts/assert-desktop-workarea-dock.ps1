@@ -76,6 +76,11 @@ if ($window -notmatch 'fn draw_drag_hover_outer_glow\(' -or
     $window -notmatch 'v24_18_outer_glow_contacts_actual_rounded_contour_without_any_gap') {
     throw 'V24.18 must render a true exterior halo first, using the same rounded mask as body and tab.'
 }
+if ($window -notmatch '(?s)fn render_floating_handle_bitmap_at\(.*?if opacity > 0 && pixels\[index\] >> 24 == 0 \{.*?pixels\[index\] = 0x01000000' -or
+    $window -notmatch 'desktop_transparent_drag_tab_whole_rounded_surface_remains_hit_testable' -or
+    $window -notmatch 'desktop_transparent_drag_tab_probe_respects_fade_out_and_rounded_corners') {
+    throw 'Fully transparent drag-tab interiors must retain alpha-1 hit pixels inside their real rounded shape only.'
+}
 if ($window -notmatch 'desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge' -or
     $window -notmatch 'desktop_taskbar_and_physical_edges_use_identical_slide_offsets' -or
     $window -notmatch 'desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides' -or
