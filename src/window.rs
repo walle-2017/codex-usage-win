@@ -2003,12 +2003,27 @@ fn vertical_drag_handle_hit(x: i32, y: i32, width: i32, height: i32) -> bool {
     x >= 0 && x < width && y >= 0 && y < sc(VERTICAL_DRAG_HANDLE_H).min(height)
 }
 
+/// A hit test that Windows has actually delivered for the expanded,
+/// docked grip must not be discarded only because its fade-in animation has
+/// not advanced beyond alpha zero yet. Free-floating tabs retain their
+/// original alpha-zero behavior, and no invisible pixels are added here.
+fn floating_grip_hit_allowed(
+    edge: Option<FloatingEdge>, auto_collapse: bool, collapsed: bool, alpha: u8,
+) -> bool {
+    alpha > 0 || (edge.is_some() && !auto_collapse && !collapsed)
+}
+
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
     {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             if s.floating_mode {
-                if floating_grip_uses_hover_fade(s) && s.floating_grip_alpha == 0 {
+                if floating_grip_uses_hover_fade(s) && !floating_grip_hit_allowed(
+                    s.floating_edge,
+                    floating_auto_collapse_allowed(s.display_position, s.desktop_auto_collapse),
+                    s.floating_collapsed,
+                    s.floating_grip_alpha,
+                ) {
                     return false;
                 }
                 return point_in_rect(
@@ -5579,6 +5594,58 @@ fn floating_pointer_over_expanded_docked_panel(hwnd: HWND) -> bool {
     ) == 1
 }
 
+/// The fully expanded panel and edge tab may be separated by an alpha-zero
+/// gutter. That gutter is NOT a click target, but its traversal must not hide
+/// the tab before the pointer reaches the actual draggable pixels.
+fn floating_transition_corridor_contains(
+    body: RECT, grip: RECT, edge: FloatingEdge, x: i32, y: i32,
+) -> bool {
+    !point_in_rect(body, x, y)
+        && !point_in_rect(grip, x, y)
+        && point_in_rect(floating_hover_probe_rect(body, grip, Some(edge)), x, y)
+}
+
+fn floating_pointer_in_expanded_docked_transition(hwnd: HWND) -> bool {
+    let (body, grip, edge) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return false };
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd
+            || s.floating_collapsed || !floating_grip_uses_hover_fade(s)
+        {
+            return false;
+        }
+        let Some(edge) = s.floating_edge else { return false };
+        let (w, h, body) = floating_canvas_geometry_for_state(s);
+        let body = if s.floating_reserved_dock {
+            floating_slid_canvas_rect(
+                body, w, h, edge,
+                if s.dragging { s.floating_reserved_drag_reveal } else { s.floating_reveal },
+            )
+        } else { body };
+        (body, floating_state_grip_rect(s), edge)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    floating_transition_corridor_contains(
+        body, grip, edge, pointer.x - rect.left, pointer.y - rect.top,
+    )
+}
+
+fn floating_pointer_over_actual_grip(hwnd: HWND) -> bool {
+    let grip = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == hwnd
+        ) else { return false };
+        floating_state_grip_rect(s)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    point_in_rect(grip, pointer.x - rect.left, pointer.y - rect.top)
+}
+
 /// False while the pointer still overlaps the collapsed exposed edge grip.
 /// The cursor's hover *retention* area must not change with animation.
 /// In particular a transparent pixel at the physical monitor edge can stop
@@ -7323,6 +7390,14 @@ unsafe extern "system" fn wnd_proc(
                         ))
                     })
                 };
+                if hovered == Some(false) && docked_hover_fade
+                    && floating_pointer_in_expanded_docked_transition(hwnd)
+                {
+                    // HTTRANSPARENT gap: defer exit just as the original edge
+                    // popup does, but keep the panel expanded throughout.
+                    floating_arm_hover_recheck(hwnd);
+                    return LRESULT(0);
+                }
                 if hovered == Some(false) {
                     if let Some(s) = lock_state().as_mut() {
                         if s.floating_mode && s.hwnd.to_hwnd() == hwnd && !s.dragging {
@@ -7385,14 +7460,39 @@ unsafe extern "system" fn wnd_proc(
                     let active = lock_state().as_ref().and_then(|s|
                         (s.floating_mode && s.floating_edge.is_some()
                             && !s.floating_collapsed && !s.dragging)
-                            .then(|| s.hwnd.to_hwnd())
+                            .then(|| (s.hwnd.to_hwnd(), floating_grip_uses_hover_fade(s)))
                     );
-                    if let Some(active) = active {
-                        if !floating_pointer_in_docked_hover_zone(active) {
+                    if let Some((active, tab_fades)) = active {
+                        if tab_fades {
+                            // V24.26: only the transient body-to-tab gutter
+                            // receives this grace period. On expiry, use the
+                            // actual cursor position, not a stale leave event.
                             floating_cancel_hover_recheck(active);
-                            // The mouse really left the stable docked envelope:
-                            // this timer has already provided the 140ms
-                            // debounce; do not start an additional delay.
+                            if floating_pointer_over_expanded_docked_panel(active) {
+                                let over_grip = floating_pointer_over_actual_grip(active);
+                                let changed = {
+                                    let mut state = lock_state();
+                                    if let Some(s) = state.as_mut() {
+                                        let changed = s.drag_handle_hovered != over_grip;
+                                        s.drag_handle_hovered = over_grip;
+                                        changed
+                                    } else { false }
+                                };
+                                set_floating_grip_hover(true);
+                                if changed { render_layered(); }
+                            } else {
+                                if let Some(s) = lock_state().as_mut() {
+                                    s.minimal_hover_target = None;
+                                    s.drag_handle_hovered = false;
+                                }
+                                hide_minimal_usage_tooltip();
+                                set_floating_grip_hover(false);
+                                render_layered();
+                            }
+                        } else if !floating_pointer_in_docked_hover_zone(active) {
+                            floating_cancel_hover_recheck(active);
+                            // Preserve the original automatic-collapse
+                            // debounce and animation unchanged.
                             if let Some(s) = lock_state().as_mut() {
                                 s.minimal_hover_target = None;
                                 s.drag_handle_hovered = false;
@@ -7840,6 +7940,13 @@ unsafe extern "system" fn wnd_proc(
                 s.floating_mode && s.floating_edge.is_some() && !s.floating_collapsed
                     && !floating_grip_uses_hover_fade(s)
             ) {
+                floating_arm_hover_recheck(hwnd);
+                return LRESULT(0);
+            }
+            if floating_pointer_in_expanded_docked_transition(hwnd) {
+                // A transparent gutter between body and tab is a real
+                // WM_MOUSELEAVE, not a request to fade the visible tab.
+                // One bounded recheck lets a normal body-to-tab motion finish.
                 floating_arm_hover_recheck(hwnd);
                 return LRESULT(0);
             }
@@ -12343,6 +12450,50 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn v24_26_direct_body_to_grip_uses_visual_corridor_without_enlarging_drag_hit() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            for (body_width, body_height) in [(240, 42), (48, 168)] {
+                let (w, h, body) = floating_canvas_geometry(
+                    body_width, body_height, Some(edge),
+                );
+                let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+                let transition = floating_hover_probe_rect(body, grip, Some(edge));
+                let mut gap_count = 0;
+                for y in transition.top.max(0)..transition.bottom.min(h) {
+                    for x in transition.left.max(0)..transition.right.min(w) {
+                        if floating_transition_corridor_contains(body, grip, edge, x, y) {
+                            gap_count += 1;
+                            assert_eq!(floating_drag_tab_hit_code(body, grip, x, y), -1,
+                                "gutter is only a hover transition, never a draggable region");
+                        }
+                    }
+                }
+                if matches!(edge, FloatingEdge::Right | FloatingEdge::Bottom) {
+                    assert!(gap_count > 0,
+                        "the offset between body and tab must be protected on this edge");
+                }
+                let center_x = (grip.left + grip.right) / 2;
+                let center_y = (grip.top + grip.bottom) / 2;
+                assert!(!floating_transition_corridor_contains(
+                    body, grip, edge, center_x, center_y,
+                ), "real tab is never mistaken for transition gutter");
+                assert!(floating_grip_hit_allowed(Some(edge), false, false, 0),
+                    "an expanded docked grip may trigger glow before fade-in progresses");
+                assert!(!floating_grip_hit_allowed(Some(edge), true, false, 0),
+                    "normal auto-collapse must keep its original behavior");
+                assert!(!floating_grip_hit_allowed(None, false, false, 0),
+                    "a free floating hidden tab must not become a new hit target");
+                assert!(!floating_grip_hit_allowed(Some(edge), false, true, 0),
+                    "a collapsed tab must not use expanded-panel recovery logic");
+                assert!(floating_grip_hit_allowed(Some(edge), false, false, 1));
+            }
+        }
+    }
 
     #[test]
     fn docked_expanded_grip_fades_like_free_desktop_without_changing_auto_hide() {
