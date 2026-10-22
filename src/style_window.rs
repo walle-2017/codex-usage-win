@@ -8885,6 +8885,72 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn v24_28_desktop_submenu_fits_existing_card_and_includes_desktop_button() {
+        let l = desktop_submenu_layout();
+        let card = RECT { left: 200, top: 58, right: 940, bottom: 206 };
+        for r in [l.well,l.foot,l.title,l.direction_label,l.collapse_label,
+            l.horizontal,l.vertical,l.enabled,l.disabled] {
+            assert!(r.left>=card.left && r.right<=card.right);
+            assert!(r.top>=card.top && r.bottom<=card.bottom);
+            assert!(r.right>r.left && r.bottom>r.top);
+        }
+        // The bottom foot surrounds the selected Desktop button, but not Taskbar.
+        let desktop = RECT { left: 422, top: 162, right: 522, bottom: 196 };
+        let taskbar = RECT { left: 314, top: 162, right: 414, bottom: 196 };
+        assert!(l.foot.left < desktop.left && l.foot.right > desktop.right);
+        assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
+        assert!(l.foot.left >= taskbar.right);
+        assert!(l.well.left > 630, "do not overlap the Light theme button");
+        assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
+            "the two depressed regions must overlap to hide their seam");
+        assert_eq!(desktop_submenu_reveal_right(0.0), l.foot.left);
+        assert_eq!(desktop_submenu_reveal_right(1.0), l.well.right);
+        assert_eq!(PRESET_CARD_TOP,266,"preset gallery must not move");
+        for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
+            assert!(r.left>=l.well.left && r.right<l.well.right);
+        }
+        assert!(l.horizontal.right<l.vertical.left);
+        assert!(l.enabled.right<l.disabled.left);
+        assert!(l.direction_label.right<l.horizontal.left);
+        assert!(l.collapse_label.right<l.enabled.left);
+    }
+
+    #[test]
+    fn v24_28_desktop_submenu_animation_can_reverse_without_jumps() {
+        let start=Instant::now();
+        let mut animation=DesktopSubmenuAnimation::initial(false);
+        assert_eq!(animation.progress,0.0);
+        assert!(!animation.hit_enabled());
+        assert!(animation.retarget(true,start));
+        animation.advance(start+Duration::from_millis(65));
+        let partial=animation.progress;
+        assert!(partial>0.0 && partial<1.0);
+        assert!(!animation.hit_enabled());
+        assert!(animation.retarget(false,start+Duration::from_millis(65)));
+        assert!((animation.progress-partial).abs()<0.0001,
+            "reversal must begin at the actual current interpolation");
+        animation.advance(start+Duration::from_millis(300));
+        assert_eq!(animation.progress,0.0);
+        assert!(!animation.active());
+        assert!(!animation.hit_enabled());
+        let now=start+Duration::from_millis(300);
+        assert!(animation.retarget(true,now));
+        animation.advance(now+Duration::from_millis(600));
+        assert_eq!(animation.progress,1.0);
+        assert!(animation.hit_enabled());
+        assert!(!animation.retarget(true,now+Duration::from_millis(601)),
+            "snapshot refresh must not replay an already completed animation");
+        assert!(animation.retarget(false,now+Duration::from_millis(602)));
+        assert!(!animation.hit_enabled(),
+            "close must disable secondary hit targets immediately");
+        animation.advance(now+Duration::from_millis(1200));
+        assert_eq!(animation.progress,0.0);
+        assert_eq!(submenu_content_alpha(0.0),0.0);
+        assert_eq!(submenu_content_alpha(1.0),1.0);
+        assert!(submenu_content_alpha(0.80)>0.0);
+    }
+
+    #[test]
     fn preview_tooltip_templates_match_runtime_content_in_all_layouts() {
         for (minimal, expected) in [
             (false, "YYYY-MM-DD HH:mm"),
