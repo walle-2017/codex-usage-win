@@ -8903,8 +8903,8 @@ mod ui_smoke_tests {
         assert!(l.well.left > 630, "do not overlap the Light theme button");
         assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
             "the two depressed regions must overlap to hide their seam");
-        assert_eq!(desktop_submenu_reveal_right(0.0), l.foot.left);
-        assert_eq!(desktop_submenu_reveal_right(1.0), l.well.right);
+        assert_eq!(submenu_reveal_right(0.0), l.foot.left);
+        assert_eq!(submenu_reveal_right(1.0), l.well.right);
         assert_eq!(PRESET_CARD_TOP,266,"preset gallery must not move");
         for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
             assert!(r.left>=l.well.left && r.right<l.well.right);
