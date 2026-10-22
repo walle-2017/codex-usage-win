@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use std::{fs, path::PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -81,6 +82,9 @@ const EM_SETSCROLLPOS_MSG: u32 = WM_USER + 222;
 const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
+const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
+const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
+const DESKTOP_SUBMENU_DURATION_MS: u64 = 220;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
@@ -283,6 +287,88 @@ impl SendHwnd {
     }
 }
 
+/// Visual-only animation. Persisted desktop settings never depend on this
+/// state. Retargeting first samples the in-flight interpolation so rapid
+/// Desktop/Taskbar reversals cannot jump or spawn overlapping animations.
+#[derive(Clone, Copy, Debug)]
+struct DesktopSubmenuAnimation {
+    progress: f32,
+    from: f32,
+    target: f32,
+    started: Instant,
+    duration_ms: u64,
+}
+impl DesktopSubmenuAnimation {
+    fn initial(desktop: bool) -> Self {
+        let progress = if desktop { 1.0 } else { 0.0 };
+        Self {
+            progress, from: progress, target: progress,
+            started: Instant::now(), duration_ms: DESKTOP_SUBMENU_DURATION_MS,
+        }
+    }
+    fn active(&self) -> bool {
+        (self.progress - self.target).abs() > 0.0001
+    }
+    fn advance(&mut self, now: Instant) -> bool {
+        if !self.active() { return false; }
+        let elapsed = now.saturating_duration_since(self.started).as_secs_f32() * 1000.0;
+        let t = (elapsed / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
+        // Smooth ease-out cubic for both directions; no bounce or overshoot.
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.progress = if t >= 1.0 {
+            self.target
+        } else {
+            self.from + (self.target - self.from) * eased
+        };
+        true
+    }
+    fn retarget(&mut self, desktop: bool, now: Instant) -> bool {
+        self.advance(now);
+        let target = if desktop { 1.0 } else { 0.0 };
+        if (self.target - target).abs() < 0.0001 { return false; }
+        self.from = self.progress;
+        self.target = target;
+        self.started = now;
+        self.duration_ms = (DESKTOP_SUBMENU_DURATION_MS as f32
+            * (self.target - self.from).abs()).round().max(72.0) as u64;
+        true
+    }
+    fn hit_enabled(&self) -> bool {
+        self.target > 0.5 && self.progress >= 0.90
+    }
+}
+
+/// Logical 96-DPI bounds. The lower foot contains the existing Desktop
+/// button; the right well fits strictly within the original 740px card.
+#[derive(Clone, Copy, Debug)]
+struct DesktopSubmenuLayout {
+    well: RECT,
+    foot: RECT,
+    title: RECT,
+    direction_label: RECT,
+    collapse_label: RECT,
+    horizontal: RECT,
+    vertical: RECT,
+    enabled: RECT,
+    disabled: RECT,
+}
+fn desktop_submenu_layout() -> DesktopSubmenuLayout {
+    DesktopSubmenuLayout {
+        well: RECT { left: 636, top: 65, right: 930, bottom: 201 },
+        foot: RECT { left: 414, top: 155, right: 654, bottom: 201 },
+        title: RECT { left: 652, top: 73, right: 918, bottom: 96 },
+        direction_label: RECT { left: 652, top: 105, right: 750, bottom: 139 },
+        collapse_label: RECT { left: 652, top: 151, right: 752, bottom: 185 },
+        horizontal: RECT { left: 755, top: 105, right: 833, bottom: 139 },
+        vertical: RECT { left: 840, top: 105, right: 918, bottom: 139 },
+        enabled: RECT { left: 755, top: 151, right: 833, bottom: 185 },
+        disabled: RECT { left: 840, top: 151, right: 918, bottom: 185 },
+    }
+}
+fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
+    rect(hwnd, bounds.left, bounds.top, bounds.right, bounds.bottom)
+}
+
 struct PanelState {
     hwnd: SendHwnd,
     parent: SendHwnd,
@@ -293,6 +379,7 @@ struct PanelState {
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     tracking_mouse_leave: bool,
+    desktop_submenu: DesktopSubmenuAnimation,
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
     corner_edit: SendHwnd,
@@ -863,6 +950,9 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 hovered: None,
                 pressed: None,
                 tracking_mouse_leave: false,
+                desktop_submenu: DesktopSubmenuAnimation::initial(
+                    snapshot.display_position == DisplayPosition::Desktop,
+                ),
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
                 corner_edit: SendHwnd::from_hwnd(corner_edit),
@@ -922,11 +1012,18 @@ pub fn set_preview_orientation(vertical: bool) {
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let (hwnd, section, json_dirty, json_apply_pending) = {
+    let (hwnd, section, json_dirty, json_apply_pending, submenu_animated) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
+        let changed_position = s.snapshot.display_position != snapshot.display_position;
+        let submenu_animated = if changed_position {
+            s.desktop_submenu.retarget(
+                snapshot.display_position == DisplayPosition::Desktop,
+                Instant::now(),
+            )
+        } else { false };
         s.snapshot = snapshot;
         let background = if s.snapshot.is_dark {
             Color::from_hex("#20242AFF")
@@ -946,8 +1043,12 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             s.section,
             s.json_dirty,
             s.pending_json_action == Some(JsonAction::Apply),
+            submenu_animated,
         )
     };
+    if submenu_animated {
+        unsafe { let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None); }
+    }
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
     layout_settings_children(hwnd);
@@ -1203,14 +1304,19 @@ fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
 }
 
 fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
-    let index = if direction == DesktopDirection::Vertical { 1 } else { 0 };
-    rect(hwnd, 652 + index * 92, 162, 738 + index * 92, 196)
+    let layout = desktop_submenu_layout();
+    scaled_rect(hwnd, if direction == DesktopDirection::Vertical {
+        layout.vertical
+    } else {
+        layout.horizontal
+    })
 }
 
-// Compact Desktop-only choice, placed in the unused right side of the Layout row.
+// The controls are stable throughout animation; painted displacement is
+// disabled for hit testing until the subpanel has almost fully expanded.
 fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
-    let left = if enabled { 754 } else { 844 };
-    rect(hwnd, left, 116, left + 84, 150)
+    let layout = desktop_submenu_layout();
+    scaled_rect(hwnd, if enabled { layout.enabled } else { layout.disabled })
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -4155,6 +4261,7 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         }
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| {
             s.snapshot.display_position == DisplayPosition::Desktop
+                && s.desktop_submenu.hit_enabled()
         }) {
             for enabled in [true, false] {
                 if pt_in_rect(desktop_auto_collapse_rect(hwnd, enabled), x, y) {
@@ -4824,6 +4931,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_TIMER => {
+            if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
+                let still_active = {
+                    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(s) = state.as_mut() {
+                        s.desktop_submenu.advance(Instant::now());
+                        s.desktop_submenu.active()
+                    } else { false }
+                };
+                if !still_active {
+                    let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
+                }
+                let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+                return LRESULT(0);
+            }
             if wparam.0 == JSON_ACTION_TIMER_ID {
                 finish_pending_json_action(hwnd);
                 return LRESULT(0);
@@ -5376,6 +5497,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         },
         WM_DESTROY => {
+            let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
@@ -5573,6 +5695,7 @@ unsafe fn paint(hwnd: HWND) {
         json_dirty,
         discard_pending,
         font,
+        desktop_submenu_progress,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
@@ -5597,6 +5720,7 @@ unsafe fn paint(hwnd: HWND) {
             s.json_dirty,
             s.pending_discard_action.is_some(),
             s.font,
+            s.desktop_submenu.progress,
         )
     };
 
@@ -5750,6 +5874,7 @@ unsafe fn paint(hwnd: HWND) {
             &snapshot,
             section,
             editor,
+            desktop_submenu_progress,
             hovered,
             pressed,
             focused_numeric_edit,
@@ -6476,6 +6601,7 @@ unsafe fn paint_appearance_page(
     snapshot: &StyleWindowSnapshot,
     section: Section,
     editor: EditorSelection,
+    desktop_submenu_progress: f32,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     focused_numeric_edit: Option<usize>,
