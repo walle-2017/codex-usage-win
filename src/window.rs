@@ -2900,6 +2900,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 );
                 canvas.fill(0);
                 if hovered && !hidden {
+                    let accent = drag_hover_outline_color(&style);
                     // Paint the external halo FIRST. The body and tab occupy
                     // exactly the mask used for the glow, so no colored pixels
                     // can enter the semi-transparent glass or rounded corners.
