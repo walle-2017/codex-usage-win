@@ -3283,6 +3283,12 @@ fn render_taskbar_hover_glow(
                 COLORREF(0), Some(&blend), ULW_ALPHA,
             );
             let _ = ShowWindow(glow_hwnd, SW_SHOWNOACTIVATE);
+            // Showing a child may raise it in sibling Z order; reassert the
+            // halo beneath the panel after it becomes visible.
+            let _ = SetWindowPos(
+                glow_hwnd, panel_hwnd, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
             SelectObject(mem_dc, old_bmp);
         }
         if !dib.is_invalid() { let _ = DeleteObject(dib); }
