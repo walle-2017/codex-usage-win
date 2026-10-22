@@ -38,6 +38,7 @@ pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
 pub const WM_STYLE_POSITION_CHANGE: u32 = WM_APP + 125;
 pub const WM_STYLE_DESKTOP_DIRECTION_CHANGE: u32 = WM_APP + 139;
+pub const WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE: u32 = WM_APP + 145;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
 pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
@@ -149,6 +150,7 @@ pub struct StyleWindowSnapshot {
     pub appearance_preset: AppearancePreset,
     pub display_position: DisplayPosition,
     pub desktop_direction: DesktopDirection,
+    pub desktop_auto_collapse: bool,
     // Runtime orientation, not a persisted appearance setting.
     pub vertical_taskbar_mode: bool,
     pub active_style: ThemeStyle,
@@ -249,6 +251,7 @@ enum HitTarget {
     Layout(AppearancePreset),
     Position(DisplayPosition),
     DesktopDirection(DesktopDirection),
+    DesktopAutoCollapse(bool),
     Preset(ThemePreset),
     Section(Section),
     Row(EditorSelection),
@@ -1202,6 +1205,12 @@ fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
 fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
     let index = if direction == DesktopDirection::Vertical { 1 } else { 0 };
     rect(hwnd, 652 + index * 92, 162, 738 + index * 92, 196)
+}
+
+// Compact Desktop-only choice, placed in the unused right side of the Layout row.
+fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
+    let left = if enabled { 754 } else { 844 };
+    rect(hwnd, left, 116, left + 84, 150)
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -4147,6 +4156,11 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| {
             s.snapshot.display_position == DisplayPosition::Desktop
         }) {
+            for enabled in [true, false] {
+                if pt_in_rect(desktop_auto_collapse_rect(hwnd, enabled), x, y) {
+                    return Some(HitTarget::DesktopAutoCollapse(enabled));
+                }
+            }
             for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
                 if pt_in_rect(desktop_direction_rect(hwnd, direction), x, y) {
                     return Some(HitTarget::DesktopDirection(direction));
@@ -4247,6 +4261,9 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 WM_STYLE_DESKTOP_DIRECTION_CHANGE,
                 if direction == DesktopDirection::Vertical { 1 } else { 0 }, 0,
             );
+        }
+        HitTarget::DesktopAutoCollapse(enabled) => {
+            send_parent(WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, usize::from(enabled), 0);
         }
         HitTarget::Preset(preset) => {
             let index = match preset {
@@ -6584,6 +6601,44 @@ unsafe fn paint_appearance_page(
         );
     }
 
+
+    if snapshot.display_position == DisplayPosition::Desktop {
+        // Desktop-only switch shares the otherwise empty right side of the
+        // layout row. It does not affect the fixed settings card size, editor
+        // rows, or preset gallery positions.
+        let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
+        draw_text(
+            hdc,
+            if zh { "贴边自动收缩" } else { "Edge auto-hide" },
+            rect(hwnd, 562, 116, 748, 150),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for enabled in [true, false] {
+            let selected = snapshot.desktop_auto_collapse == enabled;
+            let target = HitTarget::DesktopAutoCollapse(enabled);
+            let background = button_background(
+                target, selected, hovered, pressed,
+                ButtonPalette {
+                    normal: card_hover, hover: card_pressed, pressed: card_pressed,
+                    selected: accent, selected_hover: accent_hover,
+                    selected_pressed: accent_pressed,
+                },
+            );
+            draw_segment_with_icon(
+                hdc, hwnd, desktop_auto_collapse_rect(hwnd, enabled), selected,
+                background,
+                if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+                if enabled { SettingsIcon::LayoutDefault } else { SettingsIcon::LayoutMinimal },
+                match (zh, enabled) {
+                    (true, true) => "开启",
+                    (true, false) => "关闭",
+                    (false, true) => "On",
+                    (false, false) => "Off",
+                },
+            );
+        }
+    }
+
     draw_text(
         hdc,
         if zh { "方向" } else { "Direction" },
@@ -8837,6 +8892,7 @@ mod ui_smoke_tests {
                 appearance_preset: AppearancePreset::Default,
                 display_position: DisplayPosition::Taskbar,
                 desktop_direction: DesktopDirection::Horizontal,
+                desktop_auto_collapse: true,
                 vertical_taskbar_mode: false,
                 active_style: ThemeStyle::dark_default(),
                 editable_settings: EditableSettings {
@@ -8856,6 +8912,7 @@ mod ui_smoke_tests {
                         layout: "default".into(),
                         position: "taskbar".into(),
                         desktop_direction: "horizontal".into(),
+                        desktop_auto_collapse: true,
                         dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                         light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
                     },
