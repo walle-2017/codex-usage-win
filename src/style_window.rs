@@ -8517,6 +8517,50 @@ unsafe fn draw_settings_icon(
                 cy + scale(hwnd, 4),
             );
         }
+        SettingsIcon::DirectionHorizontal => {
+            draw_rounded_outline_rect(
+                hdc, RECT {
+                    left: rect.left + scale(hwnd, 1),
+                    top: cy - scale(hwnd, 4),
+                    right: rect.right - scale(hwnd, 1),
+                    bottom: cy + scale(hwnd, 4),
+                },
+                color, scale(hwnd, 2), stroke,
+            );
+            line(hdc, rect.left + scale(hwnd, 4), cy - scale(hwnd, 1),
+                rect.right - scale(hwnd, 4), cy - scale(hwnd, 1));
+        }
+        SettingsIcon::DirectionVertical => {
+            draw_rounded_outline_rect(
+                hdc, RECT {
+                    left: cx - scale(hwnd, 4),
+                    top: rect.top + scale(hwnd, 1),
+                    right: cx + scale(hwnd, 4),
+                    bottom: rect.bottom - scale(hwnd, 1),
+                },
+                color, scale(hwnd, 2), stroke,
+            );
+            line(hdc, cx - scale(hwnd, 1), rect.top + scale(hwnd, 4),
+                cx + scale(hwnd, 1), rect.top + scale(hwnd, 4));
+        }
+        SettingsIcon::ToggleOn | SettingsIcon::ToggleOff => {
+            draw_rounded_outline_rect(
+                hdc, RECT {
+                    left: rect.left + scale(hwnd, 1),
+                    top: cy - scale(hwnd, 4),
+                    right: rect.right - scale(hwnd, 1),
+                    bottom: cy + scale(hwnd, 4),
+                },
+                color, scale(hwnd, 4), stroke,
+            );
+            let thumb_x = if icon == SettingsIcon::ToggleOn {
+                rect.right - scale(hwnd, 5)
+            } else {
+                rect.left + scale(hwnd, 5)
+            };
+            let r = scale(hwnd, 2);
+            let _ = Ellipse(hdc, thumb_x-r, cy-r, thumb_x+r, cy+r);
+        }
         SettingsIcon::LayoutAdaptive => {
             line(
                 hdc,
