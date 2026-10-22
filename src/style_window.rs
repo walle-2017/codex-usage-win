@@ -228,6 +228,10 @@ enum SettingsIcon {
     JsonExport,
     JsonApply,
     LayoutAdaptive,
+    DirectionHorizontal,
+    DirectionVertical,
+    ToggleOn,
+    ToggleOff,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,7 +350,6 @@ impl DesktopSubmenuAnimation {
 struct DesktopSubmenuLayout {
     well: RECT,
     foot: RECT,
-    title: RECT,
     direction_label: RECT,
     collapse_label: RECT,
     horizontal: RECT,
@@ -357,14 +360,14 @@ struct DesktopSubmenuLayout {
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
     DesktopSubmenuLayout {
         well: RECT { left: 636, top: 65, right: 930, bottom: 201 },
-        foot: RECT { left: 414, top: 155, right: 654, bottom: 201 },
-        title: RECT { left: 652, top: 73, right: 918, bottom: 96 },
-        direction_label: RECT { left: 652, top: 105, right: 770, bottom: 139 },
-        collapse_label: RECT { left: 652, top: 151, right: 770, bottom: 185 },
-        horizontal: RECT { left: 775, top: 105, right: 840, bottom: 139 },
-        vertical: RECT { left: 846, top: 105, right: 918, bottom: 139 },
-        enabled: RECT { left: 775, top: 151, right: 840, bottom: 185 },
-        disabled: RECT { left: 846, top: 151, right: 918, bottom: 185 },
+        // Leave a 14px gap after Taskbar (x=314..414); Desktop is x=434..534.
+        foot: RECT { left: 428, top: 155, right: 654, bottom: 201 },
+        direction_label: RECT { left: 652, top: 88, right: 770, bottom: 122 },
+        collapse_label: RECT { left: 652, top: 146, right: 770, bottom: 180 },
+        horizontal: RECT { left: 775, top: 88, right: 840, bottom: 122 },
+        vertical: RECT { left: 846, top: 88, right: 918, bottom: 122 },
+        enabled: RECT { left: 775, top: 146, right: 840, bottom: 180 },
+        disabled: RECT { left: 846, top: 146, right: 918, bottom: 180 },
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -1301,8 +1304,10 @@ fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
 }
 
 fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
-    let index = if position == DisplayPosition::Desktop { 1 } else { 0 };
-    rect(hwnd, 314 + index * 108, 162, 414 + index * 108, 196)
+    // Taskbar is unchanged. Desktop is shifted to keep its surrounding
+    // depressed surface visually distinct from the adjacent Taskbar button.
+    let left = if position == DisplayPosition::Desktop { 434 } else { 314 };
+    rect(hwnd, left, 162, left + 100, 196)
 }
 
 fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
@@ -6696,18 +6701,17 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
     let zh=snapshot.language==LanguageId::SimplifiedChinese;
     let dx=scale(hwnd,((1.0-opacity)*5.0).round() as i32);
     let txt=|mut r:RECT|{r.left+=dx;r.right+=dx;r};
-    let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,primary,opacity).to_colorref()));
-    draw_text(hdc,if zh{"桌面专属设置"}else{"Desktop settings"},
-        txt(scaled_rect(hwnd,l.title)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    // The inset and selected Desktop button already convey the hierarchy;
+    // avoid a redundant secondary-panel title.
     let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
     draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
         DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    draw_text(hdc,if zh{"贴边自动收缩"}else{"Auto-collapse"},
+    draw_text(hdc,if zh{"自动收缩"}else{"Auto-collapse"},
         txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
     for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
         let horizontal=direction==DesktopDirection::Horizontal;
         paint_submenu_choice(hdc,hwnd,if horizontal{l.horizontal}else{l.vertical},
-            if horizontal{SettingsIcon::Panel}else{SettingsIcon::ThemeSystem},
+            if horizontal{SettingsIcon::DirectionHorizontal}else{SettingsIcon::DirectionVertical},
             match(zh,horizontal){(true,true)=>"横向",(true,false)=>"纵向",
                 (false,true)=>"Horz",(false,false)=>"Vert"},
             snapshot.desktop_direction==direction,HitTarget::DesktopDirection(direction),
@@ -6715,7 +6719,7 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
     }
     for enabled in [true,false] {
         paint_submenu_choice(hdc,hwnd,if enabled{l.enabled}else{l.disabled},
-            if enabled{SettingsIcon::LayoutDefault}else{SettingsIcon::LayoutMinimal},
+            if enabled{SettingsIcon::ToggleOn}else{SettingsIcon::ToggleOff},
             match(zh,enabled){(true,true)=>"开启",(true,false)=>"关闭",
                 (false,true)=>"On",(false,false)=>"Off"},
             snapshot.desktop_auto_collapse==enabled,HitTarget::DesktopAutoCollapse(enabled),
@@ -8908,21 +8912,41 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn v24_30_desktop_submenu_labels_and_icons_match_controls() {
+        let l = desktop_submenu_layout();
+        assert!(l.direction_label.top == l.horizontal.top
+            && l.direction_label.bottom == l.horizontal.bottom);
+        assert!(l.collapse_label.top == l.enabled.top
+            && l.collapse_label.bottom == l.enabled.bottom);
+        assert!(l.collapse_label.top > l.direction_label.bottom,
+            "two rows must be visually separated after the redundant title is removed");
+        assert_eq!(SettingsIcon::DirectionHorizontal as i32, 26);
+        assert_eq!(SettingsIcon::DirectionVertical as i32, 27);
+        assert_eq!(SettingsIcon::ToggleOn as i32, 28);
+        assert_eq!(SettingsIcon::ToggleOff as i32, 29);
+        assert!(l.foot.left - 414 >= 12);
+        assert!(l.foot.left < 434 && l.foot.right > 534);
+    }
+
+    #[test]
     fn v24_28_desktop_submenu_fits_existing_card_and_includes_desktop_button() {
         let l = desktop_submenu_layout();
         let card = RECT { left: 200, top: 58, right: 940, bottom: 206 };
-        for r in [l.well,l.foot,l.title,l.direction_label,l.collapse_label,
+        for r in [l.well,l.foot,l.direction_label,l.collapse_label,
             l.horizontal,l.vertical,l.enabled,l.disabled] {
             assert!(r.left>=card.left && r.right<=card.right);
             assert!(r.top>=card.top && r.bottom<=card.bottom);
             assert!(r.right>r.left && r.bottom>r.top);
         }
         // The bottom foot surrounds the selected Desktop button, but not Taskbar.
-        let desktop = RECT { left: 422, top: 162, right: 522, bottom: 196 };
+        let desktop = RECT { left: 434, top: 162, right: 534, bottom: 196 };
         let taskbar = RECT { left: 314, top: 162, right: 414, bottom: 196 };
         assert!(l.foot.left < desktop.left && l.foot.right > desktop.right);
         assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
-        assert!(l.foot.left >= taskbar.right);
+        assert!(l.foot.left - taskbar.right >= 12,
+            "recessed background must leave a visible gap after Taskbar");
+        assert_eq!(desktop.left - taskbar.right, 20,
+            "the position buttons remain separate even at standard DPI");
         assert!(l.well.left > 630, "do not overlap the Light theme button");
         assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
             "the two depressed regions must overlap to hide their seam");
