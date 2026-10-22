@@ -32,7 +32,7 @@ use crate::native_interop::{
 use crate::poller;
 use crate::popup_menu::{self, PopupItem};
 use crate::settings_model::{
-    EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
+    default_desktop_auto_collapse, EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
     EDITABLE_SETTINGS_SCHEMA_VERSION,
 };
 use crate::style::{
@@ -77,6 +77,7 @@ struct AppState {
     effective_appearance_preset: AppearancePreset,
     display_position: DisplayPosition,
     desktop_direction: DesktopDirection,
+    desktop_auto_collapse: bool,
     hidden_for_taskbar_space: bool,
     taskbar_space_warning_shown: bool,
     floating_mode: bool,
@@ -551,6 +552,8 @@ struct SettingsFile {
     display_position: DisplayPosition,
     #[serde(default)]
     desktop_direction: DesktopDirection,
+    #[serde(default = "default_desktop_auto_collapse")]
+    desktop_auto_collapse: bool,
     #[serde(default)]
     theme_mode: ThemeMode,
     #[serde(default)]
@@ -581,6 +584,7 @@ impl Default for SettingsFile {
             appearance_preset: AppearancePreset::Default,
             display_position: DisplayPosition::Taskbar,
             desktop_direction: DesktopDirection::Horizontal,
+            desktop_auto_collapse: default_desktop_auto_collapse(),
             theme_mode: ThemeMode::System,
             styles: StyleSettings::default(),
             show_session_window: true,
@@ -681,6 +685,7 @@ fn save_state_settings() {
             appearance_preset: s.appearance_preset.configured(),
             display_position: s.display_position,
             desktop_direction: s.desktop_direction,
+            desktop_auto_collapse: s.desktop_auto_collapse,
             theme_mode: s.theme_mode,
             styles: s.styles.clone(),
             show_session_window: s.show_session_window,
@@ -2398,6 +2403,7 @@ pub fn run() {
                 appearance_preset: settings.appearance_preset,
                 display_position: settings.display_position,
                 desktop_direction: settings.desktop_direction,
+                desktop_auto_collapse: settings.desktop_auto_collapse,
                 effective_appearance_preset: match settings.appearance_preset {
                     AppearancePreset::Minimal => AppearancePreset::Minimal,
                     _ => AppearancePreset::Default,
@@ -5402,11 +5408,36 @@ fn floating_hover_can_reveal(collapsed: bool, guard: bool, dragging: bool) -> bo
     collapsed && !guard && !dragging
 }
 
+// In fallback desktop mode (taskbar has no free space), preserve the
+// existing auto-hide behavior. This option only affects explicitly selected
+// Desktop mode, not Explorer's taskbar and not the docking geometry.
+fn floating_auto_collapse_allowed(position: DisplayPosition, enabled: bool) -> bool {
+    position != DisplayPosition::Desktop || enabled
+}
+
+fn sync_desktop_auto_collapse() {
+    let (hwnd, collapse) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || s.floating_edge.is_none() { return; }
+        let collapse = floating_auto_collapse_allowed(
+            s.display_position, s.desktop_auto_collapse,
+        );
+        s.floating_first_collapse_guard = false;
+        (s.hwnd.to_hwnd(), collapse)
+    };
+    floating_cancel_hover_recheck(hwnd);
+    set_floating_collapsed(collapse);
+}
+
 fn set_floating_collapsed(collapsed: bool) {
     let hwnd = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         if !s.floating_mode || s.dragging || s.floating_edge.is_none()
+            || (collapsed && !floating_auto_collapse_allowed(
+                s.display_position, s.desktop_auto_collapse,
+            ))
             || (!collapsed && s.floating_first_collapse_guard)
             || s.floating_collapsed == collapsed { return; }
         s.floating_collapsed = collapsed;
@@ -5759,8 +5790,11 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_drag_glow_detached = false;
             // Reserved edges retract by pixel clipping, not by moving the
             // popup underneath Explorer.
-            s.floating_collapsed = edge.is_some();
-            s.floating_first_collapse_guard = edge.is_some();
+            let retract = edge.is_some() && floating_auto_collapse_allowed(
+                s.display_position, s.desktop_auto_collapse,
+            );
+            s.floating_collapsed = retract;
+            s.floating_first_collapse_guard = retract;
             s.floating_reveal = 100;
             s.floating_slide_from = 100;
             s.floating_slide_target = 100;
@@ -5779,7 +5813,7 @@ fn finish_floating_drag(hwnd: HWND) {
     if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
         sync_blur_backdrop_zorder(hwnd);
     }
-    if edge.is_some() {
+    if lock_state().as_ref().is_some_and(|s| s.floating_collapsed) {
         unsafe {
             SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
         }
@@ -8569,8 +8603,29 @@ unsafe extern "system" fn wnd_proc(
             hide_minimal_usage_tooltip();
             save_state_settings();
             position_at_taskbar();
+            sync_desktop_auto_collapse();
             render_layered();
             style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE => {
+            let enabled = wparam.0 != 0;
+            let changed = {
+                let mut state = lock_state();
+                match state.as_mut() {
+                    Some(s) if s.display_position == DisplayPosition::Desktop
+                        && s.desktop_auto_collapse != enabled => {
+                        s.desktop_auto_collapse = enabled;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                save_state_settings();
+                sync_desktop_auto_collapse();
+                style_window::sync(style_settings_snapshot());
+            }
             LRESULT(0)
         }
         _ if msg == style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE => {
@@ -8604,6 +8659,7 @@ unsafe extern "system" fn wnd_proc(
             // popup. A second render_layered() here repeated the expensive
             // WinRT/DirectComposition updates after every toggle.
             position_at_taskbar();
+            sync_desktop_auto_collapse();
             diagnose::log_lazy(|| format!(
                 "desktop orientation switch: geometry applied direction={direction:?} elapsed_ms={}",
                 start.elapsed().as_millis(),
@@ -9276,6 +9332,7 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
             desktop_direction: if state.desktop_direction == DesktopDirection::Vertical {
                 "vertical"
             } else { "horizontal" }.to_string(),
+            desktop_auto_collapse: state.desktop_auto_collapse,
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
             light: EditableThemeStyle::from_theme_style(&state.styles.light),
         },
@@ -9300,6 +9357,7 @@ fn default_editable_settings() -> EditableSettings {
             layout: "default".to_string(),
             position: "taskbar".to_string(),
             desktop_direction: "horizontal".to_string(),
+            desktop_auto_collapse: default_desktop_auto_collapse(),
             dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
             light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
         },
@@ -9317,6 +9375,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             appearance_preset: s.appearance_preset.configured(),
             display_position: s.display_position,
             desktop_direction: s.desktop_direction,
+            desktop_auto_collapse: s.desktop_auto_collapse,
             vertical_taskbar_mode: s.vertical_taskbar_mode,
             active_style: s.styles.active(s.is_dark).clone(),
             editable_settings: editable_settings_from_state(s, startup_enabled),
@@ -9329,6 +9388,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             appearance_preset: AppearancePreset::Default,
             display_position: DisplayPosition::Taskbar,
             desktop_direction: DesktopDirection::Horizontal,
+            desktop_auto_collapse: default_desktop_auto_collapse(),
             vertical_taskbar_mode: false,
             active_style: ThemeStyle::dark_default(),
             editable_settings: default_editable_settings(),
@@ -9396,6 +9456,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         s.desktop_direction = if settings.appearance.desktop_direction == "vertical" {
             DesktopDirection::Vertical
         } else { DesktopDirection::Horizontal };
+        s.desktop_auto_collapse = settings.appearance.desktop_auto_collapse;
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
         s.styles.clamp_corner_radii(s.appearance_preset);
@@ -9420,6 +9481,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     }
     hide_minimal_usage_tooltip();
     position_at_taskbar();
+    sync_desktop_auto_collapse();
     render_layered();
     sync_tray_icons(hwnd);
     notify_quota_alerts(hwnd, &alerts);
@@ -12194,6 +12256,25 @@ mod tests {
             assert_ne!(pixels[(((r.top + r.bottom) / 2) * w +
                 (r.left + r.right) / 2) as usize], 0);
         }
+    }
+
+
+    #[test]
+    fn desktop_auto_collapse_defaults_enabled_round_trips_and_respects_mode() {
+        let legacy: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert!(legacy.desktop_auto_collapse);
+        let disabled = SettingsFile {
+            display_position: DisplayPosition::Desktop,
+            desktop_auto_collapse: false,
+            ..Default::default()
+        };
+        let parsed: SettingsFile =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert!(!parsed.desktop_auto_collapse);
+        assert!(!floating_auto_collapse_allowed(DisplayPosition::Desktop, false));
+        assert!(floating_auto_collapse_allowed(DisplayPosition::Desktop, true));
+        assert!(floating_auto_collapse_allowed(DisplayPosition::Taskbar, false),
+            "taskbar-space fallback keeps its existing automatic collapse behavior");
     }
 
     #[test]
