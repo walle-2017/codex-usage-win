@@ -67,6 +67,8 @@ pub struct EditableAppearance {
     pub position: String,
     #[serde(default = "default_desktop_direction")]
     pub desktop_direction: String,
+    #[serde(default = "default_desktop_auto_collapse")]
+    pub desktop_auto_collapse: bool,
     pub dark: EditableThemeStyle,
     pub light: EditableThemeStyle,
 }
@@ -225,6 +227,7 @@ impl EditableThemeStyle {
 
 fn default_display_position() -> String { "taskbar".to_string() }
 fn default_desktop_direction() -> String { "horizontal".to_string() }
+pub(crate) fn default_desktop_auto_collapse() -> bool { true }
 
 impl EditableSettings {
     pub fn validate_and_normalize(&self) -> Result<Self, String> {
@@ -369,6 +372,10 @@ r#"{{
     // {direction_options}
     "desktop_direction": {desktop_direction},
 
+    // {auto_collapse_desc}
+    // {bool_options}
+    "desktop_auto_collapse": {desktop_auto_collapse},
+
     // {dark_desc}
     "dark": {{
 {dark_json}
@@ -430,6 +437,8 @@ r#"{{
             direction_desc = localized(zh, "桌面模式的横向或纵向布局；任务栏模式下忽略", "Horizontal/vertical layout for Desktop, ignored in Taskbar mode"),
             direction_options = localized(zh, "可选：horizontal | vertical", "Options: horizontal | vertical"),
             desktop_direction = q(&a.desktop_direction),
+            auto_collapse_desc = localized(zh, "桌面贴靠边缘后是否自动收缩；任务栏模式下忽略", "Auto-collapse after Desktop edge docking; ignored in Taskbar mode"),
+            desktop_auto_collapse = a.desktop_auto_collapse,
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
             light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
             dark_json = theme_jsonc(dark, zh, 6, &a.layout),
@@ -715,6 +724,7 @@ mod tests {
                 layout: "default".into(),
                 position: "taskbar".into(),
                 desktop_direction: "horizontal".into(),
+                desktop_auto_collapse: true,
                 dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                 light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
             },
@@ -733,6 +743,25 @@ mod tests {
 }"#)
         .unwrap();
         assert!(stripped.contains("https://example.com//x"));
+    }
+
+
+    #[test]
+    fn desktop_auto_collapse_old_json_defaults_enabled_and_round_trips() {
+        let original = sample();
+        // Remove the optional field independently of JSON whitespace.
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&original.to_pretty_json().unwrap()).unwrap();
+        legacy["appearance"].as_object_mut().unwrap().remove("desktop_auto_collapse");
+        let migrated: EditableSettings = serde_json::from_value(legacy).unwrap();
+        assert!(migrated.appearance.desktop_auto_collapse);
+        let mut disabled = migrated;
+        disabled.appearance.desktop_auto_collapse = false;
+        let output = disabled.to_jsonc(LanguageId::SimplifiedChinese);
+        assert!(output.contains("\"desktop_auto_collapse\": false"));
+        let parsed = parse_jsonc(&output).unwrap();
+        assert!(!parsed.appearance.desktop_auto_collapse);
+        assert_eq!(parsed.validate_and_normalize().unwrap(), disabled);
     }
 
     #[test]
