@@ -2898,8 +2898,8 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 let canvas = std::slice::from_raw_parts_mut(
                     canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
                 );
-                canvas.fill(0);
                 let accent = drag_hover_outline_color(&style);
+                canvas.fill(0);
                 if hovered && !hidden {
                     // Paint the external halo FIRST. The body and tab occupy
                     // exactly the mask used for the glow, so no colored pixels
