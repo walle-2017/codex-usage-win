@@ -252,6 +252,7 @@ const GITHUB_RELEASES_URL: &str =
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
+const TASKBAR_HOVER_GLOW_CLASS: &str = "CodexUsageTaskbarHoverGlow";
 const WM_APP_FOCUS_EXISTING_SETTINGS: u32 = native_interop::WM_APP + 140;
 const WM_APP_DESKTOP_HOVER_EXIT: u32 = native_interop::WM_APP + 141;
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
@@ -284,6 +285,7 @@ static PARKED_BLUR_BACKDROPS: Mutex<Vec<ParkedBlurBackdrop>> = Mutex::new(Vec::n
 static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
+static TASKBAR_HOVER_GLOW_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
 static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
@@ -2632,6 +2634,7 @@ fn render_layered() {
 fn render_layered_at(desktop_origin: Option<POINT>) {
     refresh_dpi();
     if widget_hidden_for_taskbar_space() {
+        hide_taskbar_hover_glow();
         return;
     }
     let (
@@ -2705,6 +2708,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
 
     let embedded = lock_state().as_ref().is_some_and(|s| s.embedded);
     if !embedded && !composition_blur_active && !floating {
+        hide_taskbar_hover_glow();
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -2834,12 +2838,22 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
 
         let drag_hovered = lock_state().as_ref().is_some_and(|s| s.drag_handle_hovered);
         let accent = drag_hover_outline_color(&style);
-        if !floating && drag_hovered {
-            draw_drag_hover_outline(
-                pixel_data, width, height,
-                RECT { left: 0, top: 0, right: width, bottom: height },
-                style.panel_corner_radius, accent,
-            );
+        if !floating && embedded {
+            // Taskbar children have no outer pixels in their original bitmap.
+            // Render the very same strictly exterior halo as desktop mode in
+            // an independent click-through sibling, behind the main panel.
+            render_taskbar_hover_glow(hwnd, width, height, drag_hovered, &style, accent);
+        } else {
+            hide_taskbar_hover_glow();
+            if !floating && drag_hovered {
+                // Retain the normal-window fallback until its separate
+                // top-level composition path can host an external sibling.
+                draw_drag_hover_outline(
+                    pixel_data, width, height,
+                    RECT { left: 0, top: 0, right: width, bottom: height },
+                    style.panel_corner_radius, accent,
+                );
+            }
         }
 
         let pt_src = POINT { x: 0, y: 0 };
@@ -3119,6 +3133,161 @@ fn draw_drag_hover_outer_glow(
         if coverage != 0 {
             pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
         }
+    }
+}
+
+
+/// A non-interactive child of Explorer's taskbar, behind the quota panel.
+/// The main HWND retains its original bounds, hover hit zone and drag anchors.
+/// Explorer clips pixels beyond the taskbar itself, as with any taskbar child.
+fn taskbar_hover_glow_geometry(width: i32, height: i32) -> (i32, i32, RECT) {
+    let margin = sc(12).max(2);
+    (width + 2 * margin, height + 2 * margin,
+        RECT { left: margin, top: margin, right: margin + width, bottom: margin + height })
+}
+
+fn hide_taskbar_hover_glow() {
+    let hwnd = *TASKBAR_HOVER_GLOW_HWND.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            if IsWindow(hwnd.to_hwnd()).as_bool() {
+                let _ = ShowWindow(hwnd.to_hwnd(), SW_HIDE);
+            }
+        }
+    }
+}
+
+fn destroy_taskbar_hover_glow() {
+    let hwnd = TASKBAR_HOVER_GLOW_HWND.lock()
+        .unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            if IsWindow(hwnd.to_hwnd()).as_bool() {
+                let _ = DestroyWindow(hwnd.to_hwnd());
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn taskbar_hover_glow_wnd_proc(
+    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT; never capture drag/tooltip input
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn ensure_taskbar_hover_glow_window(panel_hwnd: HWND) -> Option<HWND> {
+    unsafe {
+        let parent = GetAncestor(panel_hwnd, GA_PARENT);
+        if parent.0.is_null() || parent == panel_hwnd { return None; }
+        let mut slot = TASKBAR_HOVER_GLOW_HWND.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = *slot {
+            let existing = existing.to_hwnd();
+            if IsWindow(existing).as_bool() {
+                if GetAncestor(existing, GA_PARENT) == parent {
+                    return Some(existing);
+                }
+                let _ = DestroyWindow(existing);
+            }
+            *slot = None;
+        }
+        let instance = GetModuleHandleW(PCWSTR::null()).ok()?;
+        let name = native_interop::wide_str(TASKBAR_HOVER_GLOW_CLASS);
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(taskbar_hover_glow_wnd_proc),
+            hInstance: HINSTANCE(instance.0),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+        let title = native_interop::wide_str("");
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            PCWSTR::from_raw(name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_CHILD,
+            0, 0, 1, 1, parent, HMENU::default(), instance, None,
+        ).ok()?;
+        *slot = Some(SendHwnd::from_hwnd(hwnd));
+        Some(hwnd)
+    }
+}
+
+fn render_taskbar_hover_glow(
+    panel_hwnd: HWND, width: i32, height: i32,
+    hovered: bool, style: &ThemeStyle, accent: Color,
+) {
+    if !hovered {
+        hide_taskbar_hover_glow();
+        return;
+    }
+    let Some(glow_hwnd) = ensure_taskbar_hover_glow_window(panel_hwnd) else { return; };
+    let (canvas_w, canvas_h, body) = taskbar_hover_glow_geometry(width, height);
+    let margin = body.left;
+    unsafe {
+        let parent = GetAncestor(panel_hwnd, GA_PARENT);
+        let Some(panel_rect) = native_interop::get_window_rect_safe(panel_hwnd) else {
+            hide_taskbar_hover_glow();
+            return;
+        };
+        let Some(parent_rect) = native_interop::get_window_rect_safe(parent) else {
+            hide_taskbar_hover_glow();
+            return;
+        };
+        // Taskbar and panel are sibling children of the same parent. Keep
+        // this halo *below* the panel, not in its semi-transparent content.
+        let _ = SetWindowPos(
+            glow_hwnd, panel_hwnd,
+            panel_rect.left - parent_rect.left - margin,
+            panel_rect.top - parent_rect.top - margin,
+            canvas_w, canvas_h, SWP_NOACTIVATE,
+        );
+        let screen_dc = GetDC(glow_hwnd);
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: canvas_w, biHeight: -canvas_h,
+                biPlanes: 1, biBitCount: 32, biCompression: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+            .unwrap_or_default();
+        if dib.is_invalid() || bits.is_null() {
+            hide_taskbar_hover_glow();
+        } else {
+            let old_bmp = SelectObject(mem_dc, dib);
+            let pixels = std::slice::from_raw_parts_mut(
+                bits as *mut u32, (canvas_w * canvas_h) as usize,
+            );
+            pixels.fill(0);
+            draw_drag_hover_outer_glow(
+                pixels, canvas_w, canvas_h, body, RECT::default(), style, accent,
+            );
+            let blend = BLENDFUNCTION {
+                BlendOp: 0, BlendFlags: 0,
+                SourceConstantAlpha: 255, AlphaFormat: 1,
+            };
+            let _ = UpdateLayeredWindow(
+                glow_hwnd, screen_dc, None, Some(&SIZE { cx: canvas_w, cy: canvas_h }),
+                mem_dc, Some(&POINT { x: 0, y: 0 }),
+                COLORREF(0), Some(&blend), ULW_ALPHA,
+            );
+            let _ = ShowWindow(glow_hwnd, SW_SHOWNOACTIVATE);
+            SelectObject(mem_dc, old_bmp);
+        }
+        if !dib.is_invalid() { let _ = DeleteObject(dib); }
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(glow_hwnd, screen_dc);
     }
 }
 
@@ -5898,6 +6067,7 @@ fn hide_widget_for_taskbar_space(
         let mut state = lock_state();
         if let Some(s) = state.as_mut() { s.hidden_for_taskbar_space = true; }
     }
+    hide_taskbar_hover_glow();
     unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
     diagnose::log(format!("waiting for taskbar layout cache: {reason}"));
 }
@@ -8627,6 +8797,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DESTROY => {
             hide_minimal_usage_tooltip();
+            destroy_taskbar_hover_glow();
 
             destroy_blur_backdrop();
             destroy_parked_blur_backdrops();
@@ -9837,6 +10008,53 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v24_21_taskbar_hover_uses_desktop_exterior_glow_without_interior_tint() {
+        for (width, height) in [(270, 53), (48, 168)] {
+            for radius in [0_u8, 3, 10, 20] {
+                for alpha in [0_u8, 64, 255] {
+                    let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+                    style.panel_corner_radius = radius;
+                    style.set_color(StyleColorTarget::PanelBackground,
+                        Color::rgba(18, 45, 37, alpha));
+                    let (canvas_w, canvas_h, body) =
+                        taskbar_hover_glow_geometry(width, height);
+                    let mut halo = vec![0_u32; (canvas_w * canvas_h) as usize];
+                    draw_drag_hover_outer_glow(
+                        &mut halo, canvas_w, canvas_h,
+                        body, RECT::default(), &style,
+                        drag_hover_outline_color(&style),
+                    );
+                    let mut outside = 0;
+                    for y in 0..canvas_h {
+                        for x in 0..canvas_w {
+                            let idx = (y * canvas_w + x) as usize;
+                            if panel_inner_shape_contains(
+                                width, height, x - body.left, y - body.top, radius,
+                            ) {
+                                assert_eq!(halo[idx], 0,
+                                    "taskbar hover must not tint the panel content");
+                            }
+                            if !panel_outer_shape_contains(
+                                width, height, x - body.left, y - body.top, radius,
+                            ) && halo[idx] >> 24 > 0 {
+                                outside += 1;
+                            }
+                        }
+                    }
+                    assert!(outside > 0,
+                        "taskbar glow must have genuine external pixels");
+                    assert!(halo[((body.top - 1) * canvas_w + body.left + width / 2)
+                        as usize] >> 24 > 0,
+                        "outer glow must contact the top border without a gap");
+                    assert_eq!(halo[0], 0,
+                        "halo canvas corners far from the silhouette are transparent");
+                }
+            }
+        }
+    }
+
 
     #[test]
     fn premultiplied_text_composition_preserves_partial_coverage() {
