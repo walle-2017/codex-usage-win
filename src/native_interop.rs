@@ -62,6 +62,15 @@ unsafe extern "C" {
         coverage: *mut u8,
         coverage_len: usize,
     ) -> i32;
+    fn codex_draw_desktop_inset_well(
+        hdc_raw: isize,
+        well_left: i32, well_top: i32, well_right: i32, well_bottom: i32,
+        foot_left: i32, foot_top: i32, foot_right: i32, foot_bottom: i32,
+        reveal_right: i32, radius: f32,
+        top_r: u8, top_g: u8, top_b: u8,
+        bottom_r: u8, bottom_g: u8, bottom_b: u8,
+        shadow_opacity: f32,
+    ) -> i32;
     fn codex_draw_rounded_rect(
         hdc_raw: isize,
         left: i32,
@@ -518,6 +527,29 @@ pub fn draw_antialiased_settings_icon(
             color.g,
             color.b,
             color.a,
+        ) != 0
+    }
+}
+
+/// Draw the *single* recessed L-shaped Desktop settings surface.  Both
+/// fill and interior shadow are clipped to one continuous D2D path.
+pub fn draw_antialiased_desktop_inset_well(
+    hdc: HDC, well: RECT, foot: RECT, reveal_right: i32,
+    radius: f32, top: Color, bottom: Color, shadow_opacity: f32,
+) -> bool {
+    if hdc.0.is_null() || well.right <= well.left || well.bottom <= well.top
+        || foot.right <= foot.left || foot.bottom <= foot.top
+    {
+        return false;
+    }
+    unsafe {
+        codex_draw_desktop_inset_well(
+            hdc.0 as isize,
+            well.left,well.top,well.right,well.bottom,
+            foot.left,foot.top,foot.right,foot.bottom,
+            reveal_right,radius,
+            top.r,top.g,top.b,bottom.r,bottom.g,bottom.b,
+            shadow_opacity,
         ) != 0
     }
 }
