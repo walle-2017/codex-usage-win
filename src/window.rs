@@ -2008,7 +2008,17 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
         let state = lock_state();
         if let Some(s) = state.as_ref() {
             if s.floating_mode {
-                if floating_grip_uses_hover_fade(s) && s.floating_grip_alpha == 0 {
+                if s.floating_grip_alpha == 0
+                    && !floating_hidden_docked_grip_hit_enabled(
+                        s.floating_edge,
+                        floating_auto_collapse_allowed(
+                            s.display_position, s.desktop_auto_collapse,
+                        ),
+                        s.floating_collapsed,
+                    )
+                {
+                    // Free desktops keep their original invisible-tab hit
+                    // behavior; expanded edge docks need a hover recovery probe.
                     return false;
                 }
                 return point_in_rect(
@@ -2857,7 +2867,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             AlphaFormat: 1,
         };
         if floating {
-            let (edge, hidden, hovered, grip_alpha, reserved, reveal, dragging, drag_reveal) = {
+            let (edge, hidden, hovered, grip_alpha, reserved, reveal, dragging, drag_reveal, invisible_grip_hit) = {
                 let state = lock_state();
                 state.as_ref().map(|s| (
                     s.floating_edge,
@@ -2869,7 +2879,14 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     s.floating_reveal,
                     s.dragging,
                     s.floating_reserved_drag_reveal,
-                )).unwrap_or((None, false, false, 0, false, 100, false, 100))
+                    floating_hidden_docked_grip_hit_enabled(
+                        s.floating_edge,
+                        floating_auto_collapse_allowed(
+                            s.display_position, s.desktop_auto_collapse,
+                        ),
+                        s.floating_collapsed,
+                    ),
+                )).unwrap_or((None, false, false, 0, false, 100, false, 100, false))
             };
             // Composite the already rendered taskbar-size panel into a separate
             // transparent desktop canvas. Neither the panel border nor quota
@@ -2932,6 +2949,15 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 render_floating_handle_bitmap(
                     canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
                 );
+                if invisible_grip_hit && grip_alpha == 0 && !hidden {
+                    // Windows rejects alpha=0 pixels before WM_NCHITTEST.
+                    // Keep the *hidden* tab visually invisible yet responsive
+                    // to pointer entry, including when approached from the
+                    // outside rather than from the visible panel.
+                    paint_floating_hidden_grip_hit_probe(
+                        canvas, canvas_w, canvas_h, grip, style.panel_corner_radius,
+                    );
+                }
                 if hovered && !hidden {
                     // Preserve V24.6's alpha-1 transition probe: light is
                     // visual-only and must never enlarge drag hit targets.
@@ -3251,6 +3277,45 @@ fn draw_drag_hover_outline(
 /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
 /// When collapsed, every pixel outside the tab is fully transparent and cannot
 /// obstruct other desktop windows or leave a visible panel edge.
+/// Only a fully expanded desktop dock with auto-collapse disabled needs
+/// an invisible drag-tab hit surface. The legacy collapsed edge handle and
+/// the undocked hover treatment are deliberately unchanged.
+fn floating_hidden_docked_grip_hit_enabled(
+    edge: Option<FloatingEdge>, auto_collapse: bool, collapsed: bool,
+) -> bool {
+    edge.is_some() && !auto_collapse && !collapsed
+}
+
+/// Preserve native layered-window mouse hit testing when the edge-docked
+/// drag tab has faded to complete transparency. Alpha=1 premultiplied black
+/// is visually negligible; limiting it to the real rounded tab keeps the
+/// entire outside glow gutter click-through.
+fn paint_floating_hidden_grip_hit_probe(
+    pixels: &mut [u32], width: i32, height: i32, grip: RECT, radius: u8,
+) {
+    if width <= 0 || height <= 0
+        || pixels.len() < width as usize * height as usize
+    {
+        return;
+    }
+    let grip_w = grip.right - grip.left;
+    let grip_h = grip.bottom - grip.top;
+    if grip_w <= 0 || grip_h <= 0 { return; }
+    for y in grip.top.max(0)..grip.bottom.min(height) {
+        for x in grip.left.max(0)..grip.right.min(width) {
+            if !panel_outer_shape_contains(
+                grip_w, grip_h, x - grip.left, y - grip.top, radius,
+            ) {
+                continue;
+            }
+            let index = (y * width + x) as usize;
+            if pixels[index] >> 24 == 0 {
+                pixels[index] = 0x01000000;
+            }
+        }
+    }
+}
+
 fn render_floating_handle_bitmap(
     pixels: &mut [u32], width: i32, height: i32,
     edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
@@ -12343,6 +12408,57 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn v24_25_invisible_edge_tab_retains_hit_pixels_and_no_extra_targets() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            assert!(floating_hidden_docked_grip_hit_enabled(Some(edge), false, false));
+            assert!(!floating_hidden_docked_grip_hit_enabled(Some(edge), true, false));
+            assert!(!floating_hidden_docked_grip_hit_enabled(Some(edge), false, true));
+            assert!(!floating_hidden_docked_grip_hit_enabled(None, false, false));
+            for radius in [0u8, 8, 22] {
+                let (w, h, body) = floating_canvas_geometry(238, 58, Some(edge));
+                let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+                let mut pixels = vec![0u32; (w * h) as usize];
+                paint_floating_hidden_grip_hit_probe(
+                    &mut pixels, w, h, grip, radius,
+                );
+                let mut hit_count = 0;
+                for y in 0..h {
+                    for x in 0..w {
+                        let pixel = pixels[(y * w + x) as usize];
+                        let inside = panel_outer_shape_contains(
+                            grip.right - grip.left, grip.bottom - grip.top,
+                            x - grip.left, y - grip.top, radius,
+                        );
+                        if inside {
+                            assert_eq!(pixel, 0x01000000,
+                                "invisible tab must receive Windows hit testing");
+                            hit_count += 1;
+                        } else {
+                            assert_eq!(pixel, 0,
+                                "round corners, outside gutter and panel stay click-through");
+                        }
+                    }
+                }
+                assert!(hit_count > 0);
+                // The probe does not affect panel visuals or the hover color;
+                // the original desktop renderer still owns its exterior halo.
+                assert!(point_in_rect(body, body.left, body.top));
+                let mut halo = vec![0u32; (w * h) as usize];
+                let style = ThemeStyle::preset(true, ThemePreset::Forest);
+                draw_drag_hover_outer_glow(
+                    &mut halo, w, h, body, grip, &style,
+                    drag_hover_outline_color(&style),
+                );
+                assert!(halo.iter().any(|px| *px >> 24 > 0),
+                    "hovered docked tab should still draw the existing exterior halo");
+            }
+        }
+    }
 
     #[test]
     fn docked_expanded_grip_fades_like_free_desktop_without_changing_auto_hide() {
