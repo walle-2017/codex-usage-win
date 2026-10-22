@@ -3198,6 +3198,16 @@ fn render_floating_handle_bitmap_at(
             pixels[index] = composite_premultiplied_pixel(
                 pixels[index], premultiplied_pixel(color),
             );
+            if opacity > 0 && pixels[index] >> 24 == 0 {
+                // Layered windows discard alpha=0 pixels BEFORE WM_NCHITTEST.
+                // With a fully transparent panel background, only the grip's
+                // border and six dots otherwise receive mouse clicks.
+                // Restore the existing V24.6 alpha-1 hit-test convention for
+                // the real rounded grip interior (never its glow gutter or
+                // transparent rounded corners). The opacity is visually
+                // imperceptible, and this pixel remains valid premultiplied BGRA.
+                pixels[index] = 0x01000000;
+            }
         }
     }
 }
