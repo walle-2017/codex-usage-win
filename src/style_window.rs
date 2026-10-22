@@ -6611,29 +6611,50 @@ fn submenu_reveal_right(progress: f32) -> i32 {
     l.foot.left + ((l.well.right - l.foot.left) as f32 * progress.clamp(0.0,1.0)).round() as i32
 }
 
-/// Continuous L-shape: two overlapping same-color fills and no border,
-/// connector or arrow. Shading exists only at exposed top/left edges,
-/// never where the foot and right-hand well join.
-unsafe fn paint_submenu_well(hdc: HDC, hwnd: HWND, progress: f32, card: Color, dark: bool) -> Color {
-    let target = if dark { Color::from_hex("#1A1E24FF") }
-                 else { Color::from_hex("#DCE4EDFF") };
-    if progress <= 0.0 { return target; }
+/// One anti-aliased, continuous L-shaped inset. The old implementation
+/// overpainted two rounded rectangles and four opaque shadow bars; its joined
+/// horizontal/vertical edges produced the heavy black seams in V24.28.
+/// A native Direct2D path now owns the union AND its low-contrast inner shadow.
+unsafe fn paint_submenu_well(
+    hdc: HDC, hwnd: HWND, progress: f32, card: Color, dark: bool,
+) -> Color {
+    let top_target = if dark {
+        Color::from_hex("#252A30FF")
+    } else {
+        Color::from_hex("#E4EBF2FF")
+    };
+    let bottom_target = if dark {
+        Color::from_hex("#22272DFF")
+    } else {
+        Color::from_hex("#E0E7EFFF")
+    };
+    if progress <= 0.0 { return top_target; }
     let l = desktop_submenu_layout();
-    let inset = submenu_mix(card, target, progress);
-    let shade = submenu_mix(inset, if dark { Color::from_hex("#10141AFF") }
-        else { Color::from_hex("#A9B7C6FF") }, 0.48*progress);
-    let saved = SaveDC(hdc);
-    let _ = IntersectClipRect(hdc, scale(hwnd,l.foot.left),scale(hwnd,l.well.top),
-        scale(hwnd,submenu_reveal_right(progress)),scale(hwnd,l.foot.bottom));
-    fill_rounded_rect(hdc,scaled_rect(hwnd,l.well),inset,scale(hwnd,12));
-    fill_rounded_rect(hdc,scaled_rect(hwnd,l.foot),inset,scale(hwnd,12));
-    fill(hdc,rect(hwnd,640,164,651,193),inset);
-    fill(hdc,rect(hwnd,648,67,918,70),shade);
-    fill(hdc,rect(hwnd,638,79,641,150),shade);
-    fill(hdc,rect(hwnd,426,157,634,160),shade);
-    fill(hdc,rect(hwnd,416,168,419,189),shade);
-    let _ = RestoreDC(hdc,saved);
-    inset
+    // Much lower contrast to the parent card than the former #1A1E24.
+    let top = submenu_mix(card, top_target, progress);
+    let bottom = submenu_mix(card, bottom_target, progress);
+    let well = scaled_rect(hwnd, l.well);
+    let foot = scaled_rect(hwnd, l.foot);
+    let reveal = scale(hwnd, submenu_reveal_right(progress));
+    let shadow_opacity = if dark { 0.12 } else { 0.075 } * progress;
+    if !native_interop::draw_antialiased_desktop_inset_well(
+        hdc, well, foot, reveal, scale(hwnd, 11) as f32,
+        top, bottom, shadow_opacity,
+    ) {
+        // Degraded systems without the Direct2D DC renderer: use a subtle
+        // solid inset, but never restore the hard black shadow rectangles.
+        let saved = SaveDC(hdc);
+        let _ = IntersectClipRect(
+            hdc, foot.left, well.top, reveal, well.bottom,
+        );
+        fill_rounded_rect(hdc, well, top, scale(hwnd, 11));
+        fill_rounded_rect(hdc, foot, top, scale(hwnd, 11));
+        fill(hdc, rect(hwnd, 641, 163, 652, 191), top);
+        let _ = RestoreDC(hdc, saved);
+    }
+    // This is also the backing color used when fading the submenu labels and
+    // controls. Its exact value is independent of the persistent user theme.
+    top
 }
 
 #[allow(clippy::too_many_arguments)]
