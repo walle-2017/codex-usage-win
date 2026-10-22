@@ -533,6 +533,7 @@ pub fn draw_antialiased_settings_icon(
 
 /// Draw the *single* recessed L-shaped Desktop settings surface.  Both
 /// fill and interior shadow are clipped to one continuous D2D path.
+#[allow(clippy::too_many_arguments)] // FFI mirrors the fixed native drawing signature.
 pub fn draw_antialiased_desktop_inset_well(
     hdc: HDC, well: RECT, foot: RECT, reveal_right: i32,
     radius: f32, top: Color, bottom: Color, shadow_opacity: f32,
