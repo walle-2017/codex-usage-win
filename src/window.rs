@@ -5546,6 +5546,39 @@ fn step_floating_animation(hwnd: HWND) {
     }
 }
 
+/// Like free desktop hover retention, keep an expanded, edge-docked panel's
+/// hidden tab visible while the pointer is anywhere on its real panel or tab.
+/// This is only used when automatic edge collapse was explicitly disabled.
+/// The exterior halo gutter is never a hover target.
+fn floating_pointer_over_expanded_docked_panel(hwnd: HWND) -> bool {
+    let (body, grip) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return false };
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd
+            || s.floating_edge.is_none() || s.floating_collapsed
+            || !floating_grip_uses_hover_fade(s)
+        {
+            return false;
+        }
+        let (w, h, body) = floating_canvas_geometry_for_state(s);
+        let body = if s.floating_reserved_dock {
+            floating_slid_canvas_rect(
+                body, w, h, s.floating_edge.unwrap(),
+                if s.dragging { s.floating_reserved_drag_reveal } else { s.floating_reveal },
+            )
+        } else {
+            body
+        };
+        (body, floating_state_grip_rect(s))
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    floating_drag_tab_hit_code(
+        body, grip, pointer.x - rect.left, pointer.y - rect.top,
+    ) == 1
+}
+
 /// False while the pointer still overlaps the collapsed exposed edge grip.
 /// The cursor's hover *retention* area must not change with animation.
 /// In particular a transparent pixel at the physical monitor edge can stop
@@ -7233,7 +7266,8 @@ unsafe extern "system" fn wnd_proc(
                         )).unwrap_or(body)
                     } else { body },
                     floating_state_grip_rect(s),
-                    s.drag_handle_hovered && !s.dragging,
+                    !s.dragging && (s.drag_handle_hovered ||
+                        (floating_grip_uses_hover_fade(s) && s.floating_grip_hover)),
                 )
             };
             let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -7261,10 +7295,18 @@ unsafe extern "system" fn wnd_proc(
             // capture during dragging must not cause another release flicker.
             let valid = lock_state().as_ref().is_some_and(|s|
                 s.floating_mode && s.hwnd.to_hwnd() == hwnd
-                    && s.drag_handle_hovered && !s.dragging
+                    && !s.dragging
+                    && (s.drag_handle_hovered ||
+                        (floating_grip_uses_hover_fade(s) && s.floating_grip_hover))
             );
             if valid {
-                let hovered = {
+                let docked_hover_fade = lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                        && s.floating_edge.is_some() && floating_grip_uses_hover_fade(s)
+                );
+                let hovered = if docked_hover_fade {
+                    Some(floating_pointer_over_expanded_docked_panel(hwnd))
+                } else {
                     let geometry = {
                         let state = lock_state();
                         state.as_ref().map(|s| {
@@ -7286,6 +7328,9 @@ unsafe extern "system" fn wnd_proc(
                         if s.floating_mode && s.hwnd.to_hwnd() == hwnd && !s.dragging {
                             s.drag_handle_hovered = false;
                         }
+                    }
+                    if docked_hover_fade {
+                        set_floating_grip_hover(false);
                     }
                     render_layered();
                 }
@@ -7793,11 +7838,14 @@ unsafe extern "system" fn wnd_proc(
             // if Windows sends no second WM_MOUSELEAVE.
             if lock_state().as_ref().is_some_and(|s|
                 s.floating_mode && s.floating_edge.is_some() && !s.floating_collapsed
+                    && !floating_grip_uses_hover_fade(s)
             ) {
                 floating_arm_hover_recheck(hwnd);
                 return LRESULT(0);
             }
-            if floating_pointer_still_over_free_grip(hwnd) {
+            if floating_pointer_still_over_free_grip(hwnd)
+                || floating_pointer_over_expanded_docked_panel(hwnd)
+            {
                 // Capture change or popup movement can dispatch a stale leave
                 // despite the cursor still being over the detached tab.
                 // Re-arm tracking so the *next real exit* still hides the glow.
