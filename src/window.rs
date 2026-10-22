@@ -2910,8 +2910,15 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     for y in 0..height {
                         let dst = ((y + body.top) * canvas_w + body.left) as usize;
                         let src = (y * width) as usize;
-                        canvas[dst..dst + width as usize]
-                            .copy_from_slice(&pixel_data[src..src + width as usize]);
+                        for x in 0..width as usize {
+                            let index = dst + x;
+                            // Direct copies erased the underpainting even at
+                            // completely transparent round-corner pixels,
+                            // recreating a dark seam between body and halo.
+                            canvas[index] = composite_premultiplied_pixel(
+                                canvas[index], pixel_data[src + x],
+                            );
+                        }
                     }
                 }
                 render_floating_handle_bitmap(
@@ -3045,6 +3052,7 @@ fn draw_drag_hover_outer_glow(
     if canvas_w <= 0 || canvas_h <= 0 { return; }
     let area = (canvas_w * canvas_h) as usize;
     let mut occupied = vec![false; area];
+    let mut border_pixels = vec![false; area];
     for rect in [body, tab] {
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
@@ -3055,7 +3063,12 @@ fn draw_drag_hover_outer_glow(
                     width, height, x - rect.left, y - rect.top,
                     style.panel_corner_radius,
                 ) {
-                    occupied[(y * canvas_w + x) as usize] = true;
+                    let index = (y * canvas_w + x) as usize;
+                    occupied[index] = true;
+                    border_pixels[index] |= !panel_inner_shape_contains(
+                        width, height, x - rect.left, y - rect.top,
+                        style.panel_corner_radius,
+                    );
                 }
             }
         }
@@ -3076,6 +3089,13 @@ fn draw_drag_hover_outer_glow(
                 || !occupied[((y - 1) * canvas_w + x) as usize]
                 || !occupied[((y + 1) * canvas_w + x) as usize];
             if !boundary { continue; }
+            // V24.19: extend the same halo 0.75px below the *real* painted
+            // border. The later alpha-over compositing hides this under
+            // opaque pixels and lets it feather through only the outermost
+            // translucent rim. Never underpaint the actual content interior.
+            if border_pixels[index] {
+                glow[index] = glow[index].max(drag_hover_glow_coverage(0.75));
+            }
             for dy in -extent..=extent {
                 let ny = y + dy;
                 if ny < 0 || ny >= canvas_h { continue; }
@@ -3174,7 +3194,10 @@ fn render_floating_handle_bitmap_at(
             }));
             let mut color = if dot_pixel { dots } else { panel_color };
             color.a = ((u16::from(color.a) * u16::from(opacity.min(100)) + 50) / 100) as u8;
-            pixels[(y * width + x) as usize] = premultiplied_pixel(color);
+            let index = (y * width + x) as usize;
+            pixels[index] = composite_premultiplied_pixel(
+                pixels[index], premultiplied_pixel(color),
+            );
         }
     }
 }
@@ -3251,6 +3274,26 @@ fn panel_outer_shape_contains(
     radius == 0 || point_in_rounded_box(width, height, x, y, inset, radius)
 }
 
+/// The inner fill contour must be identical in rendering and halo
+/// underpainting. No light is ever placed underneath this content area.
+fn panel_inner_shape_contains(
+    width: i32, height: i32, x: i32, y: i32, corner_radius: u8,
+) -> bool {
+    let outer_inset = sc(1).max(1);
+    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
+    let outer_radius = sc(i32::from(corner_radius))
+        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
+    if outer_radius > 0 {
+        point_in_rounded_box(
+            width, height, x, y, inner_inset,
+            (outer_radius - PANEL_BORDER_WIDTH_PX).max(1),
+        )
+    } else {
+        x >= inner_inset && x < width - inner_inset
+            && y >= inner_inset && y < height - inner_inset
+    }
+}
+
 fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
     let outer_inset = sc(1).max(1);
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
@@ -3267,14 +3310,9 @@ fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &Theme
             if !outer_inside {
                 continue;
             }
-            let inner_inside = if outer_radius > 0 {
-                point_in_rounded_box(width, height, x, y, inner_inset, inner_radius)
-            } else {
-                x >= inner_inset
-                    && x < width - inner_inset
-                    && y >= inner_inset
-                    && y < height - inner_inset
-            };
+            let inner_inside = panel_inner_shape_contains(
+                width, height, x, y, style.panel_corner_radius,
+            );
             let idx = (y * width + x) as usize;
             pixels[idx] = blend_pixel(pixels[idx], if inner_inside { fill } else { border });
         }
@@ -3289,24 +3327,7 @@ fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -
     if !panel_outer_shape_contains(width, height, x, y, style.panel_corner_radius) {
         return None;
     }
-    if outer_radius > 0 {
-        let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
-        if point_in_rounded_box(width, height, x, y, inner_inset, inner_radius) {
-            Some(style.color(StyleColorTarget::PanelBackground))
-        } else {
-            Some(style.color(StyleColorTarget::PanelBorder))
-        }
-    } else if x < outer_inset
-        || x >= width - outer_inset
-        || y < outer_inset
-        || y >= height - outer_inset
-    {
-        None
-    } else if x >= inner_inset
-        && x < width - inner_inset
-        && y >= inner_inset
-        && y < height - inner_inset
-    {
+    if panel_inner_shape_contains(width, height, x, y, style.panel_corner_radius) {
         Some(style.color(StyleColorTarget::PanelBackground))
     } else {
         Some(style.color(StyleColorTarget::PanelBorder))
@@ -3349,6 +3370,28 @@ fn finalize_layered_bitmap(
             }
         }
     }
+}
+
+/// Premultiplied BGRA source-over for layered-window pixels. Unlike a
+/// direct assignment, a transparent rounded corner cannot erase the
+/// previously rendered background glow. Solid content remains unchanged.
+fn composite_premultiplied_pixel(dst: u32, src: u32) -> u32 {
+    let alpha = (src >> 24) & 0xFF;
+    if alpha == 0 { return dst; }
+    if alpha == 255 { return src; }
+    let inv = 255 - alpha;
+    let da = (dst >> 24) & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let out_a = alpha + (da * inv + 127) / 255;
+    let out_r = (sr + (dr * inv + 127) / 255).min(255);
+    let out_g = (sg + (dg * inv + 127) / 255).min(255);
+    let out_b = (sb + (db * inv + 127) / 255).min(255);
+    (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
 }
 
 fn composite_premultiplied_text(dst: u32, color: Color, coverage: u8) -> u32 {
