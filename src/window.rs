@@ -7975,12 +7975,19 @@ unsafe extern "system" fn wnd_proc(
                 floating_arm_hover_recheck(hwnd);
                 return LRESULT(0);
             }
-            if floating_pointer_in_expanded_docked_transition(hwnd) {
-                // Either a free transparent gutter OR the two alpha-zero
-                // edge pixels within the adjacent body/tab rectangles can
-                // deliver WM_MOUSELEAVE. Both need the same timed recheck.
-                // Re-arming TrackMouseEvent here (the old fallback below)
-                // cannot recover events lost to alpha-zero hit testing.
+            if lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_edge.is_some() && !s.floating_collapsed
+                    && floating_grip_uses_hover_fade(s)
+            ) {
+                // WM_MOUSELEAVE is asynchronous: by the time it is delivered
+                // the pointer may already have crossed the alpha-zero seam
+                // into the visible tab. A geometric "still inside" test would
+                // merely re-arm TrackMouseEvent and NEVER update
+                // drag_handle_hovered if Win32 stopped sending WM_MOUSEMOVE.
+                // Always schedule one bounded actual-cursor recheck for this
+                // expanded docked mode, including when the cursor has already
+                // arrived at the tab. The timer changes only hover state,
+                // NEVER panel collapse.
                 floating_arm_hover_recheck(hwnd);
                 return LRESULT(0);
             }
