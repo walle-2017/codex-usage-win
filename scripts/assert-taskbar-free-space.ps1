@@ -32,7 +32,7 @@ if ($native -notmatch 'codex_taskbar_control_rects' -or
 }
 
 if ($appearance -notmatch 'pub enum DisplayPosition' -or
-    $appearance -notmatch 'Self::Adaptive\s*=>\s*Self::Default' -or
+    $appearance -match '(?m)^\s*Adaptive,' -or
     $settings -notmatch 'appearance.position: allowed values are taskbar, desktop' -or
     $styleWindow -notmatch 'HitTarget::Position\(position\)' -or
     $styleWindow -notmatch 'DisplayPosition::Taskbar, DisplayPosition::Desktop' -or
