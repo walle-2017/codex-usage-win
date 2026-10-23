@@ -145,7 +145,6 @@ struct AppState {
     taskbar_top_offset: i32,
     vertical_taskbar_mode: bool,
     vertical_widget_width: i32,
-    legacy_tray_offset: Option<i32>,
     dragging: bool,
     drag_anchor_logical_x: i32,
     drag_anchor_logical_y: i32,
@@ -508,7 +507,6 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
 }
 
 const SETTINGS_DIR: &str = "CodexUsage";
-const LEGACY_SETTINGS_DIR: &str = "ClaudeCodeUsageMonitor";
 
 fn appdata_path(directory: &str) -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
@@ -519,14 +517,9 @@ fn settings_path() -> PathBuf {
     appdata_path(SETTINGS_DIR)
 }
 
-fn legacy_settings_path() -> PathBuf {
-    appdata_path(LEGACY_SETTINGS_DIR)
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SettingsFile {
-    #[serde(default)]
-    tray_offset: i32,
     #[serde(default)]
     taskbar_index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -570,7 +563,6 @@ struct SettingsFile {
 impl Default for SettingsFile {
     fn default() -> Self {
         Self {
-            tray_offset: 0,
             taskbar_index: 0,
             taskbar_left_offset: None,
             taskbar_top_offset: None,
@@ -676,8 +668,7 @@ fn backup_invalid_settings(path: &std::path::Path) {
 
 fn load_settings() -> SettingsFile {
     let current_path = settings_path();
-    let legacy_path = legacy_settings_path();
-    let (settings, needs_rewrite) = load_settings_from_paths(&current_path, &legacy_path)
+    let (settings, needs_rewrite) = load_settings_from_path(&current_path)
         .unwrap_or_else(|| (SettingsFile::default(), false));
     if needs_rewrite {
         save_settings(&settings);
@@ -689,23 +680,12 @@ fn load_settings() -> SettingsFile {
     settings
 }
 
-fn load_settings_from_paths(
-    current_path: &std::path::Path,
-    legacy_path: &std::path::Path,
-) -> Option<(SettingsFile, bool)> {
-    if let Ok(text) = std::fs::read_to_string(current_path) {
-        if serde_json::from_str::<serde_json::Value>(&text).is_err() {
-            backup_invalid_settings(current_path);
-        }
-        return Some(reconcile_settings_json(&text));
-    }
-
-    let text = std::fs::read_to_string(legacy_path).ok()?;
+fn load_settings_from_path(path: &std::path::Path) -> Option<(SettingsFile, bool)> {
+    let text = std::fs::read_to_string(path).ok()?;
     if serde_json::from_str::<serde_json::Value>(&text).is_err() {
-        backup_invalid_settings(legacy_path);
+        backup_invalid_settings(path);
     }
-    let (settings, _) = reconcile_settings_json(&text);
-    Some((settings, true))
+    Some(reconcile_settings_json(&text))
 }
 
 fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
@@ -748,9 +728,6 @@ fn save_state_settings() {
     let snapshot = {
         let state = lock_state();
         state.as_ref().map(|s| SettingsFile {
-            // Legacy fields remain serialized for backward compatibility, but
-            // new versions use an absolute left-edge offset plus monitor identity.
-            tray_offset: 0,
             taskbar_index: s.taskbar_index,
             taskbar_left_offset: Some(s.taskbar_left_offset),
             taskbar_top_offset: Some(s.taskbar_top_offset),
@@ -1419,22 +1396,7 @@ fn clamp_left_offset(left_offset: i32, max_left: i32) -> i32 {
     left_offset.clamp(0, max_left.max(0))
 }
 
-fn legacy_left_offset_from_max(max_left: i32, tray_offset: i32) -> i32 {
-    let max_left = max_left.max(0);
-    max_left - tray_offset.clamp(0, max_left)
-}
 
-fn legacy_left_offset(
-    taskbar_hwnd: HWND,
-    taskbar_rect: RECT,
-    widget_width: i32,
-    tray_offset: i32,
-) -> i32 {
-    legacy_left_offset_from_max(
-        max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width),
-        tray_offset,
-    )
-}
 
 fn free_spans_from_occupied(
     taskbar_rect: RECT,
@@ -1878,7 +1840,6 @@ fn update_language_change() -> bool {
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_REGISTRY_KEY: &str = "CodexUsageWin";
-const LEGACY_STARTUP_REGISTRY_KEY: &str = "CodexUsage";
 
 /// Returns true only if the startup registry value points to this executable.
 fn is_startup_enabled() -> bool {
@@ -1977,26 +1938,7 @@ fn delete_startup_value(key: &str) {
     }
 }
 
-fn migrate_legacy_startup_entry() {
-    let legacy_exists = read_startup_value(LEGACY_STARTUP_REGISTRY_KEY).is_some();
-    let current_exists = read_startup_value(STARTUP_REGISTRY_KEY).is_some();
-    if !legacy_exists {
-        return;
-    }
 
-    if should_write_migrated_startup(legacy_exists, current_exists) {
-        set_startup_enabled(true);
-    }
-
-    if read_startup_value(STARTUP_REGISTRY_KEY).is_some() {
-        delete_startup_value(LEGACY_STARTUP_REGISTRY_KEY);
-        diagnose::log("migrated legacy startup registry entry to CodexUsageWin");
-    }
-}
-
-fn should_write_migrated_startup(legacy_exists: bool, current_exists: bool) -> bool {
-    legacy_exists && !current_exists
-}
 
 fn set_startup_enabled(enable: bool) {
     unsafe {
@@ -2035,8 +1977,6 @@ fn set_startup_enabled(enable: bool) {
             }
         } else {
             let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(key_name.as_ptr()));
-            let legacy_key_name = native_interop::wide_str(LEGACY_STARTUP_REGISTRY_KEY);
-            let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(legacy_key_name.as_ptr()));
         }
 
         let _ = RegCloseKey(hkey);
@@ -2399,8 +2339,6 @@ pub fn run() {
         }
     };
 
-    migrate_legacy_startup_entry();
-
     let class_name = native_interop::wide_str("CodexUsageWin");
 
     unsafe {
@@ -2553,10 +2491,6 @@ pub fn run() {
                 taskbar_top_offset: settings.taskbar_top_offset.unwrap_or(0),
                 vertical_taskbar_mode: false,
                 vertical_widget_width: sc(VERTICAL_WIDGET_MIN_WIDTH),
-                legacy_tray_offset: settings
-                    .taskbar_left_offset
-                    .is_none()
-                    .then_some(settings.tray_offset),
                 dragging: false,
                 drag_anchor_logical_x: 0,
                 drag_anchor_logical_y: 0,
@@ -2567,8 +2501,7 @@ pub fn run() {
             });
         }
 
-        // Prefer the stable monitor identity. taskbar_index is retained only
-        // as a compatibility fallback for settings written by older versions.
+        // Prefer a persisted monitor identity; fall back to the saved index if unavailable.
         if attach_to_preferred_taskbar(
             hwnd,
             settings.taskbar_monitor.as_deref(),
@@ -6361,7 +6294,6 @@ fn position_at_taskbar() {
         hwnd,
         embedded,
         desired_left_offset,
-        legacy_tray_offset,
         taskbar_hwnd,
         taskbar_monitor,
         blur_active,
@@ -6387,7 +6319,6 @@ fn position_at_taskbar() {
             s.hwnd.to_hwnd(),
             s.embedded,
             s.taskbar_left_offset,
-            s.legacy_tray_offset,
             taskbar_hwnd,
             s.taskbar_monitor.clone(),
             s.composition_blur_active,
@@ -6432,35 +6363,6 @@ fn position_at_taskbar() {
             }
         }
     }
-
-    let migration_preset = match configured_preset {
-        AppearancePreset::Minimal => AppearancePreset::Minimal,
-        _ => AppearancePreset::Default,
-    };
-    let migration_width = total_widget_width_for_preset(language, migration_preset);
-    let desired_left_offset = if let Some(legacy_tray_offset) = legacy_tray_offset {
-        let migrated = legacy_left_offset(
-            taskbar_hwnd,
-            taskbar_rect,
-            migration_width,
-            legacy_tray_offset,
-        );
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.taskbar_left_offset = migrated;
-                s.legacy_tray_offset = None;
-            }
-        }
-        diagnose::log(format!(
-            "migrated legacy tray_offset={} to taskbar_left_offset={}",
-            legacy_tray_offset, migrated
-        ));
-        save_state_settings();
-        migrated
-    } else {
-        desired_left_offset
-    };
 
     let Some(free_spans) = taskbar_free_spans(taskbar_hwnd, taskbar_rect) else {
         hide_widget_for_taskbar_space(
@@ -8249,7 +8151,6 @@ unsafe extern "system" fn wnd_proc(
                                     let mut state = lock_state();
                                     if let Some(s) = state.as_mut() {
                                         s.taskbar_top_offset = top;
-                                        s.legacy_tray_offset = None;
                                     }
                                 } else {
                                     diagnose::log("drag release found no safe vertical gap");
@@ -8303,7 +8204,6 @@ unsafe extern "system" fn wnd_proc(
                                     let mut state = lock_state();
                                     if let Some(s) = state.as_mut() {
                                         s.taskbar_left_offset = new_left_offset;
-                                        s.legacy_tray_offset = None;
                                     }
                                 }
                                 let monitor = {
@@ -8569,7 +8469,6 @@ unsafe extern "system" fn wnd_proc(
                                 TaskbarAxis::Horizontal => s.taskbar_left_offset = target,
                                 TaskbarAxis::Vertical => s.taskbar_top_offset = target,
                             }
-                            s.legacy_tray_offset = None;
                         }
                     }
                     save_state_settings();
@@ -9733,7 +9632,6 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     };
     let appearance_preset = match settings.appearance.layout.as_str() {
         "minimal" => AppearancePreset::Minimal,
-        "adaptive" => AppearancePreset::Default,
         _ => AppearancePreset::Default,
     };
     let startup_enabled = settings.general.start_with_windows;
@@ -12867,7 +12765,7 @@ mod tests {
     }
 
     #[test]
-    fn taskbar_top_offset_remains_compatible_with_legacy_settings() {
+    fn taskbar_offsets_round_trip() {
         let old = r#"{"taskbar_index":0,"taskbar_left_offset":123}"#;
         let parsed: SettingsFile = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.taskbar_left_offset, Some(123));
@@ -13074,7 +12972,6 @@ mod tests {
     fn test_settings_json(language: &str) -> String {
         format!(
             r#"{{
-  "tray_offset": 321,
   "taskbar_index": 1,
   "poll_interval_ms": 60000,
   "language": "{language}"
@@ -13083,7 +12980,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_settings_default_to_default_appearance() {
+    fn empty_settings_default_to_default_appearance() {
         let settings: SettingsFile = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.appearance_preset, AppearancePreset::Default);
     }
@@ -13176,14 +13073,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tray_offset_migrates_to_equivalent_left_offset() {
-        assert_eq!(legacy_left_offset_from_max(1000, 0), 1000);
-        assert_eq!(legacy_left_offset_from_max(1000, 321), 679);
-        assert_eq!(legacy_left_offset_from_max(1000, 1200), 0);
-    }
-
-    #[test]
-    fn monitor_identity_wins_over_legacy_taskbar_index() {
+    fn monitor_identity_wins_over_selected_taskbar_index() {
         let taskbars = vec![
             native_interop::TaskbarWindow {
                 hwnd: HWND::default(),
@@ -13285,61 +13175,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let current = dir.join("settings.json");
         std::fs::write(&current, "{invalid json").unwrap();
-        let (settings, rewrite) = load_settings_from_paths(&current, &dir.join("legacy.json")).unwrap();
+        let (settings, rewrite) = load_settings_from_path(&current).unwrap();
         assert!(rewrite);
         assert_eq!(settings.appearance_preset, AppearancePreset::Default);
         assert_eq!(std::fs::read_to_string(current.with_extension("json.invalid.bak")).unwrap(), "{invalid json");
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn loads_legacy_settings_when_new_path_is_missing() {
-        let base = std::env::temp_dir().join(format!(
-            "codex-usage-settings-test-{}-{}",
-            std::process::id(),
-            now_unix_secs()
-        ));
-        let current = base.join("CodexUsage").join("settings.json");
-        let legacy = base.join("ClaudeCodeUsageMonitor").join("settings.json");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, test_settings_json("zh-CN")).unwrap();
-        let (settings, migrated) = load_settings_from_paths(&current, &legacy).unwrap();
-        assert!(migrated);
-        assert_eq!(settings.tray_offset, 321);
-        assert_eq!(settings.taskbar_left_offset, None);
-        assert_eq!(settings.taskbar_monitor, None);
-        assert_eq!(settings.poll_interval_ms, 60_000);
-        assert_eq!(settings.language.as_deref(), Some("zh-CN"));
-        assert!(settings.show_session_window);
-        assert!(settings.show_weekly_window);
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn new_settings_take_precedence_over_legacy_settings() {
-        let base = std::env::temp_dir().join(format!(
-            "codex-usage-settings-precedence-test-{}-{}",
-            std::process::id(),
-            now_unix_secs()
-        ));
-        let current = base.join("CodexUsage").join("settings.json");
-        let legacy = base.join("ClaudeCodeUsageMonitor").join("settings.json");
-        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&current, test_settings_json("en")).unwrap();
-        std::fs::write(&legacy, test_settings_json("zh-CN")).unwrap();
-        let (settings, needs_rewrite) = load_settings_from_paths(&current, &legacy).unwrap();
-        assert!(needs_rewrite);
-        assert_eq!(settings.language.as_deref(), Some("en"));
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn startup_migration_only_writes_when_legacy_exists_without_current_entry() {
-        assert!(should_write_migrated_startup(true, false));
-        assert!(!should_write_migrated_startup(false, false));
-        assert!(!should_write_migrated_startup(true, true));
-        assert!(!should_write_migrated_startup(false, true));
     }
 
     #[test]
