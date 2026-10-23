@@ -360,7 +360,7 @@ if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
 # All settings buttons use the same embedded SVG assets, including GDI-only hosts.
 $svgIcons = Get-ChildItem (Join-Path $PSScriptRoot '..\assets\settings-icons') -Filter '*.svg'
 $svgRaster = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\svg_icons.rs')
-if ($svgIcons.Count -ne 32 -or
+if ($svgIcons.Count -ne 31 -or
     $native -notmatch 'codex_blend_settings_icon' -or
     $controlPrimitives -notmatch 'codex_blend_settings_icon' -or
     $controlPrimitives -notmatch 'AlphaBlend\(' -or
@@ -370,7 +370,7 @@ if ($svgIcons.Count -ne 32 -or
     $svgRaster -notmatch 'premultiply_alpha' -or
     $controlPrimitives -match 'codex_draw_settings_icon' -or
     $native -match 'codex_draw_settings_icon') {
-    throw 'All 32 settings glyphs must be embedded SVG files, theme/DPI raster-cached and alpha-composited.'
+    throw 'All 31 settings glyphs must be embedded SVG files, theme/DPI raster-cached and alpha-composited.'
 }
 
 if ($native -notmatch 'set_composition_blur_bounds' -or
