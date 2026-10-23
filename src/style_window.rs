@@ -87,6 +87,7 @@ const ENM_CHANGE_MASK: isize = 0x00000001;
 const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
 const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
 const DESKTOP_SUBMENU_DURATION_MS: u64 = 220;
+const DESKTOP_SUBMENU_ICON_SIZE: i32 = 18;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
@@ -6679,9 +6680,13 @@ unsafe fn paint_submenu_choice(hdc:HDC,hwnd:HWND,bounds:RECT,icon:SettingsIcon,
     let outline=submenu_mix(inset,if selected{Color::from_hex("#76A7FFFF")}
         else{subtle_control_border(desired)},alpha);
     draw_rounded_outline_rect(hdc,r,outline,scale(hwnd,7),1);
-    let size=scale(hwnd,14);
-    let gap=scale(hwnd,3);
-    let group=size+gap+text_width_px(hwnd,label);
+    // V24.32: the 14px glyphs in V24.31 lost the silhouette at 100% DPI.
+    // Use 18px and reserve text width even on English / scaled displays.
+    let gap=scale(hwnd,2);
+    let text_width=text_width_px(hwnd,label);
+    let size=scale(hwnd,DESKTOP_SUBMENU_ICON_SIZE)
+        .min((r.right-r.left-text_width-gap-scale(hwnd,6)).max(scale(hwnd,12)));
+    let group=size+gap+text_width;
     let left=r.left+((r.right-r.left-group)/2).max(scale(hwnd,3));
     let top=r.top+(r.bottom-r.top-size)/2;
     let ir=RECT{left,top,right:left+size,bottom:top+size};
@@ -8453,10 +8458,7 @@ unsafe fn draw_settings_icon(
             let gear_radius = scale(hwnd, 3);
             let _ = Ellipse(hdc, gear_x - gear_radius, gear_y - gear_radius,
                 gear_x + gear_radius, gear_y + gear_radius);
-            for (dx, dy) in [
-                (-4, 0), (4, 0), (0, -4), (0, 4),
-                (-3, -3), (3, -3), (-3, 3), (3, 3),
-            ] {
+            for (dx, dy) in [(-4, 0), (4, 0), (0, -4), (0, 4)] {
                 let ax = gear_x + scale(hwnd, dx * 3 / 4);
                 let ay = gear_y + scale(hwnd, dy * 3 / 4);
                 line(hdc, ax, ay, gear_x + scale(hwnd, dx),
@@ -8552,59 +8554,50 @@ unsafe fn draw_settings_icon(
                 cx + scale(hwnd, 3), rect.bottom - scale(hwnd, 1));
         }
         SettingsIcon::ToggleOn | SettingsIcon::ToggleOff => {
-            draw_rounded_outline_rect(hdc, RECT {
+            // Color-on-background capsule with a much brighter thumb.
+            fill_rounded_rect(hdc, RECT {
                 left: rect.left + scale(hwnd, 1),
-                top: cy - scale(hwnd, 4),
+                top: cy - scale(hwnd, 5),
                 right: rect.right - scale(hwnd, 1),
-                bottom: cy + scale(hwnd, 4),
-            }, color, scale(hwnd, 4), stroke);
+                bottom: cy + scale(hwnd, 5),
+            }, submenu_mix(background, color, 0.34), scale(hwnd, 5));
             let thumb_x = if icon == SettingsIcon::ToggleOn {
                 rect.right - scale(hwnd, 6)
             } else {
                 rect.left + scale(hwnd, 6)
             };
             fill_rounded_rect(hdc, RECT {
-                left: thumb_x - scale(hwnd, 3),
-                top: cy - scale(hwnd, 3),
-                right: thumb_x + scale(hwnd, 3),
-                bottom: cy + scale(hwnd, 3),
-            }, color, scale(hwnd, 3));
+                left: thumb_x - scale(hwnd, 4),
+                top: cy - scale(hwnd, 4),
+                right: thumb_x + scale(hwnd, 4),
+                bottom: cy + scale(hwnd, 4),
+            }, color, scale(hwnd, 4));
         }
         SettingsIcon::PositionTaskbar => {
-            // Horizontal taskbar with status indicator slots.
             draw_rounded_outline_rect(hdc, RECT {
                 left: rect.left + scale(hwnd, 1),
-                top: cy - scale(hwnd, 4),
+                top: cy - scale(hwnd, 5),
                 right: rect.right - scale(hwnd, 1),
-                bottom: cy + scale(hwnd, 4),
+                bottom: cy + scale(hwnd, 5),
             }, color, scale(hwnd, 2), stroke);
             line(hdc, rect.left + scale(hwnd, 4), cy,
-                rect.left + scale(hwnd, 7), cy);
-            for x in [rect.right - scale(hwnd, 8),
-                      rect.right - scale(hwnd, 5),
-                      rect.right - scale(hwnd, 2)] {
-                line(hdc, x, cy - scale(hwnd, 1), x, cy + scale(hwnd, 1));
+                rect.left + scale(hwnd, 8), cy);
+            for x in [rect.right - scale(hwnd, 7), rect.right - scale(hwnd, 3)] {
+                fill_rounded_rect(hdc, RECT {
+                    left: x - scale(hwnd, 1), top: cy - scale(hwnd, 2),
+                    right: x + scale(hwnd, 1), bottom: cy + scale(hwnd, 2),
+                }, color, scale(hwnd, 1));
             }
         }
         SettingsIcon::PositionDesktop => {
-            // Four app tiles inside a monitor, no gear.
-            draw_rounded_outline_rect(hdc, RECT {
-                left: rect.left + scale(hwnd, 1),
-                top: rect.top + scale(hwnd, 2),
-                right: rect.right - scale(hwnd, 1),
-                bottom: rect.bottom - scale(hwnd, 5),
-            }, color, scale(hwnd, 2), stroke);
-            line(hdc, cx, rect.bottom - scale(hwnd, 5),
-                cx, rect.bottom - scale(hwnd, 2));
-            line(hdc, cx - scale(hwnd, 3), rect.bottom - scale(hwnd, 2),
-                cx + scale(hwnd, 3), rect.bottom - scale(hwnd, 2));
-            for (dx, dy) in [(-3, -3), (2, -3), (-3, 1), (2, 1)] {
+            // Four bold tiles only: Desktop must not look like System monitor.
+            for (dx, dy) in [(-7, -7), (1, -7), (-7, 1), (1, 1)] {
                 fill_rounded_rect(hdc, RECT {
-                    left: cx + scale(hwnd, dx) - scale(hwnd, 1),
-                    top: cy + scale(hwnd, dy) - scale(hwnd, 1),
-                    right: cx + scale(hwnd, dx) + scale(hwnd, 1),
-                    bottom: cy + scale(hwnd, dy) + scale(hwnd, 1),
-                }, color, scale(hwnd, 1));
+                    left: cx + scale(hwnd, dx),
+                    top: cy + scale(hwnd, dy),
+                    right: cx + scale(hwnd, dx + 6),
+                    bottom: cy + scale(hwnd, dy + 6),
+                }, color, scale(hwnd, 2));
             }
         }
         SettingsIcon::LayoutAdaptive => {
@@ -8717,8 +8710,13 @@ unsafe fn draw_segment_with_icon(
     };
     draw_rounded_outline_rect(hdc, rect, border, radius, 1);
 
-    let icon_size = scale(hwnd, 18).min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
-    let gap = scale(hwnd, 7);
+    let important_small_icon = matches!(
+        icon,
+        SettingsIcon::ThemeSystem | SettingsIcon::PositionTaskbar | SettingsIcon::PositionDesktop,
+    );
+    let icon_size = scale(hwnd, if important_small_icon { 20 } else { 18 })
+        .min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
+    let gap = scale(hwnd, if important_small_icon { 5 } else { 7 });
     let text_width = text_width_px(hwnd, text).max(scale(hwnd, 12));
     let group_width = icon_size + gap + text_width;
     let group_left = rect.left + ((rect.right - rect.left - group_width) / 2).max(scale(hwnd, 6));
@@ -9017,6 +9015,12 @@ mod ui_smoke_tests {
         assert_eq!(SettingsIcon::PositionTaskbar as i32, 30);
         assert_eq!(SettingsIcon::PositionDesktop as i32, 31);
         assert_ne!(SettingsIcon::ThemeSystem as i32, SettingsIcon::PositionDesktop as i32);
+        assert_eq!(DESKTOP_SUBMENU_ICON_SIZE, 18);
+        // Regression for V24.31: all six added icons were rejected by the
+        // original native kind>25 gate and always fell back to tiny GDI art.
+        let native = include_str!("../native/control_primitives.cpp");
+        assert!(native.contains("icon_kind > 31"),
+            "Direct2D must accept settings icon kinds 26 through 31");
         assert!(l.foot.left - 414 >= 12);
         assert!(l.foot.left < 434 && l.foot.right > 534);
     }
