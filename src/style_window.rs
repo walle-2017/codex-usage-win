@@ -8439,30 +8439,30 @@ unsafe fn draw_settings_icon(
             draw_text(hdc, "{}", rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
         SettingsIcon::ThemeSystem => {
-            // Theme follows Windows: a monitor plus small gear, visibly
-            // distinct from the four-app-tile Desktop placement icon.
+            // Fallback matches the native 22px monitor + enlarged gear:
+            // six chunky teeth outside a hollow center.
             draw_rounded_outline_rect(
                 hdc, RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: rect.top + scale(hwnd, 2),
-                    right: rect.right - scale(hwnd, 4),
-                    bottom: rect.bottom - scale(hwnd, 5),
+                    left: rect.left + scale(hwnd, 2),
+                    top: rect.top + scale(hwnd, 3),
+                    right: rect.right - scale(hwnd, 7),
+                    bottom: rect.bottom - scale(hwnd, 7),
                 }, color, scale(hwnd, 2), stroke,
             );
-            line(hdc, cx - scale(hwnd, 2), rect.bottom - scale(hwnd, 5),
-                cx - scale(hwnd, 2), rect.bottom - scale(hwnd, 2));
-            line(hdc, cx - scale(hwnd, 5), rect.bottom - scale(hwnd, 2),
-                cx + scale(hwnd, 1), rect.bottom - scale(hwnd, 2));
-            let gear_x = rect.right - scale(hwnd, 5);
-            let gear_y = rect.bottom - scale(hwnd, 5);
-            let gear_radius = scale(hwnd, 3);
-            let _ = Ellipse(hdc, gear_x - gear_radius, gear_y - gear_radius,
-                gear_x + gear_radius, gear_y + gear_radius);
-            for (dx, dy) in [(-4, 0), (4, 0), (0, -4), (0, 4)] {
-                let ax = gear_x + scale(hwnd, dx * 3 / 4);
-                let ay = gear_y + scale(hwnd, dy * 3 / 4);
-                line(hdc, ax, ay, gear_x + scale(hwnd, dx),
-                    gear_y + scale(hwnd, dy));
+            line(hdc, rect.left + scale(hwnd, 8), rect.bottom - scale(hwnd, 7),
+                rect.left + scale(hwnd, 8), rect.bottom - scale(hwnd, 4));
+            line(hdc, rect.left + scale(hwnd, 5), rect.bottom - scale(hwnd, 4),
+                rect.left + scale(hwnd, 11), rect.bottom - scale(hwnd, 4));
+            let gx = rect.right - scale(hwnd, 6);
+            let gy = rect.bottom - scale(hwnd, 6);
+            let ring = scale(hwnd, 3);
+            let _ = Ellipse(hdc, gx - ring, gy - ring, gx + ring, gy + ring);
+            for (dx, dy, ix, iy) in [
+                (0, -5, 0, -3), (4, -3, 2, -2), (4, 3, 2, 2),
+                (0, 5, 0, 3), (-4, 3, -2, 2), (-4, -3, -2, -2),
+            ] {
+                line(hdc, gx + scale(hwnd, ix), gy + scale(hwnd, iy),
+                    gx + scale(hwnd, dx), gy + scale(hwnd, dy));
             }
         }
         SettingsIcon::ThemeDark => {
@@ -8573,32 +8573,32 @@ unsafe fn draw_settings_icon(
                 bottom: cy + scale(hwnd, 4),
             }, color, scale(hwnd, 4));
         }
-        SettingsIcon::PositionTaskbar => {
+        SettingsIcon::PositionTaskbar | SettingsIcon::PositionDesktop => {
+            // Shared monitor silhouette. Only the position/height of the
+            // solid interior differs, as in the primary Direct2D painter.
             draw_rounded_outline_rect(hdc, RECT {
-                left: rect.left + scale(hwnd, 1),
-                top: cy - scale(hwnd, 5),
-                right: rect.right - scale(hwnd, 1),
-                bottom: cy + scale(hwnd, 5),
+                left: rect.left + scale(hwnd, 2),
+                top: rect.top + scale(hwnd, 3),
+                right: rect.right - scale(hwnd, 2),
+                bottom: rect.bottom - scale(hwnd, 3),
             }, color, scale(hwnd, 2), stroke);
-            line(hdc, rect.left + scale(hwnd, 4), cy,
-                rect.left + scale(hwnd, 8), cy);
-            for x in [rect.right - scale(hwnd, 7), rect.right - scale(hwnd, 3)] {
-                fill_rounded_rect(hdc, RECT {
-                    left: x - scale(hwnd, 1), top: cy - scale(hwnd, 2),
-                    right: x + scale(hwnd, 1), bottom: cy + scale(hwnd, 2),
-                }, color, scale(hwnd, 1));
-            }
-        }
-        SettingsIcon::PositionDesktop => {
-            // Four bold tiles only: Desktop must not look like System monitor.
-            for (dx, dy) in [(-7, -7), (1, -7), (-7, 1), (1, 1)] {
-                fill_rounded_rect(hdc, RECT {
-                    left: cx + scale(hwnd, dx),
-                    top: cy + scale(hwnd, dy),
-                    right: cx + scale(hwnd, dx + 6),
-                    bottom: cy + scale(hwnd, dy + 6),
-                }, color, scale(hwnd, 2));
-            }
+            let taskbar = icon == SettingsIcon::PositionTaskbar;
+            let top = if taskbar {
+                rect.bottom - scale(hwnd, 8)
+            } else {
+                rect.top + scale(hwnd, 6)
+            };
+            let bottom = if taskbar {
+                rect.bottom - scale(hwnd, 5)
+            } else {
+                rect.bottom - scale(hwnd, 9)
+            };
+            fill_rounded_rect(hdc, RECT {
+                left: rect.left + scale(hwnd, 5),
+                top,
+                right: rect.right - scale(hwnd, 5),
+                bottom,
+            }, color, scale(hwnd, 1));
         }
         SettingsIcon::LayoutAdaptive => {
             line(
@@ -8714,7 +8714,16 @@ unsafe fn draw_segment_with_icon(
         icon,
         SettingsIcon::ThemeSystem | SettingsIcon::PositionTaskbar | SettingsIcon::PositionDesktop,
     );
-    let icon_size = scale(hwnd, if important_small_icon { 20 } else { 18 })
+    // The theme's gear needs a few more pixels than the much simpler
+    // rectangular placement icons to keep its teeth distinguishable.
+    let preferred_icon_size = if icon == SettingsIcon::ThemeSystem {
+        22
+    } else if important_small_icon {
+        20
+    } else {
+        18
+    };
+    let icon_size = scale(hwnd, preferred_icon_size)
         .min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
     let gap = scale(hwnd, if important_small_icon { 5 } else { 7 });
     let text_width = text_width_px(hwnd, text).max(scale(hwnd, 12));
@@ -8997,6 +9006,23 @@ mod ui_smoke_tests {
             assert!(tooltip.top > body.bottom);
             assert!(tooltip.bottom <= canvas.bottom);
         }
+    }
+
+    #[test]
+    fn v24_33_taskbar_desktop_share_screen_outline_with_distinct_fill_bands() {
+        let src = include_str!("../native/control_primitives.cpp");
+        // Both placements are rendered through the SAME outer screen path;
+        // the fill changes from short/bottom to tall/top.
+        assert!(src.contains("case 30: // Taskbar: monitor with a SHORT solid bar"));
+        assert!(src.contains("case 31: { // Desktop: identical monitor, TALL solid area"));
+        assert!(src.contains("icon_kind == 30 ? 16.0f : 6.0f"));
+        assert!(src.contains("icon_kind == 30 ? 18.5f : 14.7f"));
+        assert!(src.contains("case 8: { // System: monitor + conspicuous six-tooth gear"));
+        assert!(src.contains("for (int i = 0; i < 6; ++i)"));
+        assert!(src.contains("icon_kind > 31"));
+        assert_eq!(SettingsIcon::ThemeSystem as i32, 8);
+        assert_eq!(SettingsIcon::PositionTaskbar as i32, 30);
+        assert_eq!(SettingsIcon::PositionDesktop as i32, 31);
     }
 
     #[test]
