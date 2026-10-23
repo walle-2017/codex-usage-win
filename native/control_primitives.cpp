@@ -589,18 +589,22 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
                 });
             break;
 
-        case 8: // System: recognizable monitor with one simplified gear.
-            rounded_rect(2.8f, 3.0f, 17.5f, 15.5f, 2.0f);
-            line(9.5f, 15.5f, 9.5f, 18.4f);
-            line(6.0f, 18.4f, 12.3f, 18.4f);
-            // Four chunky teeth, rather than eight tiny hairlines.
-            ellipse(18.1f, 16.9f, 3.25f);
-            dot(18.1f, 16.9f, 1.3f);
-            line(18.1f, 11.9f, 18.1f, 13.2f);
-            line(18.1f, 20.6f, 18.1f, 21.8f);
-            line(13.2f, 16.9f, 14.4f, 16.9f);
-            line(21.6f, 16.9f, 22.7f, 16.9f);
+        case 8: { // System: monitor + conspicuous six-tooth gear.
+            // The gear is deliberately a separate LARGE outline rather
+            // than a few tiny lines merged with the monitor's bottom edge.
+            rounded_rect(2.1f, 2.7f, 16.6f, 15.4f, 2.0f);
+            line(8.0f, 15.4f, 8.0f, 18.0f);
+            line(5.2f, 18.0f, 11.1f, 18.0f);
+            const float gx = 17.6f, gy = 17.5f;
+            for (int i = 0; i < 6; ++i) {
+                const float angle = static_cast<float>(i) * 3.14159265f / 3.0f;
+                const float cs = std::cos(angle), sn = std::sin(angle);
+                line(gx + 3.0f * cs, gy + 3.0f * sn,
+                     gx + 5.1f * cs, gy + 5.1f * sn);
+            }
+            ellipse(gx, gy, 2.7f); // Hollow center stays legible at 22px.
             break;
+        }
 
         case 9: // Dark - crescent moon.
             draw_icon_path(
@@ -951,24 +955,19 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             break;
         }
 
-        case 30: // Taskbar: a single wide status strip with TWO clear blocks.
-            rounded_rect(2.2f, 7.0f, 21.8f, 17.0f, 2.2f);
-            line(5.0f, 12.0f, 9.0f, 12.0f);
-            dot(15.8f, 12.0f, 1.75f);
-            dot(19.5f, 12.0f, 1.75f);
+        case 30: // Taskbar: monitor with a SHORT solid bar at the BOTTOM.
+        case 31: { // Desktop: identical monitor, TALL solid area at the TOP.
+            // Both choices intentionally share the same screen silhouette:
+            // only the filled position/height conveys the selected placement.
+            rounded_rect(2.5f, 3.3f, 21.5f, 20.7f, 2.5f);
+            const float fill_top = icon_kind == 30 ? 16.0f : 6.0f;
+            const float fill_bottom = icon_kind == 30 ? 18.5f : 14.7f;
+            target->FillRoundedRectangle(
+                D2D1::RoundedRect(rf(5.2f, fill_top, 18.8f, fill_bottom),
+                    0.85f*scale, 0.85f*scale),
+                brush.Get());
             break;
-
-        case 31: // Desktop: four large app tiles (NO monitor or gear).
-            // The 2x2 grid differentiates Desktop from Theme/System.
-            for (const float tx : {3.0f, 13.0f}) {
-                for (const float ty : {3.0f, 13.0f}) {
-                    target->FillRoundedRectangle(
-                        D2D1::RoundedRect(rf(tx,ty,tx+8.0f,ty+8.0f),
-                                          1.7f*scale,1.7f*scale),
-                        brush.Get());
-                }
-            }
-            break;
+        }
 
         default:
             break;
