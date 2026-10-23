@@ -102,3 +102,14 @@ if ((Get-Content -Raw (Join-Path $PSScriptRoot '..\native\taskbar_layout.cpp')) 
 }
 
 Write-Host 'PASS: default adaptive taskbar placement and persistent taskbar/desktop selection contract.'
+
+# Adaptive is retired, but the default layout still shrinks when space is tight.
+$appearanceSource = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\appearance.rs')
+$svgSource = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\svg_icons.rs')
+if ($appearanceSource -match '(?m)^\s*Adaptive,' -or
+    $styleWindow -match 'LayoutAdaptive' -or
+    $svgSource -match 'layout-adaptive.svg' -or
+    $svgSource -notmatch 'ICONS: \[&str; 31\]' -or
+    (Test-Path (Join-Path $PSScriptRoot '..\assets\settings-icons\layout-adaptive.svg'))) {
+    throw 'Removed adaptive layout must not remain in active code or SVG assets.'
+}

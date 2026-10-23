@@ -212,7 +212,6 @@ const IDM_ALERT_30: u16 = 83;
 
 const IDM_LAYOUT_DEFAULT: u16 = 91;
 const IDM_LAYOUT_MINIMAL: u16 = 92;
-const IDM_LAYOUT_ADAPTIVE: u16 = 97;
 const IDM_THEME_SYSTEM: u16 = 93;
 const IDM_THEME_DARK: u16 = 94;
 const IDM_THEME_LIGHT: u16 = 95;
@@ -603,17 +602,87 @@ fn default_show_usage_window() -> bool {
     true
 }
 
+
+// Current settings schema is generated from the active SettingsFile defaults.
+// Optional fields omitted by skip_serializing_if are explicitly included so
+// they remain eligible for retaining an existing saved user value.
+fn settings_schema() -> serde_json::Value {
+    let mut schema = serde_json::to_value(SettingsFile::default())
+        .expect("settings defaults must serialize");
+    let object = schema.as_object_mut().expect("settings schema must be an object");
+    for name in [
+        "taskbar_left_offset", "taskbar_top_offset", "floating_x", "floating_y",
+        "floating_edge", "taskbar_monitor", "language",
+    ] {
+        object.insert(name.to_string(), serde_json::Value::Null);
+    }
+    object.insert("notified_quota_windows".to_string(), serde_json::json!([]));
+    schema
+}
+
+/// Walk only schema-known names. Invalid values (wrong type, retired enum
+/// variants, overflow) revert independently, not the entire user settings.
+fn preserve_matching_settings(
+    output: &mut serde_json::Value,
+    schema: &serde_json::Value,
+    incoming: &serde_json::Value,
+    path: &mut Vec<String>,
+) {
+    let (Some(fields), Some(user_fields)) = (schema.as_object(), incoming.as_object()) else {
+        return;
+    };
+    for (name, default) in fields {
+        let Some(value) = user_fields.get(name) else { continue };
+        path.push(name.clone());
+        if default.is_object() && value.is_object() {
+            preserve_matching_settings(output, default, value, path);
+        } else {
+            let pointer = format!("/{}", path.join("/"));
+            let old = output.pointer(&pointer).cloned().expect("known setting");
+            *output.pointer_mut(&pointer).expect("known setting") = value.clone();
+            if serde_json::from_value::<SettingsFile>(output.clone()).is_err() {
+                *output.pointer_mut(&pointer).expect("known setting") = old;
+            }
+        }
+        path.pop();
+    }
+}
+
+/// Missing fields come from defaults; extra fields are dropped, recursively.
+/// Accepted fields must be representable by the current typed configuration.
+fn reconcile_settings_json(text: &str) -> (SettingsFile, bool) {
+    let Ok(input) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (SettingsFile::default(), true);
+    };
+    let schema = settings_schema();
+    let mut output = schema.clone();
+    preserve_matching_settings(&mut output, &schema, &input, &mut Vec::new());
+    let decoded: SettingsFile = serde_json::from_value(output)
+        .unwrap_or_else(|_| SettingsFile::default());
+    let normalized = normalize_settings(decoded);
+    let encoded = serde_json::to_value(&normalized)
+        .expect("normalized settings must serialize");
+    (normalized, encoded != input)
+}
+
+fn backup_invalid_settings(path: &std::path::Path) {
+    // A malformed JSON document cannot be partially recovered as JSON.
+    // Preserve it once before replacing it with defaults.
+    let backup = path.with_extension("json.invalid.bak");
+    if !backup.exists() {
+        let _ = std::fs::copy(path, backup);
+    }
+}
+
 fn load_settings() -> SettingsFile {
     let current_path = settings_path();
     let legacy_path = legacy_settings_path();
-    let (settings, migrated) = load_settings_from_paths(&current_path, &legacy_path)
+    let (settings, needs_rewrite) = load_settings_from_paths(&current_path, &legacy_path)
         .unwrap_or_else(|| (SettingsFile::default(), false));
-    let settings = normalize_settings(settings);
-    if migrated {
+    if needs_rewrite {
         save_settings(&settings);
         diagnose::log(format!(
-            "migrated settings from {} to {}",
-            legacy_path.display(),
+            "reconciled settings file with current schema at {}",
             current_path.display()
         ));
     }
@@ -624,16 +693,19 @@ fn load_settings_from_paths(
     current_path: &std::path::Path,
     legacy_path: &std::path::Path,
 ) -> Option<(SettingsFile, bool)> {
-    if let Ok(content) = std::fs::read_to_string(current_path) {
-        return serde_json::from_str(&content)
-            .ok()
-            .map(|settings| (settings, false));
+    if let Ok(text) = std::fs::read_to_string(current_path) {
+        if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+            backup_invalid_settings(current_path);
+        }
+        return Some(reconcile_settings_json(&text));
     }
 
-    let content = std::fs::read_to_string(legacy_path).ok()?;
-    serde_json::from_str(&content)
-        .ok()
-        .map(|settings| (settings, true))
+    let text = std::fs::read_to_string(legacy_path).ok()?;
+    if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+        backup_invalid_settings(legacy_path);
+    }
+    let (settings, _) = reconcile_settings_json(&text);
+    Some((settings, true))
 }
 
 fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
@@ -646,7 +718,6 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
     settings.styles.normalize();
-    settings.appearance_preset = settings.appearance_preset.configured();
     settings.styles.clamp_corner_radii(settings.appearance_preset);
     settings
 }
@@ -682,7 +753,7 @@ fn save_state_settings() {
             language: s
                 .language_override
                 .map(|language| language.code().to_string()),
-            appearance_preset: s.appearance_preset.configured(),
+            appearance_preset: s.appearance_preset,
             display_position: s.display_position,
             desktop_direction: s.desktop_direction,
             desktop_auto_collapse: s.desktop_auto_collapse,
@@ -1623,7 +1694,7 @@ fn placement_for_free_spans(
     free_spans: &[HorizontalSpan],
     desired_left_offset: i32,
 ) -> Option<(AppearancePreset, i32, i32)> {
-    let choice = configured_preset.configured();
+    let choice = configured_preset;
     let preset_width = |preset| total_widget_width_for_preset(language, preset);
     let place = |preset| {
         let width = preset_width(preset);
@@ -1634,7 +1705,6 @@ fn placement_for_free_spans(
         AppearancePreset::Minimal => place(AppearancePreset::Minimal),
         AppearancePreset::Default => place(AppearancePreset::Default)
             .or_else(|| place(AppearancePreset::Minimal)),
-        AppearancePreset::Adaptive => unreachable!(),
     }
 }
 fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
@@ -2080,16 +2150,15 @@ fn is_small_taskbar_height(taskbar_height: i32) -> bool {
 }
 
 fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
-    match state.appearance_preset.configured() {
+    match state.appearance_preset {
         AppearancePreset::Default => state.effective_appearance_preset,
         AppearancePreset::Minimal => AppearancePreset::Minimal,
-        AppearancePreset::Adaptive => unreachable!(),
     }
 }
 
 // The configured Default is always adaptive, without changing stored settings.
 fn vertical_effective_preset(preset: AppearancePreset) -> AppearancePreset {
-    preset.configured()
+    preset
 }
 
 fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
@@ -2161,7 +2230,7 @@ fn current_style_color(target: StyleColorTarget) -> Color {
 
 fn row_bar_segment_count(preset: AppearancePreset) -> i32 {
     match preset {
-        AppearancePreset::Default | AppearancePreset::Adaptive => 8,
+        AppearancePreset::Default => 8,
         AppearancePreset::Minimal => 6,
     }
 }
@@ -5049,13 +5118,12 @@ fn vertical_placement_for_gaps(
 ) -> Option<(AppearancePreset, i32)> {
     let normal = vertical_widget_height_for_preset(AppearancePreset::Default);
     let compact = vertical_widget_height_for_preset(AppearancePreset::Minimal);
-    let choices = match preset.configured() {
+    let choices = match preset {
         AppearancePreset::Minimal => [Some((AppearancePreset::Minimal, compact)), None],
         AppearancePreset::Default => [
             Some((AppearancePreset::Default, normal)),
             Some((AppearancePreset::Minimal, compact)),
         ],
-        AppearancePreset::Adaptive => unreachable!(),
     };
     for choice in choices.into_iter().flatten() {
         if let Some(top) = nearest_free_top_offset(taskbar_rect, spans, choice.1, desired) {
@@ -8590,8 +8658,7 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     style_window::sync(style_settings_snapshot());
                 }
-                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL | IDM_LAYOUT_ADAPTIVE => {
-                    // The retired Adaptive command is an alias for Default.
+                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL => {
                     let preset = if id == IDM_LAYOUT_MINIMAL {
                         AppearancePreset::Minimal
                     } else {
@@ -9553,11 +9620,10 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
                 ThemeMode::Light => "light",
             }
             .to_string(),
-            layout: match state.appearance_preset.configured() {
+            layout: match state.appearance_preset {
                 AppearancePreset::Default => "default",
                 AppearancePreset::Minimal => "minimal",
-                AppearancePreset::Adaptive => unreachable!(),
-            }
+                    }
             .to_string(),
             position: if state.display_position == DisplayPosition::Desktop {
                 "desktop"
@@ -9605,7 +9671,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             language: s.language,
             theme_mode: s.theme_mode,
             is_dark: s.is_dark,
-            appearance_preset: s.appearance_preset.configured(),
+            appearance_preset: s.appearance_preset,
             display_position: s.display_position,
             desktop_direction: s.desktop_direction,
             desktop_auto_collapse: s.desktop_auto_collapse,
@@ -12676,18 +12742,18 @@ mod tests {
     }
 
     #[test]
-    fn vertical_adaptive_uses_compact_before_desktop_fallback() {
+    fn vertical_default_uses_compact_before_desktop_fallback() {
         let bar = RECT { left: 1800, top: 0, right: 1850, bottom: 800 };
         let ample = [VerticalSpan { top: 20, bottom: 280 }];
-        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &ample, 24),
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &ample, 24),
             Some((AppearancePreset::Default, 24)));
         let short = [VerticalSpan { top: 20, bottom: 130 }];
-        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &short, 24),
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24),
             Some((AppearancePreset::Minimal, 24)));
         assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24),
             Some((AppearancePreset::Minimal, 24)));
         let exhausted = [VerticalSpan { top: 20, bottom: 65 }];
-        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Adaptive, bar, &exhausted, 24), None);
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &exhausted, 24), None);
         assert_eq!(vertical_placement_for_gaps(AppearancePreset::Minimal, bar, &short, 24),
             Some((AppearancePreset::Minimal, 24)));
     }
@@ -12856,7 +12922,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_layout_prefers_default_then_falls_back_to_minimal() {
+    fn default_layout_prefers_full_then_falls_back_to_minimal() {
         let taskbar = RECT {
             left: 0,
             top: 0,
@@ -12873,7 +12939,7 @@ mod tests {
             right: 100 + default_width + 20,
         }];
         let placement = placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &wide,
@@ -12887,7 +12953,7 @@ mod tests {
             right: 100 + minimal_width,
         }];
         let placement = placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &narrow,
@@ -12920,7 +12986,7 @@ mod tests {
             },
         ];
         let placement = placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &free,
@@ -12932,7 +12998,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_layout_reports_no_placement_when_even_minimal_does_not_fit() {
+    fn default_layout_reports_no_placement_when_even_minimal_does_not_fit() {
         let taskbar = RECT {
             left: 0,
             top: 0,
@@ -12946,7 +13012,7 @@ mod tests {
             right: 100 + minimal_width - 1,
         }];
         assert!(placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &too_small,
@@ -13014,7 +13080,7 @@ mod tests {
     }
 
     #[test]
-    fn display_position_and_legacy_adaptive_config_are_compatible() {
+    fn display_position_and_retired_adaptive_value_is_rejected() {
         let settings: SettingsFile = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.display_position, DisplayPosition::Taskbar);
         let desktop = SettingsFile {
@@ -13027,10 +13093,7 @@ mod tests {
         ).unwrap();
         assert_eq!(parsed.display_position, DisplayPosition::Desktop);
         assert_eq!(parsed.appearance_preset, AppearancePreset::Default);
-        let legacy = normalize_settings(SettingsFile {
-            appearance_preset: AppearancePreset::Adaptive, ..Default::default()
-        });
-        assert_eq!(legacy.appearance_preset, AppearancePreset::Default);
+        assert!(serde_json::from_str::<AppearancePreset>(r#""adaptive""#).is_err());
     }
 
     #[test]
@@ -13142,6 +13205,69 @@ mod tests {
     }
 
     #[test]
+    fn schema_repair_retains_matching_fields_and_removes_nested_obsolete_names() {
+        let mut config = serde_json::to_value(SettingsFile::default()).unwrap();
+        config["appearance_preset"] = serde_json::json!("adaptive");
+        config["display_position"] = serde_json::json!("desktop");
+        config["desktop_direction"] = serde_json::json!("vertical");
+        config["taskbar_left_offset"] = serde_json::json!(163);
+        config["styles"]["dark"]["remaining"] = serde_json::json!("#ABCDEF88");
+        config["styles"]["dark"]["removed_field"] = serde_json::json!(123);
+        config["obsolete_setting"] = serde_json::json!("ignored");
+        config.as_object_mut().unwrap().remove("poll_interval_ms");
+        let (settings, dirty) = reconcile_settings_json(&config.to_string());
+        assert!(dirty);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(settings.display_position, DisplayPosition::Desktop);
+        assert_eq!(settings.desktop_direction, DesktopDirection::Vertical);
+        assert_eq!(settings.taskbar_left_offset, Some(163));
+        assert_eq!(settings.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(settings.styles.dark.remaining, "#ABCDEF88");
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("obsolete_setting").is_none());
+        assert!(saved["styles"]["dark"].get("removed_field").is_none());
+        assert!(!reconcile_settings_json(&saved.to_string()).1);
+    }
+
+    #[test]
+    fn schema_repair_defaults_bad_leaf_without_losing_other_user_values() {
+        let bad = serde_json::json!({
+            "appearance_preset": "old-variant",
+            "theme_mode": "dark",
+            "poll_interval_ms": "wrong-type",
+            "taskbar_left_offset": 280,
+            "styles": { "dark": {
+                "panel_corner_radius": "invalid",
+                "remaining": "#123456FF"
+            }}
+        });
+        let (settings, changed) = reconcile_settings_json(&bad.to_string());
+        assert!(changed);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(settings.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(settings.taskbar_left_offset, Some(280));
+        assert_eq!(settings.styles.dark.remaining, "#123456FF");
+        assert_eq!(settings.styles.dark.panel_corner_radius,
+            ThemeStyle::dark_default().panel_corner_radius);
+    }
+
+    #[test]
+    fn malformed_settings_are_backed_up_before_recovery() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-settings-invalid-{}-{}", std::process::id(), now_unix_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("settings.json");
+        std::fs::write(&current, "{invalid json").unwrap();
+        let (settings, rewrite) = load_settings_from_paths(&current, &dir.join("legacy.json")).unwrap();
+        assert!(rewrite);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(std::fs::read_to_string(current.with_extension("json.invalid.bak")).unwrap(), "{invalid json");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn loads_legacy_settings_when_new_path_is_missing() {
         let base = std::env::temp_dir().join(format!(
             "codex-usage-settings-test-{}-{}",
@@ -13177,8 +13303,8 @@ mod tests {
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         std::fs::write(&current, test_settings_json("en")).unwrap();
         std::fs::write(&legacy, test_settings_json("zh-CN")).unwrap();
-        let (settings, migrated) = load_settings_from_paths(&current, &legacy).unwrap();
-        assert!(!migrated);
+        let (settings, needs_rewrite) = load_settings_from_paths(&current, &legacy).unwrap();
+        assert!(needs_rewrite);
         assert_eq!(settings.language.as_deref(), Some("en"));
         let _ = std::fs::remove_dir_all(base);
     }
