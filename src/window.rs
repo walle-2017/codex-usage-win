@@ -695,6 +695,11 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     if settings.floating_edge.as_deref().is_some_and(|side| FloatingEdge::parse(side).is_none()) {
         settings.floating_edge = None;
     }
+    // The current settings UI supports only these two explicit language codes.
+    // All retired codes fall back to system language on next startup.
+    if settings.language.as_deref().is_some_and(|code| !matches!(code, "zh-CN" | "en")) {
+        settings.language = None;
+    }
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
     settings.styles.normalize();
@@ -13085,6 +13090,24 @@ mod tests {
         assert_eq!(settings.floating_edge, None);
         assert_eq!(settings.language.as_deref(), Some("zh-CN"));
         assert_eq!(settings.display_position, DisplayPosition::Desktop);
+    }
+
+    #[test]
+    fn current_schema_discards_retired_language_and_old_shape() {
+        let input = serde_json::json!({
+            "language": "ja-JP",
+            "styles": {"dark": {"panel_rounded": true}},
+            "tray_offset": 123,
+            "taskbar_left_offset": 80,
+        });
+        let (settings, changed) = reconcile_settings_json(&input.to_string());
+        assert!(changed);
+        assert_eq!(settings.language, None);
+        assert_eq!(settings.taskbar_left_offset, Some(80));
+        assert_eq!(settings.styles.dark.panel_corner_radius, ThemeStyle::dark_default().panel_corner_radius);
+        let output = serde_json::to_value(settings).unwrap();
+        assert!(output.get("tray_offset").is_none());
+        assert!(output["styles"]["dark"].get("panel_rounded").is_none());
     }
 
     #[test]
