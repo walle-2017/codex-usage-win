@@ -1,6 +1,6 @@
 # Settings SVG icon contract
 
-All 32 settings icons are SVG resources in `assets/settings-icons/`. Their
+All 31 settings icons are SVG resources in `assets/settings-icons/`. Their
 index order matches `SettingsIcon` in `src/style_window.rs`, bound through
 `src/svg_icons.rs`. No disk files are required at runtime.
 

@@ -715,6 +715,15 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     if !matches!(settings.alert_threshold_percent, 0 | 10 | 20 | 30) {
         settings.alert_threshold_percent = 0;
     }
+    if !matches!(
+        settings.poll_interval_ms,
+        POLL_1_MIN | POLL_5_MIN | POLL_15_MIN | POLL_1_HOUR
+    ) {
+        settings.poll_interval_ms = default_poll_interval();
+    }
+    if settings.floating_edge.as_deref().is_some_and(|side| FloatingEdge::parse(side).is_none()) {
+        settings.floating_edge = None;
+    }
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
     settings.styles.normalize();
@@ -13250,6 +13259,22 @@ mod tests {
         assert_eq!(settings.styles.dark.remaining, "#123456FF");
         assert_eq!(settings.styles.dark.panel_corner_radius,
             ThemeStyle::dark_default().panel_corner_radius);
+    }
+
+    #[test]
+    fn unsupported_semantic_values_are_restored_to_current_defaults() {
+        let invalid = serde_json::json!({
+            "poll_interval_ms": 0,
+            "floating_edge": "diagonal",
+            "language": "zh-CN",
+            "display_position": "desktop"
+        });
+        let (settings, changed) = reconcile_settings_json(&invalid.to_string());
+        assert!(changed);
+        assert_eq!(settings.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(settings.floating_edge, None);
+        assert_eq!(settings.language.as_deref(), Some("zh-CN"));
+        assert_eq!(settings.display_position, DisplayPosition::Desktop);
     }
 
     #[test]
