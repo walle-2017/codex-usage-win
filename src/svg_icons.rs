@@ -133,6 +133,28 @@ mod tests {
     }
 
     #[test]
+    fn preset_cloud_stays_inside_viewbox_at_button_and_dpi_sizes() {
+        // Guard against truncated cloud curls at the SVG's right boundary.
+        let cloud = include_str!("../assets/settings-icons/preset-cloud.svg");
+        for size in [18u32, 20, 24, 36, 48, 96] {
+            let pixels = rasterize(cloud, size, size, Color::rgba(255, 255, 255, 255))
+                .expect("cloud SVG should render at every control size");
+            let stride = size as usize;
+            let alpha = |x: usize, y: usize| pixels[(y * stride + x) * 4 + 3];
+            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "cloud should be visible at {size}px");
+            for position in 0..stride {
+                assert_eq!(alpha(position, 0), 0, "cloud clipped at top ({size}px)");
+                assert_eq!(alpha(position, stride - 1), 0,
+                    "cloud clipped at bottom ({size}px)");
+                assert_eq!(alpha(0, position), 0, "cloud clipped at left ({size}px)");
+                assert_eq!(alpha(stride - 1, position), 0,
+                    "cloud clipped at right ({size}px)");
+            }
+        }
+    }
+
+    #[test]
     fn transparency_and_theme_tint_are_respected() {
         let fg = Color::rgba(64, 128, 192, 128);
         let pixels = rasterize(ICONS[29], 20, 20, fg).unwrap();
