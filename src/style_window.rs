@@ -1642,7 +1642,6 @@ fn language_label_for_index(index: usize, ui_language: LanguageId) -> &'static s
     match LanguageId::SELECTABLE.get(index).copied() {
         Some(LanguageId::SimplifiedChinese) => "中文",
         Some(LanguageId::English) => "English",
-        Some(language) => language.native_name(),
         None => ui_language.strings().system_default,
     }
 }
@@ -3075,7 +3074,6 @@ fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: La
     match language {
         LanguageId::SimplifiedChinese => format!("× {action_zh}：{detail}"),
         LanguageId::English => format!("× {action_en}: {detail}"),
-        _ => json_error_status(language, &detail),
     }
 }
 
