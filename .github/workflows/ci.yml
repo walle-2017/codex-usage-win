@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feature/vertical-taskbar-support
   pull_request:
     branches:
       - main
@@ -90,12 +89,6 @@ jobs:
 
       - name: Run tests
         run: cargo test
-      # Temporary: export the resolver-updated tracked lockfile for this full SVG migration.
-      - name: Export resolved dependency lock
-        shell: pwsh
-        run: |
-          $encoded = [Convert]::ToBase64String([IO.File]::ReadAllBytes('Cargo.lock'))
-          Write-Output ("LOCKFILE64:" + $encoded)
       - name: Run Clippy
         run: cargo clippy -- -D warnings
       - name: Build release binary
