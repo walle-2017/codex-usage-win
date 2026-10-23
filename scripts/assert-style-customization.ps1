@@ -357,29 +357,20 @@ if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
     $composition -notmatch 'tint_visual\.Size\(size\)') {
     throw 'Composition backdrop must hard-clip the taskbar panel and independently clip, fade and blur the desktop grip without stale-DPI tails.'
 }
-if ($native -notmatch 'codex_draw_settings_icon') {
-    throw 'Rust native interop must expose the Direct2D settings-icon renderer.'
-}
-if ($controlPrimitives -notmatch 'codex_draw_settings_icon' -or
-    $controlPrimitives -notmatch 'D2D1_CAP_STYLE_ROUND' -or
-    $controlPrimitives -notmatch 'D2D1_LINE_JOIN_ROUND' -or
-    $controlPrimitives -notmatch 'Painter palette|painter palette' -or
-    $controlPrimitives -notmatch 'crescent moon' -or
-    $controlPrimitives -notmatch 'Default layout - full two-row usage panel' -or
-    $controlPrimitives -notmatch 'Minimal layout - one compact usage row' -or
-    $controlPrimitives -notmatch 'graphite cube' -or
-    $controlPrimitives -notmatch 'smooth waves' -or
-    $controlPrimitives -notmatch 'pine tree' -or
-    $controlPrimitives -notmatch 'Cloud Porcelain - cloud' -or
-    $controlPrimitives -notmatch 'Clear Bay - sun over calm bay' -or
-    $controlPrimitives -notmatch 'Wheat Glow - wheat ear' -or
-    $controlPrimitives -notmatch 'JSON Reload - circular arrow' -or
-    $controlPrimitives -notmatch 'JSON Format - braces with formatted lines' -or
-    $controlPrimitives -notmatch 'JSON Import - arrow into tray' -or
-    $controlPrimitives -notmatch 'JSON Export - arrow out of tray' -or
-    $controlPrimitives -notmatch 'JSON Apply - check in circle' -or
-    $controlPrimitives -notmatch 'paintbrush') {
-    throw 'Settings icons must use rounded Direct2D vector paths with distinct layout, light-preset, and JSON-action glyphs.'
+# All settings buttons use the same embedded SVG assets, including GDI-only hosts.
+$svgIcons = Get-ChildItem (Join-Path $PSScriptRoot '..\assets\settings-icons') -Filter '*.svg'
+$svgRaster = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\svg_icons.rs')
+if ($svgIcons.Count -ne 32 -or
+    $native -notmatch 'codex_blend_settings_icon' -or
+    $controlPrimitives -notmatch 'codex_blend_settings_icon' -or
+    $controlPrimitives -notmatch 'AlphaBlend\(' -or
+    $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
+    $svgRaster -notmatch 'resvg::render\(' -or
+    $svgRaster -notmatch 'CACHE_CAPACITY' -or
+    $svgRaster -notmatch 'premultiply_alpha' -or
+    $controlPrimitives -match 'codex_draw_settings_icon' -or
+    $native -match 'codex_draw_settings_icon') {
+    throw 'All 32 settings glyphs must be embedded SVG files, theme/DPI raster-cached and alpha-composited.'
 }
 
 if ($native -notmatch 'set_composition_blur_bounds' -or
@@ -727,7 +718,7 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::JsonExport' -or
     $styleWindow -notmatch 'SettingsIcon::JsonApply' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
-    $styleWindow -notmatch 'draw_antialiased_settings_icon\(' -or
+    $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
     $styleWindow -notmatch 'theme_icon\(mode\)' -or
     $styleWindow -notmatch 'layout_icon\(preset\)' -or
     $styleWindow -notmatch 'preset_icon\(preset,\s*snapshot\.is_dark\)' -or
