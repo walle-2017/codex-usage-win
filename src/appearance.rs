@@ -62,7 +62,7 @@ pub struct StyleMetrics {
 impl AppearancePreset {
     pub fn metrics(self) -> StyleMetrics {
         match self {
-            Self::Default | Self::Adaptive => StyleMetrics {
+            Self::Default => StyleMetrics {
                 widget_height: 42,
                 panel_radius: 0,
                 outer_padding: 6,
