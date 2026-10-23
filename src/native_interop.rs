@@ -95,18 +95,16 @@ unsafe extern "C" {
         out_rects: *mut TaskbarControlRect,
         capacity: usize,
     ) -> i32;
-    fn codex_draw_settings_icon(
+    fn codex_blend_settings_icon(
         hdc_raw: isize,
         left: i32,
         top: i32,
-        right: i32,
-        bottom: i32,
-        icon_kind: i32,
-        color_r: u8,
-        color_g: u8,
-        color_b: u8,
-        color_a: u8,
+        width: i32,
+        height: i32,
+        premultiplied_bgra: *const u8,
+        buffer_len: usize,
     ) -> i32;
+
 }
 
 #[repr(C)]
@@ -506,27 +504,16 @@ pub fn directwrite_text_mask(
     (ok != 0).then_some(coverage)
 }
 
-pub fn draw_antialiased_settings_icon(
-    hdc: HDC,
-    rect: RECT,
-    icon_kind: i32,
-    color: Color,
-) -> bool {
-    if hdc.0.is_null() || rect.right <= rect.left || rect.bottom <= rect.top {
+pub fn blend_svg_icon(hdc: HDC, rect: RECT, pixels: &[u8]) -> bool {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if hdc.0.is_null() || width <= 0 || height <= 0 {
         return false;
     }
     unsafe {
-        codex_draw_settings_icon(
-            hdc.0 as isize,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            icon_kind,
-            color.r,
-            color.g,
-            color.b,
-            color.a,
+        codex_blend_settings_icon(
+            hdc.0 as isize, rect.left, rect.top, width, height,
+            pixels.as_ptr(), pixels.len(),
         ) != 0
     }
 }

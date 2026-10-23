@@ -12,6 +12,7 @@ mod settings_model;
 mod system_proxy;
 mod style;
 mod style_window;
+mod svg_icons;
 mod theme;
 mod tray_icon;
 mod updater;
