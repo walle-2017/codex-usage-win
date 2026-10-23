@@ -10,7 +10,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::native_interop::WM_APP_TRAY;
 
 const APP_TRAY_ICON_ID: u32 = 1;
-const LEGACY_PROVIDER_TRAY_ICON_IDS: [u32; 2] = [2, 3];
 
 pub enum TrayAction {
     None,
@@ -155,9 +154,6 @@ fn remove_id(hwnd: HWND, id: u32) {
 }
 
 pub fn sync(hwnd: HWND, icon: Option<&TrayIconData>) {
-    for id in LEGACY_PROVIDER_TRAY_ICON_IDS {
-        remove_id(hwnd, id);
-    }
     if let Some(icon) = icon {
         add(hwnd, &icon.tooltip);
         update(hwnd, &icon.tooltip);
@@ -168,9 +164,6 @@ pub fn sync(hwnd: HWND, icon: Option<&TrayIconData>) {
 
 pub fn remove_all(hwnd: HWND) {
     remove_id(hwnd, APP_TRAY_ICON_ID);
-    for id in LEGACY_PROVIDER_TRAY_ICON_IDS {
-        remove_id(hwnd, id);
-    }
 }
 
 pub fn handle_message(lparam: LPARAM) -> TrayAction {
