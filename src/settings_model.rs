@@ -271,7 +271,7 @@ impl EditableSettings {
                 "appearance.theme: allowed values are system, dark, light".to_string(),
             );
         }
-        if !matches!(self.appearance.layout.as_str(), "default" | "minimal" | "adaptive") {
+        if !matches!(self.appearance.layout.as_str(), "default" | "minimal") {
             return Err("appearance.layout: allowed values are default, minimal".to_string());
         }
         if !matches!(self.appearance.position.as_str(), "taskbar" | "desktop") {
@@ -291,9 +291,6 @@ impl EditableSettings {
         let progress_radius_max = progress_corner_radius_max(appearance_preset);
 
         let mut normalized = self.clone();
-        if normalized.appearance.layout == "adaptive" {
-            normalized.appearance.layout = "default".to_string();
-        }
         normalized.appearance.dark = self.appearance.dark.validate_and_normalize(
             "appearance.dark",
             panel_radius_max,
@@ -430,7 +427,7 @@ r#"{{
                 "可选：default | minimal；默认排版会在任务栏空间不足时自动临时切换至极简",
                 "Options: default | minimal; Default temporarily switches to Minimal when taskbar space is insufficient",
             ),
-            layout = q(if a.layout == "adaptive" { "default" } else { &a.layout }),
+            layout = q(&a.layout),
             position_desc = localized(zh, "组件显示位置；任务栏空间不足时自动临时切换至桌面", "Display location; temporarily fall back to Desktop if the taskbar is too full"),
             position_options = localized(zh, "可选：taskbar | desktop", "Options: taskbar | desktop"),
             position = q(&a.position),
@@ -481,7 +478,6 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize, layout: &str
     let mut lines = Vec::new();
     let preset = match layout {
         "minimal" => AppearancePreset::Minimal,
-        "adaptive" => AppearancePreset::Adaptive,
         _ => AppearancePreset::Default,
     };
     let panel_radius_max = panel_corner_radius_max(preset);

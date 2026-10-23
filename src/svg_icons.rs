@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Gdi::HDC;
 
 use crate::native_interop::{self, Color};
 
-const ICONS: [&str; 32] = [
+const ICONS: [&str; 31] = [
     include_str!("../assets/settings-icons/general.svg"),
     include_str!("../assets/settings-icons/preset.svg"),
     include_str!("../assets/settings-icons/panel.svg"),
@@ -37,7 +37,6 @@ const ICONS: [&str; 32] = [
     include_str!("../assets/settings-icons/json-import.svg"),
     include_str!("../assets/settings-icons/json-export.svg"),
     include_str!("../assets/settings-icons/json-apply.svg"),
-    include_str!("../assets/settings-icons/layout-adaptive.svg"),
     include_str!("../assets/settings-icons/direction-horizontal.svg"),
     include_str!("../assets/settings-icons/direction-vertical.svg"),
     include_str!("../assets/settings-icons/toggle-on.svg"),
@@ -119,8 +118,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_32_svg_assets_parse_and_render_at_small_and_high_dpi() {
-        assert_eq!(ICONS.len(), 32);
+    fn all_31_svg_assets_parse_and_render_at_small_and_high_dpi() {
+        assert_eq!(ICONS.len(), 31);
         for (id, source) in ICONS.iter().enumerate() {
             assert!(source.contains("viewBox=\"0 0 24 24\""), "bad viewBox: {id}");
             assert!(source.contains("#010203"), "missing theme foreground: {id}");
@@ -136,7 +135,7 @@ mod tests {
     #[test]
     fn transparency_and_theme_tint_are_respected() {
         let fg = Color::rgba(64, 128, 192, 128);
-        let pixels = rasterize(ICONS[30], 20, 20, fg).unwrap();
+        let pixels = rasterize(ICONS[29], 20, 20, fg).unwrap();
         assert!(pixels.chunks_exact(4).any(|p| p[3] == 0));
         assert!(pixels.chunks_exact(4).any(|p| p[3] > 0));
         assert!(pixels.chunks_exact(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));

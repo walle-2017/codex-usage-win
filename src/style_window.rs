@@ -228,7 +228,6 @@ enum SettingsIcon {
     JsonImport,
     JsonExport,
     JsonApply,
-    LayoutAdaptive,
     DirectionHorizontal,
     DirectionVertical,
     ToggleOn,
@@ -1272,7 +1271,6 @@ fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
     match preset {
         AppearancePreset::Default => SettingsIcon::LayoutDefault,
         AppearancePreset::Minimal => SettingsIcon::LayoutMinimal,
-        AppearancePreset::Adaptive => SettingsIcon::LayoutAdaptive,
     }
 }
 
@@ -1333,7 +1331,6 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     let index = match preset {
         AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
-        AppearancePreset::Adaptive => 2,
     };
     rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
 }
@@ -1366,7 +1363,7 @@ fn preview_layout_flags() -> (bool, bool) {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.as_ref().map(|s| (
         preview_vertical_for_snapshot(&s.snapshot),
-        s.snapshot.appearance_preset.configured() == AppearancePreset::Minimal,
+        s.snapshot.appearance_preset == AppearancePreset::Minimal,
     )).unwrap_or((false, false))
 }
 
@@ -6836,7 +6833,7 @@ unsafe fn paint_appearance_page(
     }
 
     for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
-        let selected = snapshot.appearance_preset.configured() == preset;
+        let selected = snapshot.appearance_preset == preset;
         let target = HitTarget::Layout(preset);
         let control_background = button_background(
             target,
@@ -6863,10 +6860,8 @@ unsafe fn paint_appearance_page(
             match (zh, preset) {
                 (true, AppearancePreset::Default) => "默认",
                 (true, AppearancePreset::Minimal) => "极简",
-                (true, AppearancePreset::Adaptive) => "自适应",
                 (false, AppearancePreset::Default) => "Default",
                 (false, AppearancePreset::Minimal) => "Minimal",
-                (false, AppearancePreset::Adaptive) => "Adaptive",
             },
         );
     }
@@ -7160,7 +7155,7 @@ unsafe fn paint_preset_gallery(
             accent,
             primary,
             preview_vertical_for_snapshot(snapshot),
-            snapshot.appearance_preset.configured() == AppearancePreset::Minimal,
+            snapshot.appearance_preset == AppearancePreset::Minimal,
             snapshot.display_position == DisplayPosition::Desktop,
         );
     }
@@ -7180,7 +7175,7 @@ unsafe fn paint_preset_gallery(
             accent,
             primary,
             preview_vertical_for_snapshot(snapshot),
-            snapshot.appearance_preset.configured() == AppearancePreset::Minimal,
+            snapshot.appearance_preset == AppearancePreset::Minimal,
             snapshot.display_position == DisplayPosition::Desktop,
         );
     }
@@ -8578,12 +8573,12 @@ mod ui_smoke_tests {
     #[test]
     fn v24_svg_glyph_ids_and_placement_shapes_remain_stable() {
         assert_eq!(SettingsIcon::ThemeSystem as i32, 8);
-        assert_eq!(SettingsIcon::DirectionHorizontal as i32, 26);
-        assert_eq!(SettingsIcon::DirectionVertical as i32, 27);
-        assert_eq!(SettingsIcon::ToggleOn as i32, 28);
-        assert_eq!(SettingsIcon::ToggleOff as i32, 29);
-        assert_eq!(SettingsIcon::PositionTaskbar as i32, 30);
-        assert_eq!(SettingsIcon::PositionDesktop as i32, 31);
+        assert_eq!(SettingsIcon::DirectionHorizontal as i32, 25);
+        assert_eq!(SettingsIcon::DirectionVertical as i32, 26);
+        assert_eq!(SettingsIcon::ToggleOn as i32, 27);
+        assert_eq!(SettingsIcon::ToggleOff as i32, 28);
+        assert_eq!(SettingsIcon::PositionTaskbar as i32, 29);
+        assert_eq!(SettingsIcon::PositionDesktop as i32, 30);
         assert_eq!(DESKTOP_SUBMENU_ICON_SIZE, 18);
         let taskbar = include_str!("../assets/settings-icons/position-taskbar.svg");
         let desktop = include_str!("../assets/settings-icons/position-desktop.svg");
