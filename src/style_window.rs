@@ -6526,7 +6526,7 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
     let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
     draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
         DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    draw_text(hdc,if zh{"自动收缩"}else{"Auto-collapse"},
+    draw_text(hdc,if zh{"收缩"}else{"Collapse"},
         txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
     for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
         let horizontal=direction==DesktopDirection::Horizontal;
