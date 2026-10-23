@@ -25,13 +25,6 @@ impl LanguageId {
         }
     }
 
-    pub fn native_name(self) -> &'static str {
-        match self {
-            Self::English => "English",
-            Self::SimplifiedChinese => "简体中文",
-        }
-    }
-
     pub fn strings(self) -> Strings {
         match self {
             Self::English => english::STRINGS,
