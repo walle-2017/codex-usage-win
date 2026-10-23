@@ -33,7 +33,7 @@ Assert-Contains $Window 'https://github.com/walle-2017/codex-usage-win/releases'
 Assert-Contains $Window 'ShellExecuteW' 'GitHub Releases command must open in the default browser.'
 Assert-Contains $Window 'ManualUpdateRequired { version }' 'UI must handle the manual-update result explicitly.'
 Assert-Contains $Window 'updater::UpdateError::AssetMissing' 'UI error matching must remain exhaustive for the internal missing-asset error.'
-Assert-Contains $Window '程序名称或发布文件名称已发生变化' 'Simplified Chinese notification must explain the program/release asset rename.'
+Assert-Contains $Window '对应的发布文件不存在' 'Simplified Chinese notification must explain missing release assets.'
 Assert-Contains $Window 'GitHub Releases' 'Context menu must expose GitHub Releases.'
 
 Write-Output 'PASS: missing renamed assets fall back to manual GitHub Releases update without legacy aliases.'
