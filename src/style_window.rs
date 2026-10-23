@@ -8592,7 +8592,7 @@ mod ui_smoke_tests {
         assert!(taskbar.contains("height=\"2.5\""));
         assert!(desktop.contains("height=\"8.7\""));
         let system = include_str!("../assets/settings-icons/theme-system.svg");
-        assert!(system.contains("circle"));
+        assert!(system.contains("fill-rule=\"evenodd\""));
         let l = desktop_submenu_layout();
         assert_eq!(l.collapse_label.top, l.enabled.top);
         assert!(l.collapse_label.top > l.direction_label.bottom);
