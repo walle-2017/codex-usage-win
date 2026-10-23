@@ -394,6 +394,8 @@ struct PanelState {
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     json_edit: SendHwnd,
     json_save_mask: SendHwnd,
+    // Until the destination page has painted, RichEdit must remain hidden.
+    json_reveal_pending: bool,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
     focused_corner_edit: bool,
@@ -967,6 +969,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
                 json_save_mask: SendHwnd::from_hwnd(HWND::default()),
+                json_reveal_pending: false,
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
                 focused_corner_edit: false,
@@ -2205,8 +2208,16 @@ fn ensure_json_save_mask(owner: HWND) -> Option<HWND> {
     }
 }
 
+fn json_editor_should_be_visible(
+    section: Section,
+    discard_pending: bool,
+    reveal_pending: bool,
+) -> bool {
+    section == Section::Json && !discard_pending && !reveal_pending
+}
+
 fn layout_settings_children(hwnd: HWND) {
-    let Some((json_edit, json_save_mask, section, discard_pending, save_mask_visible)) = ({
+    let Some((json_edit, json_save_mask, section, discard_pending, reveal_pending, save_mask_visible)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| {
             (
@@ -2214,8 +2225,10 @@ fn layout_settings_children(hwnd: HWND) {
                 s.json_save_mask,
                 s.section,
                 s.pending_discard_action.is_some(),
+                s.json_reveal_pending,
                 s.section == Section::Json
                     && s.pending_discard_action.is_none()
+                    && !s.json_reveal_pending
                     && s.json_save_feedback == Some(JsonSaveFeedback::Saving),
             )
         })
@@ -2225,12 +2238,12 @@ fn layout_settings_children(hwnd: HWND) {
 
     unsafe {
         let focused = GetFocus();
-        if (section != Section::Json || discard_pending) && focused == json_edit.to_hwnd() {
+        let visible = json_editor_should_be_visible(section, discard_pending, reveal_pending);
+        if !visible && focused == json_edit.to_hwnd() {
             let _ = SetFocus(hwnd);
         }
 
         let json_rect = json_edit_text_rect(hwnd);
-        let visible = section == Section::Json && !discard_pending;
         let visibility = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
         let _ = SetWindowPos(
             json_edit.to_hwnd(),
@@ -4370,7 +4383,7 @@ fn set_section(section: Section) {
             s.pending_discard_action.is_some(),
         )
     };
-    if discard_pending {
+    if discard_pending || current_section == section {
         return;
     }
     if current_section == Section::Json && section != Section::Json && dirty {
@@ -4384,6 +4397,9 @@ fn set_section(section: Section) {
             return;
         };
         s.section = section;
+        // RichEdit paints in its own child HWND. Do not reveal it until the
+        // parent has synchronously painted the JSON page in the new section.
+        s.json_reveal_pending = section == Section::Json;
         if section != Section::General {
             s.language_popup_open = false;
         }
@@ -4402,20 +4418,33 @@ fn set_section(section: Section) {
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
+    // Pre-position and hide children before any page-specific text update.
+    // write_json_editor() calls layout_settings_children() itself; the pending
+    // reveal flag prevents that nested call from showing the editor too soon.
+    layout_settings_children(hwnd);
     if section == Section::Json {
         if json_dirty {
             refresh_json_editor_theme();
         } else {
             reload_json_editor_from_snapshot();
         }
-    } else {
-        layout_settings_children(hwnd);
     }
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
     sync_corner_edit();
+    // Paint the new page *while RichEdit remains hidden*, so no frame can
+    // contain the old preset/gallery background underneath the JSON editor.
     redraw_settings_window(hwnd);
+    if section == Section::Json {
+        {
+            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = state.as_mut() {
+                s.json_reveal_pending = false;
+            }
+        }
+        layout_settings_children(hwnd);
+    }
 }
 
 fn select_editor(editor: EditorSelection) {
@@ -8355,6 +8384,14 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn json_rich_edit_is_deferred_until_parent_page_has_painted() {
+        assert!(!json_editor_should_be_visible(Section::Preset, false, false));
+        assert!(!json_editor_should_be_visible(Section::Json, true, false));
+        assert!(!json_editor_should_be_visible(Section::Json, false, true));
+        assert!(json_editor_should_be_visible(Section::Json, false, false));
+    }
+
+    #[test]
     fn horizontal_preset_gallery_restores_three_across_and_custom_below() {
         let row = [
             ThemePreset::Classic, ThemePreset::Ocean, ThemePreset::Forest,
@@ -8772,6 +8809,11 @@ mod ui_smoke_tests {
                 state.as_ref().unwrap().json_edit.to_hwnd()
             };
             set_section(Section::Json);
+            assert!(
+                !STATE.lock().unwrap_or_else(|e| e.into_inner())
+                    .as_ref().unwrap().json_reveal_pending,
+                "JSON editor reveal must finish synchronously in set_section"
+            );
             assert!(
                 IsWindowVisible(json_edit).as_bool(),
                 "JSON editor must be visible on the JSON settings page"
