@@ -335,7 +335,7 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
     HDC hdc = reinterpret_cast<HDC>(hdc_raw);
     const int width = right - left;
     const int height = bottom - top;
-    if (!hdc || width <= 0 || height <= 0 || icon_kind < 0 || icon_kind > 25) {
+    if (!hdc || width <= 0 || height <= 0 || icon_kind < 0 || icon_kind > 31) {
         return 0;
     }
     if (!ensure_control_factory()) {
@@ -401,7 +401,12 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             (static_cast<float>(width) - logical_size * scale) * 0.5f;
         const float origin_y =
             (static_cast<float>(height) - logical_size * scale) * 0.5f;
-        const float stroke_width = (std::max)(1.25f, 1.9f * scale);
+        // Small buttons need a strong silhouette. Icons 26..31 previously fell
+        // through to GDI because the entry guard stopped at kind 25.
+        const bool compact_ui_icon = icon_kind == 8 || icon_kind >= 26;
+        const float stroke_width = (std::max)(
+            compact_ui_icon ? 1.85f : 1.25f,
+            (compact_ui_icon ? 2.65f : 1.9f) * scale);
         const auto p = [&](float x, float y) noexcept {
             return D2D1::Point2F(origin_x + x * scale, origin_y + y * scale);
         };
@@ -584,20 +589,17 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
                 });
             break;
 
-        case 8: // System theme - display and settings gear (not Desktop mode).
-            rounded_rect(2.0f, 3.2f, 18.8f, 16.1f, 2.1f);
-            line(9.6f, 16.1f, 9.6f, 18.5f);
-            line(6.4f, 18.5f, 12.2f, 18.5f);
-            // Low-detail gear remains distinguishable at 18px button scale.
-            ellipse(18.0f, 16.6f, 3.0f);
-            ellipse(18.0f, 16.6f, 1.0f);
-            for (int i = 0; i < 8; ++i) {
-                const float angle = static_cast<float>(i) * 3.14159265f / 4.0f;
-                const float cs = std::cos(angle);
-                const float sn = std::sin(angle);
-                line(18.0f + 3.8f * cs, 16.6f + 3.8f * sn,
-                     18.0f + 4.7f * cs, 16.6f + 4.7f * sn);
-            }
+        case 8: // System: recognizable monitor with one simplified gear.
+            rounded_rect(2.8f, 3.0f, 17.5f, 15.5f, 2.0f);
+            line(9.5f, 15.5f, 9.5f, 18.4f);
+            line(6.0f, 18.4f, 12.3f, 18.4f);
+            // Four chunky teeth, rather than eight tiny hairlines.
+            ellipse(18.1f, 16.9f, 3.25f);
+            dot(18.1f, 16.9f, 1.3f);
+            line(18.1f, 11.9f, 18.1f, 13.2f);
+            line(18.1f, 20.6f, 18.1f, 21.8f);
+            line(13.2f, 16.9f, 14.4f, 16.9f);
+            line(21.6f, 16.9f, 22.7f, 16.9f);
             break;
 
         case 9: // Dark - crescent moon.
@@ -924,44 +926,48 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             line(8.0f, 18.0f, 16.0f, 18.0f);
             break;
 
-        case 26: // Horizontal: wide panel with short left/right guide bars.
-            rounded_rect(4.8f, 6.3f, 19.2f, 17.7f, 2.2f);
-            line(2.2f, 8.8f, 2.2f, 15.2f);
-            line(21.8f, 8.8f, 21.8f, 15.2f);
+        case 26: // Horizontal: one strong wide silhouette.
+            rounded_rect(3.6f, 6.2f, 20.4f, 17.8f, 2.8f);
+            line(1.6f, 8.5f, 1.6f, 15.5f);
+            line(22.4f, 8.5f, 22.4f, 15.5f);
             break;
 
-        case 27: // Vertical: tall panel with top/bottom guide bars.
-            rounded_rect(8.1f, 4.8f, 15.9f, 19.2f, 2.2f);
-            line(8.8f, 2.2f, 15.2f, 2.2f);
-            line(8.8f, 21.8f, 15.2f, 21.8f);
+        case 27: // Vertical: one strong tall silhouette.
+            rounded_rect(7.3f, 3.6f, 16.7f, 20.4f, 2.8f);
+            line(8.5f, 1.6f, 15.5f, 1.6f);
+            line(8.5f, 22.4f, 15.5f, 22.4f);
             break;
 
-        case 28: // Enabled - capsule with filled right-hand thumb.
-            rounded_rect(2.0f, 6.2f, 22.0f, 17.8f, 5.8f);
-            dot(16.0f, 12.0f, 3.5f);
+        case 28: // On: soft capsule, large solid thumb on the RIGHT.
+        case 29: { // Off: same capsule, thumb on the LEFT.
+            const auto outer = D2D1::RoundedRect(
+                rf(2.0f, 6.1f, 22.0f, 17.9f), 5.9f*scale, 5.9f*scale);
+            brush->SetOpacity(0.34f);
+            target->FillRoundedRectangle(outer, brush.Get());
+            brush->SetOpacity(0.80f);
+            target->DrawRoundedRectangle(outer, brush.Get(), stroke_width*0.78f);
+            brush->SetOpacity(1.0f);
+            dot(icon_kind == 28 ? 16.2f : 7.8f, 12.0f, 4.1f);
+            break;
+        }
+
+        case 30: // Taskbar: a single wide status strip with TWO clear blocks.
+            rounded_rect(2.2f, 7.0f, 21.8f, 17.0f, 2.2f);
+            line(5.0f, 12.0f, 9.0f, 12.0f);
+            dot(15.8f, 12.0f, 1.75f);
+            dot(19.5f, 12.0f, 1.75f);
             break;
 
-        case 29: // Disabled - capsule with filled left-hand thumb.
-            rounded_rect(2.0f, 6.2f, 22.0f, 17.8f, 5.8f);
-            dot(8.0f, 12.0f, 3.5f);
-            break;
-
-        case 30: // Taskbar: compact horizontal system bar with status slots.
-            rounded_rect(2.0f, 7.2f, 22.0f, 16.8f, 2.3f);
-            line(5.0f, 12.0f, 8.6f, 12.0f);
-            line(13.2f, 10.5f, 13.2f, 13.5f);
-            line(16.6f, 10.5f, 16.6f, 13.5f);
-            line(20.0f, 10.5f, 20.0f, 13.5f);
-            break;
-
-        case 31: // Desktop: monitor with four app tiles, no gear or status bar.
-            rounded_rect(2.2f, 3.1f, 21.8f, 17.6f, 2.0f);
-            line(12.0f, 17.6f, 12.0f, 20.2f);
-            line(8.5f, 20.2f, 15.5f, 20.2f);
-            dot(9.3f, 8.1f, 1.05f);
-            dot(14.3f, 8.1f, 1.05f);
-            dot(9.3f, 12.6f, 1.05f);
-            dot(14.3f, 12.6f, 1.05f);
+        case 31: // Desktop: four large app tiles (NO monitor or gear).
+            // The 2x2 grid differentiates Desktop from Theme/System.
+            for (const float tx : {3.0f, 13.0f}) {
+                for (const float ty : {3.0f, 13.0f}) {
+                    target->FillRoundedRectangle(
+                        D2D1::RoundedRect(rf(tx,ty,tx+8.0f,ty+8.0f),
+                                          1.7f*scale,1.7f*scale),
+                        brush.Get());
+                }
+            }
             break;
 
         default:
