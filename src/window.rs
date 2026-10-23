@@ -8599,8 +8599,7 @@ unsafe extern "system" fn wnd_proc(
                 }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
-                | IDM_LANG_SIMPLIFIED_CHINESE
-                | IDM_LANG_PORTUGUESE_BRAZIL => {
+                | IDM_LANG_SIMPLIFIED_CHINESE => {
                     let language_override = match id {
                         IDM_LANG_SYSTEM => None,
                         IDM_LANG_ENGLISH => Some(LanguageId::English),
@@ -12898,16 +12897,6 @@ mod tests {
             ),
             "Codex: 5H 剩余13% 19:04重置 | 7D 剩余86% 07/18重置"
         );
-    }
-
-    fn test_settings_json(language: &str) -> String {
-        format!(
-            r#"{{
-  "taskbar_index": 1,
-  "poll_interval_ms": 60000,
-  "language": "{language}"
-}}"#
-        )
     }
 
     #[test]
