@@ -583,10 +583,20 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
                 });
             break;
 
-        case 8: // Follow system - monitor.
-            rounded_rect(3.0f, 4.0f, 21.0f, 17.0f, 2.0f);
-            line(12.0f, 17.0f, 12.0f, 20.0f);
-            line(8.0f, 20.0f, 16.0f, 20.0f);
+        case 8: // System theme - display and settings gear (not Desktop mode).
+            rounded_rect(2.0f, 3.2f, 18.8f, 16.1f, 2.1f);
+            line(9.6f, 16.1f, 9.6f, 18.5f);
+            line(6.4f, 18.5f, 12.2f, 18.5f);
+            // Low-detail gear remains distinguishable at 18px button scale.
+            ellipse(18.0f, 16.6f, 3.0f);
+            ellipse(18.0f, 16.6f, 1.0f);
+            for (int i = 0; i < 8; ++i) {
+                const float angle = static_cast<float>(i) * 3.14159265f / 4.0f;
+                const float cs = std::cos(angle);
+                const float sn = std::sin(angle);
+                line(18.0f + 3.8f * cs, 16.6f + 3.8f * sn,
+                     18.0f + 4.7f * cs, 16.6f + 4.7f * sn);
+            }
             break;
 
         case 9: // Dark - crescent moon.
@@ -913,24 +923,44 @@ extern "C" __declspec(dllexport) int codex_draw_settings_icon(
             line(8.0f, 18.0f, 16.0f, 18.0f);
             break;
 
-        case 26: // Desktop: landscape orientation (wide panel).
-            rounded_rect(2.0f, 6.0f, 22.0f, 18.0f, 2.8f);
-            line(5.0f, 10.0f, 19.0f, 10.0f);
+        case 26: // Horizontal: wide panel with short left/right guide bars.
+            rounded_rect(4.8f, 6.3f, 19.2f, 17.7f, 2.2f);
+            line(2.2f, 8.8f, 2.2f, 15.2f);
+            line(21.8f, 8.8f, 21.8f, 15.2f);
             break;
 
-        case 27: // Desktop: portrait orientation (tall panel).
-            rounded_rect(7.0f, 2.0f, 17.0f, 22.0f, 2.8f);
-            line(9.5f, 6.0f, 14.5f, 6.0f);
+        case 27: // Vertical: tall panel with top/bottom guide bars.
+            rounded_rect(8.1f, 4.8f, 15.9f, 19.2f, 2.2f);
+            line(8.8f, 2.2f, 15.2f, 2.2f);
+            line(8.8f, 21.8f, 15.2f, 21.8f);
             break;
 
-        case 28: // Auto-collapse enabled: switch with thumb to the right.
-            rounded_rect(2.0f, 6.5f, 22.0f, 17.5f, 5.5f);
-            ellipse(16.5f, 12.0f, 3.0f);
+        case 28: // Enabled - capsule with filled right-hand thumb.
+            rounded_rect(2.0f, 6.2f, 22.0f, 17.8f, 5.8f);
+            dot(16.0f, 12.0f, 3.5f);
             break;
 
-        case 29: // Auto-collapse disabled: switch with thumb to the left.
-            rounded_rect(2.0f, 6.5f, 22.0f, 17.5f, 5.5f);
-            ellipse(7.5f, 12.0f, 3.0f);
+        case 29: // Disabled - capsule with filled left-hand thumb.
+            rounded_rect(2.0f, 6.2f, 22.0f, 17.8f, 5.8f);
+            dot(8.0f, 12.0f, 3.5f);
+            break;
+
+        case 30: // Taskbar: compact horizontal system bar with status slots.
+            rounded_rect(2.0f, 7.2f, 22.0f, 16.8f, 2.3f);
+            line(5.0f, 12.0f, 8.6f, 12.0f);
+            line(13.2f, 10.5f, 13.2f, 13.5f);
+            line(16.6f, 10.5f, 16.6f, 13.5f);
+            line(20.0f, 10.5f, 20.0f, 13.5f);
+            break;
+
+        case 31: // Desktop: monitor with four app tiles, no gear or status bar.
+            rounded_rect(2.2f, 3.1f, 21.8f, 17.6f, 2.0f);
+            line(12.0f, 17.6f, 12.0f, 20.2f);
+            line(8.5f, 20.2f, 15.5f, 20.2f);
+            dot(9.3f, 8.1f, 1.05f);
+            dot(14.3f, 8.1f, 1.05f);
+            dot(9.3f, 12.6f, 1.05f);
+            dot(14.3f, 12.6f, 1.05f);
             break;
 
         default:
