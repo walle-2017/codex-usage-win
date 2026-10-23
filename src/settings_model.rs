@@ -9,26 +9,6 @@ use crate::style::{
 
 pub const EDITABLE_SETTINGS_SCHEMA_VERSION: u32 = 1;
 
-const LEGACY_ROUNDED_RADIUS: u8 = 8;
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CornerRadiusValue {
-    Radius(u8),
-    LegacyRounded(bool),
-}
-
-fn deserialize_corner_radius<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match CornerRadiusValue::deserialize(deserializer)? {
-        CornerRadiusValue::Radius(value) => value,
-        CornerRadiusValue::LegacyRounded(true) => LEGACY_ROUNDED_RADIUS,
-        CornerRadiusValue::LegacyRounded(false) => 0,
-    })
-}
-
 fn localized<'a>(zh: bool, zh_text: &'a str, en_text: &'a str) -> &'a str {
     if zh { zh_text } else { en_text }
 }
@@ -63,11 +43,8 @@ pub struct EditableUsage {
 pub struct EditableAppearance {
     pub theme: String,
     pub layout: String,
-    #[serde(default = "default_display_position")]
     pub position: String,
-    #[serde(default = "default_desktop_direction")]
     pub desktop_direction: String,
-    #[serde(default = "default_desktop_auto_collapse")]
     pub desktop_auto_collapse: bool,
     pub dark: EditableThemeStyle,
     pub light: EditableThemeStyle,
@@ -79,7 +56,7 @@ pub struct EditableThemeStyle {
     pub panel_background: String,
     pub panel_border: String,
     pub frosted_strength: u8,
-    #[serde(default, alias = "panel_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub panel_corner_radius: u8,
     #[serde(default)]
     pub tooltip_background: Option<String>,
@@ -87,7 +64,7 @@ pub struct EditableThemeStyle {
     pub tooltip_border: Option<String>,
     #[serde(default)]
     pub tooltip_frosted_strength: Option<u8>,
-    #[serde(default, alias = "tooltip_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub tooltip_corner_radius: u8,
     pub quota_type: String,
     pub remaining: String,
@@ -97,7 +74,7 @@ pub struct EditableThemeStyle {
     pub progress_medium: String,
     pub progress_low: String,
     pub progress_consumed: String,
-    #[serde(default, alias = "progress_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub progress_corner_radius: u8,
     pub drag_handle: String,
 }
@@ -204,7 +181,6 @@ impl EditableThemeStyle {
         ThemeStyle {
             panel_background: self.panel_background.clone(),
             panel_border: self.panel_border.clone(),
-            panel_blur_radius: 0,
             panel_frosted_strength: self.frosted_strength,
             panel_corner_radius: self.panel_corner_radius,
             tooltip_background: self.tooltip_background.clone(),
@@ -225,8 +201,6 @@ impl EditableThemeStyle {
     }
 }
 
-fn default_display_position() -> String { "taskbar".to_string() }
-fn default_desktop_direction() -> String { "horizontal".to_string() }
 pub(crate) fn default_desktop_auto_collapse() -> bool { true }
 
 impl EditableSettings {
@@ -741,24 +715,6 @@ mod tests {
         assert!(stripped.contains("https://example.com//x"));
     }
 
-
-    #[test]
-    fn desktop_auto_collapse_old_json_defaults_enabled_and_round_trips() {
-        let original = sample();
-        // Remove the optional field independently of JSON whitespace.
-        let mut legacy: serde_json::Value =
-            serde_json::from_str(&original.to_pretty_json().unwrap()).unwrap();
-        legacy["appearance"].as_object_mut().unwrap().remove("desktop_auto_collapse");
-        let migrated: EditableSettings = serde_json::from_value(legacy).unwrap();
-        assert!(migrated.appearance.desktop_auto_collapse);
-        let mut disabled = migrated;
-        disabled.appearance.desktop_auto_collapse = false;
-        let output = disabled.to_jsonc(LanguageId::SimplifiedChinese);
-        assert!(output.contains("\"desktop_auto_collapse\": false"));
-        let parsed = parse_jsonc(&output).unwrap();
-        assert!(!parsed.appearance.desktop_auto_collapse);
-        assert_eq!(parsed.validate_and_normalize().unwrap(), disabled);
-    }
 
     #[test]
     fn unknown_properties_are_rejected() {
