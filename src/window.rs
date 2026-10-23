@@ -1379,14 +1379,6 @@ fn tray_left_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT) -> i32 {
     tray_left
 }
 
-fn max_left_offset_for_taskbar(
-    taskbar_hwnd: HWND,
-    taskbar_rect: RECT,
-    widget_width: i32,
-) -> i32 {
-    let tray_left = tray_left_for_taskbar(taskbar_hwnd, taskbar_rect);
-    (tray_left - taskbar_rect.left - widget_width).max(0)
-}
 
 fn clamp_left_offset(left_offset: i32, max_left: i32) -> i32 {
     left_offset.clamp(0, max_left.max(0))
@@ -1883,25 +1875,6 @@ fn read_startup_value(key: &str) -> Option<String> {
     }
 }
 
-fn delete_startup_value(key: &str) {
-    unsafe {
-        let path = native_interop::wide_str(STARTUP_REGISTRY_PATH);
-        let key_name = native_interop::wide_str(key);
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR::from_raw(path.as_ptr()),
-            0,
-            KEY_SET_VALUE,
-            &mut hkey,
-        )
-        .is_ok()
-        {
-            let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(key_name.as_ptr()));
-            let _ = RegCloseKey(hkey);
-        }
-    }
-}
 
 
 
