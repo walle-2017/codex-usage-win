@@ -232,6 +232,8 @@ enum SettingsIcon {
     DirectionVertical,
     ToggleOn,
     ToggleOff,
+    PositionTaskbar,
+    PositionDesktop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6881,9 +6883,9 @@ unsafe fn paint_appearance_page(
             background,
             if selected { Color::from_hex("#FFFFFFFF") } else { primary },
             if position == DisplayPosition::Taskbar {
-                SettingsIcon::ThemeSystem
+                SettingsIcon::PositionTaskbar
             } else {
-                SettingsIcon::Panel
+                SettingsIcon::PositionDesktop
             },
             match (zh, position) {
                 (true, DisplayPosition::Taskbar) => "任务栏",
@@ -8432,26 +8434,34 @@ unsafe fn draw_settings_icon(
             draw_text(hdc, "{}", rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
         SettingsIcon::ThemeSystem => {
+            // Theme follows Windows: a monitor plus small gear, visibly
+            // distinct from the four-app-tile Desktop placement icon.
             draw_rounded_outline_rect(
-                hdc,
-                RECT {
+                hdc, RECT {
                     left: rect.left + scale(hwnd, 1),
                     top: rect.top + scale(hwnd, 2),
-                    right: rect.right - scale(hwnd, 1),
+                    right: rect.right - scale(hwnd, 4),
                     bottom: rect.bottom - scale(hwnd, 5),
-                },
-                color,
-                scale(hwnd, 2),
-                stroke,
+                }, color, scale(hwnd, 2), stroke,
             );
-            line(hdc, cx, rect.bottom - scale(hwnd, 5), cx, rect.bottom - scale(hwnd, 1));
-            line(
-                hdc,
-                cx - scale(hwnd, 4),
-                rect.bottom - scale(hwnd, 1),
-                cx + scale(hwnd, 4),
-                rect.bottom - scale(hwnd, 1),
-            );
+            line(hdc, cx - scale(hwnd, 2), rect.bottom - scale(hwnd, 5),
+                cx - scale(hwnd, 2), rect.bottom - scale(hwnd, 2));
+            line(hdc, cx - scale(hwnd, 5), rect.bottom - scale(hwnd, 2),
+                cx + scale(hwnd, 1), rect.bottom - scale(hwnd, 2));
+            let gear_x = rect.right - scale(hwnd, 5);
+            let gear_y = rect.bottom - scale(hwnd, 5);
+            let gear_radius = scale(hwnd, 3);
+            let _ = Ellipse(hdc, gear_x - gear_radius, gear_y - gear_radius,
+                gear_x + gear_radius, gear_y + gear_radius);
+            for (dx, dy) in [
+                (-4, 0), (4, 0), (0, -4), (0, 4),
+                (-3, -3), (3, -3), (-3, 3), (3, 3),
+            ] {
+                let ax = gear_x + scale(hwnd, dx * 3 / 4);
+                let ay = gear_y + scale(hwnd, dy * 3 / 4);
+                line(hdc, ax, ay, gear_x + scale(hwnd, dx),
+                    gear_y + scale(hwnd, dy));
+            }
         }
         SettingsIcon::ThemeDark => {
             let moon = RECT {
@@ -8518,48 +8528,84 @@ unsafe fn draw_settings_icon(
             );
         }
         SettingsIcon::DirectionHorizontal => {
-            draw_rounded_outline_rect(
-                hdc, RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: cy - scale(hwnd, 4),
-                    right: rect.right - scale(hwnd, 1),
-                    bottom: cy + scale(hwnd, 4),
-                },
-                color, scale(hwnd, 2), stroke,
-            );
-            line(hdc, rect.left + scale(hwnd, 4), cy - scale(hwnd, 1),
-                rect.right - scale(hwnd, 4), cy - scale(hwnd, 1));
+            draw_rounded_outline_rect(hdc, RECT {
+                left: rect.left + scale(hwnd, 4),
+                top: cy - scale(hwnd, 4),
+                right: rect.right - scale(hwnd, 4),
+                bottom: cy + scale(hwnd, 4),
+            }, color, scale(hwnd, 2), stroke);
+            line(hdc, rect.left + scale(hwnd, 1), cy - scale(hwnd, 3),
+                rect.left + scale(hwnd, 1), cy + scale(hwnd, 3));
+            line(hdc, rect.right - scale(hwnd, 1), cy - scale(hwnd, 3),
+                rect.right - scale(hwnd, 1), cy + scale(hwnd, 3));
         }
         SettingsIcon::DirectionVertical => {
-            draw_rounded_outline_rect(
-                hdc, RECT {
-                    left: cx - scale(hwnd, 4),
-                    top: rect.top + scale(hwnd, 1),
-                    right: cx + scale(hwnd, 4),
-                    bottom: rect.bottom - scale(hwnd, 1),
-                },
-                color, scale(hwnd, 2), stroke,
-            );
-            line(hdc, cx - scale(hwnd, 1), rect.top + scale(hwnd, 4),
-                cx + scale(hwnd, 1), rect.top + scale(hwnd, 4));
+            draw_rounded_outline_rect(hdc, RECT {
+                left: cx - scale(hwnd, 4),
+                top: rect.top + scale(hwnd, 4),
+                right: cx + scale(hwnd, 4),
+                bottom: rect.bottom - scale(hwnd, 4),
+            }, color, scale(hwnd, 2), stroke);
+            line(hdc, cx - scale(hwnd, 3), rect.top + scale(hwnd, 1),
+                cx + scale(hwnd, 3), rect.top + scale(hwnd, 1));
+            line(hdc, cx - scale(hwnd, 3), rect.bottom - scale(hwnd, 1),
+                cx + scale(hwnd, 3), rect.bottom - scale(hwnd, 1));
         }
         SettingsIcon::ToggleOn | SettingsIcon::ToggleOff => {
-            draw_rounded_outline_rect(
-                hdc, RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: cy - scale(hwnd, 4),
-                    right: rect.right - scale(hwnd, 1),
-                    bottom: cy + scale(hwnd, 4),
-                },
-                color, scale(hwnd, 4), stroke,
-            );
+            draw_rounded_outline_rect(hdc, RECT {
+                left: rect.left + scale(hwnd, 1),
+                top: cy - scale(hwnd, 4),
+                right: rect.right - scale(hwnd, 1),
+                bottom: cy + scale(hwnd, 4),
+            }, color, scale(hwnd, 4), stroke);
             let thumb_x = if icon == SettingsIcon::ToggleOn {
-                rect.right - scale(hwnd, 5)
+                rect.right - scale(hwnd, 6)
             } else {
-                rect.left + scale(hwnd, 5)
+                rect.left + scale(hwnd, 6)
             };
-            let r = scale(hwnd, 2);
-            let _ = Ellipse(hdc, thumb_x-r, cy-r, thumb_x+r, cy+r);
+            fill_rounded_rect(hdc, RECT {
+                left: thumb_x - scale(hwnd, 3),
+                top: cy - scale(hwnd, 3),
+                right: thumb_x + scale(hwnd, 3),
+                bottom: cy + scale(hwnd, 3),
+            }, color, scale(hwnd, 3));
+        }
+        SettingsIcon::PositionTaskbar => {
+            // Horizontal taskbar with status indicator slots.
+            draw_rounded_outline_rect(hdc, RECT {
+                left: rect.left + scale(hwnd, 1),
+                top: cy - scale(hwnd, 4),
+                right: rect.right - scale(hwnd, 1),
+                bottom: cy + scale(hwnd, 4),
+            }, color, scale(hwnd, 2), stroke);
+            line(hdc, rect.left + scale(hwnd, 4), cy,
+                rect.left + scale(hwnd, 7), cy);
+            for x in [rect.right - scale(hwnd, 8),
+                      rect.right - scale(hwnd, 5),
+                      rect.right - scale(hwnd, 2)] {
+                line(hdc, x, cy - scale(hwnd, 1), x, cy + scale(hwnd, 1));
+            }
+        }
+        SettingsIcon::PositionDesktop => {
+            // Four app tiles inside a monitor, no gear.
+            draw_rounded_outline_rect(hdc, RECT {
+                left: rect.left + scale(hwnd, 1),
+                top: rect.top + scale(hwnd, 2),
+                right: rect.right - scale(hwnd, 1),
+                bottom: rect.bottom - scale(hwnd, 5),
+            }, color, scale(hwnd, 2), stroke);
+            line(hdc, cx, rect.bottom - scale(hwnd, 5),
+                cx, rect.bottom - scale(hwnd, 2));
+            line(hdc, cx - scale(hwnd, 3), rect.bottom - scale(hwnd, 2),
+                cx + scale(hwnd, 3), rect.bottom - scale(hwnd, 2));
+            for (dx, dy) in [(-3, -3), (2, -3), (-3, 1), (2, 1)] {
+                fill_rounded_rect(hdc, RECT {
+                    left: cx + scale(hwnd, dx) - scale(hwnd, 1),
+                    top: cy + scale(hwnd, dy) - scale(hwnd, 1),
+                    right: cx + scale(hwnd, dx) + scale(hwnd, 1),
+                    bottom: cy + scale(hwnd, dy) + scale(hwnd, 1),
+                }, color, scale(hwnd, 1));
+            }
         }
         SettingsIcon::LayoutAdaptive => {
             line(
@@ -8968,6 +9014,9 @@ mod ui_smoke_tests {
         assert_eq!(SettingsIcon::DirectionVertical as i32, 27);
         assert_eq!(SettingsIcon::ToggleOn as i32, 28);
         assert_eq!(SettingsIcon::ToggleOff as i32, 29);
+        assert_eq!(SettingsIcon::PositionTaskbar as i32, 30);
+        assert_eq!(SettingsIcon::PositionDesktop as i32, 31);
+        assert_ne!(SettingsIcon::ThemeSystem as i32, SettingsIcon::PositionDesktop as i32);
         assert!(l.foot.left - 414 >= 12);
         assert!(l.foot.left < 434 && l.foot.right > 534);
     }
