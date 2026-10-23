@@ -155,6 +155,29 @@ mod tests {
     }
 
     #[test]
+    fn theme_system_gear_is_centered_inside_monitor_without_edge_clipping() {
+        let source = include_str!("../assets/settings-icons/theme-system.svg");
+        assert!(source.contains("fill-rule=\"evenodd\""));
+        for size in [18u32, 20, 22, 24, 36, 48, 96] {
+            let pixels = rasterize(source, size, size, Color::rgba(255, 255, 255, 255))
+                .expect("system theme icon must rasterize");
+            let stride = size as usize;
+            let alpha = |x: usize, y: usize| pixels[(y * stride + x) * 4 + 3];
+            for offset in 0..stride {
+                assert_eq!(alpha(offset, 0), 0, "top clipped at {size}px");
+                assert_eq!(alpha(offset, stride - 1), 0, "bottom clipped at {size}px");
+                assert_eq!(alpha(0, offset), 0, "left clipped at {size}px");
+                assert_eq!(alpha(stride - 1, offset), 0, "right clipped at {size}px");
+            }
+        }
+        let pixels = rasterize(source, 96, 96, Color::rgba(255, 255, 255, 255))
+            .expect("system theme icon must render at high DPI");
+        let alpha = |x: usize, y: usize| pixels[(y * 96 + x) * 4 + 3];
+        assert_eq!(alpha(48, 40), 0, "center of gear must remain transparent");
+        assert!(alpha(58, 40) > 200, "gear must be centered and visible in monitor");
+    }
+
+    #[test]
     fn transparency_and_theme_tint_are_respected() {
         let fg = Color::rgba(64, 128, 192, 128);
         let pixels = rasterize(ICONS[29], 20, 20, fg).unwrap();
