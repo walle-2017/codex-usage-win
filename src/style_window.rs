@@ -6578,7 +6578,7 @@ unsafe fn paint_appearance_page(
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
-        if zh { "外观" } else { "Appearance" },
+        &appearance_page_title(section, snapshot.language),
         settings_page_title_rect(hwnd),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
@@ -6740,15 +6740,8 @@ unsafe fn paint_appearance_page(
         return;
     }
 
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        section_label(section, snapshot.language),
-        rect(hwnd, 200, 180, 600, 212),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-
+    // The current section name belongs in the page heading. Drawing it at
+    // y=180..212 would overlap the shared appearance card (y=58..206).
     for (index, row) in rows(section).iter().copied().enumerate() {
         let r = row_rect(hwnd, index);
         let selected = row == editor;
@@ -7910,6 +7903,23 @@ unsafe fn draw_slider(
     fill_rounded_rect(hdc, thumb, accent, radius);
 }
 
+fn appearance_page_title(section: Section, language: LanguageId) -> String {
+    let root = if language == LanguageId::SimplifiedChinese {
+        "外观"
+    } else {
+        "Appearance"
+    };
+    if matches!(
+        section,
+        Section::Panel | Section::Tooltip | Section::Text
+            | Section::Progress | Section::Interaction
+    ) {
+        format!("{root} · {}", section_label(section, language))
+    } else {
+        root.to_string()
+    }
+}
+
 fn section_label(section: Section, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match section {
@@ -8316,6 +8326,33 @@ unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORM
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+
+    #[test]
+    fn appearance_subpage_titles_do_not_overlap_the_shared_options_card() {
+        for (section, zh, en) in [
+            (Section::Panel, "外观 · 面板", "Appearance · Panel"),
+            (Section::Tooltip, "外观 · 浮框", "Appearance · Tooltip"),
+            (Section::Text, "外观 · 文字", "Appearance · Text"),
+            (Section::Progress, "外观 · 进度条", "Appearance · Progress"),
+            (Section::Interaction, "外观 · 交互", "Appearance · Interaction"),
+        ] {
+            assert_eq!(appearance_page_title(section, LanguageId::SimplifiedChinese), zh);
+            assert_eq!(appearance_page_title(section, LanguageId::English), en);
+        }
+        assert_eq!(
+            appearance_page_title(Section::Preset, LanguageId::SimplifiedChinese),
+            "外观"
+        );
+
+        let hwnd = HWND::default();
+        let header = settings_page_title_rect(hwnd);
+        let shared_card = settings_card_rect(hwnd, 58, 206);
+        let first_editor_row = row_rect(hwnd, 0);
+        assert!(header.bottom < shared_card.top,
+            "page heading must be above the shared appearance options");
+        assert!(first_editor_row.top > shared_card.bottom,
+            "editor rows must start after the shared appearance options");
+    }
 
     #[test]
     fn horizontal_preset_gallery_restores_three_across_and_custom_below() {
