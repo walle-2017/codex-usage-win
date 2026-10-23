@@ -362,14 +362,15 @@ struct DesktopSubmenuLayout {
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
     DesktopSubmenuLayout {
         well: RECT { left: 636, top: 65, right: 930, bottom: 201 },
-        // Leave a 14px gap after Taskbar (x=314..414); Desktop is x=434..534.
-        foot: RECT { left: 428, top: 155, right: 654, bottom: 201 },
+        // Keep an even 4px inset around the Desktop button, without touching Taskbar.
+        // All three appearance rows share the same 8px button-column spacing.
+        foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
         direction_label: RECT { left: 652, top: 88, right: 770, bottom: 122 },
         collapse_label: RECT { left: 652, top: 146, right: 770, bottom: 180 },
-        horizontal: RECT { left: 775, top: 88, right: 840, bottom: 122 },
-        vertical: RECT { left: 846, top: 88, right: 918, bottom: 122 },
-        enabled: RECT { left: 775, top: 146, right: 840, bottom: 180 },
-        disabled: RECT { left: 846, top: 146, right: 918, bottom: 180 },
+        horizontal: RECT { left: 775, top: 88, right: 842, bottom: 122 },
+        vertical: RECT { left: 850, top: 88, right: 917, bottom: 122 },
+        enabled: RECT { left: 775, top: 146, right: 842, bottom: 180 },
+        disabled: RECT { left: 850, top: 146, right: 917, bottom: 180 },
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -1295,20 +1296,33 @@ fn json_action_icon(action: JsonAction) -> SettingsIcon {
     }
 }
 
+// Shared appearance-button grid: all rows use equal widths and 8px gaps.
+const APPEARANCE_BUTTON_LEFT: i32 = 314;
+const APPEARANCE_BUTTON_WIDTH: i32 = 100;
+const APPEARANCE_BUTTON_GAP: i32 = 8;
+const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
+
+fn appearance_button_rect(hwnd: HWND, column: i32, top: i32) -> RECT {
+    let left = APPEARANCE_BUTTON_LEFT
+        + column * (APPEARANCE_BUTTON_WIDTH + APPEARANCE_BUTTON_GAP);
+    rect(
+        hwnd, left, top,
+        left + APPEARANCE_BUTTON_WIDTH, top + APPEARANCE_BUTTON_HEIGHT,
+    )
+}
+
 fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
-    let index = match mode {
+    let column = match mode {
         ThemeMode::System => 0,
         ThemeMode::Dark => 1,
         ThemeMode::Light => 2,
     };
-    rect(hwnd, 314 + index * 108, 70, 414 + index * 108, 104)
+    appearance_button_rect(hwnd, column, 70)
 }
 
 fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
-    // Taskbar is unchanged. Desktop is shifted to keep its surrounding
-    // depressed surface visually distinct from the adjacent Taskbar button.
-    let left = if position == DisplayPosition::Desktop { 434 } else { 314 };
-    rect(hwnd, left, 162, left + 100, 196)
+    let column = if position == DisplayPosition::Desktop { 1 } else { 0 };
+    appearance_button_rect(hwnd, column, 162)
 }
 
 fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
@@ -1328,11 +1342,11 @@ fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
-    let index = match preset {
+    let column = match preset {
         AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
     };
-    rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
+    appearance_button_rect(hwnd, column, 116)
 }
 
 
@@ -8399,7 +8413,7 @@ mod ui_smoke_tests {
         let l = desktop_submenu_layout();
         assert_eq!(l.collapse_label.top, l.enabled.top);
         assert!(l.collapse_label.top > l.direction_label.bottom);
-        assert!(l.foot.left - 414 >= 12);
+        assert_eq!(l.foot.left, APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH + 4);
     }
 
     #[test]
@@ -8412,15 +8426,17 @@ mod ui_smoke_tests {
             assert!(r.top>=card.top && r.bottom<=card.bottom);
             assert!(r.right>r.left && r.bottom>r.top);
         }
-        // The bottom foot surrounds the selected Desktop button, but not Taskbar.
-        let desktop = RECT { left: 434, top: 162, right: 534, bottom: 196 };
+        // The bottom foot surrounds Desktop, but never overlaps Taskbar.
+        let desktop = RECT { left: 422, top: 162, right: 522, bottom: 196 };
         let taskbar = RECT { left: 314, top: 162, right: 414, bottom: 196 };
         assert!(l.foot.left < desktop.left && l.foot.right > desktop.right);
         assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
-        assert!(l.foot.left - taskbar.right >= 12,
-            "recessed background must leave a visible gap after Taskbar");
-        assert_eq!(desktop.left - taskbar.right, 20,
-            "the position buttons remain separate even at standard DPI");
+        assert_eq!(desktop.left - l.foot.left, 4,
+            "Desktop must have a consistent left inset");
+        assert_eq!(l.foot.left - taskbar.right, 4,
+            "the inset must leave space after Taskbar");
+        assert_eq!(desktop.left - taskbar.right, APPEARANCE_BUTTON_GAP,
+            "position buttons must share the same column spacing");
         assert!(l.well.left > 630, "do not overlap the Light theme button");
         assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
             "the two depressed regions must overlap to hide their seam");
@@ -8434,6 +8450,33 @@ mod ui_smoke_tests {
         assert!(l.enabled.right<l.disabled.left);
         assert!(l.direction_label.right<l.horizontal.left);
         assert!(l.collapse_label.right<l.enabled.left);
+        assert_eq!(l.horizontal.left, l.enabled.left);
+        assert_eq!(l.horizontal.right, l.enabled.right);
+        assert_eq!(l.vertical.left, l.disabled.left);
+        assert_eq!(l.vertical.right, l.disabled.right);
+        assert_eq!(l.horizontal.right - l.horizontal.left,
+                   l.vertical.right - l.vertical.left);
+        assert_eq!(l.vertical.left - l.horizontal.right, APPEARANCE_BUTTON_GAP);
+    }
+
+    #[test]
+    fn appearance_buttons_share_aligned_columns_across_all_rows() {
+        let a = appearance_button_rect(HWND::default(), 0, 70);
+        let b = appearance_button_rect(HWND::default(), 1, 70);
+        let c = appearance_button_rect(HWND::default(), 2, 70);
+        assert_eq!(a.right - a.left, APPEARANCE_BUTTON_WIDTH);
+        assert_eq!(b.right - b.left, APPEARANCE_BUTTON_WIDTH);
+        assert_eq!(c.right - c.left, APPEARANCE_BUTTON_WIDTH);
+        assert_eq!(b.left - a.right, APPEARANCE_BUTTON_GAP);
+        assert_eq!(c.left - b.right, APPEARANCE_BUTTON_GAP);
+        for top in [116, 162] {
+            for column in 0..2 {
+                let r = appearance_button_rect(HWND::default(), column, top);
+                let reference = appearance_button_rect(HWND::default(), column, 70);
+                assert_eq!((r.left, r.right), (reference.left, reference.right));
+                assert_eq!(r.bottom - r.top, APPEARANCE_BUTTON_HEIGHT);
+            }
+        }
     }
 
     #[test]
