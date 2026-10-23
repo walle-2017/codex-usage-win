@@ -19,31 +19,6 @@ pub fn progress_corner_radius_max(preset: AppearancePreset) -> u8 {
     (preset.metrics().bar_height.max(0) / 2)
         .min(i32::from(u8::MAX)) as u8
 }
-const LEGACY_ROUNDED_RADIUS: u8 = 8;
-const LEGACY_FROSTED_STRENGTH_SENTINEL: u8 = u8::MAX;
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CornerRadiusValue {
-    Radius(u8),
-    LegacyRounded(bool),
-}
-
-fn deserialize_corner_radius<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match CornerRadiusValue::deserialize(deserializer)? {
-        CornerRadiusValue::Radius(value) => value,
-        CornerRadiusValue::LegacyRounded(true) => LEGACY_ROUNDED_RADIUS,
-        CornerRadiusValue::LegacyRounded(false) => 0,
-    })
-}
-
-fn missing_frosted_strength() -> u8 {
-    LEGACY_FROSTED_STRENGTH_SENTINEL
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
@@ -95,13 +70,10 @@ pub enum StyleColorTarget {
 pub struct ThemeStyle {
     pub panel_background: String,
     pub panel_border: String,
-    /// Legacy v1.0.5 test-build field. Read for migration only and omit on save.
-    #[serde(default, skip_serializing)]
-    pub panel_blur_radius: u8,
     /// Visual Acrylic intensity: 0 = off, 1..=100 = increasingly frosted.
-    #[serde(default = "missing_frosted_strength")]
+    #[serde(default)]
     pub panel_frosted_strength: u8,
-    #[serde(default, alias = "panel_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub panel_corner_radius: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip_background: Option<String>,
@@ -109,7 +81,7 @@ pub struct ThemeStyle {
     pub tooltip_border: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip_frosted_strength: Option<u8>,
-    #[serde(default, alias = "tooltip_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub tooltip_corner_radius: u8,
     pub quota_type: String,
     pub remaining: String,
@@ -119,7 +91,7 @@ pub struct ThemeStyle {
     pub progress_medium: String,
     pub progress_low: String,
     pub progress_consumed: String,
-    #[serde(default, alias = "progress_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub progress_corner_radius: u8,
     pub drag_handle: String,
 }
@@ -135,7 +107,6 @@ impl ThemeStyle {
         Self {
             panel_background: "#242A31FF".into(),
             panel_border: "#343B43FF".into(),
-            panel_blur_radius: 0,
             panel_frosted_strength: 0,
             panel_corner_radius: 2,
             tooltip_background: Some("#242A31FF".into()),
@@ -160,7 +131,6 @@ impl ThemeStyle {
         Self {
             panel_background: "#F6F8FAFF".into(),
             panel_border: "#C7D0D9FF".into(),
-            panel_blur_radius: 0,
             panel_frosted_strength: 0,
             panel_corner_radius: 2,
             tooltip_background: Some("#F6F8FAFF".into()),
@@ -187,7 +157,6 @@ impl ThemeStyle {
             (true, ThemePreset::Ocean) => Self {
                 panel_background: "#0F1B24FF".into(),
                 panel_border: "#294252FF".into(),
-                panel_blur_radius: 0,
                 panel_frosted_strength: 0,
                 panel_corner_radius: 2,
                 tooltip_background: Some("#0F1B24FF".into()),
@@ -209,7 +178,6 @@ impl ThemeStyle {
                 // Clear Bay: visibly blue-tinted surfaces with marine cyan accents.
                 panel_background: "#DCEFF5FF".into(),
                 panel_border: "#AFCFD8FF".into(),
-                panel_blur_radius: 0,
                 panel_frosted_strength: 0,
                 panel_corner_radius: 2,
                 tooltip_background: Some("#DCEFF5FF".into()),
@@ -230,7 +198,6 @@ impl ThemeStyle {
             (true, ThemePreset::Forest) => Self {
                 panel_background: "#14211DFF".into(),
                 panel_border: "#2B4038FF".into(),
-                panel_blur_radius: 0,
                 panel_frosted_strength: 0,
                 panel_corner_radius: 2,
                 tooltip_background: Some("#14211DFF".into()),
@@ -252,7 +219,6 @@ impl ThemeStyle {
                 // Wheat Glow: warm ivory surfaces with restrained sage and amber accents.
                 panel_background: "#FFF1DCFF".into(),
                 panel_border: "#DDBF8FFF".into(),
-                panel_blur_radius: 0,
                 panel_frosted_strength: 0,
                 panel_corner_radius: 2,
                 tooltip_background: Some("#FFF1DCFF".into()),
@@ -313,20 +279,8 @@ impl ThemeStyle {
             normalize_color(&self.progress_consumed, &fallback.progress_consumed);
         self.drag_handle = normalize_color(&self.drag_handle, &fallback.drag_handle);
 
-        // Earlier v1.0.5 test builds stored frosted glass as a boolean-like
-        // panel_blur_radius (0/1). Preserve an enabled setting by migrating it
-        // to 100% the first time the new linear-strength schema is loaded.
-        if self.panel_frosted_strength == LEGACY_FROSTED_STRENGTH_SENTINEL {
-            self.panel_frosted_strength = if self.panel_blur_radius > 0 {
-                FROSTED_STRENGTH_MAX
-            } else {
-                0
-            };
-        } else {
-            self.panel_frosted_strength =
-                self.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
-        }
-        self.panel_blur_radius = 0;
+        self.panel_frosted_strength =
+            self.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
 
         if self.tooltip_background.is_some()
             || self.tooltip_border.is_some()
@@ -671,26 +625,6 @@ mod tests {
         styles.normalize();
         assert_eq!(styles.dark.panel_background, "#242A31FF");
         assert_eq!(styles.dark.panel_frosted_strength, FROSTED_STRENGTH_MAX);
-    }
-
-    #[test]
-    fn legacy_boolean_frosted_setting_migrates_to_full_strength() {
-        let json = r##"{
-            "dark": {
-                "panel_blur_radius": 1
-            },
-            "light": {
-                "panel_blur_radius": 0
-            }
-        }"##;
-        let mut styles: StyleSettings = serde_json::from_str(json).unwrap();
-        styles.normalize();
-        assert_eq!(styles.dark.panel_frosted_strength, 100);
-        assert_eq!(styles.light.panel_frosted_strength, 0);
-
-        let saved = serde_json::to_string(&styles).unwrap();
-        assert!(saved.contains("panel_frosted_strength"));
-        assert!(!saved.contains("panel_blur_radius"));
     }
 
     #[test]
