@@ -9,7 +9,7 @@ This document records the maintained product constraints for **Codex Usage Win**
 - Product name: `Codex Usage Win`
 - Standalone executable: `codex-usage-win.exe`
 - Runtime scope: Codex-only
-- Settings compatibility directory: `%APPDATA%\CodexUsage`
+- Settings location: `%APPDATA%\CodexUsage\settings.json`
 
 ## Security constraints
 
@@ -38,11 +38,13 @@ Store packages are built with:
 
 Store builds must not initiate GitHub executable self-updates. Package updates are managed by Microsoft Store.
 
-## Compatibility
+## Settings schema
 
-v1.0.3 intentionally keeps the legacy product name, icon, and `codex-usage.exe` filename, while its rewritten release uses the current repository URL and supports the manual-update migration notice.
-
-v1.0.4 is the renamed Codex Usage Win baseline with the new icon and complete current functionality.
+On startup, the current schema is the sole source of truth. Keep valid matching
+fields, remove unknown fields recursively, and fill missing or invalid values
+from defaults. Malformed JSON is backed up before recovery. Do not introduce
+per-version migration aliases, old application directories, or obsolete CLI
+argument handling.
 
 ## UI invariants
 

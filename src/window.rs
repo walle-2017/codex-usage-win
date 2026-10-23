@@ -190,15 +190,6 @@ const IDM_START_WITH_WINDOWS: u16 = 20;
 const IDM_RESET_POSITION: u16 = 30;
 const IDM_LANG_SYSTEM: u16 = 40;
 const IDM_LANG_ENGLISH: u16 = 41;
-const IDM_LANG_DUTCH: u16 = 42;
-const IDM_LANG_SPANISH: u16 = 43;
-const IDM_LANG_FRENCH: u16 = 44;
-const IDM_LANG_GERMAN: u16 = 45;
-const IDM_LANG_JAPANESE: u16 = 46;
-const IDM_LANG_KOREAN: u16 = 47;
-const IDM_LANG_TRADITIONAL_CHINESE: u16 = 48;
-const IDM_LANG_RUSSIAN: u16 = 49;
-const IDM_LANG_PORTUGUESE_BRAZIL: u16 = 50;
 const IDM_LANG_SIMPLIFIED_CHINESE: u16 = 51;
 const IDM_CHECK_UPDATE: u16 = 60;
 const IDM_OPEN_RELEASES: u16 = 61;
@@ -1745,39 +1736,8 @@ fn refresh_usage_texts(state: &mut AppState) {
 
 fn manual_update_required_message(language: LanguageId, version: &str) -> String {
     match language {
-        LanguageId::English => format!(
-            "Version v{version} is available, but the program or release asset name has changed. Automatic update is unavailable. Open GitHub Releases and update manually."
-        ),
-        LanguageId::Dutch => format!(
-            "Versie v{version} is beschikbaar, maar de programma- of releasebestandsnaam is gewijzigd. Automatisch bijwerken is niet mogelijk. Open GitHub Releases en werk handmatig bij."
-        ),
-        LanguageId::Spanish => format!(
-            "La versión v{version} está disponible, pero el nombre del programa o de los archivos de la versión ha cambiado. La actualización automática no está disponible. Abre GitHub Releases y actualiza manualmente."
-        ),
-        LanguageId::French => format!(
-            "La version v{version} est disponible, mais le nom du programme ou des fichiers de publication a changé. La mise à jour automatique est indisponible. Ouvrez GitHub Releases et mettez à jour manuellement."
-        ),
-        LanguageId::German => format!(
-            "Version v{version} ist verfügbar, aber der Programmname oder der Name der Release-Datei hat sich geändert. Die automatische Aktualisierung ist nicht möglich. Öffnen Sie GitHub Releases und aktualisieren Sie manuell."
-        ),
-        LanguageId::Japanese => format!(
-            "v{version} を利用できますが、プログラム名またはリリースファイル名が変更されています。自動更新できません。GitHub Releases を開き、手動で更新してください。"
-        ),
-        LanguageId::Korean => format!(
-            "v{version} 버전을 사용할 수 있지만 프로그램 이름 또는 릴리스 파일 이름이 변경되었습니다. 자동 업데이트를 사용할 수 없습니다. GitHub Releases를 열어 수동으로 업데이트하세요."
-        ),
-        LanguageId::SimplifiedChinese => format!(
-            "检测到 v{version}，但程序名称或发布文件名称已发生变化，无法自动升级。请前往 GitHub Releases 手动更新。"
-        ),
-        LanguageId::TraditionalChinese => format!(
-            "偵測到 v{version}，但程式名稱或發佈檔案名稱已變更，無法自動升級。請前往 GitHub Releases 手動更新。"
-        ),
-        LanguageId::Russian => format!(
-            "Доступна версия v{version}, но название программы или файла релиза изменилось. Автоматическое обновление недоступно. Откройте GitHub Releases и обновитесь вручную."
-        ),
-        LanguageId::PortugueseBrazil => format!(
-            "A versão v{version} está disponível, mas o nome do programa ou do arquivo da versão mudou. A atualização automática não está disponível. Abra o GitHub Releases e atualize manualmente."
-        ),
+        LanguageId::English => format!("Version v{version} is available, but the release asset is missing. Open GitHub Releases and update manually."),
+        LanguageId::SimplifiedChinese => format!("检测到 v{version}，但对应的发布文件不存在，无法自动升级。请前往 GitHub Releases 手动更新。"),
     }
 }
 
@@ -8639,29 +8599,12 @@ unsafe extern "system" fn wnd_proc(
                 }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
-                | IDM_LANG_DUTCH
-                | IDM_LANG_SPANISH
-                | IDM_LANG_FRENCH
-                | IDM_LANG_GERMAN
-                | IDM_LANG_JAPANESE
-                | IDM_LANG_KOREAN
                 | IDM_LANG_SIMPLIFIED_CHINESE
-                | IDM_LANG_TRADITIONAL_CHINESE
-                | IDM_LANG_RUSSIAN
                 | IDM_LANG_PORTUGUESE_BRAZIL => {
                     let language_override = match id {
                         IDM_LANG_SYSTEM => None,
                         IDM_LANG_ENGLISH => Some(LanguageId::English),
-                        IDM_LANG_DUTCH => Some(LanguageId::Dutch),
-                        IDM_LANG_SPANISH => Some(LanguageId::Spanish),
-                        IDM_LANG_FRENCH => Some(LanguageId::French),
-                        IDM_LANG_GERMAN => Some(LanguageId::German),
-                        IDM_LANG_JAPANESE => Some(LanguageId::Japanese),
-                        IDM_LANG_KOREAN => Some(LanguageId::Korean),
                         IDM_LANG_SIMPLIFIED_CHINESE => Some(LanguageId::SimplifiedChinese),
-                        IDM_LANG_TRADITIONAL_CHINESE => Some(LanguageId::TraditionalChinese),
-                        IDM_LANG_RUSSIAN => Some(LanguageId::Russian),
-                        IDM_LANG_PORTUGUESE_BRAZIL => Some(LanguageId::PortugueseBrazil),
                         _ => None,
                     };
                     {
@@ -9713,22 +9656,10 @@ fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
         }
     };
 
-    let settings_text = match language {
-        LanguageId::SimplifiedChinese => "设置...",
-        LanguageId::TraditionalChinese => "設定...",
-        _ => "Settings...",
-    };
-    let check_text = match language {
-        LanguageId::SimplifiedChinese => "检查更新",
-        LanguageId::TraditionalChinese => "檢查更新",
-        LanguageId::Japanese => "更新を確認",
-        LanguageId::Korean => "업데이트 확인",
-        _ => "Check for updates",
-    };
-    let github_text = match language {
-        LanguageId::SimplifiedChinese | LanguageId::TraditionalChinese => "前往 GitHub",
-        _ => "Open GitHub",
-    };
+    let zh = language == LanguageId::SimplifiedChinese;
+    let settings_text = if zh { "设置..." } else { "Settings..." };
+    let check_text = if zh { "检查更新" } else { "Check for updates" };
+    let github_text = if zh { "前往 GitHub" } else { "Open GitHub" };
     let version_label = if cfg!(feature = "github-update") {
         match available_update_version.as_deref() {
             Some(latest) => format!("v{} --> v{}", env!("CARGO_PKG_VERSION"), latest),

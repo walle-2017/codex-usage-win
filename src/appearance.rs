@@ -276,7 +276,6 @@ mod tests {
         for language in [
             LanguageId::SimplifiedChinese,
             LanguageId::English,
-            LanguageId::Japanese,
         ] {
             let value = taskbar_value_text(
                 AppearancePreset::Default,
