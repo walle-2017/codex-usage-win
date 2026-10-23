@@ -395,10 +395,9 @@ if ($native -match 'SetWindowCompositionAttribute' -or
     $native -match 'set_native_acrylic') {
     throw 'Legacy WCA Acrylic backend must not remain in the production blur path.'
 }
-if ($styleProduction -notmatch 'skip_serializing' -or
-    $styleProduction -notmatch 'LEGACY_FROSTED_STRENGTH_SENTINEL' -or
-    $styleProduction -notmatch 'panel_blur_radius') {
-    throw 'Legacy boolean frosted settings must migrate without being written back.'
+if ($styleProduction -match 'LEGACY_FROSTED_STRENGTH_SENTINEL|panel_blur_radius|alias = "panel_rounded"' -or
+    $settingsModel -match 'LegacyRounded|alias = "tooltip_rounded"') {
+    throw 'Deprecated frost and corner aliases must not remain.'
 }
 if ($windowProduction -notmatch 'BLUR_BACKDROP_HWND' -or
     $windowProduction -notmatch 'BLUR_BACKDROP_CONTEXT' -or
@@ -432,8 +431,8 @@ if ($native -notmatch 'monitor_device_name\(' -or
     $native -notmatch 'monitor_device:\s*Option<String>' -or
     $windowProduction -notmatch 'taskbar_left_offset:\s*i32' -or
     $windowProduction -notmatch 'taskbar_monitor:\s*Option<String>' -or
-    $windowProduction -notmatch 'legacy_tray_offset:\s*Option<i32>') {
-    throw 'Taskbar placement must use a stable monitor identity and a left-edge offset, while retaining one-time legacy offset migration.'
+    $windowProduction -match 'legacy_tray_offset|legacy_left_offset') {
+    throw 'Taskbar placement must use a stable monitor identity and a left-edge offset without legacy migration.'
 }
 $positionBlock = [regex]::Match(
     $windowProduction,
