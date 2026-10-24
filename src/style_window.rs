@@ -94,9 +94,6 @@ const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
 const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
 const JSON_ERROR_SHAKE_TIMER_ID: usize = 0x4A57;
 const SETTINGS_EDIT_SUBCLASS_ID: usize = 0x4A58;
-const JSON_REVEAL_TIMER_ID: usize = 0x4A5A;
-// Give DWM time to present the freshly painted parent before showing RichEdit.
-const JSON_REVEAL_DELAY_MS: u32 = 50;
 const JSON_ACTION_DELAY_MS: u32 = 200;
 const JSON_VALIDATION_DELAY_MS: u32 = 90;
 const JSON_ERROR_SHAKE_INTERVAL_MS: u32 = 16;
@@ -397,10 +394,6 @@ struct PanelState {
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     json_edit: SendHwnd,
     json_save_mask: SendHwnd,
-    // RichEdit is revealed in a later message after the destination page
-    // has painted AND a compositor frame has had time to present.
-    json_reveal_pending: bool,
-    json_reveal_timer_armed: bool,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
     focused_corner_edit: bool,
@@ -624,8 +617,11 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         let _ = RegisterClassExW(&wc);
 
         let title = native_interop::wide_str("Codex Usage Win");
+        // The settings page is GDI double-buffered, but RichEdit is a separate
+        // child HWND. Compose the entire window tree as one buffered frame so
+        // a new editor can never be layered over the previous page's pixels.
         let hwnd = match CreateWindowExW(
-            WS_EX_APPWINDOW,
+            WS_EX_APPWINDOW | WS_EX_COMPOSITED,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
@@ -974,8 +970,6 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
                 json_save_mask: SendHwnd::from_hwnd(HWND::default()),
-                json_reveal_pending: false,
-                json_reveal_timer_armed: false,
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
                 focused_corner_edit: false,
@@ -2214,18 +2208,12 @@ fn ensure_json_save_mask(owner: HWND) -> Option<HWND> {
     }
 }
 
-// This check also gates layout calls initiated by RichEdit syntax highlighting,
-// window resize, DPI changes and asynchronous parent synchronization.
-fn json_editor_should_be_visible(
-    section: Section,
-    discard_pending: bool,
-    reveal_pending: bool,
-) -> bool {
-    section == Section::Json && !discard_pending && !reveal_pending
+fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> bool {
+    section == Section::Json && !discard_pending
 }
 
 fn layout_settings_children(hwnd: HWND) {
-    let Some((json_edit, json_save_mask, section, discard_pending, reveal_pending, save_mask_visible)) = ({
+    let Some((json_edit, json_save_mask, section, discard_pending, save_mask_visible)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| {
             (
@@ -2233,10 +2221,8 @@ fn layout_settings_children(hwnd: HWND) {
                 s.json_save_mask,
                 s.section,
                 s.pending_discard_action.is_some(),
-                s.json_reveal_pending,
                 s.section == Section::Json
                     && s.pending_discard_action.is_none()
-                    && !s.json_reveal_pending
                     && s.json_save_feedback == Some(JsonSaveFeedback::Saving),
             )
         })
@@ -2246,7 +2232,7 @@ fn layout_settings_children(hwnd: HWND) {
 
     unsafe {
         let focused = GetFocus();
-        let visible = json_editor_should_be_visible(section, discard_pending, reveal_pending);
+        let visible = json_editor_should_be_visible(section, discard_pending);
         if !visible && focused == json_edit.to_hwnd() {
             let _ = SetFocus(hwnd);
         }
@@ -4378,46 +4364,6 @@ fn button_background(
     }
 }
 
-fn arm_json_editor_reveal_after_paint(hwnd: HWND) {
-    let should_arm = {
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_mut() else { return; };
-        if s.section != Section::Json || !s.json_reveal_pending || s.json_reveal_timer_armed {
-            false
-        } else {
-            s.json_reveal_timer_armed = true;
-            true
-        }
-    };
-    if should_arm {
-        unsafe {
-            // WM_PAINT has completed, but immediately showing the child could
-            // still be composed with the previous parent frame. Keep it hidden
-            // until the next message-loop turn after a compositor-frame gap.
-            let _ = SetTimer(hwnd, JSON_REVEAL_TIMER_ID, JSON_REVEAL_DELAY_MS, None);
-        }
-    }
-}
-
-fn finish_json_editor_reveal(hwnd: HWND) {
-    unsafe { let _ = KillTimer(hwnd, JSON_REVEAL_TIMER_ID); }
-    let should_reveal = {
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(s) = state.as_mut() else { return; };
-        s.json_reveal_timer_armed = false;
-        let ready = s.section == Section::Json
-            && s.json_reveal_pending
-            && s.pending_discard_action.is_none();
-        if ready {
-            s.json_reveal_pending = false;
-        }
-        ready
-    };
-    if should_reveal {
-        layout_settings_children(hwnd);
-    }
-}
-
 fn set_section(section: Section) {
     let (current_section, dirty, hwnd, discard_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -4439,19 +4385,12 @@ fn set_section(section: Section) {
         return;
     }
 
-    // Cancel any pending reveal from a previous navigation before changing
-    // children. This also protects a rapid JSON → Preset → JSON sequence.
-    unsafe { let _ = KillTimer(hwnd, JSON_REVEAL_TIMER_ID); }
     let (hwnd, json_dirty) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
         s.section = section;
-        // RichEdit paints in its own child HWND. Do not reveal it until the
-        // parent has synchronously painted the JSON page in the new section.
-        s.json_reveal_pending = section == Section::Json;
-        s.json_reveal_timer_armed = false;
         if section != Section::General {
             s.language_popup_open = false;
         }
@@ -4470,9 +4409,9 @@ fn set_section(section: Section) {
     };
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
-    // Pre-position and hide children before any page-specific text update.
-    // write_json_editor() calls layout_settings_children() itself; the pending
-    // reveal flag prevents that nested call from showing the editor too soon.
+    // Prepare RichEdit's position/content while the parent has not yet
+    // committed a new composited frame. The window-level WS_EX_COMPOSITED
+    // buffers these child and parent updates together.
     layout_settings_children(hwnd);
     if section == Section::Json {
         if json_dirty {
@@ -4485,9 +4424,8 @@ fn set_section(section: Section) {
     sync_numeric_edits();
     sync_blur_edit();
     sync_corner_edit();
-    // Paint the new page *while RichEdit remains hidden*. WM_PAINT arms a
-    // one-shot reveal AFTER EndPaint, and the later timer gives DWM a separate
-    // presentation opportunity. Do not reveal RichEdit in this call stack.
+    // Commit the new parent page and all visible child controls as one
+    // composited frame. There is no timer-based partial display state.
     redraw_settings_window(hwnd);
 }
 
@@ -4824,16 +4762,9 @@ unsafe extern "system" fn wnd_proc(
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             paint(hwnd);
-            // The parent is painted, but not necessarily presented by DWM.
-            // Arm the child reveal only after the parent EndPaint completed.
-            arm_json_editor_reveal_after_paint(hwnd);
             LRESULT(0)
         }
         WM_TIMER => {
-            if wparam.0 == JSON_REVEAL_TIMER_ID {
-                finish_json_editor_reveal(hwnd);
-                return LRESULT(0);
-            }
             if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
                 let still_active = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -8435,11 +8366,10 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn json_rich_edit_is_deferred_until_parent_page_has_painted() {
-        assert!(!json_editor_should_be_visible(Section::Preset, false, false));
-        assert!(!json_editor_should_be_visible(Section::Json, true, false));
-        assert!(!json_editor_should_be_visible(Section::Json, false, true));
-        assert!(json_editor_should_be_visible(Section::Json, false, false));
+    fn json_editor_visibility_depends_only_on_active_page_and_modal_state() {
+        assert!(!json_editor_should_be_visible(Section::Preset, false));
+        assert!(!json_editor_should_be_visible(Section::Json, true));
+        assert!(json_editor_should_be_visible(Section::Json, false));
     }
 
     #[test]
@@ -8859,43 +8789,25 @@ mod ui_smoke_tests {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.as_ref().unwrap().json_edit.to_hwnd()
             };
-            set_section(Section::Json);
-            {
-                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                let s = state.as_ref().unwrap();
-                assert!(s.json_reveal_pending, "JSON reveal must be deferred");
-                assert!(s.json_reveal_timer_armed, "parent paint must schedule reveal");
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            assert_ne!(
+                ex_style & WS_EX_COMPOSITED.0,
+                0,
+                "the parent must buffer GDI and RichEdit children as one frame"
+            );
+            for _ in 0..3 {
+                set_section(Section::Json);
+                assert!(
+                    IsWindowVisible(json_edit).as_bool(),
+                    "RichEdit must be visible in the composited JSON page"
+                );
+                set_section(Section::Preset);
+                assert!(
+                    !IsWindowVisible(json_edit).as_bool(),
+                    "RichEdit must be hidden whenever the preset page is active"
+                );
+                let _ = UpdateWindow(hwnd);
             }
-            assert!(
-                !IsWindowVisible(json_edit).as_bool(),
-                "RichEdit must stay hidden until after the JSON page has painted"
-            );
-            // Exercise the one-shot timer handler without slowing the smoke test.
-            let _ = SendMessageW(
-                hwnd, WM_TIMER, WPARAM(JSON_REVEAL_TIMER_ID), LPARAM(0),
-            );
-            assert!(
-                IsWindowVisible(json_edit).as_bool(),
-                "RichEdit must become visible after the deferred reveal"
-            );
-            set_section(Section::Preset);
-            assert!(
-                !IsWindowVisible(json_edit).as_bool(),
-                "RichEdit must be hidden immediately after leaving the JSON page"
-            );
-            // A stale timer must never redisplay RichEdit on the previous page.
-            let _ = SendMessageW(
-                hwnd, WM_TIMER, WPARAM(JSON_REVEAL_TIMER_ID), LPARAM(0),
-            );
-            assert!(!IsWindowVisible(json_edit).as_bool());
-            set_section(Section::Json);
-            assert!(!IsWindowVisible(json_edit).as_bool());
-            set_section(Section::Preset);
-            let _ = SendMessageW(
-                hwnd, WM_TIMER, WPARAM(JSON_REVEAL_TIMER_ID), LPARAM(0),
-            );
-            assert!(!IsWindowVisible(json_edit).as_bool(),
-                "cancelled navigation must never reveal stale JSON RichEdit");
 
             set_section(Section::Panel);
             let hex_edit = {
