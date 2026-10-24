@@ -54,6 +54,7 @@ pub const WM_STYLE_CORNER_PREVIEW: u32 = WM_APP + 134;
 
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const JSON_SAVE_MASK_CLASS: &str = "CodexUsageJsonSaveMaskV1";
+const JSON_PAGE_SURFACE_CLASS: &str = "CodexUsageJsonPageSurfaceV1";
 const WINDOW_WIDTH: i32 = 980;
 const WINDOW_HEIGHT: i32 = 700;
 const WINDOW_MIN_WIDTH: i32 = 980;
@@ -393,6 +394,9 @@ struct PanelState {
     corner_edit: SendHwnd,
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     json_edit: SendHwnd,
+    // Opaque sibling covering the complete content pane whenever JSON is active.
+    // Preset-page pixels must never be visible around the RichEdit child.
+    json_page_surface: SendHwnd,
     json_save_mask: SendHwnd,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
@@ -877,6 +881,40 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
 
+        // Create the opaque JSON content pane before RichEdit. As a sibling
+        // child, it stays BELOW RichEdit in Z order but ABOVE all stale parent
+        // page pixels. Painting the entire pane prevents mixed-page frames.
+        let json_page_class = native_interop::wide_str(JSON_PAGE_SURFACE_CLASS);
+        let page_wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(json_page_surface_wnd_proc),
+            hInstance: GetModuleHandleW(PCWSTR::null()).unwrap().into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(json_page_class.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&page_wc);
+        let json_page_surface = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(json_page_class.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WS_CHILD,
+            0, 0, 1, 1,
+            hwnd,
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(page) => page,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                let _ = DeleteObject(json_font);
+                return;
+            }
+        };
+
         let msftedit = native_interop::wide_str("Msftedit.dll");
         if LoadLibraryW(PCWSTR::from_raw(msftedit.as_ptr())).is_err() {
             let _ = DestroyWindow(hwnd);
@@ -969,6 +1007,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 corner_edit: SendHwnd::from_hwnd(corner_edit),
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
+                json_page_surface: SendHwnd::from_hwnd(json_page_surface),
                 json_save_mask: SendHwnd::from_hwnd(HWND::default()),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
@@ -2100,6 +2139,115 @@ fn layout_numeric_edits(hwnd: HWND) {
 }
 
 
+// JSON is rendered in a full opaque child content pane rather than directly
+// over the previous appearance page. The editor is a sibling *above* this pane,
+// so its background cannot accidentally reveal old preset/gallery pixels.
+unsafe extern "system" fn json_page_surface_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => LRESULT(1),
+        // Clicking JSON toolbar controls must still reach the parent hit-test.
+        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        WM_PAINT => {
+            paint_json_page_surface(hwnd);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe fn paint_json_page_surface(page: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let screen = BeginPaint(page, &mut ps);
+    let mut client = RECT::default();
+    let _ = GetClientRect(page, &mut client);
+    let width = (client.right - client.left).max(1);
+    let height = (client.bottom - client.top).max(1);
+    let dc = CreateCompatibleDC(screen);
+    if dc.0.is_null() {
+        let _ = EndPaint(page, &ps);
+        return;
+    }
+    let bitmap = CreateCompatibleBitmap(screen, width, height);
+    if bitmap.0.is_null() {
+        let _ = DeleteDC(dc);
+        let _ = EndPaint(page, &ps);
+        return;
+    }
+    let previous_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+    let state_snapshot = {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|s| (
+            s.hwnd.to_hwnd(), s.snapshot.clone(),
+            s.json_status.clone(), s.json_status_path.clone(),
+            s.json_save_feedback, s.json_error_shake_step, s.json_dirty,
+            s.hovered, s.pressed, s.font,
+        ))
+    };
+    if let Some((
+        owner, snapshot, status, status_path, feedback, shake_step,
+        dirty, hovered, pressed, font,
+    )) = state_snapshot {
+        let left = scale(owner, 180);
+        // Reuse JSON painting geometry, which is expressed in the parent's
+        // client coordinates. Only the viewport origin changes here.
+        let _ = SetViewportOrgEx(dc, -left, 0, None);
+        let background = if snapshot.is_dark {
+            Color::from_hex("#1F2125FF")
+        } else {
+            Color::from_hex("#E9EEF4FF")
+        };
+        fill(dc, RECT { left, top: 0, right: left + width, bottom: height }, background);
+        let old_font = SelectObject(dc, HGDIOBJ(font as *mut _));
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let primary = if snapshot.is_dark {
+            Color::from_hex("#F2F3F5FF")
+        } else {
+            Color::from_hex("#202124FF")
+        };
+        let secondary = if snapshot.is_dark {
+            Color::from_hex("#A8ADB5FF")
+        } else {
+            Color::from_hex("#666B73FF")
+        };
+        let card = if snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else {
+            Color::from_hex("#FFFFFFFF")
+        };
+        let card_hover = if snapshot.is_dark {
+            Color::from_hex("#343840FF")
+        } else {
+            Color::from_hex("#DCE5EFFF")
+        };
+        let card_pressed = if snapshot.is_dark {
+            Color::from_hex("#414751FF")
+        } else {
+            Color::from_hex("#CBD7E4FF")
+        };
+        paint_json_page(
+            dc, owner, &snapshot, &status, status_path.as_deref(),
+            feedback, shake_step, dirty, hovered, pressed,
+            card, card_hover, card_pressed,
+            Color::from_hex("#4C8DFFFF"),
+            Color::from_hex("#629CFFFF"),
+            Color::from_hex("#3678E6FF"),
+            primary, secondary,
+        );
+        SelectObject(dc, old_font);
+        let _ = SetViewportOrgEx(dc, 0, 0, None);
+    }
+    let _ = BitBlt(screen, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, previous_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(dc);
+    let _ = EndPaint(page, &ps);
+}
+
 unsafe extern "system" fn json_save_mask_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -2213,11 +2361,12 @@ fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> boo
 }
 
 fn layout_settings_children(hwnd: HWND) {
-    let Some((json_edit, json_save_mask, section, discard_pending, save_mask_visible)) = ({
+    let Some((json_edit, json_page_surface, json_save_mask, section, discard_pending, save_mask_visible)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| {
             (
                 s.json_edit,
+                s.json_page_surface,
                 s.json_save_mask,
                 s.section,
                 s.pending_discard_action.is_some(),
@@ -2235,6 +2384,32 @@ fn layout_settings_children(hwnd: HWND) {
         let visible = json_editor_should_be_visible(section, discard_pending);
         if !visible && focused == json_edit.to_hwnd() {
             let _ = SetFocus(hwnd);
+        }
+
+        // Reveal the full opaque JSON pane before revealing RichEdit. Even if
+        // the parent still displays a cached preset frame, the entire right
+        // content region is now covered by the correctly painted JSON page.
+        let page = json_page_surface.to_hwnd();
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let page_left = scale(hwnd, 180);
+        if !visible {
+            let _ = ShowWindow(json_edit.to_hwnd(), SW_HIDE);
+        }
+        let _ = SetWindowPos(
+            page,
+            HWND::default(),
+            page_left, 0,
+            (client.right - page_left).max(1),
+            client.bottom.max(1),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS
+                | if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW },
+        );
+        if visible {
+            let _ = RedrawWindow(
+                page, None, HRGN::default(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            );
         }
 
         let json_rect = json_edit_text_rect(hwnd);
@@ -4762,6 +4937,17 @@ unsafe extern "system" fn wnd_proc(
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             paint(hwnd);
+            // JSON toolbar hover, status and custom scrollbar are painted on
+            // the opaque child pane, so invalidate it when the parent changes.
+            let page = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().and_then(|s|
+                    (s.section == Section::Json).then_some(s.json_page_surface.to_hwnd())
+                )
+            };
+            if let Some(page) = page {
+                let _ = InvalidateRect(page, None, false);
+            }
             LRESULT(0)
         }
         WM_TIMER => {
@@ -8789,6 +8975,11 @@ mod ui_smoke_tests {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.as_ref().unwrap().json_edit.to_hwnd()
             };
+            let json_page_surface = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().unwrap().json_page_surface.to_hwnd()
+            };
+            assert!(IsWindow(json_page_surface).as_bool());
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             assert_ne!(
                 ex_style & WS_EX_COMPOSITED.0,
@@ -8798,10 +8989,18 @@ mod ui_smoke_tests {
             for _ in 0..3 {
                 set_section(Section::Json);
                 assert!(
+                    IsWindowVisible(json_page_surface).as_bool(),
+                    "opaque JSON content pane must cover the old appearance page"
+                );
+                assert!(
                     IsWindowVisible(json_edit).as_bool(),
-                    "RichEdit must be visible in the composited JSON page"
+                    "RichEdit must be visible on top of the JSON content pane"
                 );
                 set_section(Section::Preset);
+                assert!(
+                    !IsWindowVisible(json_page_surface).as_bool(),
+                    "opaque JSON pane must be hidden on preset page"
+                );
                 assert!(
                     !IsWindowVisible(json_edit).as_bool(),
                     "RichEdit must be hidden whenever the preset page is active"
