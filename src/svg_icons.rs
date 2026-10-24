@@ -25,7 +25,7 @@ const ICONS: [&str; 31] = [
     include_str!("../assets/settings-icons/theme-light.svg"),
     include_str!("../assets/settings-icons/layout-default.svg"),
     include_str!("../assets/settings-icons/layout-minimal.svg"),
-    include_str!("../assets/settings-icons/preset-classic.svg"),
+    include_str!("../assets/settings-icons/preset-graphite.svg"),
     include_str!("../assets/settings-icons/preset-ocean.svg"),
     include_str!("../assets/settings-icons/preset-forest.svg"),
     include_str!("../assets/settings-icons/preset-custom.svg"),
@@ -130,6 +130,11 @@ mod tests {
                 assert!(pixels.chunks_exact(4).any(|p| p[3] > 0), "empty icon: {id}");
             }
         }
+    }
+
+    #[test]
+    fn graphite_preset_uses_named_svg_asset() {
+        assert_eq!(ICONS[13], include_str!("../assets/settings-icons/preset-graphite.svg"));
     }
 
     #[test]
