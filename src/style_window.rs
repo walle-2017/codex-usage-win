@@ -2414,14 +2414,18 @@ fn layout_settings_children(hwnd: HWND) {
 
         let json_rect = json_edit_text_rect(hwnd);
         let visibility = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+        // Both windows are siblings. WS_EX_COMPOSITED uses their *actual*
+        // Z-order, not the order in which SetWindowPos was called. The opaque
+        // JSON page must stay BEHIND RichEdit or its text is fully covered.
+        // SWP_NOZORDER here left the pane in front on some Windows systems.
         let _ = SetWindowPos(
             json_edit.to_hwnd(),
-            HWND::default(),
+            HWND_TOP,
             json_rect.left,
             json_rect.top,
             (json_rect.right - json_rect.left).max(1),
             (json_rect.bottom - json_rect.top).max(1),
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | visibility,
+            SWP_NOACTIVATE | SWP_NOCOPYBITS | visibility,
         );
 
         let mask_hwnd = json_save_mask.to_hwnd();
@@ -8995,6 +8999,28 @@ mod ui_smoke_tests {
                 assert!(
                     IsWindowVisible(json_edit).as_bool(),
                     "RichEdit must be visible on top of the JSON content pane"
+                );
+                // A visible RichEdit can still be 100% obscured by a sibling.
+                // Ensure RichEdit is the topmost child, not merely WS_VISIBLE.
+                let top_child = GetWindow(hwnd, GW_CHILD)
+                    .expect("settings window should have a topmost child");
+                assert_eq!(
+                    top_child, json_edit,
+                    "opaque JSON surface must remain below the RichEdit HWND"
+                );
+                assert!(
+                    GetWindowTextLengthW(json_edit) > 0,
+                    "JSON RichEdit must retain the generated configuration text"
+                );
+                // Repainting the opaque pane must not change the z-order.
+                let _ = RedrawWindow(
+                    json_page_surface, None, HRGN::default(),
+                    RDW_INVALIDATE | RDW_UPDATENOW,
+                );
+                assert_eq!(
+                    GetWindow(hwnd, GW_CHILD).expect("top child after repaint"),
+                    json_edit,
+                    "a page repaint must not obscure RichEdit"
                 );
                 set_section(Section::Preset);
                 assert!(
