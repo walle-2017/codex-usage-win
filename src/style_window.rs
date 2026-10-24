@@ -899,7 +899,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             WINDOW_EX_STYLE(0),
             PCWSTR::from_raw(json_page_class.as_ptr()),
             PCWSTR::from_raw(empty.as_ptr()),
-            WS_CHILD,
+            WS_CHILD | WS_CLIPSIBLINGS,
             0, 0, 1, 1,
             hwnd,
             HMENU::default(),
@@ -929,6 +929,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             PCWSTR::from_raw(empty.as_ptr()),
             WINDOW_STYLE(
                 WS_CHILD.0
+                    | WS_CLIPSIBLINGS.0
                     | ES_MULTILINE as u32
                     | ES_AUTOVSCROLL as u32
                     | ES_AUTOHSCROLL as u32
@@ -8984,6 +8985,16 @@ mod ui_smoke_tests {
                 state.as_ref().unwrap().json_page_surface.to_hwnd()
             };
             assert!(IsWindow(json_page_surface).as_bool());
+            for (child, label) in [
+                (json_page_surface, "JSON content pane"),
+                (json_edit, "RichEdit editor"),
+            ] {
+                let style = GetWindowLongW(child, GWL_STYLE) as u32;
+                assert_ne!(
+                    style & WS_CLIPSIBLINGS.0, 0,
+                    "{label} must clip overlapping sibling pixels"
+                );
+            }
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             assert_ne!(
                 ex_style & WS_EX_COMPOSITED.0,
