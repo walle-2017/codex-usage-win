@@ -1918,11 +1918,6 @@ fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: 
         rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
     }
 }
-fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    let (vertical, minimal) = preview_layout_flags();
-    custom_preset_card_rect_for_orientation(hwnd, vertical, minimal)
-}
-
 fn language_button_rect(hwnd: HWND) -> RECT {
     // Chinese / English only: keep the selector compact and right-aligned.
     rect(hwnd, 760, 414, 920, 450)
@@ -6264,12 +6259,12 @@ fn request_preset_gallery_warmup(hwnd: HWND) {
     let already_requested = SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| {
         cell.replace(true)
     });
-    if !already_requested {
-        if unsafe {
+    if !already_requested
+        && unsafe {
             PostMessageW(hwnd, WM_SETTINGS_PREWARM_GALLERY, WPARAM(0), LPARAM(0))
-        }.is_err() {
-            SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
-        }
+        }.is_err()
+    {
+        SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
     }
 }
 
