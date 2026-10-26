@@ -86,6 +86,9 @@ const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
 const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
+// Asynchronously refresh the expensive Preset gallery after menu animation,
+// never while its top-card frames are being composed.
+const WM_SETTINGS_PRESET_GALLERY_REFRESH: u32 = WM_APP + 146;
 // Poll with a finer timer while the short animation is active; throttle paints to ~60Hz.
 const DESKTOP_SUBMENU_FRAME_MS: u32 = 8;
 const DESKTOP_SUBMENU_MIN_FRAME_MS: u64 = 15;
@@ -310,6 +313,7 @@ struct DesktopSubmenuAnimation {
     started: Instant,
     duration_ms: u64,
     last_frame: Option<Instant>,
+    final_frame_pending: bool,
 }
 impl DesktopSubmenuAnimation {
     fn initial(desktop: bool) -> Self {
@@ -318,6 +322,7 @@ impl DesktopSubmenuAnimation {
             progress, from: progress, target: progress,
             started: Instant::now(), duration_ms: DESKTOP_SUBMENU_DURATION_MS,
             last_frame: None,
+            final_frame_pending: false,
         }
     }
     fn active(&self) -> bool {
@@ -334,6 +339,18 @@ impl DesktopSubmenuAnimation {
         }
         self.last_frame = Some(now);
         true
+    }
+    fn tick_for_paint(&mut self, now: Instant) -> (bool, bool) {
+        let due = self.frame_due(now);
+        if due {
+            self.advance(now);
+            if !self.active() {
+                // Preserve the cached fast path on the terminal frame: the
+                // next WM_PAINT must still use the pre-rendered endpoints.
+                self.final_frame_pending = true;
+            }
+        }
+        (self.active(), due)
     }
     fn advance(&mut self, now: Instant) -> bool {
         if !self.active() { return false; }
@@ -357,6 +374,7 @@ impl DesktopSubmenuAnimation {
         self.target = target;
         self.started = now;
         self.last_frame = None;
+        self.final_frame_pending = false;
         let full_duration_ms = if desktop {
             DESKTOP_SUBMENU_DURATION_MS
         } else {
@@ -537,6 +555,7 @@ struct PanelState {
     pressed: Option<HitTarget>,
     tracking_mouse_leave: bool,
     desktop_submenu: DesktopSubmenuAnimation,
+    preset_gallery_refresh_pending: bool,
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
     corner_edit: SendHwnd,
@@ -1151,6 +1170,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
                 desktop_submenu: DesktopSubmenuAnimation::initial(
                     snapshot.display_position == DisplayPosition::Desktop,
                 ),
+                preset_gallery_refresh_pending: false,
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
                 corner_edit: SendHwnd::from_hwnd(corner_edit),
@@ -1200,14 +1220,24 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 /// Keep the preset gallery in sync when the widget moves between horizontal
 /// and vertical taskbars without discarding active style edits.
 pub fn set_preview_orientation(vertical: bool) {
-    let hwnd = {
+    let (hwnd, gallery_changed) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else { return };
         if s.snapshot.vertical_taskbar_mode == vertical { return; }
+        let previous = preview_vertical_for_snapshot(&s.snapshot);
         s.snapshot.vertical_taskbar_mode = vertical;
-        s.hwnd.to_hwnd()
+        let gallery_changed = s.section == Section::Preset
+            && previous != preview_vertical_for_snapshot(&s.snapshot);
+        if gallery_changed { s.preset_gallery_refresh_pending = true; }
+        (s.hwnd.to_hwnd(), gallery_changed)
     };
-    unsafe { let _ = InvalidateRect(hwnd, None, false); }
+    if gallery_changed {
+        // The parent calls this during position changes before sync(). Posting
+        // lets sync() start its animation before the gallery is invalidated.
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_SETTINGS_PRESET_GALLERY_REFRESH, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 // Persisted position is mirrored both in display_position and JSON settings.
@@ -1226,18 +1256,23 @@ fn position_is_only_snapshot_change(
         && old.appearance_preset == new.appearance_preset
         && old.desktop_direction == new.desktop_direction
         && old.desktop_auto_collapse == new.desktop_auto_collapse
-        && old.vertical_taskbar_mode == new.vertical_taskbar_mode
+        // Vertical taskbar preview orientation only affects the lower Preset
+        // gallery, which is refreshed separately after the card animation.
         && old.active_style == new.active_style
         && old.editable_settings == normalized
 }
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let (hwnd, section, json_dirty, json_apply_pending, submenu_animated, card_only) = {
+    let (hwnd, section, json_dirty, json_apply_pending, submenu_animated, card_only, gallery_changed) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
         let changed_position = s.snapshot.display_position != snapshot.display_position;
+        let previous_preview = preview_vertical_for_snapshot(&s.snapshot);
+        let gallery_changed = s.section == Section::Preset
+            && previous_preview != preview_vertical_for_snapshot(&snapshot);
+        if gallery_changed { s.preset_gallery_refresh_pending = true; }
         let card_only = is_appearance_section(s.section)
             && position_is_only_snapshot_change(&s.snapshot, &snapshot);
         let submenu_animated = if changed_position {
@@ -1268,8 +1303,14 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             s.pending_json_action == Some(JsonAction::Apply),
             submenu_animated,
             card_only,
+            gallery_changed,
         )
     };
+    if gallery_changed {
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_SETTINGS_PRESET_GALLERY_REFRESH, WPARAM(0), LPARAM(0));
+        }
+    }
     if submenu_animated {
         begin_precise_animation_timer();
         unsafe { let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None); }
@@ -5163,15 +5204,48 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_SETTINGS_PRESET_GALLERY_REFRESH => {
+            let should_refresh = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    if s.section != Section::Preset {
+                        s.preset_gallery_refresh_pending = false;
+                        false
+                    } else if s.preset_gallery_refresh_pending
+                        && !s.desktop_submenu.active()
+                        && !s.desktop_submenu.final_frame_pending
+                    {
+                        s.preset_gallery_refresh_pending = false;
+                        true
+                    } else {
+                        false
+                    }
+                } else { false }
+            };
+            if should_refresh {
+                // Refresh the area below the top card, not the entire window.
+                // While animated, this message is deferred until after the
+                // cached terminal card frame is presented.
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                let rect = RECT {
+                    left: scale(hwnd, SETTINGS_CONTENT_LEFT),
+                    top: scale(hwnd, 206),
+                    right: client.right,
+                    bottom: client.bottom,
+                };
+                if rect.right > rect.left && rect.bottom > rect.top {
+                    let _ = InvalidateRect(hwnd, Some(&rect), false);
+                }
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
                 let (still_active, rendered) = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
-                        let now = Instant::now();
-                        let due = s.desktop_submenu.frame_due(now);
-                        if due { s.desktop_submenu.advance(now); }
-                        (s.desktop_submenu.active(), due)
+                        s.desktop_submenu.tick_for_paint(Instant::now())
                     } else { (false, false) }
                 };
                 if !still_active {
@@ -6064,6 +6138,22 @@ unsafe fn composite_cached_submenu_card(
     })
 }
 
+fn finish_submenu_terminal_paint(hwnd: HWND) {
+    let needs_gallery = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else { return };
+        s.desktop_submenu.final_frame_pending = false;
+        s.section == Section::Preset && s.preset_gallery_refresh_pending
+    };
+    if needs_gallery {
+        unsafe {
+            let _ = PostMessageW(
+                hwnd, WM_SETTINGS_PRESET_GALLERY_REFRESH, WPARAM(0), LPARAM(0),
+            );
+        }
+    }
+}
+
 unsafe fn paint(hwnd: HWND) {
     let paint_begin = Instant::now();
     let mut ps = PAINTSTRUCT::default();
@@ -6107,6 +6197,7 @@ unsafe fn paint(hwnd: HWND) {
         font,
         desktop_submenu_progress,
         desktop_submenu_active,
+        desktop_submenu_final_frame_pending,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
@@ -6133,6 +6224,7 @@ unsafe fn paint(hwnd: HWND) {
             s.font,
             s.desktop_submenu.progress,
             s.desktop_submenu.active(),
+            s.desktop_submenu.final_frame_pending,
         )
     };
     // WM_TIMER dirties exactly the shared top card. Keep all drawing outside
@@ -6192,8 +6284,8 @@ unsafe fn paint(hwnd: HWND) {
     // Fast path: the animation changes only the shared settings card. Blend
     // two cached complete card states; the first frame builds the snapshots,
     // and all following frames are just BitBlt + AlphaBlend.
-    if submenu_only && desktop_submenu_active && !discard_pending &&
-        composite_cached_submenu_card(
+    if submenu_only && (desktop_submenu_active || desktop_submenu_final_frame_pending)
+        && !discard_pending && composite_cached_submenu_card(
             screen_hdc, hdc, hwnd, width, height, &snapshot, section, editor,
             font, card, card_hover, card_pressed, track_background,
             accent, accent_hover, accent_pressed, primary, secondary,
@@ -6205,6 +6297,9 @@ unsafe fn paint(hwnd: HWND) {
             rect.right - rect.left, rect.bottom - rect.top,
             hdc, rect.left, rect.top, SRCCOPY);
         let _ = EndPaint(hwnd, &ps);
+        if desktop_submenu_final_frame_pending {
+            finish_submenu_terminal_paint(hwnd);
+        }
         record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true, true);
         return;
     }
@@ -6383,6 +6478,9 @@ unsafe fn paint(hwnd: HWND) {
         }
     }
     let _ = EndPaint(hwnd, &ps);
+    if desktop_submenu_final_frame_pending {
+        finish_submenu_terminal_paint(hwnd);
+    }
     record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false, submenu_only);
     });
 }
@@ -9215,6 +9313,28 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn submenu_terminal_frame_keeps_cache_eligibility_and_retargets_cleanly() {
+        let start = Instant::now();
+        let mut animation = DesktopSubmenuAnimation::initial(false);
+        assert!(animation.retarget(true, start));
+        let (active, due) = animation.tick_for_paint(start + Duration::from_millis(225));
+        assert!(due);
+        assert!(!active);
+        assert_eq!(animation.progress, 1.0);
+        assert!(animation.final_frame_pending);
+        // WM_PAINT composites this last frame, then clears the pending flag.
+        animation.final_frame_pending = false;
+        assert!(!animation.final_frame_pending);
+        assert!(animation.retarget(false, start + Duration::from_millis(230)));
+        assert!(!animation.final_frame_pending);
+        let (active, due) = animation.tick_for_paint(start + Duration::from_millis(425));
+        assert!(due);
+        assert!(!active);
+        assert_eq!(animation.progress, 0.0);
+        assert!(animation.final_frame_pending);
+    }
+
+    #[test]
     fn submenu_frame_gate_and_metrics_percentile() {
         let start = Instant::now();
         let mut animation = DesktopSubmenuAnimation::initial(false);
@@ -9496,6 +9616,16 @@ mod ui_smoke_tests {
                     },
                 },
             };
+
+            // A taskbar/desktop switch may update runtime preview orientation,
+            // but only the lower gallery depends on that field.
+            let mut switched_position = snapshot.clone();
+            switched_position.display_position = DisplayPosition::Desktop;
+            switched_position.vertical_taskbar_mode = true;
+            switched_position.editable_settings.appearance.position = "desktop".into();
+            assert!(position_is_only_snapshot_change(&snapshot, &switched_position));
+            switched_position.theme_mode = ThemeMode::Light;
+            assert!(!position_is_only_snapshot_change(&snapshot, &switched_position));
 
             let reopen_snapshot = snapshot.clone();
             open_or_focus(HWND::default(), snapshot);
