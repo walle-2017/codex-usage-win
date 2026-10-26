@@ -380,6 +380,7 @@ struct SubmenuFrameMetrics {
     intervals_ms: Vec<f64>,
     total_paint_ms: f64,
     max_paint_ms: f64,
+    cached_frames: usize,
 }
 
 thread_local! {
@@ -422,7 +423,7 @@ fn submenu_p95(values: &[f64]) -> f64 {
     sorted[((sorted.len() * 95).div_ceil(100)).saturating_sub(1)]
 }
 
-fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: bool) {
+fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: bool, cached: bool) {
     if std::env::var_os("CODEX_USAGE_ANIMATION_METRICS").is_none() {
         return;
     }
@@ -432,7 +433,7 @@ fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: boo
             *slot = Some(SubmenuFrameMetrics {
                 first: paint_end, last: paint_end, frames: 0,
                 intervals_ms: Vec::with_capacity(32),
-                total_paint_ms: 0.0, max_paint_ms: 0.0,
+                total_paint_ms: 0.0, max_paint_ms: 0.0, cached_frames: 0,
             });
         }
         let Some(metric) = slot.as_mut() else { return; };
@@ -440,6 +441,7 @@ fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: boo
             metric.intervals_ms.push(paint_end.duration_since(metric.last).as_secs_f64() * 1000.0);
         }
         metric.frames += 1;
+        if cached { metric.cached_frames += 1; }
         metric.last = paint_end;
         let draw_ms = paint_end.duration_since(paint_begin).as_secs_f64() * 1000.0;
         metric.total_paint_ms += draw_ms;
@@ -453,8 +455,8 @@ fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: boo
             let p95 = submenu_p95(&metric.intervals_ms);
             let gaps = metric.intervals_ms.iter().filter(|v| **v > 25.0).count();
             let line = format!(
-                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={}\n",
-                metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
+                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={}\n",
+                metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps, metric.cached_frames,
             );
             let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -5958,7 +5960,7 @@ unsafe fn composite_cached_submenu_card(
         let h = card_bounds.bottom - card_bounds.top;
         let copied = BitBlt(dest, card_bounds.left, card_bounds.top, w, h,
             frames.closed.dc, card_bounds.left, card_bounds.top, SRCCOPY);
-        if !copied.as_bool() { return false; }
+        if copied.is_err() { return false; }
         let opacity = (progress.clamp(0.0, 1.0) * 255.0).round() as u8;
         opacity == 0 || native_interop::alpha_blend_cached_card(
             dest, frames.open.dc, card_bounds, opacity)
@@ -6105,7 +6107,7 @@ unsafe fn paint(hwnd: HWND) {
             rect.right - rect.left, rect.bottom - rect.top,
             hdc, rect.left, rect.top, SRCCOPY);
         let _ = EndPaint(hwnd, &ps);
-        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active);
+        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true);
         return;
     }
 
@@ -6262,8 +6264,28 @@ unsafe fn paint(hwnd: HWND) {
             dirty.right - dirty.left, dirty.bottom - dirty.top,
             hdc, dirty.left, dirty.top, SRCCOPY);
     }
+    // Prepare both endpoint images while the page is idle. The next click
+    // can then start the animation without blocking on SVG/Direct2D rendering.
+    // This runs after presenting the normal frame, so cache preparation only
+    // touches the offscreen DC and cannot overwrite what the user sees.
+    if !submenu_only && !desktop_submenu_active && !discard_pending &&
+        !matches!(section, Section::General | Section::Json)
+    {
+        let cache_key = SubmenuCardKey::new(hwnd, width, height, &snapshot);
+        let needs_warmup = SUBMENU_CARD_FRAMES.with(|cell| {
+            cell.borrow().as_ref().is_none_or(|f| f.key != cache_key)
+        });
+        if needs_warmup {
+            let _ = composite_cached_submenu_card(
+                screen_hdc, hdc, hwnd, width, height, &snapshot, section, editor,
+                font, card, card_hover, card_pressed, track_background,
+                accent, accent_hover, accent_pressed, primary, secondary,
+                desktop_submenu_progress,
+            );
+        }
+    }
     let _ = EndPaint(hwnd, &ps);
-    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active);
+    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false);
     });
 }
 
