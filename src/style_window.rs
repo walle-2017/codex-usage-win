@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use std::io::Write;
 use std::{fs, path::PathBuf};
@@ -2160,6 +2160,101 @@ fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
     }
 }
 
+// Opt-in JSON scroll diagnostics. The editor can scroll without repainting
+// the whole settings page; measure RichEdit's work separately from the narrow
+// custom scrollbar paint path, and write a summary only after the gesture.
+#[derive(Default)]
+struct JsonScrollPerf {
+    wheel_events: usize,
+    drag_events: usize,
+    total_rich_ms: f64,
+    max_rich_ms: f64,
+    fast_scrollbar_paints: usize,
+    last: Option<Instant>,
+}
+
+static JSON_SCROLL_METRICS_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("CODEX_USAGE_JSON_SCROLL_METRICS").is_some());
+
+thread_local! {
+    static JSON_SCROLL_PERF: RefCell<JsonScrollPerf> =
+        RefCell::new(JsonScrollPerf::default());
+}
+
+fn record_json_scroll_event(wheel: bool, elapsed: Duration) {
+    if !*JSON_SCROLL_METRICS_ENABLED { return; }
+    JSON_SCROLL_PERF.with(|slot| {
+        let mut perf = slot.borrow_mut();
+        if wheel { perf.wheel_events += 1; } else { perf.drag_events += 1; }
+        let ms = elapsed.as_secs_f64() * 1000.0;
+        perf.total_rich_ms += ms;
+        perf.max_rich_ms = perf.max_rich_ms.max(ms);
+        perf.last = Some(Instant::now());
+    });
+}
+
+fn record_json_scrollbar_fast_paint() {
+    if !*JSON_SCROLL_METRICS_ENABLED { return; }
+    JSON_SCROLL_PERF.with(|slot| {
+        slot.borrow_mut().fast_scrollbar_paints += 1;
+    });
+}
+
+fn flush_idle_json_scroll_metrics() {
+    if !*JSON_SCROLL_METRICS_ENABLED { return; }
+    JSON_SCROLL_PERF.with(|slot| {
+        let mut perf = slot.borrow_mut();
+        let Some(last) = perf.last else { return };
+        if last.elapsed() < Duration::from_millis(350) { return; }
+        let events = perf.wheel_events + perf.drag_events;
+        if events > 0 {
+            let line = format!(
+                "wheel_events={},drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={}\n",
+                perf.wheel_events, perf.drag_events,
+                perf.total_rich_ms / events as f64,
+                perf.max_rich_ms, perf.fast_scrollbar_paints,
+            );
+            let path = std::env::temp_dir().join("codex-usage-json-scroll-metrics.log");
+            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+        *perf = JsonScrollPerf::default();
+    });
+}
+
+// Line count and font height are stable while the JSON text and viewport
+// dimensions remain unchanged. WM_MOUSEMOVE previously measured a font DC
+// and asked RichEdit to lay out the whole document multiple times per event.
+#[derive(Clone, Copy)]
+struct JsonScrollLayoutCache {
+    edit: isize,
+    font: isize,
+    viewport_height: i32,
+    viewport_width: i32,
+    line_height: i32,
+    total_lines: i32,
+}
+
+impl JsonScrollLayoutCache {
+    fn matches(self, edit: isize, font: isize, width: i32, height: i32) -> bool {
+        self.edit == edit && self.font == font
+            && self.viewport_width == width && self.viewport_height == height
+    }
+}
+
+thread_local! {
+    static JSON_SCROLL_LAYOUT_CACHE: RefCell<Option<JsonScrollLayoutCache>> =
+        const { RefCell::new(None) };
+    static JSON_SCROLL_LAST_THUMB: RefCell<Option<(i32, i32)>> =
+        const { RefCell::new(None) };
+}
+
+fn invalidate_json_scroll_layout_cache() {
+    JSON_SCROLL_LAYOUT_CACHE.with(|cache| *cache.borrow_mut() = None);
+    JSON_SCROLL_LAST_THUMB.with(|last| *last.borrow_mut() = None);
+}
+
 fn json_scroll_line_metrics() -> Option<(HWND, i32, i32, i32)> {
     let (edit, json_font) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -2167,34 +2262,56 @@ fn json_scroll_line_metrics() -> Option<(HWND, i32, i32, i32)> {
         (s.json_edit.to_hwnd(), s.json_font)
     };
     unsafe {
-        let total_lines = SendMessageW(edit, EM_GETLINECOUNT_MSG, WPARAM(0), LPARAM(0)).0 as i32;
-        let first_visible =
-            SendMessageW(edit, EM_GETFIRSTVISIBLELINE_MSG, WPARAM(0), LPARAM(0)).0 as i32;
         let mut client = RECT::default();
         let _ = GetClientRect(edit, &mut client);
-        let hdc = GetDC(edit);
-        if hdc.0.is_null() {
-            return None;
-        }
-        let old_font = if json_font != 0 {
-            Some(SelectObject(hdc, HGDIOBJ(json_font as *mut _)))
+        let viewport_height = (client.bottom - client.top).max(1);
+        let viewport_width = (client.right - client.left).max(1);
+        let cached = JSON_SCROLL_LAYOUT_CACHE.with(|cache| {
+            cache.borrow().as_ref().copied().filter(|metrics| {
+                metrics.matches(edit.0 as isize, json_font, viewport_width, viewport_height)
+            })
+        });
+        let metrics = if let Some(cached) = cached {
+            cached
         } else {
-            None
+            let hdc = GetDC(edit);
+            if hdc.0.is_null() {
+                return None;
+            }
+            let old_font = if json_font != 0 {
+                Some(SelectObject(hdc, HGDIOBJ(json_font as *mut _)))
+            } else {
+                None
+            };
+            let mut font_metrics = TEXTMETRICW::default();
+            let _ = GetTextMetricsW(hdc, &mut font_metrics);
+            if let Some(old_font) = old_font {
+                SelectObject(hdc, old_font);
+            }
+            let _ = ReleaseDC(edit, hdc);
+            let metrics = JsonScrollLayoutCache {
+                edit: edit.0 as isize,
+                font: json_font,
+                viewport_height,
+                viewport_width,
+                line_height: font_metrics.tmHeight.max(1),
+                total_lines: (SendMessageW(
+                    edit, EM_GETLINECOUNT_MSG, WPARAM(0), LPARAM(0),
+                ).0 as i32).max(1),
+            };
+            JSON_SCROLL_LAYOUT_CACHE.with(|cache| *cache.borrow_mut() = Some(metrics));
+            metrics
         };
-        let mut metrics = TEXTMETRICW::default();
-        let _ = GetTextMetricsW(hdc, &mut metrics);
-        if let Some(old_font) = old_font {
-            SelectObject(hdc, old_font);
-        }
-        let _ = ReleaseDC(edit, hdc);
-        let line_height = metrics.tmHeight.max(1);
-        let visible_lines = ((client.bottom - client.top).max(1) / line_height).max(1);
-        Some((edit, total_lines.max(1), visible_lines, first_visible.max(0)))
+        let first_visible =
+            SendMessageW(edit, EM_GETFIRSTVISIBLELINE_MSG, WPARAM(0), LPARAM(0)).0 as i32;
+        let visible_lines = (viewport_height / metrics.line_height).max(1);
+        Some((edit, metrics.total_lines, visible_lines, first_visible.max(0)))
     }
 }
 
-fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
-    let (_, total_lines, visible_lines, first_visible) = json_scroll_line_metrics()?;
+fn json_scroll_thumb_from_lines(
+    hwnd: HWND, total_lines: i32, visible_lines: i32, first_visible: i32,
+) -> Option<RECT> {
     if visible_lines >= total_lines {
         return None;
     }
@@ -2212,6 +2329,47 @@ fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
         right: track.right - scale(hwnd, 1),
         bottom: track.top + offset + thumb_h,
     })
+}
+
+fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
+    let (_, total, visible, first) = json_scroll_line_metrics()?;
+    json_scroll_thumb_from_lines(hwnd, total, visible, first)
+}
+
+// The scrollbar is owned visually by the opaque JSON page sibling, not by
+// the parent. Invalidating only this child avoids repainting toolbars, text,
+// and the entire settings tree on every wheel or drag event.
+fn invalidate_json_scrollbar(hwnd: HWND) {
+    let page = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().and_then(|s| {
+            (s.section == Section::Json && s.pending_discard_action.is_none())
+                .then_some(s.json_page_surface.to_hwnd())
+        })
+    };
+    if let Some(page) = page {
+        let offset = scale(hwnd, 180);
+        let track = json_scrollbar_track_rect(hwnd);
+        let local = RECT {
+            left: track.left - offset,
+            top: track.top,
+            right: track.right - offset,
+            bottom: track.bottom,
+        };
+        unsafe { let _ = InvalidateRect(page, Some(&local), false); }
+    }
+}
+
+fn refresh_json_scrollbar_if_changed(hwnd: HWND) {
+    let current = json_scroll_thumb_rect(hwnd).map(|thumb| (thumb.top, thumb.bottom));
+    let changed = JSON_SCROLL_LAST_THUMB.with(|last| {
+        let mut previous = last.borrow_mut();
+        if *previous == current { false } else {
+            *previous = current;
+            true
+        }
+    });
+    if changed { invalidate_json_scrollbar(hwnd); }
 }
 
 fn json_scroll_thumb_hit_rect(hwnd: HWND) -> Option<RECT> {
@@ -2232,20 +2390,16 @@ fn json_editor_active() -> bool {
 }
 
 fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
-    if lines == 0 {
-        return;
-    }
+    if lines == 0 { return; }
+    let begin = Instant::now();
     unsafe {
+        // RichEdit invalidates its own changed text lines. Forcing
+        // RDW_UPDATENOW also paints the entire WS_EX_COMPOSITED hierarchy
+        // synchronously on every wheel message; let the message loop coalesce.
         let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
-        let _ = RedrawWindow(
-            edit,
-            None,
-            HRGN::default(),
-            RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
-        );
-        let _ = InvalidateRect(panel, Some(&json_scrollbar_track_rect(panel)), false);
-        let _ = UpdateWindow(panel);
     }
+    record_json_scroll_event(true, begin.elapsed());
+    refresh_json_scrollbar_if_changed(panel);
 }
 
 unsafe extern "system" fn settings_edit_subclass_proc(
@@ -2328,7 +2482,9 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
     let Some((edit, total_lines, visible_lines, first_visible)) = json_scroll_line_metrics() else {
         return;
     };
-    let Some(thumb) = json_scroll_thumb_rect(hwnd) else { return; };
+    let Some(thumb) = json_scroll_thumb_from_lines(
+        hwnd, total_lines, visible_lines, first_visible,
+    ) else { return; };
     let track = json_scrollbar_track_rect(hwnd);
     let thumb_h = thumb.bottom - thumb.top;
     let available = (track.bottom - track.top - thumb_h).max(1);
@@ -2338,19 +2494,12 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
         ((top - track.top) * max_first + available / 2) / available;
     let delta = target_first - first_visible;
     if delta != 0 {
+        let begin = Instant::now();
         unsafe {
             let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
-            let _ = RedrawWindow(
-                edit,
-                None,
-                HRGN::default(),
-                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
-            );
         }
-    }
-    unsafe {
-        let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
-        let _ = UpdateWindow(hwnd);
+        record_json_scroll_event(false, begin.elapsed());
+        refresh_json_scrollbar_if_changed(hwnd);
     }
 }
 
@@ -2609,6 +2758,31 @@ unsafe extern "system" fn json_page_surface_wnd_proc(
 unsafe fn paint_json_page_surface(page: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let screen = BeginPaint(page, &mut ps);
+    // A scrollbar-only invalidation is far narrower than the JSON pane.
+    // Paint the track directly on the child HDC instead of allocating a
+    // fullscreen bitmap and redrawing the toolbar and status on every scroll.
+    let owner_state = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| (s.hwnd.to_hwnd(), s.snapshot.is_dark))
+    };
+    if let Some((owner, is_dark)) = owner_state {
+        let origin_x = scale(owner, 180);
+        let track = json_scrollbar_track_rect(owner);
+        let dirty = ps.rcPaint;
+        let scrollbar_only = dirty.left >= track.left - origin_x
+            && dirty.right <= track.right - origin_x
+            && dirty.top >= track.top && dirty.bottom <= track.bottom
+            && dirty.left < dirty.right && dirty.top < dirty.bottom;
+        if scrollbar_only {
+            let _ = SetViewportOrgEx(screen, -origin_x, 0, None);
+            fill(screen, track, json_editor_background(is_dark));
+            paint_json_scrollbar_decoration(screen, owner, is_dark);
+            let _ = SetViewportOrgEx(screen, 0, 0, None);
+            let _ = EndPaint(page, &ps);
+            record_json_scrollbar_fast_paint();
+            return;
+        }
+    }
     let mut client = RECT::default();
     let _ = GetClientRect(page, &mut client);
     let width = (client.right - client.left).max(1);
@@ -2902,9 +3076,11 @@ fn layout_settings_children(hwnd: HWND) {
         }
 
         if visible {
-            let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
+            invalidate_json_scroll_layout_cache();
+            let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 120, None);
         } else {
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
+            invalidate_json_scroll_layout_cache();
         }
     }
 }
@@ -5498,17 +5674,13 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
             if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
-                let section = {
-                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    state.as_ref().map(|s| s.section)
-                };
-                if section == Some(Section::Json) {
-                    let _ = InvalidateRect(
-                        hwnd,
-                        Some(&json_scrollbar_track_rect(hwnd)),
-                        false,
-                    );
+                // Keyboard navigation and caret auto-scroll do not pass through
+                // our custom wheel/drag handlers. Poll only for actual thumb
+                // movement; never repaint the parent when nothing changed.
+                if json_editor_active() {
+                    refresh_json_scrollbar_if_changed(hwnd);
                 }
+                flush_idle_json_scroll_metrics();
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -5579,7 +5751,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 let _ = SetCapture(hwnd);
-                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                invalidate_json_scrollbar(hwnd);
                 return LRESULT(0);
             }
 
@@ -5684,15 +5856,15 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
             let scroll_hover = json_editor_active()
-                && json_scroll_thumb_rect(hwnd).is_some()
-                && pt_in_rect(json_scrollbar_track_rect(hwnd), x, y);
+                && pt_in_rect(json_scrollbar_track_rect(hwnd), x, y)
+                && json_scroll_thumb_rect(hwnd).is_some();
             if scroll_hover != old_scroll_hover {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = state.as_mut() {
                     s.json_scroll_hovered = scroll_hover;
                 }
                 drop(state);
-                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                invalidate_json_scrollbar(hwnd);
             }
 
             let kind = {
@@ -5769,7 +5941,7 @@ unsafe extern "system" fn wnd_proc(
             if was_scroll_dragging {
                 let _ = ReleaseCapture();
                 update_json_scroll_drag(hwnd, y);
-                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                invalidate_json_scrollbar(hwnd);
                 return LRESULT(0);
             }
 
@@ -5833,6 +6005,7 @@ unsafe extern "system" fn wnd_proc(
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
 
             if control_id == ID_EDIT_JSON && notification == EN_CHANGE_CODE {
+                invalidate_json_scroll_layout_cache();
                 schedule_json_validation(hwnd);
                 return LRESULT(0);
             }
@@ -6058,6 +6231,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         },
         WM_DESTROY => {
+            invalidate_json_scroll_layout_cache();
             end_submenu_frame_clock(hwnd);
             PRESET_GALLERY_FRAMES.with(|cell| *cell.borrow_mut() = None);
             SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(false));
@@ -7383,6 +7557,47 @@ unsafe fn paint_general_page(
     }
 }
 
+// Shared between the full JSON page paint and scrollbar-only child paints.
+unsafe fn paint_json_scrollbar_decoration(hdc: HDC, hwnd: HWND, is_dark: bool) {
+    let scroll_hovered = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.json_scroll_hovered).unwrap_or(false)
+    };
+    if let Some(thumb) = json_scroll_thumb_rect(hwnd) {
+        if scroll_hovered {
+            let track = json_scrollbar_track_rect(hwnd);
+            fill_rounded_rect(
+                hdc,
+                track,
+                if is_dark {
+                    // Composite equivalent of a very low-opacity light gray over
+                    // the JSON editor background; GDI brushes do not alpha blend.
+                    Color::from_hex("#303033FF")
+                } else {
+                    Color::from_hex("#F1F2F4FF")
+                },
+                ((track.right - track.left) / 2).max(1),
+            );
+        }
+        fill_rounded_rect(
+            hdc,
+            thumb,
+            if scroll_hovered {
+                if is_dark {
+                    Color::from_hex("#777E88FF")
+                } else {
+                    Color::from_hex("#666D76FF")
+                }
+            } else if is_dark {
+                Color::from_hex("#555B64FF")
+            } else {
+                Color::from_hex("#747B84FF")
+            },
+            ((thumb.right - thumb.left) / 2).max(1),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_json_page(
     hdc: HDC,
@@ -7461,43 +7676,8 @@ unsafe fn paint_json_page(
         scale(hwnd, 7),
         1,
     );
-    let scroll_hovered = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.json_scroll_hovered).unwrap_or(false)
-    };
-    if let Some(thumb) = json_scroll_thumb_rect(hwnd) {
-        if scroll_hovered {
-            let track = json_scrollbar_track_rect(hwnd);
-            fill_rounded_rect(
-                hdc,
-                track,
-                if snapshot.is_dark {
-                    // Composite equivalent of a very low-opacity light gray over
-                    // the JSON editor background; GDI brushes do not alpha blend.
-                    Color::from_hex("#303033FF")
-                } else {
-                    Color::from_hex("#F1F2F4FF")
-                },
-                ((track.right - track.left) / 2).max(1),
-            );
-        }
-        fill_rounded_rect(
-            hdc,
-            thumb,
-            if scroll_hovered {
-                if snapshot.is_dark {
-                    Color::from_hex("#777E88FF")
-                } else {
-                    Color::from_hex("#666D76FF")
-                }
-            } else if snapshot.is_dark {
-                Color::from_hex("#555B64FF")
-            } else {
-                Color::from_hex("#747B84FF")
-            },
-            ((thumb.right - thumb.left) / 2).max(1),
-        );
-    }
+    paint_json_scrollbar_decoration(hdc, hwnd, snapshot.is_dark);
+
     let running = status.starts_with('◌');
     let success = !status.starts_with('×') && !running;
     let status_color = if running {
@@ -9561,6 +9741,23 @@ mod ui_smoke_tests {
             "editor rows must start after the shared appearance options");
         assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
             "preset gallery should immediately follow the shared options without a redundant heading");
+    }
+
+    #[test]
+    fn json_scroll_layout_cache_invalidates_on_document_or_viewport_change() {
+        let cache = JsonScrollLayoutCache {
+            edit: 100, font: 12, viewport_height: 430,
+            viewport_width: 600, line_height: 18, total_lines: 200,
+        };
+        assert!(cache.matches(100, 12, 600, 430));
+        assert!(!cache.matches(100, 12, 620, 430),
+            "word wrapping changes when editor width changes");
+        assert!(!cache.matches(100, 12, 600, 450),
+            "visible line count changes with the editor height");
+        assert!(!cache.matches(100, 14, 600, 430),
+            "font changes invalidate the measurement");
+        assert!(!cache.matches(101, 12, 600, 430),
+            "never reuse a prior RichEdit window's line count");
     }
 
     #[test]
