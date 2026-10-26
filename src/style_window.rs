@@ -88,6 +88,7 @@ const ENM_CHANGE_MASK: isize = 0x00000001;
 const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
 const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
 const DESKTOP_SUBMENU_DURATION_MS: u64 = 220;
+const DESKTOP_SUBMENU_CLOSE_DURATION_MS: u64 = 190;
 const DESKTOP_SUBMENU_ICON_SIZE: i32 = 18;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
@@ -322,8 +323,9 @@ impl DesktopSubmenuAnimation {
         if !self.active() { return false; }
         let elapsed = now.saturating_duration_since(self.started).as_secs_f32() * 1000.0;
         let t = (elapsed / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
-        // Smooth ease-out cubic for both directions; no bounce or overshoot.
-        let eased = 1.0 - (1.0 - t).powi(3);
+        // Smoothstep keeps both endpoints at zero velocity, preventing the
+        // reveal edge from snapping at the end of an open/close animation.
+        let eased = t * t * (3.0 - 2.0 * t);
         self.progress = if t >= 1.0 {
             self.target
         } else {
@@ -338,7 +340,12 @@ impl DesktopSubmenuAnimation {
         self.from = self.progress;
         self.target = target;
         self.started = now;
-        self.duration_ms = (DESKTOP_SUBMENU_DURATION_MS as f32
+        let full_duration_ms = if desktop {
+            DESKTOP_SUBMENU_DURATION_MS
+        } else {
+            DESKTOP_SUBMENU_CLOSE_DURATION_MS
+        };
+        self.duration_ms = (full_duration_ms as f32
             * (self.target - self.from).abs()).round().max(72.0) as u64;
         true
     }
@@ -362,16 +369,17 @@ struct DesktopSubmenuLayout {
 }
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
     DesktopSubmenuLayout {
-        well: RECT { left: 636, top: 65, right: 930, bottom: 201 },
-        // Keep an even 4px inset around the Desktop button, without touching Taskbar.
-        // All three appearance rows share the same 8px button-column spacing.
+        // Keep the L-shaped join anchored to the Desktop button, but narrow
+        // the right well and its label column to remove unused horizontal space.
+        well: RECT { left: 636, top: 65, right: 894, bottom: 201 },
+        // Keep the 4px inset around Desktop without touching Taskbar.
         foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
-        direction_label: RECT { left: 652, top: 88, right: 770, bottom: 122 },
-        collapse_label: RECT { left: 652, top: 146, right: 770, bottom: 180 },
-        horizontal: RECT { left: 775, top: 88, right: 842, bottom: 122 },
-        vertical: RECT { left: 850, top: 88, right: 917, bottom: 122 },
-        enabled: RECT { left: 775, top: 146, right: 842, bottom: 180 },
-        disabled: RECT { left: 850, top: 146, right: 917, bottom: 180 },
+        direction_label: RECT { left: 650, top: 88, right: 728, bottom: 122 },
+        collapse_label: RECT { left: 650, top: 146, right: 728, bottom: 180 },
+        horizontal: RECT { left: 736, top: 88, right: 803, bottom: 122 },
+        vertical: RECT { left: 811, top: 88, right: 878, bottom: 122 },
+        enabled: RECT { left: 736, top: 146, right: 803, bottom: 180 },
+        disabled: RECT { left: 811, top: 146, right: 878, bottom: 180 },
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -6627,8 +6635,10 @@ fn submenu_mix(a: Color, b: Color, t: f32) -> Color {
     Color::rgba(c(a.r,b.r),c(a.g,b.g),c(a.b,b.b),c(a.a,b.a))
 }
 fn submenu_content_alpha(progress: f32) -> f32 {
-    let p = ((progress - 0.68) / 0.32).clamp(0.0, 1.0);
-    p*p*(3.0-2.0*p)
+    // Start fading after the well begins to reveal, instead of waiting until
+    // 68% of its width has already opened. The same curve fades out on close.
+    let p = ((progress - 0.25) / 0.65).clamp(0.0, 1.0);
+    p * p * (3.0 - 2.0 * p)
 }
 fn submenu_reveal_right(progress: f32) -> i32 {
     let l = desktop_submenu_layout();
@@ -8668,6 +8678,14 @@ mod ui_smoke_tests {
         assert_eq!(desktop.left - taskbar.right, APPEARANCE_BUTTON_GAP,
             "position buttons must share the same column spacing");
         assert!(l.well.left > 630, "do not overlap the Light theme button");
+        assert_eq!(l.well.right - l.well.left, 258,
+            "desktop submenu width stays compact");
+        assert_eq!(l.horizontal.left - l.direction_label.right, 8);
+        assert_eq!(l.enabled.left - l.collapse_label.right, 8);
+        assert_eq!(l.well.right - l.vertical.right, 16);
+        assert_eq!(l.well.right - l.disabled.right, 16);
+        assert!(l.direction_label.right <= l.horizontal.left);
+        assert!(l.collapse_label.right <= l.enabled.left);
         assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
             "the two depressed regions must overlap to hide their seam");
         assert_eq!(submenu_reveal_right(0.0), l.foot.left);
@@ -8742,7 +8760,37 @@ mod ui_smoke_tests {
         assert_eq!(animation.progress,0.0);
         assert_eq!(submenu_content_alpha(0.0),0.0);
         assert_eq!(submenu_content_alpha(1.0),1.0);
+        assert_eq!(submenu_content_alpha(0.25), 0.0);
+        assert_eq!(submenu_content_alpha(0.90), 1.0);
+        assert!(submenu_content_alpha(0.50) > 0.0);
+        assert!(submenu_content_alpha(0.50) < 1.0);
         assert!(submenu_content_alpha(0.80)>0.0);
+    }
+
+    #[test]
+    fn compact_desktop_submenu_reveal_and_reverse_stay_continuous() {
+        let layout = desktop_submenu_layout();
+        assert_eq!(submenu_reveal_right(0.0), layout.foot.left);
+        assert_eq!(submenu_reveal_right(1.0), layout.well.right);
+        for step in 1..=10 {
+            let prev = (step - 1) as f32 / 10.0;
+            let next = step as f32 / 10.0;
+            assert!(submenu_reveal_right(next) >= submenu_reveal_right(prev));
+            assert!(submenu_content_alpha(next) >= submenu_content_alpha(prev));
+        }
+        let start = Instant::now();
+        let mut state = DesktopSubmenuAnimation::initial(false);
+        state.retarget(true, start);
+        state.advance(start + Duration::from_millis(100));
+        let mid = state.progress;
+        assert!(mid > 0.0 && mid < 1.0);
+        state.retarget(false, start + Duration::from_millis(100));
+        assert!((state.progress - mid).abs() < 0.0001);
+        assert_eq!(state.duration_ms,
+            (DESKTOP_SUBMENU_CLOSE_DURATION_MS as f32 * mid).round().max(72.0) as u64);
+        state.advance(start + Duration::from_millis(400));
+        assert_eq!(state.progress, 0.0);
+        assert!(!state.hit_enabled());
     }
 
     #[test]
