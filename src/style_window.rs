@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::io::Write;
@@ -89,6 +89,7 @@ const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
 // Asynchronously refresh the expensive Preset gallery after menu animation,
 // never while its top-card frames are being composed.
 const WM_SETTINGS_PRESET_GALLERY_REFRESH: u32 = WM_APP + 146;
+const WM_SETTINGS_PREWARM_GALLERY: u32 = WM_APP + 147;
 // Poll with a finer timer while the short animation is active; throttle paints to ~60Hz.
 const DESKTOP_SUBMENU_FRAME_MS: u32 = 8;
 const DESKTOP_SUBMENU_MIN_FRAME_MS: u64 = 15;
@@ -399,16 +400,53 @@ struct SubmenuFrameMetrics {
     total_paint_ms: f64,
     max_paint_ms: f64,
     cached_frames: usize,
+    gallery_cached_frames: usize,
+    uncached_full_sources: Vec<&'static str>,
     uncached_full_frames: usize,
     uncached_card_frames: usize,
     cached_paint_ms: f64,
     uncached_paint_ms: f64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPaintCause {
+    Unknown,
+    AnimationTimer,
+    PositionSync,
+    FullSync,
+    GalleryRefresh,
+    MouseCaptureChanged,
+    MouseReleased,
+    MousePressed,
+    MouseHover,
+}
+
+impl SettingsPaintCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::AnimationTimer => "animation_timer",
+            Self::PositionSync => "position_sync",
+            Self::FullSync => "full_sync",
+            Self::GalleryRefresh => "gallery_refresh",
+            Self::MouseCaptureChanged => "capture_changed",
+            Self::MouseReleased => "mouse_release",
+            Self::MousePressed => "mouse_press",
+            Self::MouseHover => "mouse_hover",
+        }
+    }
+}
+
+fn mark_settings_paint_cause(cause: SettingsPaintCause) {
+    SETTINGS_PAINT_CAUSE.with(|cell| cell.set(cause));
+}
+
 thread_local! {
     static SUBMENU_FRAME_METRICS: RefCell<Option<SubmenuFrameMetrics>> =
         const { RefCell::new(None) };
     static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
+    static SETTINGS_PAINT_CAUSE: Cell<SettingsPaintCause> =
+        const { Cell::new(SettingsPaintCause::Unknown) };
 }
 
 #[link(name = "winmm")]
@@ -447,6 +485,7 @@ fn submenu_p95(values: &[f64]) -> f64 {
 
 fn record_submenu_frame(
     paint_begin: Instant, paint_end: Instant, animating: bool, cached: bool, card_only: bool,
+    cause: SettingsPaintCause,
 ) {
     if std::env::var_os("CODEX_USAGE_ANIMATION_METRICS").is_none() {
         return;
@@ -458,6 +497,7 @@ fn record_submenu_frame(
                 first: paint_end, last: paint_end, frames: 0,
                 intervals_ms: Vec::with_capacity(32),
                 total_paint_ms: 0.0, max_paint_ms: 0.0, cached_frames: 0,
+                gallery_cached_frames: 0, uncached_full_sources: Vec::new(),
                 uncached_full_frames: 0, uncached_card_frames: 0,
                 cached_paint_ms: 0.0, uncached_paint_ms: 0.0,
             });
@@ -471,6 +511,9 @@ fn record_submenu_frame(
         let draw_ms = paint_end.duration_since(paint_begin).as_secs_f64() * 1000.0;
         if cached {
             metric.cached_frames += 1;
+            if cause == SettingsPaintCause::GalleryRefresh {
+                metric.gallery_cached_frames += 1;
+            }
             metric.cached_paint_ms += draw_ms;
         } else {
             metric.uncached_paint_ms += draw_ms;
@@ -478,6 +521,7 @@ fn record_submenu_frame(
                 metric.uncached_card_frames += 1;
             } else {
                 metric.uncached_full_frames += 1;
+                metric.uncached_full_sources.push(cause.as_str());
             }
         }
         metric.total_paint_ms += draw_ms;
@@ -498,10 +542,11 @@ fn record_submenu_frame(
                 metric.uncached_paint_ms / uncached as f64
             } else { 0.0 };
             let line = format!(
-                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1}\n",
+                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1},gallery_cached_frames={},full_sources={}\n",
                 metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
                 metric.cached_frames, metric.uncached_full_frames,
                 metric.uncached_card_frames, mean_cached, mean_uncached,
+                metric.gallery_cached_frames, metric.uncached_full_sources.join("+"),
             );
             let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -1271,7 +1316,8 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         let changed_position = s.snapshot.display_position != snapshot.display_position;
         let previous_preview = preview_vertical_for_snapshot(&s.snapshot);
         let gallery_changed = s.section == Section::Preset
-            && previous_preview != preview_vertical_for_snapshot(&snapshot);
+            && (changed_position
+                || previous_preview != preview_vertical_for_snapshot(&snapshot));
         if gallery_changed { s.preset_gallery_refresh_pending = true; }
         let card_only = is_appearance_section(s.section)
             && position_is_only_snapshot_change(&s.snapshot, &snapshot);
@@ -1316,6 +1362,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         unsafe { let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None); }
     }
     if card_only {
+        mark_settings_paint_cause(SettingsPaintCause::PositionSync);
         unsafe { invalidate_appearance_card_or_window(hwnd, section, true); }
         return;
     }
@@ -1333,6 +1380,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     sync_numeric_edits();
     sync_blur_edit();
     sync_corner_edit();
+    mark_settings_paint_cause(SettingsPaintCause::FullSync);
     redraw_settings_window(hwnd);
 }
 
@@ -5204,6 +5252,34 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_SETTINGS_PREWARM_GALLERY => {
+            SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
+            let to_warm = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().and_then(|s| {
+                    (s.section == Section::Preset && !s.desktop_submenu.active()
+                        && !s.desktop_submenu.final_frame_pending
+                        && s.pending_discard_action.is_none())
+                    .then(|| (s.snapshot.clone(), s.font))
+                })
+            };
+            if let Some((snapshot, font)) = to_warm {
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                let width = (client.right - client.left).max(1);
+                let height = (client.bottom - client.top).max(1);
+                if !preset_gallery_cache_ready(hwnd, width, height, &snapshot) {
+                    let screen = GetDC(hwnd);
+                    if !screen.0.is_null() {
+                        let _ = build_preset_gallery_cache(
+                            screen, hwnd, width, height, &snapshot, font,
+                        );
+                        let _ = ReleaseDC(hwnd, screen);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_SETTINGS_PRESET_GALLERY_REFRESH => {
             let should_refresh = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -5235,6 +5311,8 @@ unsafe extern "system" fn wnd_proc(
                     bottom: client.bottom,
                 };
                 if rect.right > rect.left && rect.bottom > rect.top {
+                    SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(true));
+                    mark_settings_paint_cause(SettingsPaintCause::GalleryRefresh);
                     let _ = InvalidateRect(hwnd, Some(&rect), false);
                 }
             }
@@ -5253,6 +5331,7 @@ unsafe extern "system" fn wnd_proc(
                     end_precise_animation_timer();
                 }
                 if rendered {
+                    mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
                     let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
                 }
                 return LRESULT(0);
@@ -5427,6 +5506,7 @@ unsafe extern "system" fn wnd_proc(
             }
 
             if let Some(target) = hit_target_at(hwnd, x, y) {
+                mark_settings_paint_cause(SettingsPaintCause::MousePressed);
                 let section = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
@@ -5501,6 +5581,7 @@ unsafe extern "system" fn wnd_proc(
                     (changed, card_only, s.section)
                 };
                 if changed {
+                    mark_settings_paint_cause(SettingsPaintCause::MouseHover);
                     invalidate_appearance_card_or_window(hwnd, section, card_only);
                 }
             }
@@ -5521,6 +5602,7 @@ unsafe extern "system" fn wnd_proc(
                 (changed, card_only, s.section)
             };
             if changed {
+                mark_settings_paint_cause(SettingsPaintCause::MouseHover);
                 invalidate_appearance_card_or_window(hwnd, section, card_only);
             }
             LRESULT(0)
@@ -5564,13 +5646,14 @@ unsafe extern "system" fn wnd_proc(
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.as_ref().map(|s| s.section).unwrap_or(Section::General)
             };
+            mark_settings_paint_cause(SettingsPaintCause::MouseReleased);
             invalidate_appearance_card_or_window(
                 hwnd, section, pressed.is_some_and(is_appearance_card_target),
             );
             LRESULT(0)
         }
         WM_CANCELMODE | WM_CAPTURECHANGED => {
-            let (was_dragging, had_pressed) = {
+            let (was_dragging, pressed_target, section) = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
                     return LRESULT(0);
@@ -5580,14 +5663,20 @@ unsafe extern "system" fn wnd_proc(
                         s.json_scroll_dragging = false;
                         s.dragging_slider.take().is_some()
                     },
-                    s.pressed.take().is_some(),
+                    s.pressed.take(),
+                    s.section,
                 )
             };
             if was_dragging {
                 send_parent(WM_STYLE_SAVE, 0, 0);
             }
-            if had_pressed {
-                let _ = InvalidateRect(hwnd, None, false);
+            if let Some(target) = pressed_target {
+                // Releasing mouse capture for an appearance choice must not
+                // invalidate the entire, expensive Preset gallery.
+                mark_settings_paint_cause(SettingsPaintCause::MouseCaptureChanged);
+                invalidate_appearance_card_or_window(
+                    hwnd, section, is_appearance_card_target(target),
+                );
             }
             LRESULT(0)
         }
@@ -5822,6 +5911,9 @@ unsafe extern "system" fn wnd_proc(
         },
         WM_DESTROY => {
             end_precise_animation_timer();
+            PRESET_GALLERY_FRAMES.with(|cell| *cell.borrow_mut() = None);
+            SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(false));
+            SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
             SUBMENU_CARD_FRAMES.with(|cell| *cell.borrow_mut() = None);
             SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
@@ -6056,11 +6148,159 @@ struct SubmenuCardFrames {
     open: SettingsPaintBuffer,
 }
 
+// The preview gallery is expensive to rasterize (ring anti-aliasing and
+// composited thumbnails). Pre-render both position variants outside the
+// animation and copy the correct view when the deferred gallery refresh runs.
+#[derive(Clone, PartialEq, Eq)]
+struct PresetGalleryKey {
+    width: i32,
+    height: i32,
+    dpi: u32,
+    dark: bool,
+    zh: bool,
+    layout: AppearancePreset,
+    desktop_direction: DesktopDirection,
+    taskbar_vertical: bool,
+    active_style: ThemeStyle,
+}
+
+impl PresetGalleryKey {
+    fn new(hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot) -> Self {
+        Self {
+            width, height, dpi: unsafe { GetDpiForWindow(hwnd) },
+            dark: snapshot.is_dark,
+            zh: snapshot.language == LanguageId::SimplifiedChinese,
+            layout: snapshot.appearance_preset,
+            desktop_direction: snapshot.desktop_direction,
+            taskbar_vertical: snapshot.vertical_taskbar_mode,
+            active_style: snapshot.active_style.clone(),
+        }
+    }
+}
+
+struct PresetGalleryFrames {
+    key: PresetGalleryKey,
+    taskbar: SettingsPaintBuffer,
+    desktop: SettingsPaintBuffer,
+}
+
+fn preset_gallery_region(hwnd: HWND, width: i32, height: i32) -> RECT {
+    RECT {
+        left: scale(hwnd, SETTINGS_CONTENT_LEFT),
+        top: scale(hwnd, 206),
+        right: width,
+        bottom: height,
+    }
+}
+
+fn preset_gallery_cache_ready(
+    hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot,
+) -> bool {
+    let key = PresetGalleryKey::new(hwnd, width, height, snapshot);
+    PRESET_GALLERY_FRAMES.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|frames| frames.key == key)
+    })
+}
+
+unsafe fn build_preset_gallery_cache(
+    screen: HDC, hwnd: HWND, width: i32, height: i32,
+    snapshot: &StyleWindowSnapshot, font: isize,
+) -> bool {
+    let key = PresetGalleryKey::new(hwnd, width, height, snapshot);
+    PRESET_GALLERY_FRAMES.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.as_ref().is_some_and(|frames| frames.key == key) {
+            return true;
+        }
+        let Some(taskbar) = SettingsPaintBuffer::create(screen, width, height) else {
+            return false;
+        };
+        let Some(desktop) = SettingsPaintBuffer::create(screen, width, height) else {
+            return false;
+        };
+        let background = if snapshot.is_dark {
+            Color::from_hex("#1F2125FF")
+        } else {
+            Color::from_hex("#E9EEF4FF")
+        };
+        let card = if snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else { Color::from_hex("#FFFFFFFF") };
+        let hover = if snapshot.is_dark {
+            Color::from_hex("#343840FF")
+        } else { Color::from_hex("#DCE5EFFF") };
+        let pressed = if snapshot.is_dark {
+            Color::from_hex("#414751FF")
+        } else { Color::from_hex("#CBD7E4FF") };
+        let border = if snapshot.is_dark {
+            Color::from_hex("#454A52FF")
+        } else { Color::from_hex("#C1CCD8FF") };
+        let primary = if snapshot.is_dark {
+            Color::from_hex("#F2F3F5FF")
+        } else { Color::from_hex("#202124FF") };
+        let palette = || PresetGalleryPalette {
+            card, card_hover: hover, card_pressed: pressed,
+            border, accent: Color::from_hex("#4C8DFFFF"), primary,
+        };
+        for (frame, position) in [
+            (&taskbar, DisplayPosition::Taskbar),
+            (&desktop, DisplayPosition::Desktop),
+        ] {
+            let mut view = snapshot.clone();
+            view.display_position = position;
+            let region = preset_gallery_region(hwnd, width, height);
+            fill(frame.dc, region, background);
+            let previous = SelectObject(frame.dc, HGDIOBJ(font as *mut _));
+            let _ = SetBkMode(frame.dc, TRANSPARENT);
+            paint_preset_gallery(frame.dc, hwnd, &view, None, None, palette());
+            SelectObject(frame.dc, previous);
+        }
+        *cache = Some(PresetGalleryFrames { key, taskbar, desktop });
+        true
+    })
+}
+
+fn request_preset_gallery_warmup(hwnd: HWND) {
+    let already_requested = SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| {
+        cell.replace(true)
+    });
+    if !already_requested {
+        if unsafe {
+            PostMessageW(hwnd, WM_SETTINGS_PREWARM_GALLERY, WPARAM(0), LPARAM(0))
+        }.is_err() {
+            SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
+        }
+    }
+}
+
+unsafe fn copy_cached_preset_gallery(
+    target: HDC, hwnd: HWND, width: i32, height: i32,
+    snapshot: &StyleWindowSnapshot, dirty: RECT,
+) -> bool {
+    let key = PresetGalleryKey::new(hwnd, width, height, snapshot);
+    PRESET_GALLERY_FRAMES.with(|cell| {
+        let cache = cell.borrow();
+        let Some(frames) = cache.as_ref().filter(|frames| frames.key == key) else {
+            return false;
+        };
+        let source = if snapshot.display_position == DisplayPosition::Desktop {
+            &frames.desktop
+        } else { &frames.taskbar };
+        BitBlt(target, dirty.left, dirty.top,
+            dirty.right - dirty.left, dirty.bottom - dirty.top,
+            source.dc, dirty.left, dirty.top, SRCCOPY).is_ok()
+    })
+}
+
 thread_local! {
     static SETTINGS_PAINT_BUFFER: RefCell<Option<SettingsPaintBuffer>> =
         const { RefCell::new(None) };
     static SUBMENU_CARD_FRAMES: RefCell<Option<SubmenuCardFrames>> =
         const { RefCell::new(None) };
+    static PRESET_GALLERY_FRAMES: RefCell<Option<PresetGalleryFrames>> =
+        const { RefCell::new(None) };
+    static SETTINGS_GALLERY_REFRESH: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_GALLERY_WARM_REQUESTED: Cell<bool> = const { Cell::new(false) };
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6156,6 +6396,8 @@ fn finish_submenu_terminal_paint(hwnd: HWND) {
 
 unsafe fn paint(hwnd: HWND) {
     let paint_begin = Instant::now();
+    let paint_cause = SETTINGS_PAINT_CAUSE.with(|cell| cell.replace(SettingsPaintCause::Unknown));
+    let gallery_refresh = SETTINGS_GALLERY_REFRESH.with(|cell| cell.replace(false));
     let mut ps = PAINTSTRUCT::default();
     let screen_hdc = BeginPaint(hwnd, &mut ps);
 
@@ -6281,6 +6523,30 @@ unsafe fn paint(hwnd: HWND) {
         Color::from_hex("#666B73FF")
     };
 
+    // Deferred Preset-gallery refresh must not trigger a full-page paint.
+    // Both position variants were rasterized while the settings page was idle.
+    let gallery_bounds = preset_gallery_region(hwnd, width, height);
+    let gallery_only = section == Section::Preset
+        && dirty.left >= gallery_bounds.left && dirty.top >= gallery_bounds.top
+        && dirty.right <= gallery_bounds.right && dirty.bottom <= gallery_bounds.bottom
+        && dirty.left < dirty.right && dirty.top < dirty.bottom;
+    let preview_interacting = matches!(hovered, Some(HitTarget::Preset(_)))
+        || matches!(pressed, Some(HitTarget::Preset(_)));
+    if gallery_refresh && gallery_only && !desktop_submenu_active
+        && !desktop_submenu_final_frame_pending && !discard_pending
+        && !preview_interacting
+        && copy_cached_preset_gallery(hdc, hwnd, width, height, &snapshot, dirty)
+    {
+        let _ = BitBlt(screen_hdc, dirty.left, dirty.top,
+            dirty.right - dirty.left, dirty.bottom - dirty.top,
+            hdc, dirty.left, dirty.top, SRCCOPY);
+        let _ = EndPaint(hwnd, &ps);
+        record_submenu_frame(
+            paint_begin, Instant::now(), false, true, false, paint_cause,
+        );
+        return;
+    }
+
     // Fast path: the animation changes only the shared settings card. Blend
     // two cached complete card states; the first frame builds the snapshots,
     // and all following frames are just BitBlt + AlphaBlend.
@@ -6300,7 +6566,7 @@ unsafe fn paint(hwnd: HWND) {
         if desktop_submenu_final_frame_pending {
             finish_submenu_terminal_paint(hwnd);
         }
-        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true, true);
+        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true, true, paint_cause);
         return;
     }
 
@@ -6477,11 +6743,19 @@ unsafe fn paint(hwnd: HWND) {
             );
         }
     }
+    // Prepare gallery variants via a deferred idle message. No costly
+    // gallery rasterization is performed from the 60Hz animation paint path.
+    if section == Section::Preset && !desktop_submenu_active
+        && !desktop_submenu_final_frame_pending && !discard_pending
+        && !preset_gallery_cache_ready(hwnd, width, height, &snapshot)
+    {
+        request_preset_gallery_warmup(hwnd);
+    }
     let _ = EndPaint(hwnd, &ps);
     if desktop_submenu_final_frame_pending {
         finish_submenu_terminal_paint(hwnd);
     }
-    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false, submenu_only);
+    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false, submenu_only, paint_cause);
     });
 }
 
@@ -7681,7 +7955,10 @@ unsafe fn paint_preset_gallery(
     // The gallery begins just below the shared appearance controls.
     let mut matched = false;
     for preset in ThemePreset::ALL {
-        let r = preset_card_rect(hwnd, preset);
+        let r = preset_card_rect_for_orientation(
+            hwnd, preset, preview_vertical_for_snapshot(snapshot),
+            snapshot.appearance_preset == AppearancePreset::Minimal,
+        );
         let target = HitTarget::Preset(preset);
         let selected = snapshot
             .active_style
@@ -7718,7 +7995,10 @@ unsafe fn paint_preset_gallery(
         paint_style_preview_card(
             hdc,
             hwnd,
-            custom_preset_card_rect(hwnd),
+            custom_preset_card_rect_for_orientation(
+                hwnd, preview_vertical_for_snapshot(snapshot),
+                snapshot.appearance_preset == AppearancePreset::Minimal,
+            ),
             &snapshot.active_style,
             SettingsIcon::PresetCustom,
             if zh { "自定义" } else { "Custom" },
@@ -9310,6 +9590,37 @@ mod ui_smoke_tests {
             Section::Json, None, Some(HitTarget::Position(DisplayPosition::Desktop)),
         ));
         assert!(!card_only_hover_change(Section::Preset, None, None));
+    }
+
+    #[test]
+    fn preset_gallery_cache_key_changes_with_rendered_state() {
+        let base = PresetGalleryKey {
+            width: 980, height: 700, dpi: 96, dark: true, zh: true,
+            layout: AppearancePreset::Default,
+            desktop_direction: DesktopDirection::Horizontal,
+            taskbar_vertical: false,
+            active_style: ThemeStyle::dark_default(),
+        };
+        let same = base.clone();
+        assert!(base == same,
+            "the same gallery cache must be reusable for position changes");
+        let vertical = PresetGalleryKey {
+            taskbar_vertical: true, ..base.clone()
+        };
+        assert!(base != vertical, "preview orientation invalidates the cache");
+        let light = PresetGalleryKey { dark: false, ..base.clone() };
+        assert!(base != light, "theme changes invalidate the cache");
+        let resized = PresetGalleryKey { width: 1000, ..base.clone() };
+        assert!(base != resized, "DPI/layout size changes invalidate the cache");
+    }
+
+    #[test]
+    fn paint_cause_names_distinguish_gallery_from_capture_and_sync() {
+        assert_eq!(SettingsPaintCause::GalleryRefresh.as_str(), "gallery_refresh");
+        assert_eq!(
+            SettingsPaintCause::MouseCaptureChanged.as_str(), "capture_changed"
+        );
+        assert_eq!(SettingsPaintCause::FullSync.as_str(), "full_sync");
     }
 
     #[test]
