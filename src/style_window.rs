@@ -335,9 +335,6 @@ impl DesktopSubmenuAnimation {
     fn active(&self) -> bool {
         (self.progress - self.target).abs() > 0.0001
     }
-    fn frame_due(&mut self, now: Instant) -> bool {
-        self.frame_due_with_gate(now, DESKTOP_SUBMENU_MIN_FRAME_MS)
-    }
     fn frame_due_with_gate(&mut self, now: Instant, min_interval_ms: u64) -> bool {
         if !self.active() {
             return false;
@@ -5471,9 +5468,9 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK => {
             // Consume the single coalesced worker callback before processing.
+            let posted_at = SUBMENU_MEDIA_TICK_POSTED_MS.load(Ordering::Acquire);
             SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
             if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0) {
-                let posted_at = SUBMENU_MEDIA_TICK_POSTED_MS.load(Ordering::Acquire);
                 let elapsed = GetTickCount64().saturating_sub(posted_at) as f64;
                 drive_submenu_frame_tick(hwnd, true, Some(elapsed));
             }
@@ -9911,9 +9908,9 @@ mod ui_smoke_tests {
         let start = Instant::now();
         let mut animation = DesktopSubmenuAnimation::initial(false);
         assert!(animation.retarget(true, start));
-        assert!(animation.frame_due(start));
-        assert!(!animation.frame_due(start + Duration::from_millis(8)));
-        assert!(animation.frame_due(start + Duration::from_millis(16)));
+        assert!(animation.frame_due_with_gate(start, DESKTOP_SUBMENU_MIN_FRAME_MS));
+        assert!(!animation.frame_due_with_gate(start + Duration::from_millis(8), DESKTOP_SUBMENU_MIN_FRAME_MS));
+        assert!(animation.frame_due_with_gate(start + Duration::from_millis(16), DESKTOP_SUBMENU_MIN_FRAME_MS));
         assert_eq!(submenu_p95(&[]), 0.0);
         assert_eq!(submenu_p95(&[10.0, 16.0, 20.0, 45.0]), 45.0);
         assert_eq!(submenu_p95(&[12.0, 14.0, 18.0]), 18.0);
