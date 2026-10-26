@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::io::Write;
@@ -9,7 +10,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW, LoadLibraryW};
-use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST,
@@ -90,9 +91,14 @@ const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
 // never while its top-card frames are being composed.
 const WM_SETTINGS_PRESET_GALLERY_REFRESH: u32 = WM_APP + 146;
 const WM_SETTINGS_PREWARM_GALLERY: u32 = WM_APP + 147;
-// Poll with a finer timer while the short animation is active; throttle paints to ~60Hz.
-const DESKTOP_SUBMENU_FRAME_MS: u32 = 8;
+const WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK: u32 = WM_APP + 148;
+// WM_TIMER is a low-priority generated message. A periodic multimedia timer
+// posts one coalesced message to the UI queue for a steadier ~60Hz cadence.
+const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
 const DESKTOP_SUBMENU_MIN_FRAME_MS: u64 = 15;
+const DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS: u64 = 8;
+const TIME_PERIODIC_FLAG: u32 = 0x0001;
+const TIME_KILL_SYNCHRONOUS_FLAG: u32 = 0x0100;
 const DESKTOP_SUBMENU_DURATION_MS: u64 = 220;
 const DESKTOP_SUBMENU_CLOSE_DURATION_MS: u64 = 190;
 const DESKTOP_SUBMENU_ICON_SIZE: i32 = 18;
@@ -330,11 +336,14 @@ impl DesktopSubmenuAnimation {
         (self.progress - self.target).abs() > 0.0001
     }
     fn frame_due(&mut self, now: Instant) -> bool {
+        self.frame_due_with_gate(now, DESKTOP_SUBMENU_MIN_FRAME_MS)
+    }
+    fn frame_due_with_gate(&mut self, now: Instant, min_interval_ms: u64) -> bool {
         if !self.active() {
             return false;
         }
         if self.last_frame.is_some_and(|last| {
-            now.saturating_duration_since(last) < Duration::from_millis(DESKTOP_SUBMENU_MIN_FRAME_MS)
+            now.saturating_duration_since(last) < Duration::from_millis(min_interval_ms)
         }) {
             return false;
         }
@@ -342,7 +351,12 @@ impl DesktopSubmenuAnimation {
         true
     }
     fn tick_for_paint(&mut self, now: Instant) -> (bool, bool) {
-        let due = self.frame_due(now);
+        self.tick_for_paint_with_gate(now, DESKTOP_SUBMENU_MIN_FRAME_MS)
+    }
+    fn tick_for_paint_with_gate(
+        &mut self, now: Instant, min_interval_ms: u64,
+    ) -> (bool, bool) {
+        let due = self.frame_due_with_gate(now, min_interval_ms);
         if due {
             self.advance(now);
             if !self.active() {
@@ -442,18 +456,70 @@ fn mark_settings_paint_cause(cause: SettingsPaintCause) {
     SETTINGS_PAINT_CAUSE.with(|cell| cell.set(cause));
 }
 
+#[derive(Default, Clone)]
+struct SubmenuSchedulerMetrics {
+    multimedia: bool,
+    ticks: usize,
+    skipped_ticks: usize,
+    last_tick: Option<Instant>,
+    tick_intervals_ms: Vec<f64>,
+    callback_queue_ms: Vec<f64>,
+}
+
+impl SubmenuSchedulerMetrics {
+    fn record(&mut self, now: Instant, queue_delay_ms: Option<f64>, drawn: bool) {
+        if let Some(last) = self.last_tick {
+            self.tick_intervals_ms.push(now.duration_since(last).as_secs_f64() * 1000.0);
+        }
+        self.last_tick = Some(now);
+        self.ticks += 1;
+        if !drawn { self.skipped_ticks += 1; }
+        if let Some(delay) = queue_delay_ms { self.callback_queue_ms.push(delay); }
+    }
+}
+
+static SUBMENU_MEDIA_TICK_QUEUED: AtomicBool = AtomicBool::new(false);
+static SUBMENU_MEDIA_TICK_POSTED_MS: AtomicU64 = AtomicU64::new(0);
+
 thread_local! {
     static SUBMENU_FRAME_METRICS: RefCell<Option<SubmenuFrameMetrics>> =
         const { RefCell::new(None) };
+    static SUBMENU_SCHEDULER_METRICS: RefCell<SubmenuSchedulerMetrics> =
+        RefCell::new(SubmenuSchedulerMetrics::default());
+    static SUBMENU_MULTIMEDIA_TIMER_ID: Cell<u32> = const { Cell::new(0) };
     static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
     static SETTINGS_PAINT_CAUSE: Cell<SettingsPaintCause> =
         const { Cell::new(SettingsPaintCause::Unknown) };
 }
 
+type MultimediaTimerCallback = unsafe extern "system" fn(u32, u32, usize, usize, usize);
+
 #[link(name = "winmm")]
 unsafe extern "system" {
     fn timeBeginPeriod(period: u32) -> u32;
     fn timeEndPeriod(period: u32) -> u32;
+    fn timeSetEvent(
+        delay: u32, resolution: u32, callback: Option<MultimediaTimerCallback>,
+        user: usize, flags: u32,
+    ) -> u32;
+    fn timeKillEvent(timer_id: u32) -> u32;
+}
+
+// The multimedia callback is NOT on the UI thread. Do not touch STATE,
+// window DCs, or thread-local rendering caches here; only post a single
+// pending animation message. A queued flag prevents unbounded message buildup.
+unsafe extern "system" fn submenu_multimedia_timer_callback(
+    _timer_id: u32, _message: u32, user: usize, _dw1: usize, _dw2: usize,
+) {
+    if SUBMENU_MEDIA_TICK_QUEUED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    SUBMENU_MEDIA_TICK_POSTED_MS.store(GetTickCount64(), Ordering::Release);
+    if PostMessageW(
+        HWND(user as *mut _), WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK, WPARAM(0), LPARAM(0),
+    ).is_err() {
+        SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
+    }
 }
 
 fn begin_precise_animation_timer() {
@@ -475,6 +541,75 @@ fn end_precise_animation_timer() {
             *enabled = false;
         }
     });
+}
+
+fn begin_submenu_frame_clock(hwnd: HWND) {
+    begin_precise_animation_timer();
+    let active = SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0);
+    if active { return; }
+    // Windows multimedia periodic timers are more suitable for frame cadence
+    // than synthesized low-priority WM_TIMER messages.
+    let id = unsafe {
+        timeSetEvent(
+            DESKTOP_SUBMENU_FRAME_MS, 1, Some(submenu_multimedia_timer_callback),
+            hwnd.0 as usize, TIME_PERIODIC_FLAG | TIME_KILL_SYNCHRONOUS_FLAG,
+        )
+    };
+    if id != 0 {
+        SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.set(id));
+        unsafe { let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID); }
+    } else {
+        // On constrained or older systems, retain the standard Win32 timer.
+        unsafe {
+            let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None);
+        }
+    }
+}
+
+fn end_submenu_frame_clock(hwnd: HWND) {
+    SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| {
+        let id = cell.replace(0);
+        if id != 0 {
+            // The synchronous flag guarantees the callback has finished.
+            unsafe { let _ = timeKillEvent(id); }
+        }
+    });
+    SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
+    unsafe { let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID); }
+    end_precise_animation_timer();
+}
+
+fn submenu_scheduler_mean(values: &[f64]) -> f64 {
+    if values.is_empty() { return 0.0; }
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+unsafe fn drive_submenu_frame_tick(
+    hwnd: HWND, multimedia: bool, queue_delay_ms: Option<f64>,
+) {
+    let now = Instant::now();
+    let (active, rendered) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            if multimedia {
+                s.desktop_submenu.tick_for_paint_with_gate(
+                    now, DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
+                )
+            } else {
+                s.desktop_submenu.tick_for_paint(now)
+            }
+        } else { (false, false) }
+    };
+    SUBMENU_SCHEDULER_METRICS.with(|slot| {
+        slot.borrow_mut().record(now, queue_delay_ms, rendered);
+    });
+    if !active {
+        end_submenu_frame_clock(hwnd);
+    }
+    if rendered {
+        mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
+        let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+    }
 }
 
 fn submenu_p95(values: &[f64]) -> f64 {
@@ -546,13 +681,23 @@ fn record_submenu_frame(
             let mean_uncached = if uncached > 0 {
                 metric.uncached_paint_ms / uncached as f64
             } else { 0.0 };
+            let schedule = SUBMENU_SCHEDULER_METRICS.with(|slot| slot.borrow().clone());
+            let tick_p95 = submenu_p95(&schedule.tick_intervals_ms);
+            let tick_mean = submenu_scheduler_mean(&schedule.tick_intervals_ms);
+            let queue_p95 = submenu_p95(&schedule.callback_queue_ms);
+            let queue_mean = submenu_scheduler_mean(&schedule.callback_queue_ms);
+            let late_ticks = schedule.tick_intervals_ms.iter()
+                .filter(|interval| **interval > 25.0).count();
             let line = format!(
-                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1},gallery_cached_frames={},coalesced_position_cached_frames={},full_sources={}\n",
+                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1},gallery_cached_frames={},coalesced_position_cached_frames={},full_sources={},scheduler={},ticks={},skipped_ticks={},mean_tick_ms={:.1},p95_tick_ms={:.1},late_ticks={},mean_queue_ms={:.1},p95_queue_ms={:.1}\n",
                 metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
                 metric.cached_frames, metric.uncached_full_frames,
                 metric.uncached_card_frames, mean_cached, mean_uncached,
                 metric.gallery_cached_frames, metric.coalesced_position_cached_frames,
                 metric.uncached_full_sources.join("+"),
+                if schedule.multimedia { "multimedia" } else { "wm_timer" },
+                schedule.ticks, schedule.skipped_ticks, tick_mean, tick_p95,
+                late_ticks, queue_mean, queue_p95,
             );
             let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -1364,8 +1509,13 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         }
     }
     if submenu_animated {
-        begin_precise_animation_timer();
-        unsafe { let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None); }
+        // Retargeting mid-animation reuses the same periodic timer.
+        SUBMENU_SCHEDULER_METRICS.with(|slot| {
+            *slot.borrow_mut() = SubmenuSchedulerMetrics::default();
+        });
+        begin_submenu_frame_clock(hwnd);
+        let multimedia = SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0);
+        SUBMENU_SCHEDULER_METRICS.with(|slot| slot.borrow_mut().multimedia = multimedia);
     }
     if card_only {
         mark_settings_paint_cause(SettingsPaintCause::PositionSync);
@@ -5319,21 +5469,21 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK => {
+            // Consume the single coalesced worker callback before processing.
+            SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
+            if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0) {
+                let posted_at = SUBMENU_MEDIA_TICK_POSTED_MS.load(Ordering::Acquire);
+                let elapsed = GetTickCount64().saturating_sub(posted_at) as f64;
+                drive_submenu_frame_tick(hwnd, true, Some(elapsed));
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
-                let (still_active, rendered) = {
-                    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(s) = state.as_mut() {
-                        s.desktop_submenu.tick_for_paint(Instant::now())
-                    } else { (false, false) }
-                };
-                if !still_active {
-                    let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
-                    end_precise_animation_timer();
-                }
-                if rendered {
-                    mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
-                    let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+                // Fallback when multimedia timer creation was not available.
+                if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() == 0) {
+                    drive_submenu_frame_tick(hwnd, false, None);
                 }
                 return LRESULT(0);
             }
@@ -5911,13 +6061,12 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         },
         WM_DESTROY => {
-            end_precise_animation_timer();
+            end_submenu_frame_clock(hwnd);
             PRESET_GALLERY_FRAMES.with(|cell| *cell.borrow_mut() = None);
             SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(false));
             SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
             SUBMENU_CARD_FRAMES.with(|cell| *cell.borrow_mut() = None);
             SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
-            let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
@@ -9716,6 +9865,45 @@ mod ui_smoke_tests {
         assert!(!active);
         assert_eq!(animation.progress, 0.0);
         assert!(animation.final_frame_pending);
+    }
+
+    #[test]
+    fn multimedia_tick_does_not_skip_adjacent_16ms_frames() {
+        let start = Instant::now();
+        let mut animation = DesktopSubmenuAnimation::initial(false);
+        assert!(animation.retarget(true, start));
+        // Callback jitter around 16ms must not trigger the old 15ms
+        // gate and accidentally skip an entire 16ms display interval.
+        let mut drawn = 0;
+        for ms in [15, 29, 45, 60, 76, 91, 107, 122] {
+            let (active, due) = animation.tick_for_paint_with_gate(
+                start + Duration::from_millis(ms),
+                DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
+            );
+            assert!(active);
+            if due { drawn += 1; }
+        }
+        assert_eq!(drawn, 8);
+        // Duplicate UI tick messages in the same millisecond are rejected.
+        assert!(!animation.frame_due_with_gate(
+            start + Duration::from_millis(122), DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
+        ));
+        assert_eq!(submenu_scheduler_mean(&[]), 0.0);
+        assert_eq!(submenu_scheduler_mean(&[16.0, 24.0]), 20.0);
+    }
+
+    #[test]
+    fn submenu_scheduler_metrics_track_skipped_and_late_ticks() {
+        let start = Instant::now();
+        let mut telemetry = SubmenuSchedulerMetrics::default();
+        telemetry.multimedia = true;
+        telemetry.record(start, Some(1.0), true);
+        telemetry.record(start + Duration::from_millis(16), Some(2.0), true);
+        telemetry.record(start + Duration::from_millis(48), Some(4.0), false);
+        assert_eq!(telemetry.ticks, 3);
+        assert_eq!(telemetry.skipped_ticks, 1);
+        assert_eq!(submenu_p95(&telemetry.tick_intervals_ms), 32.0);
+        assert_eq!(submenu_scheduler_mean(&telemetry.callback_queue_ms), 7.0 / 3.0);
     }
 
     #[test]
