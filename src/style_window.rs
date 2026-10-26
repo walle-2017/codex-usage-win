@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Instant;
 #[cfg(test)]
@@ -5531,6 +5532,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         },
         WM_DESTROY => {
+            SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
@@ -5688,6 +5690,52 @@ unsafe fn paint_discard_dialog(
     let _ = background;
 }
 
+// Reuse the offscreen DC and bitmap between WM_PAINT frames. Previously
+// every 16 ms tick allocated and released a full-window compatible bitmap.
+struct SettingsPaintBuffer {
+    dc: HDC,
+    bitmap: HBITMAP,
+    previous_bitmap: HGDIOBJ,
+    width: i32,
+    height: i32,
+}
+
+impl SettingsPaintBuffer {
+    unsafe fn create(screen: HDC, width: i32, height: i32) -> Option<Self> {
+        let dc = CreateCompatibleDC(screen);
+        if dc.0.is_null() {
+            return None;
+        }
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        if bitmap.0.is_null() {
+            let _ = DeleteDC(dc);
+            return None;
+        }
+        let previous_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+        if previous_bitmap.0.is_null() {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(dc);
+            return None;
+        }
+        Some(Self { dc, bitmap, previous_bitmap, width, height })
+    }
+}
+
+impl Drop for SettingsPaintBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SelectObject(self.dc, self.previous_bitmap);
+            let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
+            let _ = DeleteDC(self.dc);
+        }
+    }
+}
+
+thread_local! {
+    static SETTINGS_PAINT_BUFFER: RefCell<Option<SettingsPaintBuffer>> =
+        const { RefCell::new(None) };
+}
+
 unsafe fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let screen_hdc = BeginPaint(hwnd, &mut ps);
@@ -5697,19 +5745,18 @@ unsafe fn paint(hwnd: HWND) {
     let width = (paint_client.right - paint_client.left).max(1);
     let height = (paint_client.bottom - paint_client.top).max(1);
 
-    let mem_hdc = CreateCompatibleDC(screen_hdc);
-    if mem_hdc.0.is_null() {
-        let _ = EndPaint(hwnd, &ps);
-        return;
-    }
-    let bitmap = CreateCompatibleBitmap(screen_hdc, width, height);
-    if bitmap.0.is_null() {
-        let _ = DeleteDC(mem_hdc);
-        let _ = EndPaint(hwnd, &ps);
-        return;
-    }
-    let old_bitmap = SelectObject(mem_hdc, HGDIOBJ(bitmap.0));
-    let hdc = mem_hdc;
+    SETTINGS_PAINT_BUFFER.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.as_ref().is_none_or(|backbuffer| {
+            backbuffer.width != width || backbuffer.height != height
+        }) {
+            *cached = SettingsPaintBuffer::create(screen_hdc, width, height);
+        }
+        let Some(backbuffer) = cached.as_ref() else {
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        };
+        let hdc = backbuffer.dc;
 
     let (
         snapshot,
@@ -5945,11 +5992,16 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     SelectObject(hdc, old_font);
-    let _ = BitBlt(screen_hdc, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
-    SelectObject(hdc, old_bitmap);
-    let _ = DeleteObject(bitmap);
-    let _ = DeleteDC(hdc);
+    // Only transfer the invalid rectangle, rather than the full window.
+    // Full-frame backing pixels remain available for subsequent repaints.
+    let dirty = ps.rcPaint;
+    if dirty.right > dirty.left && dirty.bottom > dirty.top {
+        let _ = BitBlt(screen_hdc, dirty.left, dirty.top,
+            dirty.right - dirty.left, dirty.bottom - dirty.top,
+            hdc, dirty.left, dirty.top, SRCCOPY);
+    }
     let _ = EndPaint(hwnd, &ps);
+    });
 }
 
 
@@ -6635,14 +6687,19 @@ fn submenu_mix(a: Color, b: Color, t: f32) -> Color {
     Color::rgba(c(a.r,b.r),c(a.g,b.g),c(a.b,b.b),c(a.a,b.a))
 }
 fn submenu_content_alpha(progress: f32) -> f32 {
-    // Start fading after the well begins to reveal, instead of waiting until
-    // 68% of its width has already opened. The same curve fades out on close.
-    let p = ((progress - 0.25) / 0.65).clamp(0.0, 1.0);
+    // Fade complete controls in as a group, rather than revealing clipped
+    // fragments one after another. Reverse playback naturally fades them out.
+    let p = ((progress - 0.08) / 0.82).clamp(0.0, 1.0);
     p * p * (3.0 - 2.0 * p)
 }
-fn submenu_reveal_right(progress: f32) -> i32 {
-    let l = desktop_submenu_layout();
-    l.foot.left + ((l.well.right - l.foot.left) as f32 * progress.clamp(0.0,1.0)).round() as i32
+
+fn submenu_content_offset(progress: f32) -> i32 {
+    // A subtle slide from the right, measured in logical (96 DPI) pixels.
+    ((1.0 - submenu_content_alpha(progress)) * 8.0).round() as i32
+}
+
+fn submenu_background_alpha(progress: f32) -> f32 {
+    progress.clamp(0.0, 1.0)
 }
 
 /// One anti-aliased, continuous L-shaped inset. The old implementation
@@ -6664,13 +6721,16 @@ unsafe fn paint_submenu_well(
     };
     if progress <= 0.0 { return top_target; }
     let l = desktop_submenu_layout();
-    // Much lower contrast to the parent card than the former #1A1E24.
-    let top = submenu_mix(card, top_target, progress);
-    let bottom = submenu_mix(card, bottom_target, progress);
+    // Paint the WHOLE L-shaped surface on every animated frame. A sweeping
+    // clipping edge used to hide nearly half the animation before the well
+    // appeared, then visibly cut glyphs and controls during the reveal.
+    let opacity = submenu_background_alpha(progress);
+    let top = submenu_mix(card, top_target, opacity);
+    let bottom = submenu_mix(card, bottom_target, opacity);
     let well = scaled_rect(hwnd, l.well);
     let foot = scaled_rect(hwnd, l.foot);
-    let reveal = scale(hwnd, submenu_reveal_right(progress));
-    let shadow_opacity = if dark { 0.12 } else { 0.075 } * progress;
+    let reveal = well.right;
+    let shadow_opacity = if dark { 0.12 } else { 0.075 } * opacity;
     if !native_interop::draw_antialiased_desktop_inset_well(
         hdc, well, foot, reveal, scale(hwnd, 11) as f32,
         top, bottom, shadow_opacity,
@@ -6697,7 +6757,7 @@ unsafe fn paint_submenu_choice(hdc:HDC,hwnd:HWND,bounds:RECT,icon:SettingsIcon,
     pressed:Option<HitTarget>,alpha:f32,inset:Color,palette:ButtonPalette,primary:Color) {
     if alpha<=0.005 {return;}
     let mut r=scaled_rect(hwnd,bounds);
-    let shift=scale(hwnd,((1.0-alpha)*5.0).round() as i32);
+    let shift=scale(hwnd,((1.0-alpha)*8.0).round() as i32);
     r.left+=shift; r.right+=shift;
     let desired=button_background(target,selected,hovered,pressed,palette);
     let bg=submenu_mix(inset,desired,alpha);
@@ -6728,11 +6788,13 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
     let opacity=submenu_content_alpha(progress);
     if opacity<=0.005 {return;}
     let l=desktop_submenu_layout();
+    // Clip only to the FIXED well bounds, never to an animated vertical edge.
+    // The background, labels and controls now move/fade as a complete unit.
     let saved=SaveDC(hdc);
     let _=IntersectClipRect(hdc,scale(hwnd,l.well.left),scale(hwnd,l.well.top),
-        scale(hwnd,submenu_reveal_right(progress)),scale(hwnd,l.well.bottom));
+        scale(hwnd,l.well.right),scale(hwnd,l.well.bottom));
     let zh=snapshot.language==LanguageId::SimplifiedChinese;
-    let dx=scale(hwnd,((1.0-opacity)*5.0).round() as i32);
+    let dx=scale(hwnd,submenu_content_offset(progress));
     let txt=|mut r:RECT|{r.left+=dx;r.right+=dx;r};
     // The inset and selected Desktop button already convey the hierarchy;
     // avoid a redundant secondary-panel title.
@@ -8688,8 +8750,10 @@ mod ui_smoke_tests {
         assert!(l.collapse_label.right <= l.enabled.left);
         assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
             "the two depressed regions must overlap to hide their seam");
-        assert_eq!(submenu_reveal_right(0.0), l.foot.left);
-        assert_eq!(submenu_reveal_right(1.0), l.well.right);
+        assert_eq!(submenu_background_alpha(0.0), 0.0);
+        assert_eq!(submenu_background_alpha(1.0), 1.0);
+        assert_eq!(submenu_content_offset(0.0), 8);
+        assert_eq!(submenu_content_offset(1.0), 0);
         assert_eq!(PRESET_CARD_TOP, 226,
             "preset gallery starts immediately below the shared options card");
         for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
@@ -8760,7 +8824,7 @@ mod ui_smoke_tests {
         assert_eq!(animation.progress,0.0);
         assert_eq!(submenu_content_alpha(0.0),0.0);
         assert_eq!(submenu_content_alpha(1.0),1.0);
-        assert_eq!(submenu_content_alpha(0.25), 0.0);
+        assert_eq!(submenu_content_alpha(0.08), 0.0);
         assert_eq!(submenu_content_alpha(0.90), 1.0);
         assert!(submenu_content_alpha(0.50) > 0.0);
         assert!(submenu_content_alpha(0.50) < 1.0);
@@ -8770,13 +8834,16 @@ mod ui_smoke_tests {
     #[test]
     fn compact_desktop_submenu_reveal_and_reverse_stay_continuous() {
         let layout = desktop_submenu_layout();
-        assert_eq!(submenu_reveal_right(0.0), layout.foot.left);
-        assert_eq!(submenu_reveal_right(1.0), layout.well.right);
+        assert!(layout.well.left < layout.well.right);
+        assert!(layout.foot.left < layout.well.left);
+        assert_eq!(submenu_background_alpha(0.0), 0.0);
+        assert_eq!(submenu_background_alpha(1.0), 1.0);
         for step in 1..=10 {
             let prev = (step - 1) as f32 / 10.0;
             let next = step as f32 / 10.0;
-            assert!(submenu_reveal_right(next) >= submenu_reveal_right(prev));
+            assert!(submenu_background_alpha(next) >= submenu_background_alpha(prev));
             assert!(submenu_content_alpha(next) >= submenu_content_alpha(prev));
+            assert!(submenu_content_offset(next) <= submenu_content_offset(prev));
         }
         let start = Instant::now();
         let mut state = DesktopSubmenuAnimation::initial(false);
