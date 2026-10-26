@@ -68,6 +68,77 @@ struct DesktopInsetCache {
 
 thread_local DesktopInsetCache g_desktop_inset_cache;
 
+// Frequently reused rounded controls share one Direct2D target and both
+// brushes. BindDC changes per rounded rectangle without recreating resources.
+struct RoundedRectCache {
+    ComPtr<ID2D1DCRenderTarget> target;
+    ComPtr<ID2D1SolidColorBrush> fill;
+    ComPtr<ID2D1SolidColorBrush> stroke;
+    void reset() noexcept {
+        stroke.Reset();
+        fill.Reset();
+        target.Reset();
+    }
+};
+thread_local RoundedRectCache g_rounded_rect_cache;
+
+// AlphaBlend accepts a reusable source bitmap. Previously each icon painted
+// with a new CreateDIBSection, CreateCompatibleDC, SelectObject and teardown.
+struct SvgBlendCache {
+    HDC source = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ old_bitmap = nullptr;
+    void* bits = nullptr;
+    int width = 0;
+    int height = 0;
+
+    void reset() noexcept {
+        if (source) {
+            if (old_bitmap) SelectObject(source, old_bitmap);
+            old_bitmap = nullptr;
+        }
+        if (bitmap) DeleteObject(bitmap);
+        bitmap = nullptr;
+        bits = nullptr;
+        if (source) DeleteDC(source);
+        source = nullptr;
+        width = height = 0;
+    }
+    ~SvgBlendCache() { reset(); }
+
+    bool ensure(HDC destination, int w, int h) noexcept {
+        if (source && bitmap && bits && width == w && height == h) {
+            return true;
+        }
+        reset();
+        source = CreateCompatibleDC(destination);
+        if (!source) return false;
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = w;
+        info.bmiHeader.biHeight = -h;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        bitmap = CreateDIBSection(destination, &info, DIB_RGB_COLORS,
+                                  &bits, nullptr, 0);
+        if (!bitmap || !bits) {
+            reset();
+            return false;
+        }
+        old_bitmap = SelectObject(source, bitmap);
+        if (!old_bitmap || old_bitmap == HGDI_ERROR) {
+            old_bitmap = nullptr;
+            reset();
+            return false;
+        }
+        width = w;
+        height = h;
+        return true;
+    }
+};
+thread_local SvgBlendCache g_svg_blend_cache;
+
 } // namespace
 
 // One continuous, antialiased L-shaped inset used by the settings page.
@@ -258,33 +329,37 @@ extern "C" __declspec(dllexport) int codex_draw_rounded_rect(
             D2D1_RENDER_TARGET_USAGE_NONE,
             D2D1_FEATURE_LEVEL_DEFAULT);
 
-        ComPtr<ID2D1DCRenderTarget> target;
-        HRESULT hr = g_control_factory->CreateDCRenderTarget(
-            &properties,
-            target.GetAddressOf());
-        if (FAILED(hr)) {
-            return 0;
+        auto& cache = g_rounded_rect_cache;
+        if (!cache.target) {
+            HRESULT create_hr = g_control_factory->CreateDCRenderTarget(
+                &properties, cache.target.GetAddressOf());
+            if (FAILED(create_hr)) return 0;
         }
-
+        auto target = cache.target;
         const RECT bind_rect{left, top, right, bottom};
-        hr = target->BindDC(hdc, &bind_rect);
+        HRESULT hr = target->BindDC(hdc, &bind_rect);
         if (FAILED(hr)) {
+            cache.reset();
             return 0;
         }
-
+        if (fill_enabled && !cache.fill &&
+            FAILED(target->CreateSolidColorBrush(
+                color_from_rgba(255, 255, 255, 255), cache.fill.GetAddressOf()))) {
+            cache.reset();
+            return 0;
+        }
+        if (stroke_enabled && stroke_width > 0.0f && !cache.stroke &&
+            FAILED(target->CreateSolidColorBrush(
+                color_from_rgba(255, 255, 255, 255), cache.stroke.GetAddressOf()))) {
+            cache.reset();
+            return 0;
+        }
         target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         target->BeginDraw();
 
         const float safe_radius = std::max(0.5f, radius);
         if (fill_enabled) {
-            ComPtr<ID2D1SolidColorBrush> fill_brush;
-            hr = target->CreateSolidColorBrush(
-                color_from_rgba(fill_r, fill_g, fill_b, fill_a),
-                fill_brush.GetAddressOf());
-            if (FAILED(hr)) {
-                return 0;
-            }
-
+            cache.fill->SetColor(color_from_rgba(fill_r, fill_g, fill_b, fill_a));
             const float inset = 0.35f;
             const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(
                 D2D1::RectF(
@@ -294,18 +369,11 @@ extern "C" __declspec(dllexport) int codex_draw_rounded_rect(
                     std::max(inset, static_cast<float>(height) - inset)),
                 std::max(0.5f, safe_radius - inset),
                 std::max(0.5f, safe_radius - inset));
-            target->FillRoundedRectangle(shape, fill_brush.Get());
+            target->FillRoundedRectangle(shape, cache.fill.Get());
         }
 
         if (stroke_enabled && stroke_width > 0.0f) {
-            ComPtr<ID2D1SolidColorBrush> stroke_brush;
-            hr = target->CreateSolidColorBrush(
-                color_from_rgba(stroke_r, stroke_g, stroke_b, stroke_a),
-                stroke_brush.GetAddressOf());
-            if (FAILED(hr)) {
-                return 0;
-            }
-
+            cache.stroke->SetColor(color_from_rgba(stroke_r, stroke_g, stroke_b, stroke_a));
             const float inset = std::max(0.5f, stroke_width * 0.5f);
             const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(
                 D2D1::RectF(
@@ -317,12 +385,16 @@ extern "C" __declspec(dllexport) int codex_draw_rounded_rect(
                 std::max(0.5f, safe_radius - inset));
             target->DrawRoundedRectangle(
                 shape,
-                stroke_brush.Get(),
+                cache.stroke.Get(),
                 stroke_width);
         }
 
         hr = target->EndDraw();
-        return SUCCEEDED(hr) ? 1 : 0;
+        if (FAILED(hr)) {
+            cache.reset();
+            return 0;
+        }
+        return 1;
     } catch (...) {
         return 0;
     }
@@ -342,33 +414,14 @@ extern "C" __declspec(dllexport) int codex_blend_settings_icon(
         return 0;
     }
 
-    BITMAPINFO bitmap_info{};
-    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmap_info.bmiHeader.biWidth = width;
-    bitmap_info.bmiHeader.biHeight = -height; // top-down, same as tiny-skia
-    bitmap_info.bmiHeader.biPlanes = 1;
-    bitmap_info.bmiHeader.biBitCount = 32;
-    bitmap_info.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(
-        dest, &bitmap_info, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!bitmap || !bits) {
-        if (bitmap) DeleteObject(bitmap);
+    auto& cache = g_svg_blend_cache;
+    if (!cache.ensure(dest, width, height)) {
         return 0;
     }
-    std::memcpy(bits, premultiplied_bgra, static_cast<size_t>(width) * height * 4);
-    HDC source = CreateCompatibleDC(dest);
-    if (!source) {
-        DeleteObject(bitmap);
-        return 0;
-    }
-    HGDIOBJ previous = SelectObject(source, bitmap);
+    std::memcpy(cache.bits, premultiplied_bgra,
+                static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
     const BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     const BOOL ok = AlphaBlend(dest, left, top, width, height,
-                               source, 0, 0, width, height, blend);
-    SelectObject(source, previous);
-    DeleteDC(source);
-    DeleteObject(bitmap);
+                               cache.source, 0, 0, width, height, blend);
     return ok ? 1 : 0;
 }

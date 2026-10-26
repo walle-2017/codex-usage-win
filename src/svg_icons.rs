@@ -1,5 +1,5 @@
 //! SVG-only settings glyphs. Source assets are embedded into the EXE; no file lookup
-//! or SVG parsing happens on repeated paints for a cached size/color.
+//! or SVG parsing happens when only the animated icon tint changes.
 //! premultiplied BGRA pixels are passed to native AlphaBlend so both D2D-capable
 //! and GDI-only Windows configurations display the same vector artwork.
 use std::cell::RefCell;
@@ -45,7 +45,9 @@ const ICONS: [&str; 31] = [
     include_str!("../assets/settings-icons/position-desktop.svg"),
 ];
 const CACHE_CAPACITY: usize = 192;
-type Key = (usize, u32, u32, u8, u8, u8, u8);
+// Cache the antialiased coverage mask by icon and physical dimensions only.
+// Animating foreground colors must never trigger SVG parsing or rasterization.
+type Key = (usize, u32, u32);
 
 #[derive(Default)]
 struct RasterCache {
@@ -85,6 +87,21 @@ fn rasterize(source: &str, width: u32, height: u32, color: Color) -> Option<Vec<
     Some(bgra)
 }
 
+// Tint the cached white SVG raster in linear byte arithmetic. The alpha
+// channel carries the coverage and SVG-local opacity. All output channels
+// remain premultiplied as required by AlphaBlend.
+fn tint_cached_icon(white_bgra: &[u8], color: Color) -> Vec<u8> {
+    let mut output = Vec::with_capacity(white_bgra.len());
+    for pixel in white_bgra.chunks_exact(4) {
+        let alpha = (u16::from(pixel[3]) * u16::from(color.a) + 127) / 255;
+        output.push(((alpha * u16::from(color.b) + 127) / 255) as u8);
+        output.push(((alpha * u16::from(color.g) + 127) / 255) as u8);
+        output.push(((alpha * u16::from(color.r) + 127) / 255) as u8);
+        output.push(alpha as u8);
+    }
+    output
+}
+
 pub fn draw(hdc: HDC, rect: RECT, icon_index: usize, color: Color) -> bool {
     let Some(source) = ICONS.get(icon_index) else { return false; };
     let width = rect.right - rect.left;
@@ -92,11 +109,13 @@ pub fn draw(hdc: HDC, rect: RECT, icon_index: usize, color: Color) -> bool {
     if hdc.0.is_null() || width <= 0 || height <= 0 || width > 512 || height > 512 {
         return false;
     }
-    let key: Key = (icon_index, width as u32, height as u32, color.r, color.g, color.b, color.a);
+    let key: Key = (icon_index, width as u32, height as u32);
     CACHE.with(|cell| {
         let mut cache = cell.borrow_mut();
         if !cache.pixels.contains_key(&key) {
-            let Some(bgra) = rasterize(source, width as u32, height as u32, color) else {
+            let Some(white) = rasterize(
+                source, width as u32, height as u32, Color::rgba(255, 255, 255, 255)
+            ) else {
                 return false;
             };
             if cache.fifo.len() >= CACHE_CAPACITY {
@@ -105,10 +124,11 @@ pub fn draw(hdc: HDC, rect: RECT, icon_index: usize, color: Color) -> bool {
                 }
             }
             cache.fifo.push_back(key);
-            cache.pixels.insert(key, bgra);
+            cache.pixels.insert(key, white);
         }
-        cache.pixels.get(&key).is_some_and(|pixels| {
-            native_interop::blend_svg_icon(hdc, rect, pixels)
+        cache.pixels.get(&key).is_some_and(|white| {
+            let tinted = tint_cached_icon(white, color);
+            native_interop::blend_svg_icon(hdc, rect, &tinted)
         })
     })
 }
@@ -130,6 +150,26 @@ mod tests {
                 assert!(pixels.chunks_exact(4).any(|p| p[3] > 0), "empty icon: {id}");
             }
         }
+    }
+
+    #[test]
+    fn cached_icon_tint_preserves_coverage_and_premultiplied_alpha() {
+        let source = include_str!("../assets/settings-icons/direction-horizontal.svg");
+        let white = rasterize(source, 20, 20, Color::rgba(255, 255, 255, 255)).unwrap();
+        let colored = tint_cached_icon(&white, Color::rgba(88, 160, 230, 128));
+        assert_eq!(colored.len(), white.len());
+        for (w, c) in white.chunks_exact(4).zip(colored.chunks_exact(4)) {
+            assert_eq!(u16::from(c[3]), (u16::from(w[3]) * 128 + 127) / 255);
+            assert!(c[0] <= c[3] && c[1] <= c[3] && c[2] <= c[3]);
+        }
+        assert!(colored.chunks_exact(4).any(|c| c[3] > 0));
+    }
+
+    #[test]
+    fn cached_color_raster_key_ignores_animated_tint() {
+        let light: Key = (25, 18, 18);
+        let dark: Key = (25, 18, 18);
+        assert_eq!(light, dark, "animation color is not part of the SVG cache key");
     }
 
     #[test]
