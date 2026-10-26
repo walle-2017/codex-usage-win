@@ -381,6 +381,10 @@ struct SubmenuFrameMetrics {
     total_paint_ms: f64,
     max_paint_ms: f64,
     cached_frames: usize,
+    uncached_full_frames: usize,
+    uncached_card_frames: usize,
+    cached_paint_ms: f64,
+    uncached_paint_ms: f64,
 }
 
 thread_local! {
@@ -423,7 +427,9 @@ fn submenu_p95(values: &[f64]) -> f64 {
     sorted[((sorted.len() * 95).div_ceil(100)).saturating_sub(1)]
 }
 
-fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: bool, cached: bool) {
+fn record_submenu_frame(
+    paint_begin: Instant, paint_end: Instant, animating: bool, cached: bool, card_only: bool,
+) {
     if std::env::var_os("CODEX_USAGE_ANIMATION_METRICS").is_none() {
         return;
     }
@@ -434,6 +440,8 @@ fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: boo
                 first: paint_end, last: paint_end, frames: 0,
                 intervals_ms: Vec::with_capacity(32),
                 total_paint_ms: 0.0, max_paint_ms: 0.0, cached_frames: 0,
+                uncached_full_frames: 0, uncached_card_frames: 0,
+                cached_paint_ms: 0.0, uncached_paint_ms: 0.0,
             });
         }
         let Some(metric) = slot.as_mut() else { return; };
@@ -441,9 +449,19 @@ fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: boo
             metric.intervals_ms.push(paint_end.duration_since(metric.last).as_secs_f64() * 1000.0);
         }
         metric.frames += 1;
-        if cached { metric.cached_frames += 1; }
         metric.last = paint_end;
         let draw_ms = paint_end.duration_since(paint_begin).as_secs_f64() * 1000.0;
+        if cached {
+            metric.cached_frames += 1;
+            metric.cached_paint_ms += draw_ms;
+        } else {
+            metric.uncached_paint_ms += draw_ms;
+            if card_only {
+                metric.uncached_card_frames += 1;
+            } else {
+                metric.uncached_full_frames += 1;
+            }
+        }
         metric.total_paint_ms += draw_ms;
         metric.max_paint_ms = metric.max_paint_ms.max(draw_ms);
         if !animating {
@@ -454,9 +472,18 @@ fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: boo
             let mean_paint = metric.total_paint_ms / metric.frames as f64;
             let p95 = submenu_p95(&metric.intervals_ms);
             let gaps = metric.intervals_ms.iter().filter(|v| **v > 25.0).count();
+            let uncached = metric.uncached_full_frames + metric.uncached_card_frames;
+            let mean_cached = if metric.cached_frames > 0 {
+                metric.cached_paint_ms / metric.cached_frames as f64
+            } else { 0.0 };
+            let mean_uncached = if uncached > 0 {
+                metric.uncached_paint_ms / uncached as f64
+            } else { 0.0 };
             let line = format!(
-                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={}\n",
-                metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps, metric.cached_frames,
+                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1}\n",
+                metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
+                metric.cached_frames, metric.uncached_full_frames,
+                metric.uncached_card_frames, mean_cached, mean_uncached,
             );
             let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -1183,13 +1210,36 @@ pub fn set_preview_orientation(vertical: bool) {
     unsafe { let _ = InvalidateRect(hwnd, None, false); }
 }
 
+// Persisted position is mirrored both in display_position and JSON settings.
+// Normalize both fields before deciding whether other UI sections changed.
+fn position_is_only_snapshot_change(
+    old: &StyleWindowSnapshot, new: &StyleWindowSnapshot,
+) -> bool {
+    if old.display_position == new.display_position {
+        return false;
+    }
+    let mut normalized = new.editable_settings.clone();
+    normalized.appearance.position.clone_from(&old.editable_settings.appearance.position);
+    old.language == new.language
+        && old.theme_mode == new.theme_mode
+        && old.is_dark == new.is_dark
+        && old.appearance_preset == new.appearance_preset
+        && old.desktop_direction == new.desktop_direction
+        && old.desktop_auto_collapse == new.desktop_auto_collapse
+        && old.vertical_taskbar_mode == new.vertical_taskbar_mode
+        && old.active_style == new.active_style
+        && old.editable_settings == normalized
+}
+
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let (hwnd, section, json_dirty, json_apply_pending, submenu_animated) = {
+    let (hwnd, section, json_dirty, json_apply_pending, submenu_animated, card_only) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
         let changed_position = s.snapshot.display_position != snapshot.display_position;
+        let card_only = is_appearance_section(s.section)
+            && position_is_only_snapshot_change(&s.snapshot, &snapshot);
         let submenu_animated = if changed_position {
             s.desktop_submenu.retarget(
                 snapshot.display_position == DisplayPosition::Desktop,
@@ -1197,18 +1247,19 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             )
         } else { false };
         s.snapshot = snapshot;
-        let background = if s.snapshot.is_dark {
-            Color::from_hex("#20242AFF")
-        } else {
-            Color::from_hex("#EEF3F8FF")
-        };
-        unsafe {
-            if s.edit_brush != 0 {
-                let _ = DeleteObject(HGDIOBJ(s.edit_brush as *mut _));
+        if !card_only {
+            let background = if s.snapshot.is_dark {
+                Color::from_hex("#20242AFF")
+            } else {
+                Color::from_hex("#EEF3F8FF")
+            };
+            unsafe {
+                if s.edit_brush != 0 {
+                    let _ = DeleteObject(HGDIOBJ(s.edit_brush as *mut _));
+                }
+                let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
+                s.edit_brush = brush.0 as isize;
             }
-            let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
-            s.edit_brush = brush.0 as isize;
-
         }
         (
             s.hwnd.to_hwnd(),
@@ -1216,11 +1267,16 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
             s.json_dirty,
             s.pending_json_action == Some(JsonAction::Apply),
             submenu_animated,
+            card_only,
         )
     };
     if submenu_animated {
         begin_precise_animation_timer();
         unsafe { let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None); }
+    }
+    if card_only {
+        unsafe { invalidate_appearance_card_or_window(hwnd, section, true); }
+        return;
     }
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
@@ -2146,6 +2202,35 @@ fn is_appearance_section(section: Section) -> bool {
         section,
         Section::Preset | Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
     )
+}
+
+// Appearance-option hover, press, and position changes are confined to the
+// shared top card; avoid invalidating every expensive settings page element.
+fn is_appearance_card_target(target: HitTarget) -> bool {
+    matches!(
+        target,
+        HitTarget::Theme(_) | HitTarget::Layout(_)
+            | HitTarget::Position(_) | HitTarget::DesktopDirection(_)
+            | HitTarget::DesktopAutoCollapse(_)
+    )
+}
+
+fn card_only_hover_change(
+    section: Section, previous: Option<HitTarget>, current: Option<HitTarget>,
+) -> bool {
+    is_appearance_section(section)
+        && [previous, current].iter().flatten().any(|target| is_appearance_card_target(*target))
+        && [previous, current].iter().flatten().all(|target| is_appearance_card_target(*target))
+}
+
+unsafe fn invalidate_appearance_card_or_window(
+    hwnd: HWND, section: Section, card_only: bool,
+) {
+    if is_appearance_section(section) && card_only {
+        let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+    } else {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -5268,15 +5353,18 @@ unsafe extern "system" fn wnd_proc(
             }
 
             if let Some(target) = hit_target_at(hwnd, x, y) {
-                {
+                let section = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
                         s.pressed = Some(target);
                         s.hovered = Some(target);
-                    }
-                }
+                        s.section
+                    } else { Section::General }
+                };
                 let _ = SetCapture(hwnd);
-                let _ = InvalidateRect(hwnd, None, false);
+                invalidate_appearance_card_or_window(
+                    hwnd, section, is_appearance_card_target(target),
+                );
             }
             LRESULT(0)
         }
@@ -5328,35 +5416,38 @@ unsafe extern "system" fn wnd_proc(
             } else {
                 let (_, y) = point_from_lparam(lparam);
                 let hovered = hit_target_at(hwnd, x, y);
-                let changed = {
+                let (changed, card_only, section) = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     let Some(s) = state.as_mut() else {
                         return LRESULT(0);
                     };
                     let changed = s.hovered != hovered;
+                    let card_only = card_only_hover_change(s.section, s.hovered, hovered);
                     s.hovered = hovered;
-                    changed
+                    (changed, card_only, s.section)
                 };
                 if changed {
-                    let _ = InvalidateRect(hwnd, None, false);
+                    invalidate_appearance_card_or_window(hwnd, section, card_only);
                 }
             }
             LRESULT(0)
         }
         WM_MOUSELEAVE_MSG => {
-            let changed = {
+            let (changed, card_only, section) = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
                     return LRESULT(0);
                 };
                 s.tracking_mouse_leave = false;
                 let changed = s.hovered.is_some() || s.json_scroll_hovered;
+                let card_only = card_only_hover_change(s.section, s.hovered, None)
+                    && !s.json_scroll_hovered;
                 s.hovered = None;
                 s.json_scroll_hovered = false;
-                changed
+                (changed, card_only, s.section)
             };
             if changed {
-                let _ = InvalidateRect(hwnd, None, false);
+                invalidate_appearance_card_or_window(hwnd, section, card_only);
             }
             LRESULT(0)
         }
@@ -5395,7 +5486,13 @@ unsafe extern "system" fn wnd_proc(
                     activate_target(hwnd, target);
                 }
             }
-            let _ = InvalidateRect(hwnd, None, false);
+            let section = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.section).unwrap_or(Section::General)
+            };
+            invalidate_appearance_card_or_window(
+                hwnd, section, pressed.is_some_and(is_appearance_card_target),
+            );
             LRESULT(0)
         }
         WM_CANCELMODE | WM_CAPTURECHANGED => {
@@ -6042,9 +6139,10 @@ unsafe fn paint(hwnd: HWND) {
     // that card intact in the cached buffer, skipping expensive preset previews.
     let dirty = ps.rcPaint;
     let card_bounds = settings_card_rect(hwnd, 58, 206);
-    let submenu_only = !matches!(section, Section::General | Section::Json)
-        && dirty.left == card_bounds.left && dirty.top == card_bounds.top
-        && dirty.right == card_bounds.right && dirty.bottom == card_bounds.bottom;
+    let submenu_only = is_appearance_section(section)
+        && dirty.left >= card_bounds.left && dirty.top >= card_bounds.top
+        && dirty.right <= card_bounds.right && dirty.bottom <= card_bounds.bottom
+        && dirty.left < dirty.right && dirty.top < dirty.bottom;
 
     let dark = snapshot.is_dark;
     let background = if dark {
@@ -6107,7 +6205,7 @@ unsafe fn paint(hwnd: HWND) {
             rect.right - rect.left, rect.bottom - rect.top,
             hdc, rect.left, rect.top, SRCCOPY);
         let _ = EndPaint(hwnd, &ps);
-        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true);
+        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true, true);
         return;
     }
 
@@ -6285,7 +6383,7 @@ unsafe fn paint(hwnd: HWND) {
         }
     }
     let _ = EndPaint(hwnd, &ps);
-    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false);
+    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false, submenu_only);
     });
 }
 
@@ -9095,6 +9193,25 @@ mod ui_smoke_tests {
         assert!(a == b);
         assert!(a != c);
         let _ = hwnd;
+    }
+
+    #[test]
+    fn appearance_card_hover_and_press_invalidation_is_scoped() {
+        assert!(card_only_hover_change(
+            Section::Preset, Some(HitTarget::Position(DisplayPosition::Desktop)), None,
+        ));
+        assert!(card_only_hover_change(
+            Section::Preset, Some(HitTarget::Position(DisplayPosition::Taskbar)),
+            Some(HitTarget::Position(DisplayPosition::Desktop)),
+        ));
+        assert!(!card_only_hover_change(
+            Section::Preset, Some(HitTarget::Section(Section::Preset)),
+            Some(HitTarget::Position(DisplayPosition::Desktop)),
+        ));
+        assert!(!card_only_hover_change(
+            Section::Json, None, Some(HitTarget::Position(DisplayPosition::Desktop)),
+        ));
+        assert!(!card_only_hover_change(Section::Preset, None, None));
     }
 
     #[test]
