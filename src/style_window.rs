@@ -404,6 +404,7 @@ struct SubmenuFrameMetrics {
     uncached_full_sources: Vec<&'static str>,
     uncached_full_frames: usize,
     uncached_card_frames: usize,
+    coalesced_position_cached_frames: usize,
     cached_paint_ms: f64,
     uncached_paint_ms: f64,
 }
@@ -499,6 +500,7 @@ fn record_submenu_frame(
                 total_paint_ms: 0.0, max_paint_ms: 0.0, cached_frames: 0,
                 gallery_cached_frames: 0, uncached_full_sources: Vec::new(),
                 uncached_full_frames: 0, uncached_card_frames: 0,
+                coalesced_position_cached_frames: 0,
                 cached_paint_ms: 0.0, uncached_paint_ms: 0.0,
             });
         }
@@ -511,6 +513,9 @@ fn record_submenu_frame(
         let draw_ms = paint_end.duration_since(paint_begin).as_secs_f64() * 1000.0;
         if cached {
             metric.cached_frames += 1;
+            if !card_only && cause == SettingsPaintCause::PositionSync {
+                metric.coalesced_position_cached_frames += 1;
+            }
             if cause == SettingsPaintCause::GalleryRefresh {
                 metric.gallery_cached_frames += 1;
             }
@@ -542,11 +547,12 @@ fn record_submenu_frame(
                 metric.uncached_paint_ms / uncached as f64
             } else { 0.0 };
             let line = format!(
-                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1},gallery_cached_frames={},full_sources={}\n",
+                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1},gallery_cached_frames={},coalesced_position_cached_frames={},full_sources={}\n",
                 metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
                 metric.cached_frames, metric.uncached_full_frames,
                 metric.uncached_card_frames, mean_cached, mean_uncached,
-                metric.gallery_cached_frames, metric.uncached_full_sources.join("+"),
+                metric.gallery_cached_frames, metric.coalesced_position_cached_frames,
+                metric.uncached_full_sources.join("+"),
             );
             let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -6076,6 +6082,9 @@ struct SettingsPaintBuffer {
     previous_bitmap: HGDIOBJ,
     width: i32,
     height: i32,
+    // Only reuse the retained pixels outside the card when they were painted
+    // for the current section; a new bitmap contains undefined pixels.
+    painted_section: Cell<Option<Section>>,
 }
 
 impl SettingsPaintBuffer {
@@ -6095,7 +6104,8 @@ impl SettingsPaintBuffer {
             let _ = DeleteDC(dc);
             return None;
         }
-        Some(Self { dc, bitmap, previous_bitmap, width, height })
+        Some(Self { dc, bitmap, previous_bitmap, width, height,
+            painted_section: Cell::new(None) })
     }
 }
 
@@ -6389,6 +6399,27 @@ fn finish_submenu_terminal_paint(hwnd: HWND) {
     }
 }
 
+// A position-only sync can have its card rect coalesced with a prior
+// invalid region by Win32. The rest of the retained backing bitmap is still
+// correct for this section; avoid a full page redraw solely because rcPaint
+// extends beyond the animated card. Never reuse uninitialized or other-page
+// pixels, or a genuine gallery/other-settings refresh.
+fn can_reuse_coalesced_position_paint(
+    section: Section,
+    painted_section: Option<Section>,
+    cause: SettingsPaintCause,
+    submenu_only: bool,
+    animating: bool,
+    gallery_refresh: bool,
+) -> bool {
+    !submenu_only
+        && animating
+        && !gallery_refresh
+        && is_appearance_section(section)
+        && painted_section == Some(section)
+        && cause == SettingsPaintCause::PositionSync
+}
+
 unsafe fn paint(hwnd: HWND) {
     let paint_begin = Instant::now();
     let paint_cause = SETTINGS_PAINT_CAUSE.with(|cell| cell.replace(SettingsPaintCause::Unknown));
@@ -6542,10 +6573,17 @@ unsafe fn paint(hwnd: HWND) {
         return;
     }
 
-    // Fast path: the animation changes only the shared settings card. Blend
-    // two cached complete card states; the first frame builds the snapshots,
-    // and all following frames are just BitBlt + AlphaBlend.
-    if submenu_only && (desktop_submenu_active || desktop_submenu_final_frame_pending)
+    // Keep the non-card pixels from the already painted backbuffer if Win32
+    // merges a pure position-sync invalidation with a larger pending region.
+    // The lower Preset gallery has its own deferred refresh.
+    let coalesced_position = can_reuse_coalesced_position_paint(
+        section, backbuffer.painted_section.get(), paint_cause, submenu_only,
+        desktop_submenu_active, gallery_refresh,
+    );
+    // Animation normally touches only the shared card; both the exact card
+    // invalidation and a safe coalesced position-only invalidation use blits.
+    if (submenu_only || coalesced_position)
+        && (desktop_submenu_active || desktop_submenu_final_frame_pending)
         && !discard_pending && composite_cached_submenu_card(
             screen_hdc, hdc, hwnd, width, height, &snapshot, section, editor,
             font, card, card_hover, card_pressed, track_background,
@@ -6561,7 +6599,10 @@ unsafe fn paint(hwnd: HWND) {
         if desktop_submenu_final_frame_pending {
             finish_submenu_terminal_paint(hwnd);
         }
-        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, true, true, paint_cause);
+        record_submenu_frame(
+            paint_begin, Instant::now(), desktop_submenu_active, true,
+            submenu_only, paint_cause,
+        );
         return;
     }
 
@@ -6745,6 +6786,11 @@ unsafe fn paint(hwnd: HWND) {
         && !preset_gallery_cache_ready(hwnd, width, height, &snapshot)
     {
         request_preset_gallery_warmup(hwnd);
+    }
+    // Only a full draw establishes valid retained pixels for this page;
+    // coalesced partial paint reuse requires this exact painted section.
+    if !submenu_only {
+        backbuffer.painted_section.set(Some(section));
     }
     let _ = EndPaint(hwnd, &ps);
     if desktop_submenu_final_frame_pending {
@@ -9607,6 +9653,38 @@ mod ui_smoke_tests {
         assert!(base != light, "theme changes invalidate the cache");
         let resized = PresetGalleryKey { width: 1000, ..base.clone() };
         assert!(base != resized, "DPI/layout size changes invalidate the cache");
+    }
+
+    #[test]
+    fn position_sync_coalesced_dirty_uses_only_valid_retained_page() {
+        let section = Section::Preset;
+        assert!(can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::PositionSync,
+            false, true, false,
+        ));
+        // A just-created buffer or one painted for another page is unsafe.
+        assert!(!can_reuse_coalesced_position_paint(
+            section, None, SettingsPaintCause::PositionSync,
+            false, true, false,
+        ));
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(Section::General), SettingsPaintCause::PositionSync,
+            false, true, false,
+        ));
+        // Real content refresh, user interaction, or an idle state must
+        // remain eligible for normal complete painting.
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::FullSync,
+            false, true, false,
+        ));
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::PositionSync,
+            false, true, true,
+        ));
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::PositionSync,
+            false, false, false,
+        ));
     }
 
     #[test]
