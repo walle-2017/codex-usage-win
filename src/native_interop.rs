@@ -95,6 +95,10 @@ unsafe extern "C" {
         out_rects: *mut TaskbarControlRect,
         capacity: usize,
     ) -> i32;
+    fn codex_alpha_blend_cached_card(
+        dest_raw: isize, source_raw: isize,
+        left: i32, top: i32, width: i32, height: i32, opacity: u8,
+    ) -> i32;
     fn codex_blend_settings_icon(
         hdc_raw: isize,
         left: i32,
@@ -538,6 +542,20 @@ pub fn draw_antialiased_desktop_inset_well(
             reveal_right,radius,
             top.r,top.g,top.b,bottom.r,bottom.g,bottom.b,
             shadow_opacity,
+        ) != 0
+    }
+}
+
+/// Compose a pre-rendered settings-card state with one native AlphaBlend.
+pub fn alpha_blend_cached_card(dest: HDC, source: HDC, rect: RECT, opacity: u8) -> bool {
+    if dest.0.is_null() || source.0.is_null() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return false;
+    }
+    unsafe {
+        codex_alpha_blend_cached_card(
+            dest.0 as isize, source.0 as isize,
+            rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+            opacity,
         ) != 0
     }
 }

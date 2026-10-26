@@ -5649,6 +5649,7 @@ unsafe extern "system" fn wnd_proc(
         },
         WM_DESTROY => {
             end_precise_animation_timer();
+            SUBMENU_CARD_FRAMES.with(|cell| *cell.borrow_mut() = None);
             SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
@@ -5848,9 +5849,120 @@ impl Drop for SettingsPaintBuffer {
     }
 }
 
+// Two immutable endpoints for the shared appearance card: Taskbar and Desktop.
+// Every animation frame cross-fades the rasterized card instead of issuing
+// dozens of Win32/Direct2D draw calls and repeated icon/text measurements.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SubmenuCardKey {
+    width: i32,
+    height: i32,
+    dpi: u32,
+    dark: bool,
+    zh: bool,
+    theme: ThemeMode,
+    layout: AppearancePreset,
+    direction: DesktopDirection,
+    collapse: bool,
+}
+
+impl SubmenuCardKey {
+    fn new(hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot) -> Self {
+        Self {
+            width, height, dpi: unsafe { GetDpiForWindow(hwnd) },
+            dark: snapshot.is_dark,
+            zh: snapshot.language == LanguageId::SimplifiedChinese,
+            theme: snapshot.theme_mode, layout: snapshot.appearance_preset,
+            direction: snapshot.desktop_direction, collapse: snapshot.desktop_auto_collapse,
+        }
+    }
+}
+
+struct SubmenuCardFrames {
+    key: SubmenuCardKey,
+    closed: SettingsPaintBuffer,
+    open: SettingsPaintBuffer,
+}
+
 thread_local! {
     static SETTINGS_PAINT_BUFFER: RefCell<Option<SettingsPaintBuffer>> =
         const { RefCell::new(None) };
+    static SUBMENU_CARD_FRAMES: RefCell<Option<SubmenuCardFrames>> =
+        const { RefCell::new(None) };
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_endpoint(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    section: Section,
+    editor: EditorSelection,
+    font: isize,
+    card: Color, hover: Color, pressed_color: Color, track: Color,
+    accent: Color, accent_hover: Color, accent_pressed: Color,
+    primary: Color, secondary: Color,
+) {
+    let underlay = if snapshot.is_dark {
+        Color::from_hex("#1F2125FF")
+    } else {
+        Color::from_hex("#E9EEF4FF")
+    };
+    fill(hdc, settings_card_rect(hwnd, 58, 206), underlay);
+    let prior_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    // Hover and pressed effects are intentionally excluded from the cached
+    // animation; normal painting immediately restores live hover feedback.
+    paint_appearance_page(
+        hdc, hwnd, snapshot, section, editor,
+        if snapshot.display_position == DisplayPosition::Desktop { 1.0 } else { 0.0 },
+        true, None, None, None, false, false, None, &[false; HEX_EDIT_COUNT],
+        card, hover, pressed_color, track, accent, accent_hover,
+        accent_pressed, primary, secondary,
+    );
+    SelectObject(hdc, prior_font);
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn composite_cached_submenu_card(
+    screen: HDC, dest: HDC, hwnd: HWND, width: i32, height: i32,
+    snapshot: &StyleWindowSnapshot, section: Section, editor: EditorSelection,
+    font: isize, card: Color, hover: Color, pressed_color: Color,
+    track: Color, accent: Color, accent_hover: Color, accent_pressed: Color,
+    primary: Color, secondary: Color, progress: f32,
+) -> bool {
+    let key = SubmenuCardKey::new(hwnd, width, height, snapshot);
+    SUBMENU_CARD_FRAMES.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.as_ref().is_none_or(|frames| frames.key != key) {
+            let Some(closed) = SettingsPaintBuffer::create(screen, width, height) else {
+                return false;
+            };
+            let Some(open) = SettingsPaintBuffer::create(screen, width, height) else {
+                return false;
+            };
+            let mut closed_snapshot = snapshot.clone();
+            closed_snapshot.display_position = DisplayPosition::Taskbar;
+            let mut open_snapshot = snapshot.clone();
+            open_snapshot.display_position = DisplayPosition::Desktop;
+            paint_submenu_endpoint(closed.dc, hwnd, &closed_snapshot, section, editor,
+                font, card, hover, pressed_color, track, accent, accent_hover,
+                accent_pressed, primary, secondary);
+            paint_submenu_endpoint(open.dc, hwnd, &open_snapshot, section, editor,
+                font, card, hover, pressed_color, track, accent, accent_hover,
+                accent_pressed, primary, secondary);
+            *cache = Some(SubmenuCardFrames { key, closed, open });
+        }
+        let Some(frames) = cache.as_ref() else { return false };
+        let card_bounds = settings_card_rect(hwnd, 58, 206);
+        let w = card_bounds.right - card_bounds.left;
+        let h = card_bounds.bottom - card_bounds.top;
+        let copied = BitBlt(dest, card_bounds.left, card_bounds.top, w, h,
+            frames.closed.dc, card_bounds.left, card_bounds.top, SRCCOPY);
+        if !copied.as_bool() { return false; }
+        let opacity = (progress.clamp(0.0, 1.0) * 255.0).round() as u8;
+        opacity == 0 || native_interop::alpha_blend_cached_card(
+            dest, frames.open.dc, card_bounds, opacity)
+    })
 }
 
 unsafe fn paint(hwnd: HWND) {
@@ -5976,6 +6088,26 @@ unsafe fn paint(hwnd: HWND) {
     } else {
         Color::from_hex("#666B73FF")
     };
+
+    // Fast path: the animation changes only the shared settings card. Blend
+    // two cached complete card states; the first frame builds the snapshots,
+    // and all following frames are just BitBlt + AlphaBlend.
+    if submenu_only && desktop_submenu_active && !discard_pending &&
+        composite_cached_submenu_card(
+            screen_hdc, hdc, hwnd, width, height, &snapshot, section, editor,
+            font, card, card_hover, card_pressed, track_background,
+            accent, accent_hover, accent_pressed, primary, secondary,
+            desktop_submenu_progress,
+        )
+    {
+        let rect = ps.rcPaint;
+        let _ = BitBlt(screen_hdc, rect.left, rect.top,
+            rect.right - rect.left, rect.bottom - rect.top,
+            hdc, rect.left, rect.top, SRCCOPY);
+        let _ = EndPaint(hwnd, &ps);
+        record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active);
+        return;
+    }
 
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
@@ -8924,6 +9056,23 @@ mod ui_smoke_tests {
                 assert_eq!(r.bottom - r.top, APPEARANCE_BUTTON_HEIGHT);
             }
         }
+    }
+
+    #[test]
+    fn cached_card_key_ignores_taskbar_desktop_position_and_tracks_visual_state() {
+        let hwnd = HWND::default();
+        // GetDpiForWindow is not callable for a null test handle; compare
+        // the stable key layout fields independently instead.
+        let a = SubmenuCardKey {
+            width: 980, height: 700, dpi: 96, dark: true, zh: true,
+            theme: ThemeMode::Dark, layout: AppearancePreset::Default,
+            direction: DesktopDirection::Horizontal, collapse: false,
+        };
+        let b = SubmenuCardKey { ..a };
+        let c = SubmenuCardKey { direction: DesktopDirection::Vertical, ..a };
+        assert!(a == b);
+        assert!(a != c);
+        let _ = hwnd;
     }
 
     #[test]

@@ -401,6 +401,20 @@ extern "C" __declspec(dllexport) int codex_draw_rounded_rect(
 }
 
 
+// Composite one cached opaque top-card state into the animation backbuffer.
+// AlphaFormat=0: source is a GDI compatible bitmap, not per-pixel alpha.
+extern "C" __declspec(dllexport) int codex_alpha_blend_cached_card(
+    intptr_t dest_raw, intptr_t source_raw,
+    int left, int top, int width, int height, unsigned char opacity) noexcept
+{
+    HDC dest = reinterpret_cast<HDC>(dest_raw);
+    HDC source = reinterpret_cast<HDC>(source_raw);
+    if (!dest || !source || width <= 0 || height <= 0) return 0;
+    const BLENDFUNCTION blend{AC_SRC_OVER, 0, opacity, 0};
+    return AlphaBlend(dest, left, top, width, height,
+                      source, left, top, width, height, blend) ? 1 : 0;
+}
+
 // SVG icons are rasterized by resvg at the final physical pixel size and
 // cached by (icon, DPI, RGBA) in Rust. No hand-authored icon geometry remains.
 extern "C" __declspec(dllexport) int codex_blend_settings_icon(
