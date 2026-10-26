@@ -1395,7 +1395,8 @@ fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
 
 // Four tall, narrow cards fit the complete 740px settings content band.
 const PRESET_GALLERY_LEFT: i32 = 200;
-const PRESET_CARD_TOP: i32 = 266;
+// No duplicate dark/light preset group heading: cards follow the shared appearance options.
+const PRESET_CARD_TOP: i32 = 226;
 const PRESET_CARD_WIDTH: i32 = 172;
 const PRESET_CARD_HEIGHT: i32 = 350;
 const PRESET_CARD_MINIMAL_HEIGHT: i32 = 250;
@@ -7087,15 +7088,6 @@ unsafe fn paint_appearance_page(
     }
 }
 
-fn preset_group_label(is_dark: bool, language: LanguageId) -> &'static str {
-    match (language == LanguageId::SimplifiedChinese, is_dark) {
-        (true, true) => "深色预设",
-        (true, false) => "浅色预设",
-        (false, true) => "Dark presets",
-        (false, false) => "Light presets",
-    }
-}
-
 fn preset_label(preset: ThemePreset, is_dark: bool, language: LanguageId) -> &'static str {
     match (language == LanguageId::SimplifiedChinese, is_dark, preset) {
         (true, true, ThemePreset::Classic) => "石墨",
@@ -7129,14 +7121,8 @@ unsafe fn paint_preset_gallery(
         accent,
         primary,
     } = palette;
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        preset_group_label(snapshot.is_dark, snapshot.language),
-        rect(hwnd, 200, 226, 940, 258),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
+    // Preset is part of the page title ("Appearance · Presets").
+    // The gallery begins just below the shared appearance controls.
     let mut matched = false;
     for preset in ThemePreset::ALL {
         let r = preset_card_rect(hwnd, preset);
@@ -8113,7 +8099,7 @@ fn appearance_page_title(section: Section, language: LanguageId) -> String {
     };
     if matches!(
         section,
-        Section::Panel | Section::Tooltip | Section::Text
+        Section::Preset | Section::Panel | Section::Tooltip | Section::Text
             | Section::Progress | Section::Interaction
     ) {
         format!("{root} · {}", section_label(section, language))
@@ -8532,6 +8518,7 @@ mod ui_smoke_tests {
     #[test]
     fn appearance_subpage_titles_do_not_overlap_the_shared_options_card() {
         for (section, zh, en) in [
+            (Section::Preset, "外观 · 预设", "Appearance · Presets"),
             (Section::Panel, "外观 · 面板", "Appearance · Panel"),
             (Section::Tooltip, "外观 · 浮框", "Appearance · Tooltip"),
             (Section::Text, "外观 · 文字", "Appearance · Text"),
@@ -8541,11 +8528,6 @@ mod ui_smoke_tests {
             assert_eq!(appearance_page_title(section, LanguageId::SimplifiedChinese), zh);
             assert_eq!(appearance_page_title(section, LanguageId::English), en);
         }
-        assert_eq!(
-            appearance_page_title(Section::Preset, LanguageId::SimplifiedChinese),
-            "外观"
-        );
-
         let hwnd = HWND::default();
         let header = settings_page_title_rect(hwnd);
         let shared_card = settings_card_rect(hwnd, 58, 206);
@@ -8554,6 +8536,8 @@ mod ui_smoke_tests {
             "page heading must be above the shared appearance options");
         assert!(first_editor_row.top > shared_card.bottom,
             "editor rows must start after the shared appearance options");
+        assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
+            "preset gallery should immediately follow the shared options without a redundant heading");
     }
 
     #[test]
@@ -8688,7 +8672,8 @@ mod ui_smoke_tests {
             "the two depressed regions must overlap to hide their seam");
         assert_eq!(submenu_reveal_right(0.0), l.foot.left);
         assert_eq!(submenu_reveal_right(1.0), l.well.right);
-        assert_eq!(PRESET_CARD_TOP,266,"preset gallery must not move");
+        assert_eq!(PRESET_CARD_TOP, 226,
+            "preset gallery starts immediately below the shared options card");
         for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
             assert!(r.left>=l.well.left && r.right<l.well.right);
         }
