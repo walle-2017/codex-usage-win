@@ -1,8 +1,7 @@
 use std::cell::RefCell;
 use std::sync::Mutex;
-use std::time::Instant;
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::io::Write;
 use std::{fs, path::PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -87,7 +86,9 @@ const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
 const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
-const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
+// Poll with a finer timer while the short animation is active; throttle paints to ~60Hz.
+const DESKTOP_SUBMENU_FRAME_MS: u32 = 8;
+const DESKTOP_SUBMENU_MIN_FRAME_MS: u64 = 15;
 const DESKTOP_SUBMENU_DURATION_MS: u64 = 220;
 const DESKTOP_SUBMENU_CLOSE_DURATION_MS: u64 = 190;
 const DESKTOP_SUBMENU_ICON_SIZE: i32 = 18;
@@ -308,6 +309,7 @@ struct DesktopSubmenuAnimation {
     target: f32,
     started: Instant,
     duration_ms: u64,
+    last_frame: Option<Instant>,
 }
 impl DesktopSubmenuAnimation {
     fn initial(desktop: bool) -> Self {
@@ -315,10 +317,23 @@ impl DesktopSubmenuAnimation {
         Self {
             progress, from: progress, target: progress,
             started: Instant::now(), duration_ms: DESKTOP_SUBMENU_DURATION_MS,
+            last_frame: None,
         }
     }
     fn active(&self) -> bool {
         (self.progress - self.target).abs() > 0.0001
+    }
+    fn frame_due(&mut self, now: Instant) -> bool {
+        if !self.active() {
+            return false;
+        }
+        if self.last_frame.is_some_and(|last| {
+            now.saturating_duration_since(last) < Duration::from_millis(DESKTOP_SUBMENU_MIN_FRAME_MS)
+        }) {
+            return false;
+        }
+        self.last_frame = Some(now);
+        true
     }
     fn advance(&mut self, now: Instant) -> bool {
         if !self.active() { return false; }
@@ -341,6 +356,7 @@ impl DesktopSubmenuAnimation {
         self.from = self.progress;
         self.target = target;
         self.started = now;
+        self.last_frame = None;
         let full_duration_ms = if desktop {
             DESKTOP_SUBMENU_DURATION_MS
         } else {
@@ -353,6 +369,100 @@ impl DesktopSubmenuAnimation {
     fn hit_enabled(&self) -> bool {
         self.target > 0.5 && self.progress >= 0.98
     }
+}
+
+// Diagnostics are opt-in: set CODEX_USAGE_ANIMATION_METRICS=1 before launch.
+// A short CSV-like summary is appended only after the menu finishes animating.
+struct SubmenuFrameMetrics {
+    first: Instant,
+    last: Instant,
+    frames: usize,
+    intervals_ms: Vec<f64>,
+    total_paint_ms: f64,
+    max_paint_ms: f64,
+}
+
+thread_local! {
+    static SUBMENU_FRAME_METRICS: RefCell<Option<SubmenuFrameMetrics>> =
+        const { RefCell::new(None) };
+    static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+
+fn begin_precise_animation_timer() {
+    PRECISE_ANIMATION_TIMER.with(|slot| {
+        let mut enabled = slot.borrow_mut();
+        if !*enabled {
+            // Temporarily request a finer timer resolution; always release
+            // it after the animation to avoid affecting idle power usage.
+            *enabled = unsafe { timeBeginPeriod(1) == 0 };
+        }
+    });
+}
+
+fn end_precise_animation_timer() {
+    PRECISE_ANIMATION_TIMER.with(|slot| {
+        let mut enabled = slot.borrow_mut();
+        if *enabled {
+            unsafe { let _ = timeEndPeriod(1); }
+            *enabled = false;
+        }
+    });
+}
+
+fn submenu_p95(values: &[f64]) -> f64 {
+    if values.is_empty() { return 0.0; }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[((sorted.len() * 95).div_ceil(100)).saturating_sub(1)]
+}
+
+fn record_submenu_frame(paint_begin: Instant, paint_end: Instant, animating: bool) {
+    if std::env::var_os("CODEX_USAGE_ANIMATION_METRICS").is_none() {
+        return;
+    }
+    SUBMENU_FRAME_METRICS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() && animating {
+            *slot = Some(SubmenuFrameMetrics {
+                first: paint_end, last: paint_end, frames: 0,
+                intervals_ms: Vec::with_capacity(32),
+                total_paint_ms: 0.0, max_paint_ms: 0.0,
+            });
+        }
+        let Some(metric) = slot.as_mut() else { return; };
+        if metric.frames > 0 {
+            metric.intervals_ms.push(paint_end.duration_since(metric.last).as_secs_f64() * 1000.0);
+        }
+        metric.frames += 1;
+        metric.last = paint_end;
+        let draw_ms = paint_end.duration_since(paint_begin).as_secs_f64() * 1000.0;
+        metric.total_paint_ms += draw_ms;
+        metric.max_paint_ms = metric.max_paint_ms.max(draw_ms);
+        if !animating {
+            let elapsed_ms = metric.last.duration_since(metric.first).as_secs_f64() * 1000.0;
+            let fps = if elapsed_ms > 0.0 {
+                (metric.frames.saturating_sub(1) as f64) * 1000.0 / elapsed_ms
+            } else { 0.0 };
+            let mean_paint = metric.total_paint_ms / metric.frames as f64;
+            let p95 = submenu_p95(&metric.intervals_ms);
+            let gaps = metric.intervals_ms.iter().filter(|v| **v > 25.0).count();
+            let line = format!(
+                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={}\n",
+                metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
+            );
+            let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
+            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = file.write_all(line.as_bytes());
+            }
+            *slot = None;
+        }
+    });
 }
 
 /// Logical 96-DPI bounds. The lower foot contains the existing Desktop
@@ -1107,6 +1217,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         )
     };
     if submenu_animated {
+        begin_precise_animation_timer();
         unsafe { let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None); }
     }
     layout_numeric_edits(hwnd);
@@ -4967,17 +5078,22 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_TIMER => {
             if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
-                let still_active = {
+                let (still_active, rendered) = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
-                        s.desktop_submenu.advance(Instant::now());
-                        s.desktop_submenu.active()
-                    } else { false }
+                        let now = Instant::now();
+                        let due = s.desktop_submenu.frame_due(now);
+                        if due { s.desktop_submenu.advance(now); }
+                        (s.desktop_submenu.active(), due)
+                    } else { (false, false) }
                 };
                 if !still_active {
                     let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
+                    end_precise_animation_timer();
                 }
-                let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+                if rendered {
+                    let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+                }
                 return LRESULT(0);
             }
             if wparam.0 == JSON_ACTION_TIMER_ID {
@@ -5532,6 +5648,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         },
         WM_DESTROY => {
+            end_precise_animation_timer();
             SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
@@ -5737,6 +5854,7 @@ thread_local! {
 }
 
 unsafe fn paint(hwnd: HWND) {
+    let paint_begin = Instant::now();
     let mut ps = PAINTSTRUCT::default();
     let screen_hdc = BeginPaint(hwnd, &mut ps);
 
@@ -5777,6 +5895,7 @@ unsafe fn paint(hwnd: HWND) {
         discard_pending,
         font,
         desktop_submenu_progress,
+        desktop_submenu_active,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
@@ -5802,8 +5921,16 @@ unsafe fn paint(hwnd: HWND) {
             s.pending_discard_action.is_some(),
             s.font,
             s.desktop_submenu.progress,
+            s.desktop_submenu.active(),
         )
     };
+    // WM_TIMER dirties exactly the shared top card. Keep all drawing outside
+    // that card intact in the cached buffer, skipping expensive preset previews.
+    let dirty = ps.rcPaint;
+    let card_bounds = settings_card_rect(hwnd, 58, 206);
+    let submenu_only = !matches!(section, Section::General | Section::Json)
+        && dirty.left == card_bounds.left && dirty.top == card_bounds.top
+        && dirty.right == card_bounds.right && dirty.bottom == card_bounds.bottom;
 
     let dark = snapshot.is_dark;
     let background = if dark {
@@ -5852,6 +5979,9 @@ unsafe fn paint(hwnd: HWND) {
 
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
+    let old_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    if !submenu_only {
     fill(hdc, client, background);
     fill(
         hdc,
@@ -5874,8 +6004,6 @@ unsafe fn paint(hwnd: HWND) {
         track_background,
     );
 
-    let old_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
-    let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -5912,6 +6040,7 @@ unsafe fn paint(hwnd: HWND) {
         primary,
         secondary,
     );
+    }
 
     match section {
         Section::General => paint_general_page(
@@ -5956,6 +6085,7 @@ unsafe fn paint(hwnd: HWND) {
             section,
             editor,
             desktop_submenu_progress,
+            submenu_only,
             hovered,
             pressed,
             focused_numeric_edit,
@@ -6001,6 +6131,7 @@ unsafe fn paint(hwnd: HWND) {
             hdc, dirty.left, dirty.top, SRCCOPY);
     }
     let _ = EndPaint(hwnd, &ps);
+    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active);
     });
 }
 
@@ -6831,6 +6962,7 @@ unsafe fn paint_appearance_page(
     section: Section,
     editor: EditorSelection,
     desktop_submenu_progress: f32,
+    submenu_only: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     focused_numeric_edit: Option<usize>,
@@ -6995,6 +7127,8 @@ unsafe fn paint_appearance_page(
                 selected:accent,selected_hover:accent_hover,selected_pressed:accent_pressed,
             },primary,secondary);
     }
+
+    if submenu_only { return; }
 
     if section == Section::Preset {
         paint_preset_gallery(
@@ -8790,6 +8924,19 @@ mod ui_smoke_tests {
                 assert_eq!(r.bottom - r.top, APPEARANCE_BUTTON_HEIGHT);
             }
         }
+    }
+
+    #[test]
+    fn submenu_frame_gate_and_metrics_percentile() {
+        let start = Instant::now();
+        let mut animation = DesktopSubmenuAnimation::initial(false);
+        assert!(animation.retarget(true, start));
+        assert!(animation.frame_due(start));
+        assert!(!animation.frame_due(start + Duration::from_millis(8)));
+        assert!(animation.frame_due(start + Duration::from_millis(16)));
+        assert_eq!(submenu_p95(&[]), 0.0);
+        assert_eq!(submenu_p95(&[10.0, 16.0, 20.0, 45.0]), 45.0);
+        assert_eq!(submenu_p95(&[12.0, 14.0, 18.0]), 18.0);
     }
 
     #[test]

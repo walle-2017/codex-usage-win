@@ -47,6 +47,27 @@ D2D1_COLOR_F color_from_rgba(
         static_cast<float>(a) / 255.0f);
 }
 
+// The settings submenu renders repeatedly during its 200-ms animation.
+// Cache device-dependent drawing objects on the UI thread; rebuild geometry
+// only when DPI or menu bounds change, and discard everything on device loss.
+struct DesktopInsetCache {
+    ComPtr<ID2D1DCRenderTarget> target;
+    ComPtr<ID2D1PathGeometry> path;
+    ComPtr<ID2D1Layer> layer;
+    ComPtr<ID2D1SolidColorBrush> shadow;
+    float x0 = -1.0f, x1 = -1.0f, y1 = -1.0f, fy = -1.0f, radius = -1.0f;
+
+    void reset() noexcept {
+        shadow.Reset();
+        layer.Reset();
+        path.Reset();
+        target.Reset();
+        x0 = x1 = y1 = fy = radius = -1.0f;
+    }
+};
+
+thread_local DesktopInsetCache g_desktop_inset_cache;
+
 } // namespace
 
 // One continuous, antialiased L-shaped inset used by the settings page.
@@ -85,48 +106,55 @@ extern "C" __declspec(dllexport) int codex_draw_desktop_inset_well(
             D2D1_RENDER_TARGET_TYPE_DEFAULT,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
             0.0f, 0.0f, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT);
-        ComPtr<ID2D1DCRenderTarget> target;
-        if (FAILED(g_control_factory->CreateDCRenderTarget(&props, target.GetAddressOf()))) {
+        auto& cache = g_desktop_inset_cache;
+        if (!cache.target && FAILED(g_control_factory->CreateDCRenderTarget(
+            &props, cache.target.GetAddressOf()))) {
             return 0;
         }
-        const RECT bind{
-            origin_x, origin_y, well_right, well_bottom
-        };
+        ComPtr<ID2D1DCRenderTarget> target = cache.target;
+        const RECT bind{ origin_x, origin_y, well_right, well_bottom };
         if (FAILED(target->BindDC(hdc, &bind))) {
+            cache.reset();
             return 0;
         }
 
-        ComPtr<ID2D1PathGeometry> path;
-        ComPtr<ID2D1GeometrySink> sink;
-        if (FAILED(g_control_factory->CreatePathGeometry(path.GetAddressOf()))
-            || FAILED(path->Open(sink.GetAddressOf()))) {
-            return 0;
+        if (!cache.path || cache.x0 != x0 || cache.x1 != x1 ||
+            cache.y1 != y1 || cache.fy != fy || cache.radius != r) {
+            ComPtr<ID2D1PathGeometry> path;
+            ComPtr<ID2D1GeometrySink> sink;
+            if (FAILED(g_control_factory->CreatePathGeometry(path.GetAddressOf()))
+                || FAILED(path->Open(sink.GetAddressOf()))) {
+                return 0;
+            }
+            const auto pt = [](float x, float y) { return D2D1::Point2F(x, y); };
+            const auto arc = [r](float x, float y, D2D1_SWEEP_DIRECTION dir) {
+                return D2D1::ArcSegment(
+                    D2D1::Point2F(x, y), D2D1::SizeF(r, r), 0.0f, dir,
+                    D2D1_ARC_SIZE_SMALL);
+            };
+            const auto clockwise = D2D1_SWEEP_DIRECTION_CLOCKWISE;
+            sink->BeginFigure(pt(x0 + r, y0), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(pt(x1 - r, y0));
+            sink->AddArc(arc(x1, y0 + r, clockwise));
+            sink->AddLine(pt(x1, y1 - r));
+            sink->AddArc(arc(x1 - r, y1, clockwise));
+            sink->AddLine(pt(fx + r, y1));
+            sink->AddArc(arc(fx, y1 - r, clockwise));
+            sink->AddLine(pt(fx, fy + r));
+            sink->AddArc(arc(fx + r, fy, clockwise));
+            sink->AddLine(pt(x0 - r, fy));
+            sink->AddArc(arc(x0, fy - r, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE));
+            sink->AddLine(pt(x0, y0 + r));
+            sink->AddArc(arc(x0 + r, y0, clockwise));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (FAILED(sink->Close())) {
+                return 0;
+            }
+            cache.path = path;
+            cache.x0 = x0; cache.x1 = x1;
+            cache.y1 = y1; cache.fy = fy; cache.radius = r;
         }
-        const auto pt = [](float x, float y) { return D2D1::Point2F(x, y); };
-        const auto arc = [r](float x, float y, D2D1_SWEEP_DIRECTION dir) {
-            return D2D1::ArcSegment(
-                D2D1::Point2F(x, y), D2D1::SizeF(r, r), 0.0f, dir,
-                D2D1_ARC_SIZE_SMALL);
-        };
-        const auto clockwise = D2D1_SWEEP_DIRECTION_CLOCKWISE;
-        sink->BeginFigure(pt(x0 + r, y0), D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(pt(x1 - r, y0));
-        sink->AddArc(arc(x1, y0 + r, clockwise));
-        sink->AddLine(pt(x1, y1 - r));
-        sink->AddArc(arc(x1 - r, y1, clockwise));
-        sink->AddLine(pt(fx + r, y1));
-        sink->AddArc(arc(fx, y1 - r, clockwise));
-        sink->AddLine(pt(fx, fy + r));
-        sink->AddArc(arc(fx + r, fy, clockwise));
-        sink->AddLine(pt(x0 - r, fy));
-        // Inward turn: concave rounded transition, not a visible panel join.
-        sink->AddArc(arc(x0, fy - r, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE));
-        sink->AddLine(pt(x0, y0 + r));
-        sink->AddArc(arc(x0 + r, y0, clockwise));
-        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-        if (FAILED(sink->Close())) {
-            return 0;
-        }
+        ComPtr<ID2D1PathGeometry> path = cache.path;
 
         const D2D1_GRADIENT_STOP stops[] = {
             { 0.0f, color_from_rgba(top_r, top_g, top_b, 255) },
@@ -158,25 +186,32 @@ extern "C" __declspec(dllexport) int codex_draw_desktop_inset_well(
         // Very low-opacity *interior* shadow only. Geometry masking clips
         // strokes at the exact same outline so no dark outer border appears.
         if (shadow_opacity > 0.001f) {
-            ComPtr<ID2D1SolidColorBrush> shade;
-            if (SUCCEEDED(target->CreateSolidColorBrush(
-                color_from_rgba(6, 10, 16, 255), shade.GetAddressOf()))) {
-                ComPtr<ID2D1Layer> layer;
-                if (SUCCEEDED(target->CreateLayer(nullptr, layer.GetAddressOf()))) {
-                    target->PushLayer(D2D1::LayerParameters(
-                        D2D1::InfiniteRect(), path.Get(),
-                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), layer.Get());
-                    const float opacity = std::clamp(shadow_opacity, 0.0f, 0.16f);
-                    shade->SetOpacity(opacity * 0.38f);
-                    target->DrawGeometry(path.Get(), shade.Get(), 8.0f);
-                    shade->SetOpacity(opacity * 0.48f);
-                    target->DrawGeometry(path.Get(), shade.Get(), 3.0f);
-                    target->PopLayer();
-                }
+            if (!cache.shadow) {
+                (void)target->CreateSolidColorBrush(
+                    color_from_rgba(6, 10, 16, 255), cache.shadow.GetAddressOf());
+            }
+            if (!cache.layer) {
+                (void)target->CreateLayer(nullptr, cache.layer.GetAddressOf());
+            }
+            if (cache.shadow && cache.layer) {
+                target->PushLayer(D2D1::LayerParameters(
+                    D2D1::InfiniteRect(), path.Get(),
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), cache.layer.Get());
+                const float opacity = std::clamp(shadow_opacity, 0.0f, 0.16f);
+                cache.shadow->SetOpacity(opacity * 0.38f);
+                target->DrawGeometry(path.Get(), cache.shadow.Get(), 8.0f);
+                cache.shadow->SetOpacity(opacity * 0.48f);
+                target->DrawGeometry(path.Get(), cache.shadow.Get(), 3.0f);
+                target->PopLayer();
             }
         }
         target->PopAxisAlignedClip();
-        return SUCCEEDED(target->EndDraw()) ? 1 : 0;
+        const HRESULT result = target->EndDraw();
+        if (FAILED(result)) {
+            cache.reset();
+            return 0;
+        }
+        return 1;
     } catch (...) {
         return 0;
     }
