@@ -155,6 +155,7 @@ extern "C" __declspec(dllexport) int codex_draw_desktop_inset_well(
             cache.y1 = y1; cache.fy = fy; cache.radius = r;
         }
         ComPtr<ID2D1PathGeometry> path = cache.path;
+        const auto pt = [](float x, float y) { return D2D1::Point2F(x, y); };
 
         const D2D1_GRADIENT_STOP stops[] = {
             { 0.0f, color_from_rgba(top_r, top_g, top_b, 255) },
