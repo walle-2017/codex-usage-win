@@ -2413,7 +2413,13 @@ fn json_scroll_frame_due(last: Option<Instant>, now: Instant, refresh_hz: i32) -
 fn json_scroll_drag_should_apply(
     last: Option<Instant>, now: Instant, refresh_hz: i32, force: bool,
 ) -> bool {
-    force || json_scroll_frame_due(last, now, refresh_hz)
+    // WM_MOUSEMOVE is usually sampled every ~8 ms. A strict 16.67 ms
+    // cutoff would skip the 16 ms sample and paint only at 24 ms (~42 Hz).
+    // A 2 ms scheduling allowance keeps updates close to 60 Hz without
+    // trying to render every high-frequency input sample.
+    let interval = json_scroll_frame_interval(refresh_hz)
+        .saturating_sub(Duration::from_millis(2));
+    force || last.is_none_or(|at| now.saturating_duration_since(at) >= interval)
 }
 
 fn start_json_scroll_drag_pacing(hwnd: HWND) {
@@ -10221,6 +10227,9 @@ mod ui_smoke_tests {
         assert!(!json_scroll_drag_should_apply(
             Some(now), now + Duration::from_millis(8), 60, false,
         ));
+        assert!(json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(16), 60, false,
+        ), "an 8 ms input source must not collapse 60 Hz into 42 Hz");
         assert!(json_scroll_drag_should_apply(
             Some(now), now + Duration::from_millis(17), 60, false,
         ));
