@@ -104,6 +104,8 @@ const DESKTOP_SUBMENU_CLOSE_DURATION_MS: u64 = 190;
 const DESKTOP_SUBMENU_ICON_SIZE: i32 = 18;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
+// Keep the latest drag pointer until the next 60 Hz display interval.
+const JSON_SCROLL_DRAG_FRAME_TIMER_ID: usize = 0x4A5A;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
 const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
 const JSON_ERROR_SHAKE_TIMER_ID: usize = 0x4A57;
@@ -2214,6 +2216,8 @@ fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
 struct JsonScrollPerf {
     wheel_events: usize,
     drag_events: usize,
+    drag_motion_events: usize,
+    drag_deferred_moves: usize,
     direct_drag_events: usize,
     total_rich_ms: f64,
     max_rich_ms: f64,
@@ -2236,6 +2240,15 @@ static JSON_SCROLL_METRICS_ENABLED: LazyLock<bool> =
 thread_local! {
     static JSON_SCROLL_PERF: RefCell<JsonScrollPerf> =
         RefCell::new(JsonScrollPerf::default());
+}
+
+fn record_json_scroll_drag_motion(deferred: bool) {
+    if !*JSON_SCROLL_METRICS_ENABLED { return; }
+    JSON_SCROLL_PERF.with(|slot| {
+        let mut perf = slot.borrow_mut();
+        perf.drag_motion_events += 1;
+        if deferred { perf.drag_deferred_moves += 1; }
+    });
 }
 
 fn record_json_scroll_event(wheel: bool, direct_drag: bool, elapsed: Duration) {
@@ -2311,7 +2324,7 @@ fn flush_idle_json_scroll_metrics() {
         let events = perf.wheel_events + perf.drag_events;
         if events > 0 {
             let line = format!(
-                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={},scrollbar_buffered_paints={},json_full_page_paints={},scroll_target_hz={},scroll_sync_frames={},richedit_paint_frames={},richedit_paint_gap_mean_ms={:.2},richedit_paint_gap_max_ms={:.2}\n",
+                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={},scrollbar_buffered_paints={},json_full_page_paints={},scroll_target_hz={},scroll_sync_frames={},richedit_paint_frames={},richedit_paint_gap_mean_ms={:.2},richedit_paint_gap_max_ms={:.2},drag_motion_events={},drag_deferred_moves={}\n",
                 perf.wheel_events, perf.drag_events, perf.direct_drag_events,
                 perf.total_rich_ms / events as f64,
                 perf.max_rich_ms, perf.fast_scrollbar_paints,
@@ -2320,6 +2333,7 @@ fn flush_idle_json_scroll_metrics() {
                 perf.rich_edit_paint_frames,
                 perf.rich_edit_paint_gap_total_ms / perf.rich_edit_paint_gap_samples.max(1) as f64,
                 perf.rich_edit_paint_gap_max_ms,
+                perf.drag_motion_events, perf.drag_deferred_moves,
             );
             let path = std::env::temp_dir().join("codex-usage-json-scroll-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -2368,13 +2382,21 @@ struct JsonScrollFrameClock {
     last_sync: Option<Instant>,
     last_refresh_probe: Option<Instant>,
     refresh_hz: i32,
+    last_drag_update: Option<Instant>,
+    pending_drag_y: Option<i32>,
 }
 
 // Match the Windows display DC, but never issue unbounded synchronous WM_PAINT
 // messages (high-refresh monitors can report up to 240 Hz here). Unknown 0/1
 // values use a conservative 60 Hz fallback.
 fn json_scroll_target_hz(device_hz: i32) -> i32 {
-    if device_hz <= 1 { 60 } else { device_hz.clamp(30, 240) }
+    // Windows GDI frequently reports 59 for the normal 59.94/60 Hz
+    // desktop mode. Both use a nominal 60 Hz input/paint budget.
+    if device_hz <= 1 || (58..=61).contains(&device_hz) {
+        60
+    } else {
+        device_hz.clamp(30, 240)
+    }
 }
 
 fn json_scroll_frame_interval(refresh_hz: i32) -> Duration {
@@ -2383,6 +2405,69 @@ fn json_scroll_frame_interval(refresh_hz: i32) -> Duration {
 
 fn json_scroll_frame_due(last: Option<Instant>, now: Instant, refresh_hz: i32) -> bool {
     last.is_none_or(|at| now.saturating_duration_since(at) >= json_scroll_frame_interval(refresh_hz))
+}
+
+// A drag can generate pointer events at 120+ Hz on a 60 Hz monitor.
+// Updating RichEdit on every WM_MOUSEMOVE performs redundant native paints.
+// Preserve the last pointer rather than queueing intermediate text frames.
+fn json_scroll_drag_should_apply(
+    last: Option<Instant>, now: Instant, refresh_hz: i32, force: bool,
+) -> bool {
+    force || json_scroll_frame_due(last, now, refresh_hz)
+}
+
+fn start_json_scroll_drag_pacing(hwnd: HWND) {
+    JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut clock = cell.borrow_mut();
+        clock.last_drag_update = None;
+        clock.pending_drag_y = None;
+    });
+    if std::env::var_os("CODEX_USAGE_JSON_SCROLL_DRAG_COALESCE_DISABLED").is_none() {
+        unsafe {
+            // Timer messages are a fallback for the final pending pointer
+            // when the mouse stops between display frames. Native timers have
+            // coarse resolution; active input itself drives most frames.
+            let _ = SetTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID, 10, None);
+        }
+    }
+}
+
+fn stop_json_scroll_drag_pacing(hwnd: HWND) {
+    unsafe { let _ = KillTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID); }
+    JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut clock = cell.borrow_mut();
+        clock.last_drag_update = None;
+        clock.pending_drag_y = None;
+    });
+}
+
+fn update_json_scroll_drag_paced(hwnd: HWND, y: Option<i32>, force: bool) {
+    if std::env::var_os("CODEX_USAGE_JSON_SCROLL_DRAG_COALESCE_DISABLED").is_some() {
+        if let Some(y) = y {
+            record_json_scroll_drag_motion(false);
+            update_json_scroll_drag(hwnd, y);
+        }
+        return;
+    }
+    let now = Instant::now();
+    let (next, deferred) = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut frame = cell.borrow_mut();
+        if let Some(y) = y { frame.pending_drag_y = Some(y); }
+        if frame.pending_drag_y.is_none() { return (None, false); }
+        let due = json_scroll_drag_should_apply(
+            frame.last_drag_update, now, frame.refresh_hz, force,
+        );
+        if due {
+            frame.last_drag_update = Some(now);
+            (frame.pending_drag_y.take(), false)
+        } else {
+            (None, y.is_some())
+        }
+    });
+    if y.is_some() { record_json_scroll_drag_motion(deferred); }
+    if let Some(y) = next {
+        update_json_scroll_drag(hwnd, y);
+    }
 }
 
 // WM_PAINT is delivered only when the queue is idle. A continuous mouse-drag
@@ -6005,6 +6090,18 @@ unsafe extern "system" fn wnd_proc(
                 advance_json_error_shake(hwnd);
                 return LRESULT(0);
             }
+            if wparam.0 == JSON_SCROLL_DRAG_FRAME_TIMER_ID {
+                if json_editor_active() {
+                    let dragging = {
+                        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.as_ref().is_some_and(|s| s.json_scroll_dragging)
+                    };
+                    if dragging {
+                        update_json_scroll_drag_paced(hwnd, None, false);
+                    }
+                }
+                return LRESULT(0);
+            }
             if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
                 // Keyboard navigation and caret auto-scroll do not pass through
                 // our custom wheel/drag handlers. Poll only for actual thumb
@@ -6082,6 +6179,7 @@ unsafe extern "system" fn wnd_proc(
                         s.pressed = None;
                     }
                 }
+                start_json_scroll_drag_pacing(hwnd);
                 let _ = SetCapture(hwnd);
                 invalidate_json_scrollbar(hwnd);
                 return LRESULT(0);
@@ -6184,7 +6282,7 @@ unsafe extern "system" fn wnd_proc(
                     .unwrap_or((false, false))
             };
             if scroll_dragging {
-                update_json_scroll_drag(hwnd, y);
+                update_json_scroll_drag_paced(hwnd, Some(y), false);
                 return LRESULT(0);
             }
             let scroll_hover = json_editor_active()
@@ -6271,8 +6369,11 @@ unsafe extern "system" fn wnd_proc(
                 value
             };
             if was_scroll_dragging {
+                // Commit the exact release position even if it arrives inside
+                // the previous 16.7 ms frame; never leave a deferred thumb.
+                update_json_scroll_drag_paced(hwnd, Some(y), true);
+                stop_json_scroll_drag_pacing(hwnd);
                 let _ = ReleaseCapture();
-                update_json_scroll_drag(hwnd, y);
                 invalidate_json_scrollbar(hwnd);
                 return LRESULT(0);
             }
@@ -6305,6 +6406,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CANCELMODE | WM_CAPTURECHANGED => {
+            stop_json_scroll_drag_pacing(hwnd);
             let (was_dragging, pressed_target, section) = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
@@ -6572,6 +6674,7 @@ unsafe extern "system" fn wnd_proc(
             SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             JSON_SCROLL_FRAME_CLOCK.with(|cell| *cell.borrow_mut() = JsonScrollFrameClock::default());
+            let _ = KillTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
@@ -10099,7 +10202,10 @@ mod ui_smoke_tests {
     fn json_scroll_frame_pacing_follows_display_refresh_rate() {
         assert_eq!(json_scroll_target_hz(0), 60);
         assert_eq!(json_scroll_target_hz(1), 60);
+        assert_eq!(json_scroll_target_hz(59), 60);
         assert_eq!(json_scroll_target_hz(60), 60);
+        assert_eq!(json_scroll_target_hz(61), 60);
+        assert_eq!(json_scroll_target_hz(75), 75);
         assert_eq!(json_scroll_target_hz(120), 120);
         assert_eq!(json_scroll_target_hz(144), 144);
         assert_eq!(json_scroll_target_hz(360), 240);
@@ -10110,6 +10216,17 @@ mod ui_smoke_tests {
         assert!(!json_scroll_frame_due(Some(now), now + Duration::from_millis(8), 60));
         assert!(json_scroll_frame_due(Some(now), now + Duration::from_millis(17), 60));
         assert_eq!(json_scroll_frame_interval(120), Duration::from_micros(8333));
+        assert_eq!(json_scroll_frame_interval(59), Duration::from_micros(16666));
+        assert!(json_scroll_drag_should_apply(None, now, 60, false));
+        assert!(!json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(8), 60, false,
+        ));
+        assert!(json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(17), 60, false,
+        ));
+        assert!(json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(8), 60, true,
+        ), "mouse release must flush the most recent drag pointer");
     }
 
     #[test]
