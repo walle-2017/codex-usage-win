@@ -12820,7 +12820,7 @@ mod tests {
         let left = RECT { left: -2560, top: -100, right: -640, bottom: 980 };
         assert_eq!(floating_reset_top_origin(left, 320, 110), (-1760, -100));
         let above = RECT { left: 0, top: -1200, right: 1600, bottom: -120 };
-        assert_eq!(floating_reset_top_origin(above, 320, 110), (640, -120));
+        assert_eq!(floating_reset_top_origin(above, 320, 110), (640, -1200));
         let narrow = RECT { left: 1920, top: 40, right: 2130, bottom: 440 };
         assert_eq!(floating_reset_top_origin(narrow, 320, 110), (1920, 40));
         assert_eq!(
