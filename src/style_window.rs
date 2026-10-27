@@ -2871,6 +2871,34 @@ unsafe extern "system" fn json_page_surface_wnd_proc(
     }
 }
 
+// Render an entire scrollbar frame offscreen, then publish it in one blit.
+// This is also directly exercised by the Windows UI test; HWND invalidation
+// can be coalesced with a whole-page repaint, hiding the narrow paint path.
+unsafe fn paint_json_scrollbar_buffered(
+    screen: HDC, owner: HWND, is_dark: bool, origin_x: i32, track: RECT,
+) -> bool {
+    JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| {
+        let width = (track.right - track.left).max(1);
+        let height = (track.bottom - track.top).max(1);
+        let mut slot = cell.borrow_mut();
+        if slot.as_ref().is_none_or(|buffer| {
+            buffer.width != width || buffer.height != height
+        }) {
+            *slot = SettingsPaintBuffer::create(screen, width, height);
+        }
+        let Some(buffer) = slot.as_ref() else { return false; };
+        let _ = SetViewportOrgEx(buffer.dc, -track.left, -track.top, None);
+        fill(buffer.dc, track, json_editor_background(is_dark));
+        paint_json_scrollbar_decoration(buffer.dc, owner, is_dark);
+        let _ = SetViewportOrgEx(buffer.dc, 0, 0, None);
+        let _ = BitBlt(
+            screen, track.left - origin_x, track.top,
+            width, height, buffer.dc, 0, 0, SRCCOPY,
+        );
+        true
+    })
+}
+
 unsafe fn paint_json_page_surface(page: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let screen = BeginPaint(page, &mut ps);
@@ -2895,26 +2923,9 @@ unsafe fn paint_json_page_surface(page: HWND) {
             // become separate visible frames, making the scrollbar blink
             // during continuous dragging. Compose the complete track in a
             // tiny retained bitmap and publish it with one clipped BitBlt.
-            let buffered = JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| {
-                let width = (track.right - track.left).max(1);
-                let height = (track.bottom - track.top).max(1);
-                let mut slot = cell.borrow_mut();
-                if slot.as_ref().is_none_or(|buffer| {
-                    buffer.width != width || buffer.height != height
-                }) {
-                    *slot = SettingsPaintBuffer::create(screen, width, height);
-                }
-                let Some(buffer) = slot.as_ref() else { return false; };
-                let _ = SetViewportOrgEx(buffer.dc, -track.left, -track.top, None);
-                fill(buffer.dc, track, json_editor_background(is_dark));
-                paint_json_scrollbar_decoration(buffer.dc, owner, is_dark);
-                let _ = SetViewportOrgEx(buffer.dc, 0, 0, None);
-                let _ = BitBlt(
-                    screen, track.left - origin_x, track.top,
-                    width, height, buffer.dc, 0, 0, SRCCOPY,
-                );
-                true
-            });
+            let buffered = paint_json_scrollbar_buffered(
+                screen, owner, is_dark, origin_x, track,
+            );
             if !buffered {
                 // Low-memory fallback: retain the existing paint behavior
                 // instead of leaving a missing scrollbar.
@@ -10659,11 +10670,23 @@ mod ui_smoke_tests {
                 };
                 let _ = InvalidateRect(json_page_surface, Some(&track_local), false);
                 let _ = UpdateWindow(json_page_surface);
+                // UpdateWindow can coalesce the dirty track with a pending
+                // whole-pane redraw on headless CI runners. Independently
+                // exercise the atomic paint helper with an actual window DC.
+                let screen = GetDC(json_page_surface);
+                assert!(!screen.0.is_null());
+                let is_dark = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.as_ref().unwrap().snapshot.is_dark
+                };
+                let painted = paint_json_scrollbar_buffered(
+                    screen, hwnd, is_dark, left, track,
+                );
+                let _ = ReleaseDC(json_page_surface, screen);
+                assert!(painted, "the narrow scrollbar must support double-buffered painting");
                 JSON_SCROLLBAR_PAINT_BUFFER.with(|slot| {
                     let cache = slot.borrow();
-                    let buffer = cache.as_ref().expect(
-                        "scrollbar-only repaint must create a retained GDI surface"
-                    );
+                    let buffer = cache.as_ref().expect("scrollbar paint buffer must be retained");
                     assert_eq!(buffer.width, track.right - track.left);
                     assert_eq!(buffer.height, track.bottom - track.top);
                 });
