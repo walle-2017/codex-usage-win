@@ -5232,6 +5232,19 @@ fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32
     )
 }
 
+/// The desktop reset target is the horizontal center of the selected
+/// monitor's usable desktop, snapped against its top work-area boundary.
+/// Keep virtual-desktop coordinates signed for screens left/above primary.
+fn floating_reset_top_origin(bounds: RECT, width: i32, height: i32) -> (i32, i32) {
+    let centered_x = (i64::from(bounds.left) +
+        (i64::from(bounds.right) - i64::from(bounds.left) - i64::from(width)) / 2)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    floating_edge_position(
+        bounds, centered_x, bounds.top, width, height,
+        Some(FloatingEdge::Top), false, sc(FLOAT_EDGE_PEEK),
+    )
+}
+
 fn floating_nearest_edge(bounds: RECT, rect: RECT, threshold: i32) -> Option<FloatingEdge> {
     let edges = [
         (FloatingEdge::Left, (rect.left - bounds.left).abs()),
@@ -5500,6 +5513,95 @@ fn initial_floating_visibility(
 ) -> (bool, u8) {
     let collapsed = edge.is_some() && floating_auto_collapse_allowed(position, auto_collapse);
     (collapsed, if collapsed { 0 } else { 100 })
+}
+
+/// Reset a desktop popup without changing the stored taskbar offsets.
+/// The saved expanded desktop origin identifies its screen even if the
+/// current collapsed HWND is partially outside the monitor or across a seam.
+fn reset_floating_widget_position() -> bool {
+    let snapshot = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| {
+            if !s.floating_mode || s.dragging { return None; }
+            let (width, height) = floating_canvas_size_for_state(s);
+            let anchor = floating_restore_anchor(s.floating_x, s.floating_y, width, height)
+                .map(|center| floating_docked_monitor_anchor(
+                    s.floating_edge, s.floating_x, s.floating_y, center,
+                ))
+                .or_else(|| native_interop::get_window_rect_safe(s.hwnd.to_hwnd())
+                    .map(|r| POINT {
+                        x: r.left.saturating_add(width / 2),
+                        y: r.top.saturating_add(height / 2),
+                    }))?;
+            Some((s.hwnd.to_hwnd(), anchor, width, height,
+                s.display_position, s.desktop_auto_collapse))
+        })
+    };
+    let Some((hwnd, anchor, width, height, position, auto_collapse)) = snapshot
+    else { return false; };
+    let Some((monitor, bounds)) = floating_monitor_geometry(anchor)
+    else { return false; };
+    let (x, y) = floating_reset_top_origin(bounds, width, height);
+    let edge = FloatingEdge::Top;
+    let (collapsed, reveal) = initial_floating_visibility(Some(edge), position, auto_collapse);
+    let pointer = POINT {
+        x: bounds.left.saturating_add((bounds.right - bounds.left) / 2),
+        y: bounds.top.saturating_add(1).min(bounds.bottom.saturating_sub(1)),
+    };
+    let reserved = floating_edge_requires_clip(monitor, bounds, edge, pointer);
+    let (dx, dy) = if reserved {
+        (0, 0)
+    } else {
+        floating_slide_offset(width, height, edge, reveal)
+    };
+    let origin = POINT { x: x.saturating_add(dx), y: y.saturating_add(dy) };
+
+    hide_minimal_usage_tooltip();
+    floating_cancel_hover_recheck(hwnd);
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION);
+    }
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return false; };
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd || s.dragging { return false; }
+        s.floating_x = x;
+        s.floating_y = y;
+        s.floating_edge = Some(edge);
+        s.floating_reserved_dock = reserved;
+        s.floating_drag_glow_detached = false;
+        s.floating_reserved_drag_reveal = reveal;
+        s.floating_collapsed = collapsed;
+        s.floating_reveal = reveal;
+        s.floating_slide_from = reveal;
+        s.floating_slide_target = reveal;
+        s.floating_slide_started = Instant::now();
+        s.floating_first_collapse_guard = false;
+        s.drag_handle_hovered = false;
+        s.floating_grip_hover = false;
+        s.floating_grip_alpha = if floating_grip_should_show(
+            Some(edge), floating_auto_collapse_allowed(position, auto_collapse),
+            false, false,
+        ) { 100 } else { 0 };
+        s.floating_fade_from = s.floating_grip_alpha;
+        s.floating_fade_target = s.floating_grip_alpha;
+        s.floating_fade_started = Instant::now();
+    }
+
+    // Publish new dock orientation, size, alpha mask and screen location in
+    // one UpdateLayeredWindow. SetWindowPos first could briefly show the old
+    // expanded frame or the previous tab at the wrong coordinates.
+    let _placement_guard = FloatingInitialPlacementGuard::begin();
+    render_layered_at(Some(origin));
+    if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
+        sync_blur_backdrop_zorder(hwnd);
+    }
+    save_state_settings();
+    diagnose::log_lazy(|| format!(
+        "desktop position reset to top center at ({x},{y}) monitor=({}, {}, {}, {}) collapsed={collapsed} clipped={reserved}",
+        monitor.left, monitor.top, monitor.right, monitor.bottom,
+    ));
+    true
 }
 
 fn sync_desktop_auto_collapse() {
@@ -8558,6 +8660,10 @@ unsafe extern "system" fn wnd_proc(
                     open_github_releases(hwnd);
                 }
                 IDM_RESET_POSITION => {
+                    if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                        let _ = reset_floating_widget_position();
+                        return LRESULT(0);
+                    }
                     let target = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| {
@@ -12705,6 +12811,28 @@ mod tests {
             assert!(floating_grip_should_show(Some(edge), true, false, false),
                 "legacy auto-collapsed edge grip must stay visible");
         }
+    }
+
+    #[test]
+    fn desktop_reset_top_center_respects_monitor_bounds_and_edges() {
+        let primary = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        assert_eq!(floating_reset_top_origin(primary, 320, 110), (800, 0));
+        let left = RECT { left: -2560, top: -100, right: -640, bottom: 980 };
+        assert_eq!(floating_reset_top_origin(left, 320, 110), (-1760, -100));
+        let above = RECT { left: 0, top: -1200, right: 1600, bottom: -120 };
+        assert_eq!(floating_reset_top_origin(above, 320, 110), (640, -120));
+        let narrow = RECT { left: 1920, top: 40, right: 2130, bottom: 440 };
+        assert_eq!(floating_reset_top_origin(narrow, 320, 110), (1920, 40));
+        assert_eq!(
+            initial_floating_visibility(Some(FloatingEdge::Top), DisplayPosition::Desktop, true),
+            (true, 0),
+            "reset must publish the already-collapsed grip without a flash",
+        );
+        assert_eq!(
+            initial_floating_visibility(Some(FloatingEdge::Top), DisplayPosition::Desktop, false),
+            (false, 100),
+            "desktop with auto-collapse disabled must stay expanded",
+        );
     }
 
     #[test]
