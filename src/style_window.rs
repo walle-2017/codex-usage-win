@@ -982,10 +982,15 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 
         let title = native_interop::wide_str("Codex Usage Win");
         // The settings page is GDI double-buffered, but RichEdit is a separate
-        // child HWND. Compose the entire window tree as one buffered frame so
-        // a new editor can never be layered over the previous page's pixels.
+        // child HWND. Normally the window tree is composited as one frame so
+        // the editor cannot show pixels from the previous settings page.
+        // Opt-in diagnostic only: isolate whether whole-tree composition is
+        // responsible for the high synchronous RichEdit scroll latency.
+        // This deliberately affects the entire settings window; when enabled,
+        // switching pages may exhibit transient unbuffered drawing.
+        let no_composition = std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some();
         let hwnd = match CreateWindowExW(
-            WS_EX_APPWINDOW | WS_EX_COMPOSITED,
+            settings_window_ex_style(no_composition),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
@@ -2150,6 +2155,14 @@ fn json_save_mask_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn settings_window_ex_style(no_composition: bool) -> WINDOW_EX_STYLE {
+    if no_composition {
+        WS_EX_APPWINDOW
+    } else {
+        WS_EX_APPWINDOW | WS_EX_COMPOSITED
+    }
+}
+
 fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
     let outer = json_edit_rect(hwnd);
     RECT {
@@ -2171,6 +2184,7 @@ struct JsonScrollPerf {
     total_rich_ms: f64,
     max_rich_ms: f64,
     fast_scrollbar_paints: usize,
+    full_page_paints: usize,
     last: Option<Instant>,
 }
 
@@ -2202,6 +2216,13 @@ fn record_json_scrollbar_fast_paint() {
     });
 }
 
+fn record_json_full_page_paint() {
+    if !*JSON_SCROLL_METRICS_ENABLED { return; }
+    JSON_SCROLL_PERF.with(|slot| {
+        slot.borrow_mut().full_page_paints += 1;
+    });
+}
+
 fn flush_idle_json_scroll_metrics() {
     if !*JSON_SCROLL_METRICS_ENABLED { return; }
     JSON_SCROLL_PERF.with(|slot| {
@@ -2211,10 +2232,11 @@ fn flush_idle_json_scroll_metrics() {
         let events = perf.wheel_events + perf.drag_events;
         if events > 0 {
             let line = format!(
-                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={}\n",
+                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={},json_full_page_paints={}\n",
                 perf.wheel_events, perf.drag_events, perf.direct_drag_events,
                 perf.total_rich_ms / events as f64,
                 perf.max_rich_ms, perf.fast_scrollbar_paints,
+                perf.full_page_paints,
             );
             let path = std::env::temp_dir().join("codex-usage-json-scroll-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -2836,6 +2858,7 @@ unsafe fn paint_json_page_surface(page: HWND) {
             return;
         }
     }
+    record_json_full_page_paint();
     let mut client = RECT::default();
     let _ = GetClientRect(page, &mut client);
     let width = (client.right - client.left).max(1);
@@ -9794,6 +9817,18 @@ mod ui_smoke_tests {
             "editor rows must start after the shared appearance options");
         assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
             "preset gallery should immediately follow the shared options without a redundant heading");
+    }
+
+    #[test]
+    fn json_scroll_no_composition_experiment_preserves_default() {
+        assert_ne!(
+            settings_window_ex_style(false).0 & WS_EX_COMPOSITED.0, 0,
+            "the normal settings window must remain composited"
+        );
+        assert_eq!(
+            settings_window_ex_style(true).0 & WS_EX_COMPOSITED.0, 0,
+            "opt-in diagnostic must disable whole-window compositing"
+        );
     }
 
     #[test]
