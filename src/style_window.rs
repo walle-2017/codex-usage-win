@@ -936,7 +936,42 @@ fn redraw_settings_window(hwnd: HWND) {
 }
 
 
+// Choose the screen from the *visible widget*, not from the stable service
+// HWND (which can remain on the original taskbar after replica handoffs).
+// The work area excludes taskbar reservations. Negative virtual-desktop
+// coordinates are valid for monitors left/above the primary display.
+fn settings_centered_origin(work: RECT, width: i32, height: i32) -> (i32, i32) {
+    let work_width = (i64::from(work.right) - i64::from(work.left)).max(0);
+    let work_height = (i64::from(work.bottom) - i64::from(work.top)).max(0);
+    let x = i64::from(work.left) + (work_width - i64::from(width).max(1)).max(0) / 2;
+    let y = i64::from(work.top) + (work_height - i64::from(height).max(1)).max(0) / 2;
+    (
+        x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    )
+}
+
+fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
+    if widget.0.is_null() || !unsafe { IsWindow(widget).as_bool() } {
+        return None;
+    }
+    unsafe {
+        let monitor = MonitorFromWindow(widget, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcWork)
+    }
+}
+
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
+    open_or_focus_on_widget(parent, parent, snapshot);
+}
+
+/// The message owner stays stable while taskbar replicas and the desktop
+/// widget can move among monitors. Use the current widget only as an anchor.
+pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| s.hwnd.to_hwnd())
@@ -991,15 +1026,28 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         // CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED remains an opt-in experiment
         // to disable composition even on non-JSON settings pages.
         let no_composition = std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some();
+        let widget_work_area = settings_work_area_for_widget(widget);
+        let widget_dpi = if widget.0.is_null() || !IsWindow(widget).as_bool() {
+            96
+        } else {
+            GetDpiForWindow(widget).max(96)
+        };
+        let scale_for_widget = |v: i32| ((v as i64 * widget_dpi as i64 + 48) / 96) as i32;
+        let initial_width = scale_for_widget(WINDOW_WIDTH);
+        let initial_height = scale_for_widget(WINDOW_HEIGHT);
+        let initial_origin = widget_work_area.map(|work| {
+            settings_centered_origin(work, initial_width, initial_height)
+        });
+        let (initial_x, initial_y) = initial_origin.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
         let hwnd = match CreateWindowExW(
             settings_window_ex_style(no_composition),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
+            initial_x,
+            initial_y,
+            initial_width,
+            initial_height,
             HWND::default(),
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
@@ -1028,14 +1076,24 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
 
         let dpi = GetDpiForWindow(hwnd).max(96);
         let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
+        // Recenter using the created HWND's *actual* DPI: Windows can
+        // negotiate a different scale during WM_NCCREATE/WM_DPICHANGED.
+        // This happens before the window is shown, so no jump is visible.
+        let final_width = s(WINDOW_WIDTH);
+        let final_height = s(WINDOW_HEIGHT);
+        let final_origin = widget_work_area.map(|work| {
+            settings_centered_origin(work, final_width, final_height)
+        });
+        let (final_x, final_y) = final_origin.unwrap_or((0, 0));
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
-            0,
-            0,
-            s(WINDOW_WIDTH),
-            s(WINDOW_HEIGHT),
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            final_x,
+            final_y,
+            final_width,
+            final_height,
+            SWP_NOZORDER | SWP_NOACTIVATE
+                | if final_origin.is_some() { WINDOWPOS_FLAGS(0) } else { SWP_NOMOVE },
         );
 
         let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(snapshot.language)));
@@ -10184,6 +10242,26 @@ mod ui_smoke_tests {
             "editor rows must start after the shared appearance options");
         assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
             "preset gallery should immediately follow the shared options without a redundant heading");
+    }
+
+    #[test]
+    fn settings_window_centers_in_widget_monitor_work_area() {
+        let primary = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        assert_eq!(settings_centered_origin(primary, 980, 700), (470, 170));
+        let left_monitor = RECT {
+            left: -1920, top: -120, right: 0, bottom: 920,
+        };
+        assert_eq!(settings_centered_origin(left_monitor, 980, 700), (-1450, 50));
+        let above_monitor = RECT {
+            left: 0, top: -1080, right: 1920, bottom: -40,
+        };
+        assert_eq!(settings_centered_origin(above_monitor, 980, 700), (470, -910));
+        // A monitor smaller than the window must keep its top-left controls
+        // accessible instead of positioning the caption outside the work area.
+        let small = RECT { left: -1366, top: 0, right: 0, bottom: 650 };
+        assert_eq!(settings_centered_origin(small, 980, 700), (-1173, 0));
+        let narrow = RECT { left: 1920, top: 80, right: 2720, bottom: 680 };
+        assert_eq!(settings_centered_origin(narrow, 980, 700), (1920, 80));
     }
 
     #[test]
