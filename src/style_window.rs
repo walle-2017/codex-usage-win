@@ -2218,6 +2218,7 @@ struct JsonScrollPerf {
     total_rich_ms: f64,
     max_rich_ms: f64,
     fast_scrollbar_paints: usize,
+    buffered_scrollbar_paints: usize,
     full_page_paints: usize,
     last: Option<Instant>,
 }
@@ -2243,10 +2244,12 @@ fn record_json_scroll_event(wheel: bool, direct_drag: bool, elapsed: Duration) {
     });
 }
 
-fn record_json_scrollbar_fast_paint() {
+fn record_json_scrollbar_fast_paint(buffered: bool) {
     if !*JSON_SCROLL_METRICS_ENABLED { return; }
     JSON_SCROLL_PERF.with(|slot| {
-        slot.borrow_mut().fast_scrollbar_paints += 1;
+        let mut perf = slot.borrow_mut();
+        perf.fast_scrollbar_paints += 1;
+        if buffered { perf.buffered_scrollbar_paints += 1; }
     });
 }
 
@@ -2266,11 +2269,11 @@ fn flush_idle_json_scroll_metrics() {
         let events = perf.wheel_events + perf.drag_events;
         if events > 0 {
             let line = format!(
-                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={},json_full_page_paints={}\n",
+                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={},scrollbar_buffered_paints={},json_full_page_paints={}\n",
                 perf.wheel_events, perf.drag_events, perf.direct_drag_events,
                 perf.total_rich_ms / events as f64,
                 perf.max_rich_ms, perf.fast_scrollbar_paints,
-                perf.full_page_paints,
+                perf.buffered_scrollbar_paints, perf.full_page_paints,
             );
             let path = std::env::temp_dir().join("codex-usage-json-scroll-metrics.log");
             if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -2305,6 +2308,10 @@ thread_local! {
     static JSON_SCROLL_LAYOUT_CACHE: RefCell<Option<JsonScrollLayoutCache>> =
         const { RefCell::new(None) };
     static JSON_SCROLL_LAST_THUMB: RefCell<Option<(i32, i32)>> =
+        const { RefCell::new(None) };
+    // The scrollbar is narrow; reuse its GDI memory surface across drag frames.
+    // The existing whole-page buffer cannot be used without painting siblings.
+    static JSON_SCROLLBAR_PAINT_BUFFER: RefCell<Option<SettingsPaintBuffer>> =
         const { RefCell::new(None) };
 }
 
@@ -2883,12 +2890,41 @@ unsafe fn paint_json_page_surface(page: HWND) {
             && dirty.top >= track.top && dirty.bottom <= track.bottom
             && dirty.left < dirty.right && dirty.top < dirty.bottom;
         if scrollbar_only {
-            let _ = SetViewportOrgEx(screen, -origin_x, 0, None);
-            fill(screen, track, json_editor_background(is_dark));
-            paint_json_scrollbar_decoration(screen, owner, is_dark);
-            let _ = SetViewportOrgEx(screen, 0, 0, None);
+            // Do not erase the visible track before drawing its moving thumb.
+            // Without WS_EX_COMPOSITED the direct-to-window erase/draw steps
+            // become separate visible frames, making the scrollbar blink
+            // during continuous dragging. Compose the complete track in a
+            // tiny retained bitmap and publish it with one clipped BitBlt.
+            let buffered = JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| {
+                let width = (track.right - track.left).max(1);
+                let height = (track.bottom - track.top).max(1);
+                let mut slot = cell.borrow_mut();
+                if slot.as_ref().is_none_or(|buffer| {
+                    buffer.width != width || buffer.height != height
+                }) {
+                    *slot = SettingsPaintBuffer::create(screen, width, height);
+                }
+                let Some(buffer) = slot.as_ref() else { return false; };
+                let _ = SetViewportOrgEx(buffer.dc, -track.left, -track.top, None);
+                fill(buffer.dc, track, json_editor_background(is_dark));
+                paint_json_scrollbar_decoration(buffer.dc, owner, is_dark);
+                let _ = SetViewportOrgEx(buffer.dc, 0, 0, None);
+                let _ = BitBlt(
+                    screen, track.left - origin_x, track.top,
+                    width, height, buffer.dc, 0, 0, SRCCOPY,
+                );
+                true
+            });
+            if !buffered {
+                // Low-memory fallback: retain the existing paint behavior
+                // instead of leaving a missing scrollbar.
+                let _ = SetViewportOrgEx(screen, -origin_x, 0, None);
+                fill(screen, track, json_editor_background(is_dark));
+                paint_json_scrollbar_decoration(screen, owner, is_dark);
+                let _ = SetViewportOrgEx(screen, 0, 0, None);
+            }
             let _ = EndPaint(page, &ps);
-            record_json_scrollbar_fast_paint();
+            record_json_scrollbar_fast_paint(buffered);
             return;
         }
     }
@@ -6354,6 +6390,7 @@ unsafe extern "system" fn wnd_proc(
             SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
             SUBMENU_CARD_FRAMES.with(|cell| *cell.borrow_mut() = None);
             SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
+            JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
@@ -10609,6 +10646,27 @@ mod ui_smoke_tests {
                     GetWindowTextLengthW(json_edit) > 0,
                     "JSON RichEdit must retain the generated configuration text"
                 );
+                // Exercise the narrow, uncomposited scrollbar paint path.
+                // Dragging must use a retained GDI backbuffer, not erase the
+                // live track before drawing its thumb.
+                let track = json_scrollbar_track_rect(hwnd);
+                let left = scale(hwnd, 180);
+                let track_local = RECT {
+                    left: track.left - left,
+                    top: track.top,
+                    right: track.right - left,
+                    bottom: track.bottom,
+                };
+                let _ = InvalidateRect(json_page_surface, Some(&track_local), false);
+                let _ = UpdateWindow(json_page_surface);
+                JSON_SCROLLBAR_PAINT_BUFFER.with(|slot| {
+                    let cache = slot.borrow();
+                    let buffer = cache.as_ref().expect(
+                        "scrollbar-only repaint must create a retained GDI surface"
+                    );
+                    assert_eq!(buffer.width, track.right - track.left);
+                    assert_eq!(buffer.height, track.bottom - track.top);
+                });
                 // Repainting the opaque pane must not change the z-order.
                 let _ = RedrawWindow(
                     json_page_surface, None, HRGN::default(),
