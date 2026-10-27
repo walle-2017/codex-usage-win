@@ -981,13 +981,13 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         let _ = RegisterClassExW(&wc);
 
         let title = native_interop::wide_str("Codex Usage Win");
-        // The settings page is GDI double-buffered, but RichEdit is a separate
-        // child HWND. Normally the window tree is composited as one frame so
-        // the editor cannot show pixels from the previous settings page.
-        // Opt-in diagnostic only: isolate whether whole-tree composition is
-        // responsible for the high synchronous RichEdit scroll latency.
-        // This deliberately affects the entire settings window; when enabled,
-        // switching pages may exhibit transient unbuffered drawing.
+        // The non-JSON settings pages retain whole-window composition.
+        // A/B testing showed that WS_EX_COMPOSITED adds ~30 ms to each
+        // synchronous RichEdit scroll and defeats narrow scrollbar painting.
+        // The JSON page has an opaque child background and can safely turn
+        // composition off after its initial buffered page transition.
+        // CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED remains an opt-in experiment
+        // to disable composition even on non-JSON settings pages.
         let no_composition = std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some();
         let hwnd = match CreateWindowExW(
             settings_window_ex_style(no_composition),
@@ -2160,6 +2160,40 @@ fn settings_window_ex_style(no_composition: bool) -> WINDOW_EX_STYLE {
         WS_EX_APPWINDOW
     } else {
         WS_EX_APPWINDOW | WS_EX_COMPOSITED
+    }
+}
+
+// Keep other settings pages buffered. JSON has its own opaque child surface,
+// so compositing its RichEdit subtree adds latency without visual benefit.
+fn settings_composition_for_section(
+    section: Section, force_uncomposited: bool, keep_json_composited: bool,
+) -> bool {
+    !force_uncomposited && (section != Section::Json || keep_json_composited)
+}
+
+fn sync_settings_window_composition(hwnd: HWND, section: Section) {
+    let enabled = settings_composition_for_section(
+        section,
+        std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some(),
+        std::env::var_os("CODEX_USAGE_JSON_SCROLL_KEEP_COMPOSITED").is_some(),
+    );
+    unsafe {
+        let current = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let desired = if enabled {
+            current | WS_EX_COMPOSITED.0
+        } else {
+            current & !WS_EX_COMPOSITED.0
+        };
+        if desired != current {
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, desired as i32);
+            // Apply the style change without moving or resizing the top-level
+            // window. The section transition explicitly commits its own paint.
+            let _ = SetWindowPos(
+                hwnd, HWND::default(), 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                    | SWP_FRAMECHANGED | SWP_NOREDRAW,
+            );
+        }
     }
 }
 
@@ -5284,11 +5318,14 @@ fn set_section(section: Section) {
         s.hovered = None;
         (s.hwnd.to_hwnd(), s.json_dirty)
     };
+    // Restore buffering before hiding JSON and drawing a non-JSON page.
+    // Entering JSON takes the inverse path: the opaque pane and RichEdit
+    // are first shown together, then composition is disabled after painting.
+    if current_section == Section::Json && section != Section::Json {
+        sync_settings_window_composition(hwnd, section);
+    }
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
-    // Prepare RichEdit's position/content while the parent has not yet
-    // committed a new composited frame. The window-level WS_EX_COMPOSITED
-    // buffers these child and parent updates together.
     layout_settings_children(hwnd);
     if section == Section::Json {
         if json_dirty {
@@ -5301,9 +5338,12 @@ fn set_section(section: Section) {
     sync_numeric_edits();
     sync_blur_edit();
     sync_corner_edit();
-    // Commit the new parent page and all visible child controls as one
-    // composited frame. There is no timer-based partial display state.
+    // Finish the one-time page transition while composited, preventing
+    // remnants from the previous page beneath the RichEdit sibling.
     redraw_settings_window(hwnd);
+    if section == Section::Json {
+        sync_settings_window_composition(hwnd, section);
+    }
 }
 
 fn select_editor(editor: EditorSelection) {
@@ -9823,12 +9863,18 @@ mod ui_smoke_tests {
     fn json_scroll_no_composition_experiment_preserves_default() {
         assert_ne!(
             settings_window_ex_style(false).0 & WS_EX_COMPOSITED.0, 0,
-            "the normal settings window must remain composited"
+            "initial non-JSON settings must retain whole-window composition"
         );
         assert_eq!(
             settings_window_ex_style(true).0 & WS_EX_COMPOSITED.0, 0,
-            "opt-in diagnostic must disable whole-window compositing"
+            "opt-in diagnostic must disable whole-window composition"
         );
+        assert!(settings_composition_for_section(Section::General, false, false));
+        assert!(settings_composition_for_section(Section::Preset, false, false));
+        assert!(!settings_composition_for_section(Section::Json, false, false));
+        assert!(settings_composition_for_section(Section::Json, false, true));
+        assert!(!settings_composition_for_section(Section::General, true, false));
+        assert!(!settings_composition_for_section(Section::Json, true, true));
     }
 
     #[test]
@@ -10537,6 +10583,12 @@ mod ui_smoke_tests {
             );
             for _ in 0..3 {
                 set_section(Section::Json);
+                if std::env::var_os("CODEX_USAGE_JSON_SCROLL_KEEP_COMPOSITED").is_none() {
+                    assert_eq!(
+                        GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
+                        "JSON RichEdit must scroll without whole-tree composition"
+                    );
+                }
                 assert!(
                     IsWindowVisible(json_page_surface).as_bool(),
                     "opaque JSON content pane must cover the old appearance page"
@@ -10568,6 +10620,12 @@ mod ui_smoke_tests {
                     "a page repaint must not obscure RichEdit"
                 );
                 set_section(Section::Preset);
+                if std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_none() {
+                    assert_ne!(
+                        GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
+                        "non-JSON pages must restore whole-window composition"
+                    );
+                }
                 assert!(
                     !IsWindowVisible(json_page_surface).as_bool(),
                     "opaque JSON pane must be hidden on preset page"
