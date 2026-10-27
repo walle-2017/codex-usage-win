@@ -5074,7 +5074,6 @@ fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> R
     let mut bounds = floating_usable_bounds(monitor, work);
     let mw = monitor.right - monitor.left;
     let mh = monitor.bottom - monitor.top;
-    let mut has_top_taskbar = false;
     for bar in taskbars {
         let overlap_x = (bar.right.min(monitor.right) - bar.left.max(monitor.left)).max(0);
         let overlap_y = (bar.bottom.min(monitor.bottom) - bar.top.max(monitor.top)).max(0);
@@ -5085,7 +5084,6 @@ fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> R
         } else if overlap_x >= mw / 2 && bar.top <= monitor.top + 8
             && bar.bottom > monitor.top && bar.bottom < monitor.bottom {
             bounds.top = bar.bottom;
-            has_top_taskbar = true;
         } else if overlap_y >= mh / 2 && bar.left <= monitor.left + 8
             && bar.right > monitor.left && bar.right < monitor.right {
             bounds.left = bar.right;
@@ -5093,18 +5091,6 @@ fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> R
             && bar.left > monitor.left && bar.left < monitor.right {
             bounds.right = bar.left;
         }
-    }
-    // Work-area metadata can contain a tiny top inset even when there is no
-    // Explorer taskbar spanning the top edge. Reset-to-top previously used
-    // that inset as the snap line, leaving a visible ~6 px gap between the
-    // collapsed grip and the *physical* monitor edge. Normalize only this
-    // small unclaimed band, and retain real top taskbar reservations.
-    //
-    // This runs in the shared geometry path (reset, hover, slide, rendering)
-    // so the reset grip cannot jump back down during the next repaint.
-    let top_inset = bounds.top.saturating_sub(monitor.top);
-    if !has_top_taskbar && top_inset > 0 && top_inset <= sc(8).max(8) {
-        bounds.top = monitor.top;
     }
     if bounds.right > bounds.left && bounds.bottom > bounds.top {
         bounds
@@ -5529,6 +5515,17 @@ fn initial_floating_visibility(
     (collapsed, if collapsed { 0 } else { 100 })
 }
 
+// The top tab has a different transparent canvas size from free and
+// left/right-docked tabs. Reset must calculate the *destination* canvas
+// BEFORE applying the hidden tab's slide distance; using the source canvas
+// pushes the free tab partly offscreen and leaves side tabs below the edge.
+fn floating_reset_top_canvas_size(body_width: i32, body_height: i32) -> (i32, i32) {
+    let (width, height, _) = floating_canvas_geometry(
+        body_width, body_height, Some(FloatingEdge::Top),
+    );
+    (width, height)
+}
+
 /// Reset a desktop popup without changing the stored taskbar offsets.
 /// The saved expanded desktop origin identifies its screen even if the
 /// current collapsed HWND is partially outside the monitor or across a seam.
@@ -5547,7 +5544,10 @@ fn reset_floating_widget_position() -> bool {
                         x: r.left.saturating_add(width / 2),
                         y: r.top.saturating_add(height / 2),
                     }))?;
-            Some((s.hwnd.to_hwnd(), anchor, width, height,
+            let (reset_width, reset_height) = floating_reset_top_canvas_size(
+                total_widget_width_for_state(s), widget_height_for_state(s),
+            );
+            Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height,
                 s.display_position, s.desktop_auto_collapse))
         })
     };
@@ -12249,40 +12249,73 @@ mod tests {
     }
 
     #[test]
-    fn desktop_reset_top_grip_is_flush_with_physical_edge_without_top_taskbar() {
+    fn desktop_reset_top_grip_aligns_after_all_previous_docking_states() {
+        let body_w = 320;
+        let body_h = 90;
+        let work = RECT { left: -1920, top: -200, right: 0, bottom: 880 };
+        let (target_w, target_h) = floating_reset_top_canvas_size(body_w, body_h);
+        let (expanded_x, expanded_y) =
+            floating_reset_top_origin(work, target_w, target_h);
+        let grip = floating_grip_rect(
+            target_w, target_h, Some(FloatingEdge::Top), sc(FLOAT_EDGE_PEEK),
+        );
+        let (dx, dy) = floating_slide_offset(
+            target_w, target_h, FloatingEdge::Top, 0,
+        );
+        assert_eq!(dx, 0);
+        assert_eq!(expanded_x + (grip.left + grip.right) / 2,
+            (work.left + work.right) / 2, "the tab remains horizontally centered");
+
+        for old_edge in [
+            None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom),
+        ] {
+            let (old_w, old_h, _) = floating_canvas_geometry(
+                body_w, body_h, old_edge,
+            );
+            // Distinct source geometries are the regression: a free tab was
+            // 12px too high, left/right tabs 4px too low, while bottom was OK.
+            match old_edge {
+                None => assert!(old_h > target_h),
+                Some(FloatingEdge::Left | FloatingEdge::Right) =>
+                    assert!(old_h < target_h),
+                Some(FloatingEdge::Top | FloatingEdge::Bottom) =>
+                    assert_eq!(old_h, target_h),
+            }
+            assert_eq!(
+                floating_reset_top_canvas_size(body_w, body_h),
+                (target_w, target_h),
+                "reset geometry must be independent of the previous edge: {old_edge:?}",
+            );
+            for reserved in [false, true] {
+                // Physical edges slide the popup HWND. Taskbar/seam edges
+                // keep the HWND fixed and shift the layered bitmap instead.
+                let origin_y = expanded_y + if reserved { 0 } else { dy };
+                let visible_grip_top = origin_y + grip.top
+                    + if reserved { dy } else { 0 };
+                assert_eq!(visible_grip_top, work.top,
+                    "tab not flush after {old_edge:?}, reserved={reserved}");
+            }
+            let _ = old_w;
+        }
+
+        // Work-area insets and actual taskbar reservations are preserved.
         let monitor = RECT { left: -1920, top: -200, right: 0, bottom: 880 };
         let tiny_inset = RECT { top: -194, ..monitor };
-        let bounds = floating_bounds_at_taskbar(monitor, tiny_inset, &[]);
-        assert_eq!(bounds.top, monitor.top,
-            "a 6px rcWork inset with no real top taskbar must not shift the reset grip");
-
-        let (canvas_w, canvas_h, _) = floating_canvas_geometry(
-            320, 90, Some(FloatingEdge::Top),
+        assert_eq!(
+            floating_bounds_at_taskbar(monitor, tiny_inset, &[]).top,
+            tiny_inset.top,
+            "reset must not change global work-area boundaries",
         );
-        let grip = floating_grip_rect(
-            canvas_w, canvas_h, Some(FloatingEdge::Top), sc(FLOAT_EDGE_PEEK),
-        );
-        let (_, expanded_y) = floating_reset_top_origin(bounds, canvas_w, canvas_h);
-        let (dx, dy) = floating_slide_offset(canvas_w, canvas_h, FloatingEdge::Top, 0);
-        let _ = dx;
-        assert_eq!(expanded_y + dy + grip.top, monitor.top,
-            "the first visible grip pixel must be flush with the physical top edge");
-
         let top_taskbar = RECT {
             left: monitor.left, top: monitor.top,
             right: monitor.right, bottom: monitor.top + 48,
         };
         let real_work = RECT { top: monitor.top + 54, ..monitor };
-        let reserved = floating_bounds_at_taskbar(monitor, real_work, &[top_taskbar]);
-        assert_eq!(reserved.top, top_taskbar.bottom,
-            "a real top taskbar must retain its inner face as the snap line");
-        let (_, reserved_y) = floating_reset_top_origin(reserved, canvas_w, canvas_h);
-        assert_eq!(reserved_y + dy + grip.top, top_taskbar.bottom);
-
-        let substantial_work_inset = RECT { top: monitor.top + 36, ..monitor };
-        assert_eq!(floating_bounds_at_taskbar(monitor, substantial_work_inset, &[]).top,
-            monitor.top + 36,
-            "nontrivial reserved desktop areas remain protected");
+        assert_eq!(
+            floating_bounds_at_taskbar(monitor, real_work, &[top_taskbar]).top,
+            top_taskbar.bottom,
+        );
     }
 
     #[test]
