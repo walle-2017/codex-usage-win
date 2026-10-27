@@ -497,6 +497,13 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The visible widget HWND, not the stable polling/tray service owner.
+/// Settings use it to center their window on the correct monitor.
+pub(crate) fn settings_placement_anchor() -> Option<HWND> {
+    let state = lock_state();
+    state.as_ref().map(|s| s.hwnd.to_hwnd())
+}
+
 const SETTINGS_DIR: &str = "CodexUsage";
 
 fn appdata_path(directory: &str) -> PathBuf {
@@ -8599,16 +8606,8 @@ unsafe extern "system" fn wnd_proc(
         }
         _ if msg == WM_APP_FOCUS_EXISTING_SETTINGS => {
             close_style_editors();
-            // The stable message owner can remain on an earlier taskbar
-            // when the visible widget has moved to another monitor. Pass
-            // the active widget HWND separately as the placement anchor.
-            let widget = {
-                let state = lock_state();
-                state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or(hwnd)
-            };
-            style_window::open_or_focus_on_widget(
+            style_window::open_or_focus(
                 taskbar_replica_service_hwnd(hwnd),
-                widget,
                 style_settings_snapshot(),
             );
             LRESULT(0)
