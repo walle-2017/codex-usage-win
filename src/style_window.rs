@@ -2167,6 +2167,7 @@ fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
 struct JsonScrollPerf {
     wheel_events: usize,
     drag_events: usize,
+    direct_drag_events: usize,
     total_rich_ms: f64,
     max_rich_ms: f64,
     fast_scrollbar_paints: usize,
@@ -2181,11 +2182,12 @@ thread_local! {
         RefCell::new(JsonScrollPerf::default());
 }
 
-fn record_json_scroll_event(wheel: bool, elapsed: Duration) {
+fn record_json_scroll_event(wheel: bool, direct_drag: bool, elapsed: Duration) {
     if !*JSON_SCROLL_METRICS_ENABLED { return; }
     JSON_SCROLL_PERF.with(|slot| {
         let mut perf = slot.borrow_mut();
         if wheel { perf.wheel_events += 1; } else { perf.drag_events += 1; }
+        if direct_drag { perf.direct_drag_events += 1; }
         let ms = elapsed.as_secs_f64() * 1000.0;
         perf.total_rich_ms += ms;
         perf.max_rich_ms = perf.max_rich_ms.max(ms);
@@ -2209,8 +2211,8 @@ fn flush_idle_json_scroll_metrics() {
         let events = perf.wheel_events + perf.drag_events;
         if events > 0 {
             let line = format!(
-                "wheel_events={},drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={}\n",
-                perf.wheel_events, perf.drag_events,
+                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={}\n",
+                perf.wheel_events, perf.drag_events, perf.direct_drag_events,
                 perf.total_rich_ms / events as f64,
                 perf.max_rich_ms, perf.fast_scrollbar_paints,
             );
@@ -2398,7 +2400,7 @@ fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
         // synchronously on every wheel message; let the message loop coalesce.
         let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
     }
-    record_json_scroll_event(true, begin.elapsed());
+    record_json_scroll_event(true, false, begin.elapsed());
     refresh_json_scrollbar_if_changed(panel);
 }
 
@@ -2473,6 +2475,34 @@ unsafe extern "system" fn json_edit_subclass_proc(
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
+// EM_GET/SETSCROLLPOS expose 16-bit pixel coordinates even though POINT
+// contains i32 fields. Restrict absolute scrolling to a representable
+// document range; long documents continue to use native relative scrolling.
+const JSON_RICHEDIT_SCROLL_PIXEL_LIMIT: i64 = 32767;
+const JSON_DRAG_DIRECT_MIN_LINES: i32 = 8;
+
+fn json_direct_drag_pixel_target(
+    current_pixel_y: i32, first_visible: i32, target_first: i32,
+    line_height: i32, total_lines: i32, visible_lines: i32,
+) -> Option<i32> {
+    if line_height <= 0 || current_pixel_y < 0 || total_lines <= visible_lines {
+        return None;
+    }
+    let max_first = i64::from(total_lines - visible_lines);
+    let max_pixel = max_first * i64::from(line_height);
+    if max_pixel > JSON_RICHEDIT_SCROLL_PIXEL_LIMIT {
+        return None;
+    }
+    let delta = i64::from(target_first) - i64::from(first_visible);
+    let destination = (i64::from(current_pixel_y) + delta * i64::from(line_height))
+        .clamp(0, max_pixel);
+    i32::try_from(destination).ok()
+}
+
+fn json_drag_line_height() -> Option<i32> {
+    JSON_SCROLL_LAYOUT_CACHE.with(|slot| slot.borrow().as_ref().map(|c| c.line_height))
+}
+
 fn update_json_scroll_drag(hwnd: HWND, y: i32) {
     let drag_offset = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -2495,10 +2525,33 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
     let delta = target_first - first_visible;
     if delta != 0 {
         let begin = Instant::now();
+        let mut direct_drag = false;
         unsafe {
-            let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
+            // For long thumb jumps avoid RichEdit's relative per-line scroll
+            // path. A pixel target is faster for normal-sized JSON documents;
+            // preserve the native line path if the pixel range exceeds the
+            // documented 16-bit coordinate limit.
+            if delta.abs() >= JSON_DRAG_DIRECT_MIN_LINES {
+                if let Some(line_height) = json_drag_line_height() {
+                    let mut current = POINT::default();
+                    let _ = SendMessageW(edit, EM_GETSCROLLPOS_MSG, WPARAM(0),
+                        LPARAM((&mut current as *mut POINT) as isize));
+                    if let Some(target_y) = json_direct_drag_pixel_target(
+                        current.y, first_visible, target_first, line_height,
+                        total_lines, visible_lines,
+                    ) {
+                        let desired = POINT { x: current.x, y: target_y };
+                        let _ = SendMessageW(edit, EM_SETSCROLLPOS_MSG, WPARAM(0),
+                            LPARAM((&desired as *const POINT) as isize));
+                        direct_drag = true;
+                    }
+                }
+            }
+            if !direct_drag {
+                let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
+            }
         }
-        record_json_scroll_event(false, begin.elapsed());
+        record_json_scroll_event(false, direct_drag, begin.elapsed());
         refresh_json_scrollbar_if_changed(hwnd);
     }
 }
@@ -9741,6 +9794,21 @@ mod ui_smoke_tests {
             "editor rows must start after the shared appearance options");
         assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
             "preset gallery should immediately follow the shared options without a redundant heading");
+    }
+
+    #[test]
+    fn json_drag_direct_pixel_target_is_bounded_and_relative() {
+        assert_eq!(json_direct_drag_pixel_target(360, 20, 42, 18, 200, 24), Some(756));
+        assert_eq!(json_direct_drag_pixel_target(360, 20, 0, 18, 200, 24), Some(0));
+        assert_eq!(
+            json_direct_drag_pixel_target(2700, 150, 199, 18, 200, 24),
+            Some((200 - 24) * 18),
+        );
+        // RichEdit's pixel point is limited to 16-bit values; longer JSON
+        // documents must use the original, unbounded EM_LINESCROLL path.
+        assert_eq!(json_direct_drag_pixel_target(0, 0, 9999, 18, 20000, 24), None);
+        assert_eq!(json_direct_drag_pixel_target(0, 0, 2, 0, 200, 24), None);
+        assert_eq!(json_direct_drag_pixel_target(0, 0, 0, 18, 10, 24), None);
     }
 
     #[test]
