@@ -5314,6 +5314,13 @@ fn refresh_floating_reserved_dock(hwnd: HWND) {
 }
 
 fn move_floating_widget(hwnd: HWND) {
+    move_floating_widget_with_visibility(hwnd, true);
+}
+
+// When restoring a cached desktop HWND, position it while still hidden.
+// Its previous layered bitmap may be expanded; only show it after the new
+// collapsed/expanded frame has been committed with UpdateLayeredWindow.
+fn move_floating_widget_with_visibility(hwnd: HWND, show: bool) {
     let (x, y, edge, reveal, width, height, dragging) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
@@ -5354,9 +5361,12 @@ fn move_floating_widget(hwnd: HWND) {
         unsafe {
             let _ = SetWindowPos(
                 hwnd, HWND_TOPMOST, left, top, width, height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                if show { SWP_NOACTIVATE | SWP_SHOWWINDOW } else { SWP_NOACTIVATE },
             );
         }
+    }
+    if show && blur {
+        unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
     }
 }
 
@@ -5397,6 +5407,16 @@ fn floating_hover_can_reveal(collapsed: bool, guard: bool, dragging: bool) -> bo
 // Desktop mode, not Explorer's taskbar and not the docking geometry.
 fn floating_auto_collapse_allowed(position: DisplayPosition, enabled: bool) -> bool {
     position != DisplayPosition::Desktop || enabled
+}
+
+// A docked desktop popup must enter with its *final* visibility; initializing
+// at 100% reveal before sync_desktop_auto_collapse() momentarily exposes the
+// entire panel and then starts a needless contraction animation.
+fn initial_floating_visibility(
+    edge: Option<FloatingEdge>, position: DisplayPosition, auto_collapse: bool,
+) -> (bool, u8) {
+    let collapsed = edge.is_some() && floating_auto_collapse_allowed(position, auto_collapse);
+    (collapsed, if collapsed { 0 } else { 100 })
 }
 
 fn sync_desktop_auto_collapse() {
@@ -5957,8 +5977,15 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.small_taskbar_mode = false;
             s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
             s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
-            s.floating_collapsed = false;
-            s.floating_reveal = 100;
+            let (collapsed, reveal) = initial_floating_visibility(
+                s.floating_edge, s.display_position, s.desktop_auto_collapse,
+            );
+            s.floating_collapsed = collapsed;
+            s.floating_reveal = reveal;
+            s.floating_slide_from = reveal;
+            s.floating_slide_target = reveal;
+            s.floating_slide_started = Instant::now();
+            s.floating_reserved_drag_reveal = reveal;
             s.floating_grip_hover = false;
             s.floating_first_collapse_guard = false;
             s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
@@ -6063,8 +6090,15 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_mode = true;
         s.embedded = false;
         s.hidden_for_taskbar_space = false;
-        s.floating_collapsed = false;
-        s.floating_reveal = 100;
+        let (collapsed, reveal) = initial_floating_visibility(
+            s.floating_edge, s.display_position, s.desktop_auto_collapse,
+        );
+        s.floating_collapsed = collapsed;
+        s.floating_reveal = reveal;
+        s.floating_slide_from = reveal;
+        s.floating_slide_target = reveal;
+        s.floating_slide_started = Instant::now();
+        s.floating_reserved_drag_reveal = reveal;
         s.floating_grip_hover = false;
         s.floating_first_collapse_guard = false;
         s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
@@ -6087,9 +6121,16 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
     refresh_floating_reserved_dock(hwnd);
-    move_floating_widget(hwnd);
+    // Keep the floating HWND hidden until the complete first frame is ready.
+    // A reused popup still has the layered bitmap from its previous visit,
+    // which otherwise flashes expanded for one frame before contraction.
+    move_floating_widget_with_visibility(hwnd, false);
     style_window::set_preview_orientation(vertical);
     render_layered();
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+    if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
+        sync_blur_backdrop_zorder(hwnd);
+    }
     save_state_settings();
     diagnose::log(format!("taskbar has no safe slot: desktop popup enabled ({reason})"));
 }
@@ -12527,6 +12568,35 @@ mod tests {
             assert!(floating_grip_should_show(Some(edge), true, false, false),
                 "legacy auto-collapsed edge grip must stay visible");
         }
+    }
+
+    #[test]
+    fn docked_desktop_first_frame_is_already_fully_collapsed() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            assert_eq!(
+                initial_floating_visibility(Some(edge), DisplayPosition::Desktop, true),
+                (true, 0),
+                "edge-docked desktop must never publish an expanded first frame"
+            );
+            assert_eq!(
+                initial_floating_visibility(Some(edge), DisplayPosition::Desktop, false),
+                (false, 100),
+                "disabling automatic collapse must leave the body visible"
+            );
+            assert_eq!(
+                initial_floating_visibility(Some(edge), DisplayPosition::Taskbar, false),
+                (true, 0),
+                "taskbar-space fallback still collapses automatically"
+            );
+        }
+        assert_eq!(
+            initial_floating_visibility(None, DisplayPosition::Desktop, true),
+            (false, 100),
+            "an undocked desktop must stay fully expanded"
+        );
     }
 
     #[test]
