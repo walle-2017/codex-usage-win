@@ -2454,6 +2454,24 @@ fn json_editor_active() -> bool {
         .is_some_and(|s| s.section == Section::Json && s.pending_discard_action.is_none())
 }
 
+// The custom scrollbar lives in the opaque JSON page sibling, outside the
+// RichEdit HWND. Wheel messages over that strip can therefore arrive at the
+// parent instead of the editor. Route them to the existing RichEdit subclass
+// to preserve line steps, save-mask blocking, and low-latency scroll painting.
+fn json_scrollbar_wheel_target(hwnd: HWND, x: i32, y: i32) -> Option<HWND> {
+    let track = json_scrollbar_track_rect(hwnd);
+    if !pt_in_rect(track, x, y)
+        && !json_scroll_thumb_hit_rect(hwnd).is_some_and(|thumb| pt_in_rect(thumb, x, y))
+    {
+        return None;
+    }
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.as_ref().and_then(|s| {
+        (s.section == Section::Json && s.pending_discard_action.is_none())
+            .then_some(s.json_edit.to_hwnd())
+    })
+}
+
 fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
     if lines == 0 { return; }
     let begin = Instant::now();
@@ -2863,6 +2881,20 @@ unsafe extern "system" fn json_page_surface_wnd_proc(
         WM_ERASEBKGND => LRESULT(1),
         // Clicking JSON toolbar controls must still reach the parent hit-test.
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        WM_MOUSEWHEEL => {
+            // If Windows delivers a wheel message directly to the opaque
+            // JSON pane, use the same parent routing as wheel messages that
+            // hit the empty scrollbar strip.
+            let owner = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.hwnd.to_hwnd())
+            };
+            if let Some(owner) = owner {
+                SendMessageW(owner, msg, wparam, lparam)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
         WM_PAINT => {
             paint_json_page_surface(hwnd);
             LRESULT(0)
@@ -5624,6 +5656,15 @@ fn handle_settings_mouse_wheel(hwnd: HWND, wparam: WPARAM) -> bool {
     }
     if let Some(kind) = slider_kind_at(hwnd, point.x, point.y) {
         adjust_slider_by_wheel(hwnd, kind, delta);
+        return true;
+    }
+    if let Some(edit) = json_scrollbar_wheel_target(hwnd, point.x, point.y) {
+        unsafe {
+            // A WM_MOUSEWHEEL reaches the RichEdit subclass exactly as if
+            // the pointer were above the JSON text itself. Do not change
+            // focus or trigger an entire settings-page repaint.
+            let _ = SendMessageW(edit, WM_MOUSEWHEEL, wparam, LPARAM(0));
+        }
         return true;
     }
     false
@@ -10661,6 +10702,18 @@ mod ui_smoke_tests {
                 // Dragging must use a retained GDI backbuffer, not erase the
                 // live track before drawing its thumb.
                 let track = json_scrollbar_track_rect(hwnd);
+                let hover_x = (track.left + track.right) / 2;
+                let hover_y = (track.top + track.bottom) / 2;
+                assert_eq!(
+                    json_scrollbar_wheel_target(hwnd, hover_x, hover_y),
+                    Some(json_edit),
+                    "mouse wheel over JSON scrollbar must target RichEdit"
+                );
+                assert_eq!(
+                    json_scrollbar_wheel_target(hwnd, track.right + scale(hwnd, 6), hover_y),
+                    None,
+                    "wheel outside the scrollbar must not be redirected"
+                );
                 let left = scale(hwnd, 180);
                 let track_local = RECT {
                     left: track.left - left,
@@ -10701,6 +10754,11 @@ mod ui_smoke_tests {
                     "a page repaint must not obscure RichEdit"
                 );
                 set_section(Section::Preset);
+                assert_eq!(
+                    json_scrollbar_wheel_target(hwnd, hover_x, hover_y),
+                    None,
+                    "other settings pages must not route wheel events to hidden JSON edit"
+                );
                 if std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_none() {
                     assert_ne!(
                         GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
