@@ -382,6 +382,13 @@ pub(super) fn sync_blur_backdrop_zorder(foreground_hwnd: HWND) {
             }
         }
     } else if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+        // The taskbar-to-desktop transition stages a complete layered frame
+        // while its popup is still hidden. Do not accidentally reveal the
+        // previous cached frame during blur activation; the caller shows both
+        // windows after publishing the new image.
+        if !unsafe { IsWindowVisible(foreground_hwnd).as_bool() } {
+            return;
+        }
         unsafe {
             // Desktop blur belongs directly behind the TOPMOST foreground.
             // The desktop geometry never overlaps a reserved taskbar edge,
