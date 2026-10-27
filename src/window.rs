@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -47,6 +48,26 @@ mod taskbar_replica;
 mod blur_backdrop;
 use self::taskbar_replica::*;
 use self::blur_backdrop::*;
+
+// Set only while restoring the desktop popup to a different monitor.
+// SetWindowPos may synchronously emit WM_DPICHANGED, which must not re-enter
+// position_at_taskbar() before the target-monitor layout has been committed.
+thread_local! {
+    static FLOATING_INITIAL_PLACEMENT: Cell<bool> = const { Cell::new(false) };
+}
+
+struct FloatingInitialPlacementGuard;
+impl FloatingInitialPlacementGuard {
+    fn begin() -> Self {
+        FLOATING_INITIAL_PLACEMENT.with(|flag| flag.set(true));
+        Self
+    }
+}
+impl Drop for FloatingInitialPlacementGuard {
+    fn drop(&mut self) {
+        FLOATING_INITIAL_PLACEMENT.with(|flag| flag.set(false));
+    }
+}
 
 /// Wrapper to make HWND sendable across threads (safe for PostMessage usage)
 #[derive(Clone, Copy)]
@@ -328,18 +349,29 @@ fn gdi_text_quality() -> u32 {
 /// Uses GetDpiForWindow which returns the live DPI (unlike GetDpiForSystem
 /// which is cached at process startup and never changes).
 fn refresh_dpi() {
-    let dpi_source = {
+    let source = {
         let state = lock_state();
         state.as_ref().map(|s| {
-            // During a cross-monitor popup move, the foreground HWND can report
-            // the old monitor DPI for a short period. The selected taskbar is
-            // already authoritative for layout, so prefer its DPI.
-            if s.floating_mode { s.hwnd.to_hwnd() }
-            else { s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd()) }
+            // A fully retracted popup may lie mostly beyond its own display
+            // or across a multi-monitor seam. GetDpiForWindow(hwnd) then
+            // describes the wrong screen. The *saved expanded position*
+            // identifies the monitor containing the visible drag tab.
+            let desktop_anchor = if s.floating_mode {
+                let (width, height) = floating_canvas_size_for_state(s);
+                floating_restore_anchor(
+                    s.floating_x, s.floating_y, width, height,
+                ).map(|center| floating_docked_monitor_anchor(
+                    s.floating_edge, s.floating_x, s.floating_y, center,
+                ))
+            } else { None };
+            let hwnd = if s.floating_mode { s.hwnd.to_hwnd() }
+                else { s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd()) };
+            (hwnd, desktop_anchor)
         })
     };
-    if let Some(hwnd) = dpi_source {
-        let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if let Some((hwnd, desktop_anchor)) = source {
+        let dpi = desktop_anchor.and_then(floating_monitor_dpi)
+            .unwrap_or_else(|| unsafe { GetDpiForWindow(hwnd) });
         if dpi > 0 {
             CURRENT_DPI.store(dpi, Ordering::Relaxed);
         }
@@ -5109,6 +5141,32 @@ fn floating_restore_anchor(x: i32, y: i32, width: i32, height: i32) -> Option<PO
     })
 }
 
+// For an edge-docked popup, the saved coordinate is the expanded HWND
+// origin INSIDE its work area. Its canvas center can end up on the adjacent
+// monitor when the two screens have different DPI scales. Probe just inside
+// that original screen, rather than the hidden popup's current HWND bounds.
+fn floating_docked_monitor_anchor(
+    edge: Option<FloatingEdge>, x: i32, y: i32, center: POINT,
+) -> POINT {
+    if edge.is_some() {
+        POINT { x: x.saturating_add(1), y: y.saturating_add(1) }
+    } else {
+        center
+    }
+}
+
+fn floating_monitor_dpi(point: POINT) -> Option<u32> {
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONULL);
+        if monitor == HMONITOR::default() { return None; }
+        let mut x_dpi = 0;
+        let mut y_dpi = 0;
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x_dpi, &mut y_dpi)
+            .ok()?;
+        (x_dpi > 0).then_some(x_dpi)
+    }
+}
+
 // A disconnected monitor must not make the popup disappear off-screen.
 // Let callers probe a saved point with MONITOR_DEFAULTTONULL, rather than
 // MONITOR_DEFAULTTONEAREST (which silently chooses the taskbar screen).
@@ -5984,6 +6042,34 @@ fn finish_floating_drag(hwnd: HWND) {
     save_state_settings();
 }
 
+// Source dimensions must be recalculated after choosing the desktop
+// monitor DPI. Using the taskbar DPI for a collapsed grip makes its final
+// visible pixels miss the docking edge when the displays have different
+// scaling.
+fn floating_content_size_for_state(s: &AppState, vertical: bool) -> (i32, i32) {
+    let preset = if vertical {
+        vertical_effective_preset(s.appearance_preset)
+    } else {
+        effective_appearance_preset(s)
+    };
+    let width = if vertical {
+        sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48))
+    } else {
+        desktop_horizontal_content_width(
+            s.language, preset, s.show_session_window, s.show_weekly_window,
+            &s.codex_session_text, &s.codex_weekly_text,
+        )
+    };
+    let height = if vertical {
+        desktop_vertical_content_height(
+            preset, s.show_session_window, s.show_weekly_window,
+        )
+    } else {
+        sc(preset.metrics().widget_height)
+    };
+    (width, height)
+}
+
 fn enable_floating_widget(reason: &str, vertical: bool) {
     let vertical = {
         let state = lock_state();
@@ -6038,27 +6124,13 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         }
         return;
     }
-    let (existing, old, x, y, language, width, height) = {
+    let (existing, old, x, y, edge, language, width, height) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
-        let preset = if vertical { vertical_effective_preset(s.appearance_preset) }
-            else { effective_appearance_preset(s) };
+        let (width, height) = floating_content_size_for_state(s, vertical);
         (
             s.floating_hwnd.map(|h| h.to_hwnd()), s.hwnd.to_hwnd(),
-            s.floating_x, s.floating_y, s.language,
-            if vertical { sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48)) }
-            else {
-                desktop_horizontal_content_width(
-                    s.language, preset,
-                    s.show_session_window, s.show_weekly_window,
-                    &s.codex_session_text, &s.codex_weekly_text,
-                )
-            },
-            if vertical {
-                desktop_vertical_content_height(
-                    preset, s.show_session_window, s.show_weekly_window,
-                )
-            } else { sc(preset.metrics().widget_height) },
+            s.floating_x, s.floating_y, s.floating_edge, s.language, width, height,
         )
     };
     let (window_width, window_height, _) = floating_canvas_geometry(
@@ -6095,15 +6167,34 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     let taskbar_bounds = floating_monitor_bounds(default_point).unwrap_or(RECT {
         left: 0, top: 0, right: 1920, bottom: 1080,
     });
-    let saved_anchor = floating_restore_anchor(x, y, window_width, window_height);
+    let saved_anchor = floating_restore_anchor(x, y, window_width, window_height)
+        .map(|center| floating_docked_monitor_anchor(edge, x, y, center));
     let saved_monitor_valid = saved_anchor.is_some_and(|point| unsafe {
         MonitorFromPoint(point, MONITOR_DEFAULTTONULL) != HMONITOR::default()
     });
     let bounds = floating_restore_bounds(saved_anchor, taskbar_bounds, |point| {
         saved_monitor_valid.then(|| floating_monitor_bounds(point)).flatten()
     });
+    // The target monitor is now known. All pixel dimensions and tab offsets
+    // must use its DPI BEFORE placing the hidden popup on that monitor.
+    // This also avoids a WM_DPICHANGED reentrant relayout with the taskbar
+    // DPI halfway through the transition.
+    let target_point = POINT {
+        x: bounds.left.saturating_add((bounds.right - bounds.left) / 2),
+        y: bounds.top.saturating_add((bounds.bottom - bounds.top) / 2),
+    };
+    let target_dpi = floating_monitor_dpi(target_point)
+        .unwrap_or_else(|| unsafe { GetDpiForWindow(old) }.max(96));
+    let old_dpi = CURRENT_DPI.swap(target_dpi, Ordering::Relaxed);
+    let (width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        floating_content_size_for_state(s, vertical)
+    };
+    let (window_width, window_height, _) =
+        floating_canvas_geometry(width, height, edge);
     diagnose::log_lazy(|| format!(
-        "desktop restore saved=({x},{y}) saved_monitor_valid={saved_monitor_valid} target_bounds=({}, {}, {}, {}) taskbar_bounds=({}, {}, {}, {})",
+        "desktop restore saved=({x},{y}) saved_monitor_valid={saved_monitor_valid} target_dpi={target_dpi} previous_dpi={old_dpi} target_bounds=({}, {}, {}, {}) taskbar_bounds=({}, {}, {}, {})",
         bounds.left, bounds.top, bounds.right, bounds.bottom,
         taskbar_bounds.left, taskbar_bounds.top, taskbar_bounds.right, taskbar_bounds.bottom,
     ));
@@ -6157,6 +6248,10 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     if let Some(backdrop) = blur_backdrop_hwnd() {
         unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
     }
+    // SetWindowPos may synchronously emit WM_DPICHANGED as this HWND enters
+    // the saved desktop monitor. The outer transition already selected the
+    // correct DPI and will repaint, so suppress nested position_at_taskbar().
+    let _placement_guard = FloatingInitialPlacementGuard::begin();
     refresh_floating_reserved_dock(hwnd);
     // Keep the floating HWND hidden until the complete first frame is ready.
     // A reused popup still has the layered bitmap from its previous visit,
@@ -7474,6 +7569,11 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_DISPLAYCHANGE | WM_DPICHANGED_MSG | WM_SETTINGCHANGE => {
+            if msg == WM_DPICHANGED_MSG
+                && FLOATING_INITIAL_PLACEMENT.with(|flag| flag.get())
+            {
+                return LRESULT(0);
+            }
             if msg == WM_DPICHANGED_MSG {
                 let new_dpi = (wparam.0 & 0xFFFF) as u32;
                 CURRENT_DPI.store(new_dpi, Ordering::Relaxed);
@@ -12652,6 +12752,27 @@ mod tests {
         assert!(floating_auto_collapse_allowed(DisplayPosition::Desktop, true));
         assert!(floating_auto_collapse_allowed(DisplayPosition::Taskbar, false),
             "taskbar-space fallback keeps its existing automatic collapse behavior");
+    }
+
+    #[test]
+    fn docked_restore_uses_saved_desktop_monitor_instead_of_dpi_scaled_canvas_center() {
+        let left = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let right = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        // A docked popup on the right monitor can have a canvas center
+        // crossing the seam after a DPI change or a display rearrangement.
+        let origin = (-20, 200);
+        let guessed_center = floating_restore_anchor(origin.0, origin.1, 140, 200).unwrap();
+        assert!(guessed_center.x >= right.left);
+        let anchored = floating_docked_monitor_anchor(
+            Some(FloatingEdge::Right), origin.0, origin.1, guessed_center
+        );
+        assert!(anchored.x < left.right);
+        assert_eq!(anchored, POINT { x: -19, y: 201 });
+        assert_eq!(
+            floating_docked_monitor_anchor(None, origin.0, origin.1, guessed_center),
+            guessed_center,
+            "free desktop widgets should keep their canvas-center monitor selection",
+        );
     }
 
     #[test]
