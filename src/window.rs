@@ -5074,6 +5074,7 @@ fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> R
     let mut bounds = floating_usable_bounds(monitor, work);
     let mw = monitor.right - monitor.left;
     let mh = monitor.bottom - monitor.top;
+    let mut has_top_taskbar = false;
     for bar in taskbars {
         let overlap_x = (bar.right.min(monitor.right) - bar.left.max(monitor.left)).max(0);
         let overlap_y = (bar.bottom.min(monitor.bottom) - bar.top.max(monitor.top)).max(0);
@@ -5084,6 +5085,7 @@ fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> R
         } else if overlap_x >= mw / 2 && bar.top <= monitor.top + 8
             && bar.bottom > monitor.top && bar.bottom < monitor.bottom {
             bounds.top = bar.bottom;
+            has_top_taskbar = true;
         } else if overlap_y >= mh / 2 && bar.left <= monitor.left + 8
             && bar.right > monitor.left && bar.right < monitor.right {
             bounds.left = bar.right;
@@ -5091,6 +5093,18 @@ fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> R
             && bar.left > monitor.left && bar.left < monitor.right {
             bounds.right = bar.left;
         }
+    }
+    // Work-area metadata can contain a tiny top inset even when there is no
+    // Explorer taskbar spanning the top edge. Reset-to-top previously used
+    // that inset as the snap line, leaving a visible ~6 px gap between the
+    // collapsed grip and the *physical* monitor edge. Normalize only this
+    // small unclaimed band, and retain real top taskbar reservations.
+    //
+    // This runs in the shared geometry path (reset, hover, slide, rendering)
+    // so the reset grip cannot jump back down during the next repaint.
+    let top_inset = bounds.top.saturating_sub(monitor.top);
+    if !has_top_taskbar && top_inset > 0 && top_inset <= sc(8).max(8) {
+        bounds.top = monitor.top;
     }
     if bounds.right > bounds.left && bounds.bottom > bounds.top {
         bounds
@@ -12232,6 +12246,43 @@ mod tests {
         assert_eq!(floating_bounds_at_taskbar(monitor, right_work, &[right]).right, 3707);
         let other_monitor_bar = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
         assert_eq!(floating_bounds_at_taskbar(monitor, work, &[other_monitor_bar]).bottom, 900);
+    }
+
+    #[test]
+    fn desktop_reset_top_grip_is_flush_with_physical_edge_without_top_taskbar() {
+        let monitor = RECT { left: -1920, top: -200, right: 0, bottom: 880 };
+        let tiny_inset = RECT { top: -194, ..monitor };
+        let bounds = floating_bounds_at_taskbar(monitor, tiny_inset, &[]);
+        assert_eq!(bounds.top, monitor.top,
+            "a 6px rcWork inset with no real top taskbar must not shift the reset grip");
+
+        let (canvas_w, canvas_h, _) = floating_canvas_geometry(
+            320, 90, Some(FloatingEdge::Top),
+        );
+        let grip = floating_grip_rect(
+            canvas_w, canvas_h, Some(FloatingEdge::Top), sc(FLOAT_EDGE_PEEK),
+        );
+        let (_, expanded_y) = floating_reset_top_origin(bounds, canvas_w, canvas_h);
+        let (dx, dy) = floating_slide_offset(canvas_w, canvas_h, FloatingEdge::Top, 0);
+        let _ = dx;
+        assert_eq!(expanded_y + dy + grip.top, monitor.top,
+            "the first visible grip pixel must be flush with the physical top edge");
+
+        let top_taskbar = RECT {
+            left: monitor.left, top: monitor.top,
+            right: monitor.right, bottom: monitor.top + 48,
+        };
+        let real_work = RECT { top: monitor.top + 54, ..monitor };
+        let reserved = floating_bounds_at_taskbar(monitor, real_work, &[top_taskbar]);
+        assert_eq!(reserved.top, top_taskbar.bottom,
+            "a real top taskbar must retain its inner face as the snap line");
+        let (_, reserved_y) = floating_reset_top_origin(reserved, canvas_w, canvas_h);
+        assert_eq!(reserved_y + dy + grip.top, top_taskbar.bottom);
+
+        let substantial_work_inset = RECT { top: monitor.top + 36, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, substantial_work_inset, &[]).top,
+            monitor.top + 36,
+            "nontrivial reserved desktop areas remain protected");
     }
 
     #[test]
