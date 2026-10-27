@@ -966,7 +966,10 @@ fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
 }
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
-    open_or_focus_on_widget(parent, parent, snapshot);
+    // The owner is a stable message endpoint, which can be on a different
+    // monitor from the live component after a taskbar replica handoff.
+    let widget = crate::window::settings_placement_anchor().unwrap_or(parent);
+    open_or_focus_on_widget(parent, widget, snapshot);
 }
 
 /// The message owner stays stable while taskbar replicas and the desktop
