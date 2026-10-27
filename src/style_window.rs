@@ -1085,6 +1085,11 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             settings_centered_origin(work, final_width, final_height)
         });
         let (final_x, final_y) = final_origin.unwrap_or((0, 0));
+        let position_flags = if final_origin.is_some() {
+            SWP_NOZORDER | SWP_NOACTIVATE
+        } else {
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+        };
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
@@ -1092,8 +1097,7 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             final_y,
             final_width,
             final_height,
-            SWP_NOZORDER | SWP_NOACTIVATE
-                | if final_origin.is_some() { WINDOWPOS_FLAGS(0) } else { SWP_NOMOVE },
+            position_flags,
         );
 
         let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(snapshot.language)));
