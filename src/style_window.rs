@@ -1027,27 +1027,15 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
         // to disable composition even on non-JSON settings pages.
         let no_composition = std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some();
         let widget_work_area = settings_work_area_for_widget(widget);
-        let widget_dpi = if widget.0.is_null() || !IsWindow(widget).as_bool() {
-            96
-        } else {
-            GetDpiForWindow(widget).max(96)
-        };
-        let scale_for_widget = |v: i32| ((v as i64 * widget_dpi as i64 + 48) / 96) as i32;
-        let initial_width = scale_for_widget(WINDOW_WIDTH);
-        let initial_height = scale_for_widget(WINDOW_HEIGHT);
-        let initial_origin = widget_work_area.map(|work| {
-            settings_centered_origin(work, initial_width, initial_height)
-        });
-        let (initial_x, initial_y) = initial_origin.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
         let hwnd = match CreateWindowExW(
             settings_window_ex_style(no_composition),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
-            initial_x,
-            initial_y,
-            initial_width,
-            initial_height,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
             HWND::default(),
             HMENU::default(),
             GetModuleHandleW(PCWSTR::null()).unwrap(),
@@ -1074,11 +1062,24 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             );
         }
 
+        // Keep the original ownerless CW_USEDEFAULT creation contract. Move
+        // this still-hidden window to the active widget's monitor before
+        // creating child controls, so Windows can negotiate Per-Monitor DPI.
+        if let Some(work) = widget_work_area {
+            let anchor_dpi = GetDpiForWindow(widget).max(96);
+            let scaled = |v: i32| ((v as i64 * anchor_dpi as i64 + 48) / 96) as i32;
+            let width = scaled(WINDOW_WIDTH);
+            let height = scaled(WINDOW_HEIGHT);
+            let (x, y) = settings_centered_origin(work, width, height);
+            let _ = SetWindowPos(
+                hwnd, HWND::default(), x, y, width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
         let dpi = GetDpiForWindow(hwnd).max(96);
         let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
-        // Recenter using the created HWND's *actual* DPI: Windows can
-        // negotiate a different scale during WM_NCCREATE/WM_DPICHANGED.
-        // This happens before the window is shown, so no jump is visible.
+        // Final resize/center is based on the settings HWND's negotiated DPI.
+        // Both placement steps occur before the first ShowWindow; no jump.
         let final_width = s(WINDOW_WIDTH);
         let final_height = s(WINDOW_HEIGHT);
         let final_origin = widget_work_area.map(|work| {
