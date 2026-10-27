@@ -2480,9 +2480,13 @@ pub fn run() {
         // Position and show when a safe taskbar slot exists. If space is
         // temporarily exhausted, position_at_taskbar() keeps the widget hidden.
         position_at_taskbar();
-        if !widget_hidden_for_taskbar_space() {
+        // position_at_taskbar() can switch to a separate desktop HWND and
+        // explicitly hide this taskbar child. Do not immediately show the
+        // old child again after the desktop popup is already visible.
+        let desktop_active = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+        if !desktop_active && !widget_hidden_for_taskbar_space() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            diagnose::log("window shown");
+            diagnose::log("taskbar window shown");
         }
 
         // Initial render via UpdateLayeredWindow (for embedded) or InvalidateRect (fallback)
@@ -5095,6 +5099,27 @@ fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
     floating_monitor_geometry(point).map(|(_, usable)| usable)
 }
 
+// Persisted desktop coordinates are virtual-screen coordinates, independent
+// from taskbar_monitor / taskbar_index. Use a point inside the last desktop
+// canvas to resolve its monitor; a missing coordinate is not a valid anchor.
+fn floating_restore_anchor(x: i32, y: i32, width: i32, height: i32) -> Option<POINT> {
+    (x != i32::MIN && y != i32::MIN).then_some(POINT {
+        x: x.saturating_add(width / 2),
+        y: y.saturating_add(height / 2),
+    })
+}
+
+// A disconnected monitor must not make the popup disappear off-screen.
+// Let callers probe a saved point with MONITOR_DEFAULTTONULL, rather than
+// MONITOR_DEFAULTTONEAREST (which silently chooses the taskbar screen).
+fn floating_restore_bounds(
+    saved_anchor: Option<POINT>,
+    taskbar_bounds: RECT,
+    bounds_at_saved_anchor: impl FnOnce(POINT) -> Option<RECT>,
+) -> RECT {
+    saved_anchor.and_then(bounds_at_saved_anchor).unwrap_or(taskbar_bounds)
+}
+
 /// Detect whether the selected monitor's edge is physically exposed.
 /// At a shared display seam we still DOCK; the neighboring monitor only
 /// determines whether to alpha-clip the slide inside the selected monitor.
@@ -6067,9 +6092,21 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     let origin = native_interop::get_window_rect_safe(old);
     let default_point = origin.map(|r| POINT { x: r.left, y: r.top })
         .unwrap_or(POINT { x: 0, y: 0 });
-    let bounds = floating_monitor_bounds(default_point).unwrap_or(RECT {
+    let taskbar_bounds = floating_monitor_bounds(default_point).unwrap_or(RECT {
         left: 0, top: 0, right: 1920, bottom: 1080,
     });
+    let saved_anchor = floating_restore_anchor(x, y, window_width, window_height);
+    let saved_monitor_valid = saved_anchor.is_some_and(|point| unsafe {
+        MonitorFromPoint(point, MONITOR_DEFAULTTONULL) != HMONITOR::default()
+    });
+    let bounds = floating_restore_bounds(saved_anchor, taskbar_bounds, |point| {
+        saved_monitor_valid.then(|| floating_monitor_bounds(point)).flatten()
+    });
+    diagnose::log_lazy(|| format!(
+        "desktop restore saved=({x},{y}) saved_monitor_valid={saved_monitor_valid} target_bounds=({}, {}, {}, {}) taskbar_bounds=({}, {}, {}, {})",
+        bounds.left, bounds.top, bounds.right, bounds.bottom,
+        taskbar_bounds.left, taskbar_bounds.top, taskbar_bounds.right, taskbar_bounds.bottom,
+    ));
     let start_x = if x == i32::MIN { bounds.right - window_width - sc(32) } else { x };
     let start_y = if y == i32::MIN {
         bounds.top + (bounds.bottom - bounds.top - window_height) / 2
@@ -12615,6 +12652,53 @@ mod tests {
         assert!(floating_auto_collapse_allowed(DisplayPosition::Desktop, true));
         assert!(floating_auto_collapse_allowed(DisplayPosition::Taskbar, false),
             "taskbar-space fallback keeps its existing automatic collapse behavior");
+    }
+
+    #[test]
+    fn desktop_restore_prefers_saved_monitor_over_taskbar_and_handles_disconnection() {
+        let taskbar = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        let left_screen = RECT { left: -1600, top: -200, right: 0, bottom: 900 };
+        let right_screen = RECT { left: 1920, top: 0, right: 3840, bottom: 1080 };
+        let resolve = |p: POINT| {
+            [left_screen, taskbar, right_screen].into_iter().find(|r| {
+                p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+            })
+        };
+        // Negative virtual-screen coordinates and different taskbar screens
+        // must not override the saved desktop display.
+        let left = floating_restore_anchor(-1550, 120, 280, 90);
+        assert_eq!(floating_restore_bounds(left, taskbar, resolve), left_screen);
+        let right = floating_restore_anchor(2300, 300, 280, 90);
+        assert_eq!(floating_restore_bounds(right, taskbar, resolve), right_screen);
+        // If the saved screen is unplugged or the settings had no coordinates,
+        // use the known taskbar monitor rather than parking the UI off-screen.
+        let unplugged = floating_restore_anchor(-4000, 0, 280, 90);
+        assert_eq!(floating_restore_bounds(unplugged, taskbar, resolve), taskbar);
+        assert!(floating_restore_anchor(i32::MIN, 100, 280, 90).is_none());
+        assert!(floating_restore_anchor(100, i32::MIN, 280, 90).is_none());
+        assert_eq!(floating_restore_bounds(None, taskbar, resolve), taskbar);
+
+        // Taskbar and desktop position values remain separate across a
+        // settings JSON round trip (including a docked edge).
+        let saved = SettingsFile {
+            taskbar_index: 0,
+            taskbar_left_offset: Some(400),
+            taskbar_monitor: Some("taskbar-monitor".into()),
+            floating_x: Some(-1550),
+            floating_y: Some(120),
+            floating_edge: Some("left".into()),
+            display_position: DisplayPosition::Desktop,
+            ..SettingsFile::default()
+        };
+        let restored: SettingsFile = serde_json::from_str(
+            &serde_json::to_string(&saved).unwrap()
+        ).unwrap();
+        assert_eq!(restored.taskbar_left_offset, Some(400));
+        assert_eq!(restored.taskbar_monitor.as_deref(), Some("taskbar-monitor"));
+        assert_eq!(restored.floating_x, Some(-1550));
+        assert_eq!(restored.floating_y, Some(120));
+        assert_eq!(restored.floating_edge.as_deref(), Some("left"));
+        assert_eq!(restored.display_position, DisplayPosition::Desktop);
     }
 
     #[test]
