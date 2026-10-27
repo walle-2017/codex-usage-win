@@ -116,7 +116,8 @@ if ($styleWindow -notmatch 'HitTarget' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
-if ($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -or
+if (($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -and
+     $styleWindow -notmatch 'CreateWindowExW\(\s*settings_window_ex_style\(no_composition\)') -or
     $styleWindow -match 'WS_MAXIMIZEBOX' -or
     $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU\s*\|\s*WS_MINIMIZEBOX' -or
     $styleWindow -notmatch 'WINDOW_HEIGHT,\s*HWND::default\(\)' -or
@@ -124,6 +125,11 @@ if ($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must be an ownerless taskbar window with minimize support and a standard caption close button.'
+}
+if ($styleWindow -notmatch 'fn settings_window_ex_style\(no_composition: bool\)' -or
+    $styleWindow -notmatch 'WS_EX_APPWINDOW\s*\|\s*WS_EX_COMPOSITED' -or
+    $styleWindow -notmatch 'CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED') {
+    throw 'Default composited settings rendering and opt-in JSON scroll diagnostics must remain separate.'
 }
 if ($styleWindow -notmatch 'json_save_mask' -or
     $styleWindow -notmatch 'WS_EX_LAYERED\s*\|\s*WS_EX_TOOLWINDOW\s*\|\s*WS_EX_NOACTIVATE' -or
