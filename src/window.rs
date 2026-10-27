@@ -8599,8 +8599,16 @@ unsafe extern "system" fn wnd_proc(
         }
         _ if msg == WM_APP_FOCUS_EXISTING_SETTINGS => {
             close_style_editors();
-            style_window::open_or_focus(
+            // The stable message owner can remain on an earlier taskbar
+            // when the visible widget has moved to another monitor. Pass
+            // the active widget HWND separately as the placement anchor.
+            let widget = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or(hwnd)
+            };
+            style_window::open_or_focus_on_widget(
                 taskbar_replica_service_hwnd(hwnd),
+                widget,
                 style_settings_snapshot(),
             );
             LRESULT(0)
