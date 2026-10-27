@@ -5636,10 +5636,22 @@ fn sync_desktop_auto_collapse() {
     set_floating_collapsed(collapse);
 }
 
+// A nonmodal custom context menu is a separate HWND. Moving from the
+// expanded panel into that menu must not count as a hover exit.
+fn floating_context_menu_blocks_collapse(hwnd: HWND) -> bool {
+    popup_menu::is_open_for(hwnd) && lock_state().as_ref().is_some_and(|s|
+        s.floating_mode && s.hwnd.to_hwnd() == hwnd
+            && s.floating_edge.is_some() && !s.dragging
+    )
+}
+
 fn set_floating_collapsed(collapsed: bool) {
     let hwnd = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
+        if collapsed && popup_menu::is_open_for(s.hwnd.to_hwnd()) {
+            return;
+        }
         if !s.floating_mode || s.dragging || s.floating_edge.is_none()
             || (collapsed && !floating_auto_collapse_allowed(
                 s.display_position, s.desktop_auto_collapse,
@@ -7601,6 +7613,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(hit_code as isize)
         }
         WM_APP_DESKTOP_HOVER_EXIT => {
+            if floating_context_menu_blocks_collapse(hwnd) {
+                return LRESULT(0);
+            }
             // NCHITTEST can be delivered while layered compositing is still
             // active, so only the posted message may mutate/repaint the hover.
             // Recheck the live pointer: a rapid return to the grip or mouse
@@ -7657,6 +7672,45 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        _ if msg == popup_menu::WM_POPUP_MENU_CLOSED => {
+            // The menu owns its own HWND and does not run a modal native
+            // menu loop. Re-evaluate only when it has truly been destroyed;
+            // an old popup's close must not collapse a newly opened menu.
+            if popup_menu::is_open_for(hwnd) {
+                return LRESULT(0);
+            }
+            let eligible = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                    && s.floating_edge.is_some() && !s.dragging
+                    && !s.floating_collapsed
+                    && floating_auto_collapse_allowed(
+                        s.display_position, s.desktop_auto_collapse,
+                    )
+            );
+            if eligible {
+                if floating_pointer_in_docked_hover_zone(hwnd) {
+                    // WM_MOUSELEAVE tracking is consumed while hovering a
+                    // separate popup. Restore it for the next real exit.
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut track);
+                } else {
+                    floating_cancel_hover_recheck(hwnd);
+                    if let Some(s) = lock_state().as_mut() {
+                        s.minimal_hover_target = None;
+                        s.drag_handle_hovered = false;
+                    }
+                    hide_minimal_usage_tooltip();
+                    set_floating_collapsed(true);
+                    render_layered();
+                }
+            }
+            LRESULT(0)
+        }
         WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) => {
             // Quota content remains a client area for tooltips, while only the
             // top grip starts a drag on WM_LBUTTONDOWN.
@@ -7707,6 +7761,19 @@ unsafe extern "system" fn wnd_proc(
             let timer_id = wparam.0;
             match timer_id {
                 TIMER_FLOAT_HOVER_RECHECK => {
+                    let popup_owner = {
+                        let state = lock_state();
+                        state.as_ref().and_then(|s|
+                            (s.floating_mode && s.floating_edge.is_some())
+                                .then_some(s.hwnd.to_hwnd())
+                        )
+                    };
+                    if let Some(owner) = popup_owner {
+                        if floating_context_menu_blocks_collapse(owner) {
+                            floating_cancel_hover_recheck(owner);
+                            return LRESULT(0);
+                        }
+                    }
                     let active = lock_state().as_ref().and_then(|s|
                         (s.floating_mode && s.floating_edge.is_some()
                             && !s.floating_collapsed && !s.dragging)
@@ -8178,6 +8245,12 @@ unsafe extern "system" fn wnd_proc(
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
             if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
+                return LRESULT(0);
+            }
+            if floating_context_menu_blocks_collapse(hwnd) {
+                // The cursor is visiting our context menu, not leaving the
+                // widget interaction. Its close notification handles collapse.
+                floating_cancel_hover_recheck(hwnd);
                 return LRESULT(0);
             }
             // A docked HWND can lose alpha hit-testing at its very first
