@@ -5240,6 +5240,19 @@ fn floating_edge_requires_clip(
     )
 }
 
+fn desktop_drop_edge_with_snap(
+    enabled: bool, monitor: RECT, bounds: RECT, rect: RECT,
+    pointer: POINT, threshold: i32,
+) -> Option<FloatingEdge> {
+    if enabled {
+        floating_drop_edge_at_pointer(
+            monitor, bounds, rect, pointer, threshold, [true; 4],
+        )
+    } else {
+        None
+    }
+}
+
 fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
     (
         x.clamp(bounds.left, (bounds.right - width).max(bounds.left)),
@@ -6220,11 +6233,9 @@ fn finish_floating_drag(hwnd: HWND) {
     // MonitorFromPoint(pointer) above chooses the target monitor. ALL of its
     // four sides are dockable, including seams connected to another display.
     // This also preserves V24.15's nearest-cursor corner selection.
-    let edge = if snap_enabled {
-        floating_drop_edge_at_pointer(
-            monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
-        )
-    } else { None };
+    let edge = desktop_drop_edge_with_snap(
+        snap_enabled, monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP),
+    );
     let reserved_dock = edge.is_some_and(|edge|
         floating_edge_requires_clip(monitor, bounds, edge, pointer));
     diagnose::log_lazy(|| format!(
@@ -13246,6 +13257,46 @@ mod tests {
         assert_eq!(floating_drag_anchor_for_dpi(25, 96, 144), 38);
         assert_eq!(floating_drag_anchor_for_dpi(-25, 96, 144), -38);
         assert_eq!(floating_drag_anchor_for_dpi(30, 144, 96), 20);
+    }
+
+    #[test]
+    fn desktop_docking_switch_preserves_legacy_behavior_and_clamps_undocked_drops() {
+        let monitor = RECT { left: -1920, top: -120, right: 0, bottom: 960 };
+        let work = RECT { left: -1920, top: -120, right: 0, bottom: 912 };
+        let near_edge = RECT { left: -1908, top: 120, right: -1608, bottom: 220 };
+        let pointer = POINT { x: -1899, y: 159 };
+        assert_eq!(
+            desktop_drop_edge_with_snap(true, monitor, work, near_edge, pointer, 24),
+            Some(FloatingEdge::Left),
+            "the default-on setting must preserve automatic docking",
+        );
+        assert_eq!(
+            desktop_drop_edge_with_snap(false, monitor, work, near_edge, pointer, 24),
+            None, "disabling docking must not snap even next to an edge",
+        );
+        // The whole transparent canvas (including the tab) must remain on
+        // the pointer's chosen screen; neither the body nor the tab gets cut.
+        for (x, y, w, h) in [
+            (-2000, 70, 320, 130),
+            (-1660, -280, 320, 130),
+            (-310, 880, 320, 130),
+            (80, 50, 320, 130),
+        ] {
+            let (left, top) = floating_clamp_position(work, w, h, x, y);
+            assert!(left >= work.left && left + w <= work.right);
+            assert!(top >= work.top && top + h <= work.bottom);
+        }
+        let json: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert!(json.desktop_snap, "legacy settings must keep docking enabled");
+        let mut json = json;
+        json.desktop_snap = false;
+        json.floating_edge = Some("right".into());
+        let restored = normalize_settings(
+            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap(),
+        );
+        assert!(!restored.desktop_snap);
+        assert_eq!(restored.floating_edge, None,
+            "a saved disabled-docking widget must not start collapsed/offscreen");
     }
 
     #[test]
