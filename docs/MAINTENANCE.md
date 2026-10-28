@@ -56,6 +56,14 @@ The unified settings window is a single reusable top-level window. Reopening it 
 
 Panel and tooltip Composition blur are independently active only when the configured frosted intensity is greater than zero **and** the respective background Alpha is below 255. An opaque background disables blur without resetting the stored intensity. The same predicate must govern rendering and frosted handoff logic.
 
+## Desktop widget invariants
+
+- Explicit **Desktop** mode has no distance-based snap switch or snap radius. A dropped widget docks only when its visible panel **or real drag tab** touches the selected monitor's usable desktop boundary. Taskbar-space fallback is a separate mode and retains its original proximity detection.
+- Calculate visible content bounds from the body and tab together; transparent glow gutters may extend outside the work area. Use the same visible rectangle for edge contact and clamping.
+- On release, detect contact with the **currently displayed** drag-tab orientation before considering the next free-tab layout. An above-body tab reaching the top must dock; a below-body tab reaching the taskbar must dock. Without contact, the free tab may move below the body when overhead space is insufficient, without shifting the visible panel.
+- The desktop monitor is selected by the pointer, including negative virtual-desktop coordinates and mixed-DPI connections. Cross-screen dragging must preserve the cursor anchor. Respect actual Explorer taskbar inner bounds; taskbar-edge collapse clips the rendered pixels rather than drawing over Explorer.
+- The appearance submenu contains only **Direction** and **Collapse**. Its joined inset must remain anchored to the **Desktop** position button. Derive both paint and hit-test rectangles from `desktop_submenu_layout()` and keep the two-row vertical geometry synchronized.
+
 ## Stable multi-taskbar architecture
 
 - The primary widget HWND is the sole service owner (poll timers, tray icon, updater and settings callbacks). Foreground replicas do not create extra pollers.
@@ -73,7 +81,7 @@ Panel and tooltip Composition blur are independently active only when the config
 - These are Rust child modules, not runtime feature switches. A split must not change HWND parents, mouse capture or rendering order.
 - Verified application baseline (2026-10-16): `9c00439` (`fix/settings-focus-frosted-alpha`), including module extraction, tooltip foreground ownership, outside-taskbar drag and settings/frosted-alpha fixes. Keep it as the rollback point during final cleanup.
 - The historical pre-extraction cleanup baseline is `0c65724`; module-extraction and subsequent fixes have now passed Windows CI and manual regression.
-- The final-cleanup work is on a separate branch. The baseline has not been merged into `main` yet.
+- Continue desktop and vertical-taskbar refinements on `feature/vertical-taskbar-support`; do not change or merge into `main` without final review.
 
 ## Verification
 
