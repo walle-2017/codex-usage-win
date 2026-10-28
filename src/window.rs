@@ -742,8 +742,9 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     ) {
         settings.poll_interval_ms = default_poll_interval();
     }
-    if !settings.desktop_snap || settings.floating_edge.as_deref()
-        .is_some_and(|side| FloatingEdge::parse(side).is_none())
+    if (settings.display_position == DisplayPosition::Desktop && !settings.desktop_snap)
+        || settings.floating_edge.as_deref()
+            .is_some_and(|side| FloatingEdge::parse(side).is_none())
     {
         settings.floating_edge = None;
     }
@@ -5240,6 +5241,12 @@ fn floating_edge_requires_clip(
     )
 }
 
+// The toggle belongs to the explicitly selected Desktop mode. Taskbar
+// fallback (when Explorer has no usable slot) keeps its legacy auto-docking.
+fn desktop_snap_allowed(position: DisplayPosition, enabled: bool) -> bool {
+    position != DisplayPosition::Desktop || enabled
+}
+
 fn desktop_drop_edge_with_snap(
     enabled: bool, detected: Option<FloatingEdge>,
 ) -> Option<FloatingEdge> {
@@ -5261,7 +5268,9 @@ fn undock_floating_widget_if_snap_disabled() -> Option<(HWND, POINT)> {
     let (hwnd, bounds_point, desired_x, desired_y, width, height) = {
         let state = lock_state();
         let s = state.as_ref()?;
-        if !s.floating_mode || s.dragging || s.desktop_snap || s.floating_edge.is_none() {
+        if !s.floating_mode || s.dragging
+            || desktop_snap_allowed(s.display_position, s.desktop_snap)
+            || s.floating_edge.is_none() {
             return None;
         }
         let (_, _, old_body) = floating_canvas_geometry_for_state(s);
@@ -5289,7 +5298,8 @@ fn undock_floating_widget_if_snap_disabled() -> Option<(HWND, POINT)> {
     {
         let mut state = lock_state();
         let s = state.as_mut()?;
-        if !s.floating_mode || s.dragging || s.desktop_snap
+        if !s.floating_mode || s.dragging
+            || desktop_snap_allowed(s.display_position, s.desktop_snap)
             || s.floating_edge.is_none() || s.hwnd.to_hwnd() != hwnd
         {
             return None;
@@ -5639,13 +5649,14 @@ fn reset_floating_widget_position() -> bool {
                     }))?;
             let body_w = total_widget_width_for_state(s);
             let body_h = widget_height_for_state(s);
-            let (reset_width, reset_height) = if s.desktop_snap {
+            let snap = desktop_snap_allowed(s.display_position, s.desktop_snap);
+            let (reset_width, reset_height) = if snap {
                 floating_reset_top_canvas_size(body_w, body_h)
             } else {
                 floating_canvas_size_for_free_body(body_w, body_h)
             };
             Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height,
-                s.display_position, s.desktop_snap, s.desktop_auto_collapse))
+                s.display_position, snap, s.desktop_auto_collapse))
         })
     };
     let Some((hwnd, anchor, width, height, position, snap, auto_collapse)) = snapshot
@@ -6207,7 +6218,7 @@ fn finish_floating_drag(hwnd: HWND) {
         if !s.floating_mode { return };
         (s.floating_x, s.floating_y,
          total_widget_width_for_state(s), widget_height_for_state(s),
-         s.floating_edge, s.desktop_snap)
+         s.floating_edge, desktop_snap_allowed(s.display_position, s.desktop_snap))
     };
     let (old_w, old_h, old_body) = {
         let state = lock_state();
@@ -13253,6 +13264,23 @@ mod tests {
         assert_eq!(floating_drag_anchor_for_dpi(25, 96, 144), 38);
         assert_eq!(floating_drag_anchor_for_dpi(-25, 96, 144), -38);
         assert_eq!(floating_drag_anchor_for_dpi(30, 144, 96), 20);
+    }
+
+    #[test]
+    fn desktop_docking_toggle_does_not_change_taskbar_fallback_behavior() {
+        assert!(desktop_snap_allowed(DisplayPosition::Desktop, true));
+        assert!(!desktop_snap_allowed(DisplayPosition::Desktop, false));
+        assert!(desktop_snap_allowed(DisplayPosition::Taskbar, false));
+        let mut fallback = SettingsFile {
+            display_position: DisplayPosition::Taskbar,
+            desktop_snap: false,
+            floating_edge: Some("bottom".into()),
+            ..Default::default()
+        };
+        assert_eq!(normalize_settings(fallback.clone()).floating_edge.as_deref(), Some("bottom"));
+        fallback.display_position = DisplayPosition::Desktop;
+        assert!(normalize_settings(fallback).floating_edge.is_none(),
+            "desktop auto-docking off must not restore an offscreen collapsed tab");
     }
 
     #[test]
