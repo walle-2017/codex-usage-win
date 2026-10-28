@@ -721,19 +721,30 @@ struct DesktopSubmenuLayout {
     disabled: RECT,
 }
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
+    // Both rows share one source of vertical geometry. When a menu option
+    // changes, the drawing and hit-test bounds must move together.
+    let row_height = 30;
+    let row_gap = 10;
+    let direction_top = 116;
+    let collapse_top = direction_top + row_height + row_gap;
+    let row = |left, right, top| RECT {
+        left, top, right, bottom: top + row_height,
+    };
     DesktopSubmenuLayout {
-        // With the obsolete docking row removed, anchor this two-row well
-        // beside Layout/Position, not Theme/Layout. It must share the
-        // Desktop button's bottom edge so the L-shaped join is continuous.
-        well: RECT { left: 636, top: 106, right: 894, bottom: 201 },
+        // Anchor the two-row well beside Layout/Position. The lower edge
+        // joins the Desktop button inset, not the Theme row above it.
+        well: RECT {
+            left: 636, top: direction_top - 10,
+            right: 894, bottom: collapse_top + row_height + 15,
+        },
         // Keep the 4px inset around Desktop without touching Taskbar.
         foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
-        direction_label: RECT { left: 650, top: 116, right: 728, bottom: 146 },
-        collapse_label: RECT { left: 650, top: 156, right: 728, bottom: 186 },
-        horizontal: RECT { left: 736, top: 116, right: 803, bottom: 146 },
-        vertical: RECT { left: 811, top: 116, right: 878, bottom: 146 },
-        enabled: RECT { left: 736, top: 156, right: 803, bottom: 186 },
-        disabled: RECT { left: 811, top: 156, right: 878, bottom: 186 },
+        direction_label: row(650, 728, direction_top),
+        collapse_label: row(650, 728, collapse_top),
+        horizontal: row(736, 803, direction_top),
+        vertical: row(811, 878, direction_top),
+        enabled: row(736, 803, collapse_top),
+        disabled: row(811, 878, collapse_top),
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -10950,6 +10961,11 @@ mod ui_smoke_tests {
         assert_eq!(l.enabled.top, l.disabled.top);
         assert_eq!(l.direction_label.top, l.horizontal.top);
         assert_eq!(l.collapse_label.top, l.enabled.top);
+        assert_eq!(l.direction_label.bottom - l.direction_label.top,
+            l.collapse_label.bottom - l.collapse_label.top);
+        assert_eq!(l.horizontal.bottom - l.horizontal.top,
+            l.enabled.bottom - l.enabled.top);
+        assert_eq!(l.collapse_label.top - l.direction_label.bottom, 10);
         assert_eq!(l.well.bottom, l.foot.bottom);
         assert_eq!(l.well.bottom, 201);
         // Both rows belong beside Layout/Position. The old 65..161 well
