@@ -9923,21 +9923,17 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn json_scroll_no_composition_experiment_preserves_default() {
+    fn json_scroll_composition_keeps_optimized_default() {
         assert_ne!(
-            settings_window_ex_style(false).0 & WS_EX_COMPOSITED.0, 0,
-            "initial non-JSON settings must retain whole-window composition"
+            settings_window_ex_style().0 & WS_EX_COMPOSITED.0, 0,
+            "initial settings window must retain whole-window composition"
         );
-        assert_eq!(
-            settings_window_ex_style(true).0 & WS_EX_COMPOSITED.0, 0,
-            "opt-in diagnostic must disable whole-window composition"
-        );
-        assert!(settings_composition_for_section(Section::General, false, false));
-        assert!(settings_composition_for_section(Section::Preset, false, false));
-        assert!(!settings_composition_for_section(Section::Json, false, false));
-        assert!(settings_composition_for_section(Section::Json, false, true));
-        assert!(!settings_composition_for_section(Section::General, true, false));
-        assert!(!settings_composition_for_section(Section::Json, true, true));
+        for section in [Section::General, Section::Preset, Section::Panel, Section::Tooltip] {
+            assert!(settings_composition_for_section(section),
+                "non-JSON settings pages must retain whole-window composition");
+        }
+        assert!(!settings_composition_for_section(Section::Json),
+            "JSON editor must use the uncomposited optimized scroll path");
     }
 
     #[test]
@@ -10279,15 +10275,6 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn paint_cause_names_distinguish_gallery_from_capture_and_sync() {
-        assert_eq!(SettingsPaintCause::GalleryRefresh.as_str(), "gallery_refresh");
-        assert_eq!(
-            SettingsPaintCause::MouseCaptureChanged.as_str(), "capture_changed"
-        );
-        assert_eq!(SettingsPaintCause::FullSync.as_str(), "full_sync");
-    }
-
-    #[test]
     fn submenu_terminal_frame_keeps_cache_eligibility_and_retargets_cleanly() {
         let start = Instant::now();
         let mut animation = DesktopSubmenuAnimation::initial(false);
@@ -10330,35 +10317,16 @@ mod ui_smoke_tests {
         assert!(!animation.frame_due_with_gate(
             start + Duration::from_millis(122), DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
         ));
-        assert_eq!(submenu_scheduler_mean(&[]), 0.0);
-        assert_eq!(submenu_scheduler_mean(&[16.0, 24.0]), 20.0);
     }
 
     #[test]
-    fn submenu_scheduler_metrics_track_skipped_and_late_ticks() {
-        let start = Instant::now();
-        let mut telemetry = SubmenuSchedulerMetrics::default();
-        telemetry.multimedia = true;
-        telemetry.record(start, Some(1.0), true);
-        telemetry.record(start + Duration::from_millis(16), Some(2.0), true);
-        telemetry.record(start + Duration::from_millis(48), Some(4.0), false);
-        assert_eq!(telemetry.ticks, 3);
-        assert_eq!(telemetry.skipped_ticks, 1);
-        assert_eq!(submenu_p95(&telemetry.tick_intervals_ms), 32.0);
-        assert_eq!(submenu_scheduler_mean(&telemetry.callback_queue_ms), 7.0 / 3.0);
-    }
-
-    #[test]
-    fn submenu_frame_gate_and_metrics_percentile() {
+    fn submenu_frame_gate_keeps_animation_cadence() {
         let start = Instant::now();
         let mut animation = DesktopSubmenuAnimation::initial(false);
         assert!(animation.retarget(true, start));
         assert!(animation.frame_due_with_gate(start, DESKTOP_SUBMENU_MIN_FRAME_MS));
         assert!(!animation.frame_due_with_gate(start + Duration::from_millis(8), DESKTOP_SUBMENU_MIN_FRAME_MS));
         assert!(animation.frame_due_with_gate(start + Duration::from_millis(16), DESKTOP_SUBMENU_MIN_FRAME_MS));
-        assert_eq!(submenu_p95(&[]), 0.0);
-        assert_eq!(submenu_p95(&[10.0, 16.0, 20.0, 45.0]), 45.0);
-        assert_eq!(submenu_p95(&[12.0, 14.0, 18.0]), 18.0);
     }
 
     #[test]
@@ -10718,12 +10686,10 @@ mod ui_smoke_tests {
             );
             for _ in 0..3 {
                 set_section(Section::Json);
-                if std::env::var_os("CODEX_USAGE_JSON_SCROLL_KEEP_COMPOSITED").is_none() {
-                    assert_eq!(
-                        GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
-                        "JSON RichEdit must scroll without whole-tree composition"
-                    );
-                }
+                assert_eq!(
+                    GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
+                    "JSON RichEdit must scroll without whole-tree composition"
+                );
                 assert!(
                     IsWindowVisible(json_page_surface).as_bool(),
                     "opaque JSON content pane must cover the old appearance page"
@@ -10805,12 +10771,10 @@ mod ui_smoke_tests {
                     None,
                     "other settings pages must not route wheel events to hidden JSON edit"
                 );
-                if std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_none() {
-                    assert_ne!(
-                        GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
-                        "non-JSON pages must restore whole-window composition"
-                    );
-                }
+                assert_ne!(
+                    GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
+                    "non-JSON pages must restore whole-window composition"
+                );
                 assert!(
                     !IsWindowVisible(json_page_surface).as_bool(),
                     "opaque JSON pane must be hidden on preset page"
