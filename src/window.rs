@@ -13323,6 +13323,7 @@ mod tests {
         let json: SettingsFile = serde_json::from_str("{}").unwrap();
         assert!(json.desktop_snap, "legacy settings must keep docking enabled");
         let mut json = json;
+        json.display_position = DisplayPosition::Desktop;
         json.desktop_snap = false;
         json.floating_edge = Some("right".into());
         let restored = normalize_settings(
