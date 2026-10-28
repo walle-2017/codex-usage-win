@@ -5569,11 +5569,6 @@ fn initial_floating_visibility(
 // left/right-docked tabs. Reset must calculate the *destination* canvas
 // BEFORE applying the hidden tab's slide distance; using the source canvas
 // pushes the free tab partly offscreen and leaves side tabs below the edge.
-fn floating_canvas_size_for_free_body(body_width: i32, body_height: i32) -> (i32, i32) {
-    let (w, h, _) = floating_canvas_geometry(body_width, body_height, None);
-    (w, h)
-}
-
 fn floating_reset_top_canvas_size(body_width: i32, body_height: i32) -> (i32, i32) {
     let (width, height, _) = floating_canvas_geometry(
         body_width, body_height, Some(FloatingEdge::Top),
@@ -5601,30 +5596,19 @@ fn reset_floating_widget_position() -> bool {
                     }))?;
             let body_w = total_widget_width_for_state(s);
             let body_h = widget_height_for_state(s);
-            let snap = desktop_snap_allowed(s.display_position, s.desktop_snap);
-            let (reset_width, reset_height) = if snap {
-                floating_reset_top_canvas_size(body_w, body_h)
-            } else {
-                floating_canvas_size_for_free_body(body_w, body_h)
-            };
-            let free_body = (!snap).then(|| floating_canvas_geometry(body_w, body_h, None).2);
-            Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height, free_body,
-                s.display_position, snap, s.desktop_auto_collapse))
+            let (reset_width, reset_height) =
+                floating_reset_top_canvas_size(body_w, body_h);
+            Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height,
+                s.display_position, s.desktop_auto_collapse))
         })
     };
-    let Some((hwnd, anchor, width, height, free_body, position, snap, auto_collapse)) = snapshot
+    let Some((hwnd, anchor, width, height, position, auto_collapse)) = snapshot
     else { return false; };
     let Some((monitor, bounds)) = floating_monitor_geometry(anchor)
     else { return false; };
-    let (centered_x, top) = floating_reset_top_origin(bounds, width, height);
-    let (x, y) = if let Some(body) = free_body {
-        let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
-        floating_clamp_free_visible_position(
-            bounds, width, height, body, centered_x,
-            bounds.top.saturating_sub(body.top.min(grip.top)),
-        )
-    } else { (centered_x, top) };
-    let edge = snap.then_some(FloatingEdge::Top);
+    // An explicit reset deliberately places the popup at the top boundary.
+    let (x, y) = floating_reset_top_origin(bounds, width, height);
+    let edge = Some(FloatingEdge::Top);
     let (collapsed, reveal) = initial_floating_visibility(edge, position, auto_collapse);
     let pointer = POINT {
         x: bounds.left.saturating_add((bounds.right - bounds.left) / 2),
@@ -5682,7 +5666,7 @@ fn reset_floating_widget_position() -> bool {
     }
     save_state_settings();
     diagnose::log_lazy(|| format!(
-        "desktop position reset to top center at ({x},{y}) monitor=({}, {}, {}, {}) snap={snap} collapsed={collapsed} clipped={reserved}",
+        "desktop position reset to top center at ({x},{y}) monitor=({}, {}, {}, {}) collapsed={collapsed} clipped={reserved}",
         monitor.left, monitor.top, monitor.right, monitor.bottom,
     ));
     true
@@ -6172,13 +6156,13 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
 }
 
 fn finish_floating_drag(hwnd: HWND) {
-    let (x, y, body_w, body_h, old_edge, snap_enabled) = {
+    let (x, y, body_w, body_h, old_edge, explicit_desktop) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return };
         (s.floating_x, s.floating_y,
          total_widget_width_for_state(s), widget_height_for_state(s),
-         s.floating_edge, desktop_snap_allowed(s.display_position, s.desktop_snap))
+         s.floating_edge, s.display_position == DisplayPosition::Desktop)
     };
     let (old_w, old_h, old_body) = {
         let state = lock_state();
@@ -6194,15 +6178,24 @@ fn finish_floating_drag(hwnd: HWND) {
         return;
     };
     let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
-    // MonitorFromPoint(pointer) above chooses the target monitor. ALL of its
-    // four sides are dockable, including seams connected to another display.
-    // This also preserves V24.15's nearest-cursor corner selection.
-    // Detect using the unchanged monitor/taskbar/seam algorithm, then
-    // optionally discard that result when the user disabled auto docking.
-    let edge = floating_drop_edge_at_pointer(
-        monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
-    );
-    let edge = desktop_drop_edge_with_snap(snap_enabled, edge);
+    // Explicit Desktop never magnetically snaps near an edge. Only the real
+    // panel and drag tab qualify; fallback mode retains proximity docking.
+    let edge = if explicit_desktop {
+        let (free_w, free_h, free_body) =
+            floating_canvas_geometry(body_w, body_h, None);
+        let free_x = x + old_body.left - free_body.left;
+        let free_y = y + old_body.top - free_body.top;
+        let (free_x, free_y) = floating_clamp_free_visible_position(
+            bounds, free_w, free_h, free_body, free_x, free_y,
+        );
+        floating_desktop_contact_edge(
+            bounds, free_w, free_h, free_body, free_x, free_y, pointer,
+        )
+    } else {
+        floating_drop_edge_at_pointer(
+            monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
+        )
+    };
     let reserved_dock = edge.is_some_and(|edge|
         floating_edge_requires_clip(monitor, bounds, edge, pointer));
     diagnose::log_lazy(|| format!(
@@ -6219,7 +6212,7 @@ fn finish_floating_drag(hwnd: HWND) {
     let desired_y = y + old_body.top - new_body.top;
     // Keep undocked popups on the mouse's monitor too: there is no longer a
     // special cross-seam placement path.
-    let (x, y) = if !snap_enabled && edge.is_none() {
+    let (x, y) = if explicit_desktop && edge.is_none() {
         floating_clamp_free_visible_position(
             bounds, new_w, new_h, new_body, desired_x, desired_y,
         )
@@ -6452,8 +6445,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         bounds.top + (bounds.bottom - bounds.top - window_height) / 2
     } else { y };
     let free_desktop = lock_state().as_ref().is_some_and(|s|
-        !desktop_snap_allowed(s.display_position, s.desktop_snap)
-            && edge.is_none()
+        s.display_position == DisplayPosition::Desktop && edge.is_none()
     );
     let (x, y) = if free_desktop {
         floating_clamp_free_visible_position(
@@ -9251,31 +9243,6 @@ unsafe extern "system" fn wnd_proc(
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
-        _ if msg == style_window::WM_STYLE_DESKTOP_SNAP_CHANGE => {
-            let enabled = wparam.0 != 0;
-            let changed = {
-                let mut state = lock_state();
-                match state.as_mut() {
-                    Some(s) if s.display_position == DisplayPosition::Desktop
-                        && s.desktop_snap != enabled => {
-                        s.desktop_snap = enabled;
-                        true
-                    }
-                    _ => false,
-                }
-            };
-            if changed {
-                if let Some((_hwnd, origin)) = undock_floating_widget_if_snap_disabled() {
-                    // Publish the new full canvas and unclipped window location
-                    // together. Do not briefly expose the old collapsed tab.
-                    let _placement_guard = FloatingInitialPlacementGuard::begin();
-                    render_layered_at(Some(origin));
-                }
-                save_state_settings();
-                style_window::sync(style_settings_snapshot());
-            }
-            LRESULT(0)
-        }
         _ if msg == style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE => {
             let enabled = wparam.0 != 0;
             let changed = {
@@ -9999,7 +9966,6 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
             desktop_direction: if state.desktop_direction == DesktopDirection::Vertical {
                 "vertical"
             } else { "horizontal" }.to_string(),
-            desktop_snap: state.desktop_snap,
             desktop_auto_collapse: state.desktop_auto_collapse,
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
             light: EditableThemeStyle::from_theme_style(&state.styles.light),
@@ -10123,7 +10089,6 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         s.desktop_direction = if settings.appearance.desktop_direction == "vertical" {
             DesktopDirection::Vertical
         } else { DesktopDirection::Horizontal };
-        s.desktop_snap = settings.appearance.desktop_snap;
         s.desktop_auto_collapse = settings.appearance.desktop_auto_collapse;
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
@@ -10143,7 +10108,6 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     };
 
     set_startup_enabled(startup_enabled);
-    let _ = undock_floating_widget_if_snap_disabled();
     save_state_settings();
     unsafe {
         SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, poll_interval_ms, None);
