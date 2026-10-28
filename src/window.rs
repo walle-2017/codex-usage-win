@@ -13202,75 +13202,56 @@ mod tests {
     }
 
     #[test]
-    fn desktop_docking_toggle_does_not_change_taskbar_fallback_behavior() {
-        assert!(desktop_snap_allowed(DisplayPosition::Desktop, true));
-        assert!(!desktop_snap_allowed(DisplayPosition::Desktop, false));
-        assert!(desktop_snap_allowed(DisplayPosition::Taskbar, false));
-        let mut fallback = SettingsFile {
-            display_position: DisplayPosition::Taskbar,
-            desktop_snap: false,
-            floating_edge: Some("bottom".into()),
-            ..Default::default()
-        };
-        let fallback_json = serde_json::to_string(&fallback).unwrap();
-        let restored_fallback: SettingsFile =
-            serde_json::from_str(&fallback_json).unwrap();
-        assert_eq!(
-            normalize_settings(restored_fallback).floating_edge.as_deref(),
-            Some("bottom"),
-        );
-        fallback.display_position = DisplayPosition::Desktop;
-        assert!(normalize_settings(fallback).floating_edge.is_none(),
-            "desktop auto-docking off must not restore an offscreen collapsed tab");
+    fn explicit_desktop_only_docks_on_actual_visible_contact() {
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            let (w, h, body) = floating_canvas_geometry(body_width, body_height, None);
+            let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+            let (left, right) = (body.left.min(grip.left), body.right.max(grip.right));
+            let (top, bottom) = (body.top.min(grip.top), body.bottom.max(grip.bottom));
+            let inside_x = bounds.left + 350;
+            let inside_y = bounds.top + 250;
+            let pointer = POINT { x: bounds.left + 450, y: bounds.top + 300 };
+            let drop_edge = |requested_x, requested_y| {
+                let (x, y) = floating_clamp_free_visible_position(
+                    bounds, w, h, body, requested_x, requested_y,
+                );
+                floating_desktop_contact_edge(bounds, w, h, body, x, y, pointer)
+            };
+            assert_eq!(drop_edge(inside_x, inside_y), None);
+            for gap in [1, 5, 12, 23] {
+                assert_eq!(drop_edge(bounds.left + gap - left, inside_y), None);
+                assert_eq!(drop_edge(bounds.right - gap - right, inside_y), None);
+                assert_eq!(drop_edge(inside_x, bounds.top + gap - top), None);
+                assert_eq!(drop_edge(inside_x, bounds.bottom - gap - bottom), None);
+            }
+            assert_eq!(drop_edge(bounds.left - left, inside_y), Some(FloatingEdge::Left));
+            assert_eq!(drop_edge(bounds.right - right, inside_y), Some(FloatingEdge::Right));
+            assert_eq!(drop_edge(inside_x, bounds.top - top), Some(FloatingEdge::Top));
+            assert_eq!(drop_edge(inside_x, bounds.bottom - bottom), Some(FloatingEdge::Bottom));
+            // A genuinely overhanging drop is corrected to the boundary.
+            assert_eq!(drop_edge(bounds.left - left - 50, inside_y), Some(FloatingEdge::Left));
+        }
     }
 
     #[test]
-    fn desktop_docking_switch_preserves_legacy_behavior_and_clamps_undocked_drops() {
+    fn taskbar_fallback_retains_legacy_proximity_and_ignores_retired_setting() {
         let monitor = RECT { left: -1920, top: -120, right: 0, bottom: 960 };
         let work = RECT { left: -1920, top: -120, right: 0, bottom: 912 };
         let near_edge = RECT { left: -1908, top: 120, right: -1608, bottom: 220 };
         let pointer = POINT { x: -1899, y: 159 };
         assert_eq!(
-            desktop_drop_edge_with_snap(true, floating_drop_edge_at_pointer(
-                monitor, work, near_edge, pointer, 24, [true; 4],
-            )),
+            floating_drop_edge_at_pointer(monitor, work, near_edge, pointer, 24, [true; 4]),
             Some(FloatingEdge::Left),
-            "the default-on setting must preserve automatic docking",
         );
-        assert_eq!(
-            desktop_drop_edge_with_snap(false, floating_drop_edge_at_pointer(
-                monitor, work, near_edge, pointer, 24, [true; 4],
-            )),
-            None, "disabling docking must not snap even next to an edge",
-        );
-        // Legacy full-canvas clamping is retained for docked/fallback mode.
-        // Free Desktop positioning instead clamps only the visible geometry.
-        for (x, y, w, h) in [
-            (-2000, 70, 320, 130),
-            (-1660, -280, 320, 130),
-            (-310, 880, 320, 130),
-            (80, 50, 320, 130),
-        ] {
-            let (left, top) = floating_clamp_position(work, w, h, x, y);
-            assert!(left >= work.left && left + w <= work.right);
-            assert!(top >= work.top && top + h <= work.bottom);
-        }
-        let json: SettingsFile = serde_json::from_str("{}").unwrap();
-        assert!(json.desktop_snap, "legacy settings must keep docking enabled");
-        let mut json = json;
-        json.display_position = DisplayPosition::Desktop;
-        json.desktop_snap = false;
-        json.floating_edge = Some("right".into());
-        let restored = normalize_settings(
-            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap(),
-        );
-        assert!(!restored.desktop_snap);
-        assert_eq!(restored.floating_edge, None,
-            "a saved disabled-docking widget must not start collapsed/offscreen");
+        let mut old = serde_json::to_value(SettingsFile::default()).unwrap();
+        old["desktop_snap"] = false.into();
+        let restored: SettingsFile = serde_json::from_value(old).unwrap();
+        assert!(!serde_json::to_string(&restored).unwrap().contains("desktop_snap"));
     }
 
     #[test]
-    fn desktop_snap_off_can_put_visible_body_and_grip_flush_against_all_edges() {
+    fn free_desktop_can_put_visible_body_and_grip_flush_against_all_edges() {
         // The panel's halo gutter is transparent and must not become a
         // permanent gap. Keep both body and drag tab inside the usable area,
         // including a secondary monitor with negative coordinates.
