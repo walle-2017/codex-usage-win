@@ -11228,7 +11228,7 @@ mod tests {
                         h, show_session, show_weekly, true,
                     );
                     let a = a.or(b).unwrap() - row_height / 2;
-                    let b = b.or(Some(a + row_height / 2)).unwrap() + row_height / 2;
+                    let b = b.unwrap_or(a + row_height / 2) + row_height / 2;
                     (a, b)
                 } else {
                     let (a, b) = vertical_row_tops_for_layout(
@@ -12328,7 +12328,7 @@ mod tests {
             let y = (grip.top + grip.bottom) / 2;
             let pixel = pixels[(y * w + x) as usize];
             assert!(pixel >> 24 > 0);
-            assert!(pixels.iter().any(|px| *px == 0x01000000),
+            assert!(pixels.contains(&0x01000000),
                 "transparent tab retains an imperceptible premultiplied mouse-hit surface");
             assert_eq!(pixels[0], 0,
                 "outside the actual drag block remains transparent");
