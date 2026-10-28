@@ -107,6 +107,8 @@ struct AppState {
     floating_x: i32,
     floating_y: i32,
     floating_edge: Option<FloatingEdge>,
+    // The undocked tab is below the body when there is not enough room above.
+    floating_free_grip_below: bool,
     // Whether an edge must be clipped within this monitor: either Explorer
     // reserves it for a taskbar, or another display shares the physical edge.
     // Both dock normally with in-place sliding, never bleeding to the next screen.
@@ -569,6 +571,8 @@ struct SettingsFile {
     floating_y: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     floating_edge: Option<String>,
+    #[serde(default)]
+    floating_free_grip_below: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_monitor: Option<String>,
     #[serde(default = "default_poll_interval")]
@@ -606,6 +610,7 @@ impl Default for SettingsFile {
             floating_x: None,
             floating_y: None,
             floating_edge: None,
+            floating_free_grip_below: false,
             taskbar_monitor: None,
             poll_interval_ms: default_poll_interval(),
             language: None,
@@ -778,6 +783,7 @@ fn save_state_settings() {
             floating_x: Some(s.floating_x),
             floating_y: Some(s.floating_y),
             floating_edge: s.floating_edge.map(|e| e.name().to_string()),
+            floating_free_grip_below: s.floating_free_grip_below,
             taskbar_monitor: s.taskbar_monitor.clone(),
             poll_interval_ms: s.poll_interval_ms,
             language: s
@@ -2433,6 +2439,7 @@ pub fn run() {
                 floating_x: settings.floating_x.unwrap_or(i32::MIN),
                 floating_y: settings.floating_y.unwrap_or(i32::MIN),
                 floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
+                floating_free_grip_below: settings.floating_free_grip_below,
                 floating_reserved_dock: false,
                 floating_reserved_drag_reveal: 100,
                 floating_drag_glow_detached: false,
@@ -2873,10 +2880,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             AlphaFormat: 1,
         };
         if floating {
-            let (edge, hidden, hovered, grip_alpha, reserved, reveal, dragging, drag_reveal) = {
+            let (edge, free_below, hidden, hovered, grip_alpha, reserved, reveal, dragging, drag_reveal) = {
                 let state = lock_state();
                 state.as_ref().map(|s| (
                     s.floating_edge,
+                    s.floating_free_grip_below,
                     s.floating_collapsed && s.floating_reveal == 0,
                     s.drag_handle_hovered,
                     if s.dragging || !floating_grip_uses_hover_fade(s) { 100 }
@@ -2885,7 +2893,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     s.floating_reveal,
                     s.dragging,
                     s.floating_reserved_drag_reveal,
-                )).unwrap_or((None, false, false, 0, false, 100, false, 100))
+                )).unwrap_or((None, false, false, false, 0, false, 100, false, 100))
             };
             // Composite the already rendered taskbar-size panel into a separate
             // transparent desktop canvas. Neither the panel border nor quota
@@ -2895,8 +2903,8 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 state.as_ref().map(floating_canvas_geometry_for_state)
                     .unwrap_or_else(|| floating_canvas_geometry(width, height, edge))
             };
-            let grip = floating_grip_rect(
-                canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+            let grip = floating_layout_grip_rect(
+                canvas_w, canvas_h, edge, free_below,
             );
             let canvas_info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -2945,14 +2953,15 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                         }
                     }
                 }
-                render_floating_handle_bitmap(
-                    canvas, canvas_w, canvas_h, edge, hovered, &style, grip_alpha,
+                render_floating_handle_bitmap_at(
+                    canvas, canvas_w, canvas_h, grip, hovered, &style, grip_alpha,
                 );
                 if hovered && !hidden {
                     // Preserve V24.6's alpha-1 transition probe: light is
                     // visual-only and must never enlarge drag hit targets.
                     paint_floating_hover_hit_probe(
-                        canvas, canvas_w, canvas_h, body, grip, edge,
+                        canvas, canvas_w, canvas_h, body, grip,
+                        if edge.is_none() && free_below { Some(FloatingEdge::Top) } else { edge },
                     );
                 }
                 if reserved {
@@ -4831,21 +4840,19 @@ fn floating_drag_grip_contains_screen_point(
 // popup is repositioned. Recheck where the pointer actually is, rather than
 // clearing an otherwise valid hover until another WM_MOUSEMOVE arrives.
 fn floating_pointer_still_over_free_grip(hwnd: HWND) -> bool {
-    let (canvas_w, canvas_h) = {
+    let grip = {
         let state = lock_state();
         let Some(s) = state.as_ref().filter(|s|
             s.floating_mode && s.hwnd.to_hwnd() == hwnd && s.floating_edge.is_none()
         ) else { return false };
-        floating_canvas_size_for_state(s)
+        floating_state_grip_rect(s)
     };
     let Some(rect) = native_interop::get_window_rect_safe(hwnd) else {
         return false;
     };
     let mut pointer = POINT::default();
     if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
-    floating_drag_grip_contains_screen_point(
-        rect.left, rect.top, canvas_w, canvas_h, None, pointer,
-    )
+    point_in_rect(grip, pointer.x - rect.left, pointer.y - rect.top)
 }
 
 /// Desktop tabs occupy an independent, transparent gutter. The panel dimensions
@@ -4889,6 +4896,37 @@ fn floating_canvas_geometry(
             )
         },
     }
+}
+
+// Switching the free tab to below keeps the canvas size unchanged and
+// shifts only the panel pixels, never the visible panel's screen position.
+fn floating_free_canvas_geometry(
+    body_width: i32, body_height: i32, below: bool,
+) -> (i32, i32, RECT) {
+    let (width, height, mut body) =
+        floating_canvas_geometry(body_width, body_height, None);
+    if below {
+        let shift = sc(FLOAT_EDGE_PEEK);
+        body.top -= shift;
+        body.bottom -= shift;
+    }
+    (width, height, body)
+}
+
+fn floating_layout_grip_rect(
+    width: i32, height: i32, edge: Option<FloatingEdge>, free_below: bool,
+) -> RECT {
+    floating_grip_rect(width, height,
+        if edge.is_none() && free_below { Some(FloatingEdge::Top) } else { edge },
+        sc(FLOAT_EDGE_PEEK))
+}
+
+// This is a layout choice, NOT docking. Prefer the top tab when it fits;
+// otherwise use the empty space below. Preserve the body and tab on-screen.
+fn floating_choose_free_grip_below(bounds: RECT, body_top: i32, body_height: i32) -> bool {
+    let above = body_top.saturating_sub(bounds.top);
+    let below = bounds.bottom.saturating_sub(body_top.saturating_add(body_height));
+    above < sc(FLOAT_EDGE_PEEK) && below >= sc(FLOAT_EDGE_PEEK)
 }
 
 /// During dragging, the existing edge orientation is preserved for a stable
@@ -4985,7 +5023,9 @@ fn floating_slide_layered_bitmap(
 
 fn floating_state_grip_rect(s: &AppState) -> RECT {
     let (w, h, _) = floating_canvas_geometry_for_state(s);
-    let grip = floating_grip_rect(w, h, s.floating_edge, sc(FLOAT_EDGE_PEEK));
+    let grip = floating_layout_grip_rect(
+        w, h, s.floating_edge, s.floating_free_grip_below,
+    );
     if s.floating_reserved_dock {
         if let Some(edge) = s.floating_edge {
             let reveal = if s.dragging { s.floating_reserved_drag_reveal }
@@ -4997,10 +5037,16 @@ fn floating_state_grip_rect(s: &AppState) -> RECT {
 }
 
 fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
-    floating_drag_canvas_geometry(
-        total_widget_width_for_state(s), widget_height_for_state(s),
-        s.floating_edge, s.dragging && s.floating_drag_glow_detached,
-    )
+    let body_w = total_widget_width_for_state(s);
+    let body_h = widget_height_for_state(s);
+    if s.floating_edge.is_none() {
+        floating_free_canvas_geometry(body_w, body_h, s.floating_free_grip_below)
+    } else {
+        floating_drag_canvas_geometry(
+            body_w, body_h, s.floating_edge,
+            s.dragging && s.floating_drag_glow_detached,
+        )
+    }
 }
 
 /// Check the body against the current docking boundary. At a taskbar edge
@@ -5249,11 +5295,12 @@ fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32
 // mouse release. Its actual tab can therefore be BELOW or BESIDE the panel,
 // whereas the future free canvas would put the tab ABOVE it. Visibility and
 // contact decisions must use that current orientation, not the future one.
+#[allow(clippy::too_many_arguments)]
 fn floating_clamp_drag_visible_position(
     bounds: RECT, width: i32, height: i32, body: RECT,
-    edge: Option<FloatingEdge>, x: i32, y: i32,
+    edge: Option<FloatingEdge>, free_below: bool, x: i32, y: i32,
 ) -> (i32, i32) {
-    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+    let grip = floating_layout_grip_rect(width, height, edge, free_below);
     let visible_left = body.left.min(grip.left);
     let visible_top = body.top.min(grip.top);
     let visible_right = body.right.max(grip.right);
@@ -5268,17 +5315,18 @@ fn floating_clamp_drag_visible_position(
 fn floating_clamp_free_visible_position(
     bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
 ) -> (i32, i32) {
-    floating_clamp_drag_visible_position(bounds, width, height, body, None, x, y)
+    floating_clamp_drag_visible_position(bounds, width, height, body, None, false, x, y)
 }
 
 // Explicit Desktop docking requires contact between the body/drag tab that
 // were ACTUALLY displayed at mouse release and the work-area boundary.
 // Never substitute the future free-floating canvas before this check.
+#[allow(clippy::too_many_arguments)]
 fn floating_desktop_contact_edge(
     bounds: RECT, width: i32, height: i32, body: RECT,
-    edge: Option<FloatingEdge>, origin: POINT, pointer: POINT,
+    edge: Option<FloatingEdge>, free_below: bool, origin: POINT, pointer: POINT,
 ) -> Option<FloatingEdge> {
-    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+    let grip = floating_layout_grip_rect(width, height, edge, free_below);
     let left = origin.x + body.left.min(grip.left);
     let top = origin.y + body.top.min(grip.top);
     let right = origin.x + body.right.max(grip.right);
@@ -6083,7 +6131,7 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
     if dpi_changed {
         CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
     }
-    let (anchor_x, anchor_y, edge, body_w, body_h, unlocked, reserved, drag_reveal) = {
+    let (anchor_x, anchor_y, edge, free_below, body_w, body_h, unlocked, reserved, drag_reveal) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else { return };
         if !s.floating_mode || !s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
@@ -6100,13 +6148,17 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         }
         (
             s.floating_drag_anchor_x, s.floating_drag_anchor_y, s.floating_edge,
+            s.floating_free_grip_below,
             total_widget_width_for_state(s), widget_height_for_state(s),
             s.floating_drag_glow_detached, s.floating_reserved_dock,
             s.floating_reserved_drag_reveal,
         )
     };
-    let (old_w, old_h, old_body) =
-        floating_drag_canvas_geometry(body_w, body_h, edge, unlocked);
+    let (old_w, old_h, old_body) = if edge.is_none() {
+        floating_free_canvas_geometry(body_w, body_h, free_below)
+    } else {
+        floating_drag_canvas_geometry(body_w, body_h, edge, unlocked)
+    };
     // A clipped grip (taskbar or monitor seam) has a virtual pixel offset
     // inside a stationary HWND. On the first drag frame, transfer that to the HWND origin
     // and rebase the mouse anchor atomically, without moving the actual grip
