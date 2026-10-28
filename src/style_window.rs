@@ -1,8 +1,7 @@
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use std::io::Write;
 use std::{fs, path::PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -10,7 +9,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW, LoadLibraryW};
-use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST,
@@ -403,25 +402,6 @@ impl DesktopSubmenuAnimation {
     }
 }
 
-// Diagnostics are opt-in: set CODEX_USAGE_ANIMATION_METRICS=1 before launch.
-// A short CSV-like summary is appended only after the menu finishes animating.
-struct SubmenuFrameMetrics {
-    first: Instant,
-    last: Instant,
-    frames: usize,
-    intervals_ms: Vec<f64>,
-    total_paint_ms: f64,
-    max_paint_ms: f64,
-    cached_frames: usize,
-    gallery_cached_frames: usize,
-    uncached_full_sources: Vec<&'static str>,
-    uncached_full_frames: usize,
-    uncached_card_frames: usize,
-    coalesced_position_cached_frames: usize,
-    cached_paint_ms: f64,
-    uncached_paint_ms: f64,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPaintCause {
     Unknown,
@@ -435,56 +415,13 @@ enum SettingsPaintCause {
     MouseHover,
 }
 
-impl SettingsPaintCause {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::AnimationTimer => "animation_timer",
-            Self::PositionSync => "position_sync",
-            Self::FullSync => "full_sync",
-            Self::GalleryRefresh => "gallery_refresh",
-            Self::MouseCaptureChanged => "capture_changed",
-            Self::MouseReleased => "mouse_release",
-            Self::MousePressed => "mouse_press",
-            Self::MouseHover => "mouse_hover",
-        }
-    }
-}
-
 fn mark_settings_paint_cause(cause: SettingsPaintCause) {
     SETTINGS_PAINT_CAUSE.with(|cell| cell.set(cause));
 }
 
-#[derive(Default, Clone)]
-struct SubmenuSchedulerMetrics {
-    multimedia: bool,
-    ticks: usize,
-    skipped_ticks: usize,
-    last_tick: Option<Instant>,
-    tick_intervals_ms: Vec<f64>,
-    callback_queue_ms: Vec<f64>,
-}
-
-impl SubmenuSchedulerMetrics {
-    fn record(&mut self, now: Instant, queue_delay_ms: Option<f64>, drawn: bool) {
-        if let Some(last) = self.last_tick {
-            self.tick_intervals_ms.push(now.duration_since(last).as_secs_f64() * 1000.0);
-        }
-        self.last_tick = Some(now);
-        self.ticks += 1;
-        if !drawn { self.skipped_ticks += 1; }
-        if let Some(delay) = queue_delay_ms { self.callback_queue_ms.push(delay); }
-    }
-}
-
 static SUBMENU_MEDIA_TICK_QUEUED: AtomicBool = AtomicBool::new(false);
-static SUBMENU_MEDIA_TICK_POSTED_MS: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
-    static SUBMENU_FRAME_METRICS: RefCell<Option<SubmenuFrameMetrics>> =
-        const { RefCell::new(None) };
-    static SUBMENU_SCHEDULER_METRICS: RefCell<SubmenuSchedulerMetrics> =
-        RefCell::new(SubmenuSchedulerMetrics::default());
     static SUBMENU_MULTIMEDIA_TIMER_ID: Cell<u32> = const { Cell::new(0) };
     static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
     static SETTINGS_PAINT_CAUSE: Cell<SettingsPaintCause> =
@@ -513,7 +450,6 @@ unsafe extern "system" fn submenu_multimedia_timer_callback(
     if SUBMENU_MEDIA_TICK_QUEUED.swap(true, Ordering::AcqRel) {
         return;
     }
-    SUBMENU_MEDIA_TICK_POSTED_MS.store(GetTickCount64(), Ordering::Release);
     if PostMessageW(
         HWND(user as *mut _), WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK, WPARAM(0), LPARAM(0),
     ).is_err() {
@@ -578,14 +514,7 @@ fn end_submenu_frame_clock(hwnd: HWND) {
     end_precise_animation_timer();
 }
 
-fn submenu_scheduler_mean(values: &[f64]) -> f64 {
-    if values.is_empty() { return 0.0; }
-    values.iter().sum::<f64>() / values.len() as f64
-}
-
-unsafe fn drive_submenu_frame_tick(
-    hwnd: HWND, multimedia: bool, queue_delay_ms: Option<f64>,
-) {
+unsafe fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
     let now = Instant::now();
     let (active, rendered) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -599,9 +528,6 @@ unsafe fn drive_submenu_frame_tick(
             }
         } else { (false, false) }
     };
-    SUBMENU_SCHEDULER_METRICS.with(|slot| {
-        slot.borrow_mut().record(now, queue_delay_ms, rendered);
-    });
     if !active {
         end_submenu_frame_clock(hwnd);
     }
@@ -609,102 +535,6 @@ unsafe fn drive_submenu_frame_tick(
         mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
         let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
     }
-}
-
-fn submenu_p95(values: &[f64]) -> f64 {
-    if values.is_empty() { return 0.0; }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    sorted[((sorted.len() * 95).div_ceil(100)).saturating_sub(1)]
-}
-
-fn record_submenu_frame(
-    paint_begin: Instant, paint_end: Instant, animating: bool, cached: bool, card_only: bool,
-    cause: SettingsPaintCause,
-) {
-    if std::env::var_os("CODEX_USAGE_ANIMATION_METRICS").is_none() {
-        return;
-    }
-    SUBMENU_FRAME_METRICS.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() && animating {
-            *slot = Some(SubmenuFrameMetrics {
-                first: paint_end, last: paint_end, frames: 0,
-                intervals_ms: Vec::with_capacity(32),
-                total_paint_ms: 0.0, max_paint_ms: 0.0, cached_frames: 0,
-                gallery_cached_frames: 0, uncached_full_sources: Vec::new(),
-                uncached_full_frames: 0, uncached_card_frames: 0,
-                coalesced_position_cached_frames: 0,
-                cached_paint_ms: 0.0, uncached_paint_ms: 0.0,
-            });
-        }
-        let Some(metric) = slot.as_mut() else { return; };
-        if metric.frames > 0 {
-            metric.intervals_ms.push(paint_end.duration_since(metric.last).as_secs_f64() * 1000.0);
-        }
-        metric.frames += 1;
-        metric.last = paint_end;
-        let draw_ms = paint_end.duration_since(paint_begin).as_secs_f64() * 1000.0;
-        if cached {
-            metric.cached_frames += 1;
-            if !card_only && cause == SettingsPaintCause::PositionSync {
-                metric.coalesced_position_cached_frames += 1;
-            }
-            if cause == SettingsPaintCause::GalleryRefresh {
-                metric.gallery_cached_frames += 1;
-            }
-            metric.cached_paint_ms += draw_ms;
-        } else {
-            metric.uncached_paint_ms += draw_ms;
-            if card_only {
-                metric.uncached_card_frames += 1;
-            } else {
-                metric.uncached_full_frames += 1;
-                metric.uncached_full_sources.push(cause.as_str());
-            }
-        }
-        metric.total_paint_ms += draw_ms;
-        metric.max_paint_ms = metric.max_paint_ms.max(draw_ms);
-        if !animating {
-            let elapsed_ms = metric.last.duration_since(metric.first).as_secs_f64() * 1000.0;
-            let fps = if elapsed_ms > 0.0 {
-                (metric.frames.saturating_sub(1) as f64) * 1000.0 / elapsed_ms
-            } else { 0.0 };
-            let mean_paint = metric.total_paint_ms / metric.frames as f64;
-            let p95 = submenu_p95(&metric.intervals_ms);
-            let gaps = metric.intervals_ms.iter().filter(|v| **v > 25.0).count();
-            let uncached = metric.uncached_full_frames + metric.uncached_card_frames;
-            let mean_cached = if metric.cached_frames > 0 {
-                metric.cached_paint_ms / metric.cached_frames as f64
-            } else { 0.0 };
-            let mean_uncached = if uncached > 0 {
-                metric.uncached_paint_ms / uncached as f64
-            } else { 0.0 };
-            let schedule = SUBMENU_SCHEDULER_METRICS.with(|slot| slot.borrow().clone());
-            let tick_p95 = submenu_p95(&schedule.tick_intervals_ms);
-            let tick_mean = submenu_scheduler_mean(&schedule.tick_intervals_ms);
-            let queue_p95 = submenu_p95(&schedule.callback_queue_ms);
-            let queue_mean = submenu_scheduler_mean(&schedule.callback_queue_ms);
-            let late_ticks = schedule.tick_intervals_ms.iter()
-                .filter(|interval| **interval > 25.0).count();
-            let line = format!(
-                "frames={},fps={:.1},p95_frame_ms={:.1},mean_paint_ms={:.1},max_paint_ms={:.1},gaps_over_25ms={},cached_frames={},uncached_full_frames={},uncached_card_frames={},mean_cached_ms={:.1},mean_uncached_ms={:.1},gallery_cached_frames={},coalesced_position_cached_frames={},full_sources={},scheduler={},ticks={},skipped_ticks={},mean_tick_ms={:.1},p95_tick_ms={:.1},late_ticks={},mean_queue_ms={:.1},p95_queue_ms={:.1}\n",
-                metric.frames, fps, p95, mean_paint, metric.max_paint_ms, gaps,
-                metric.cached_frames, metric.uncached_full_frames,
-                metric.uncached_card_frames, mean_cached, mean_uncached,
-                metric.gallery_cached_frames, metric.coalesced_position_cached_frames,
-                metric.uncached_full_sources.join("+"),
-                if schedule.multimedia { "multimedia" } else { "wm_timer" },
-                schedule.ticks, schedule.skipped_ticks, tick_mean, tick_p95,
-                late_ticks, queue_mean, queue_p95,
-            );
-            let path = std::env::temp_dir().join("codex-usage-animation-metrics.log");
-            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-                let _ = file.write_all(line.as_bytes());
-            }
-            *slot = None;
-        }
-    });
 }
 
 /// Logical 96-DPI bounds. The lower foot contains the existing Desktop
@@ -1592,12 +1422,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     }
     if submenu_animated {
         // Retargeting mid-animation reuses the same periodic timer.
-        SUBMENU_SCHEDULER_METRICS.with(|slot| {
-            *slot.borrow_mut() = SubmenuSchedulerMetrics::default();
-        });
         begin_submenu_frame_clock(hwnd);
-        let multimedia = SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0);
-        SUBMENU_SCHEDULER_METRICS.with(|slot| slot.borrow_mut().multimedia = multimedia);
     }
     if card_only {
         mark_settings_paint_cause(SettingsPaintCause::PositionSync);
@@ -6145,11 +5970,9 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK => {
             // Consume the single coalesced worker callback before processing.
-            let posted_at = SUBMENU_MEDIA_TICK_POSTED_MS.load(Ordering::Acquire);
             SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
             if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0) {
-                let elapsed = GetTickCount64().saturating_sub(posted_at) as f64;
-                drive_submenu_frame_tick(hwnd, true, Some(elapsed));
+                drive_submenu_frame_tick(hwnd, true);
             }
             LRESULT(0)
         }
@@ -6157,7 +5980,7 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
                 // Fallback when multimedia timer creation was not available.
                 if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() == 0) {
-                    drive_submenu_frame_tick(hwnd, false, None);
+                    drive_submenu_frame_tick(hwnd, false);
                 }
                 return LRESULT(0);
             }
@@ -7263,7 +7086,6 @@ fn can_reuse_coalesced_position_paint(
 }
 
 unsafe fn paint(hwnd: HWND) {
-    let paint_begin = Instant::now();
     let paint_cause = SETTINGS_PAINT_CAUSE.with(|cell| cell.replace(SettingsPaintCause::Unknown));
     let gallery_refresh = SETTINGS_GALLERY_REFRESH.with(|cell| cell.replace(false));
     let mut ps = PAINTSTRUCT::default();
@@ -7409,9 +7231,6 @@ unsafe fn paint(hwnd: HWND) {
             dirty.right - dirty.left, dirty.bottom - dirty.top,
             hdc, dirty.left, dirty.top, SRCCOPY);
         let _ = EndPaint(hwnd, &ps);
-        record_submenu_frame(
-            paint_begin, Instant::now(), false, true, false, paint_cause,
-        );
         return;
     }
 
@@ -7441,10 +7260,6 @@ unsafe fn paint(hwnd: HWND) {
         if desktop_submenu_final_frame_pending {
             finish_submenu_terminal_paint(hwnd);
         }
-        record_submenu_frame(
-            paint_begin, Instant::now(), desktop_submenu_active, true,
-            submenu_only, paint_cause,
-        );
         return;
     }
 
@@ -7638,7 +7453,6 @@ unsafe fn paint(hwnd: HWND) {
     if desktop_submenu_final_frame_pending {
         finish_submenu_terminal_paint(hwnd);
     }
-    record_submenu_frame(paint_begin, Instant::now(), desktop_submenu_active, false, submenu_only, paint_cause);
     });
 }
 
