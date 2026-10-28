@@ -33,7 +33,7 @@ use crate::native_interop::{
 use crate::poller;
 use crate::popup_menu::{self, PopupItem};
 use crate::settings_model::{
-    default_desktop_auto_collapse, EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
+    default_desktop_auto_collapse, default_desktop_snap, EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
     EDITABLE_SETTINGS_SCHEMA_VERSION,
 };
 use crate::style::{
@@ -98,6 +98,7 @@ struct AppState {
     effective_appearance_preset: AppearancePreset,
     display_position: DisplayPosition,
     desktop_direction: DesktopDirection,
+    desktop_snap: bool,
     desktop_auto_collapse: bool,
     hidden_for_taskbar_space: bool,
     taskbar_space_warning_shown: bool,
@@ -581,6 +582,8 @@ struct SettingsFile {
     display_position: DisplayPosition,
     #[serde(default)]
     desktop_direction: DesktopDirection,
+    #[serde(default = "default_desktop_snap")]
+    desktop_snap: bool,
     #[serde(default = "default_desktop_auto_collapse")]
     desktop_auto_collapse: bool,
     #[serde(default)]
@@ -612,6 +615,7 @@ impl Default for SettingsFile {
             appearance_preset: AppearancePreset::Default,
             display_position: DisplayPosition::Taskbar,
             desktop_direction: DesktopDirection::Horizontal,
+            desktop_snap: default_desktop_snap(),
             desktop_auto_collapse: default_desktop_auto_collapse(),
             theme_mode: ThemeMode::System,
             styles: StyleSettings::default(),
@@ -738,7 +742,9 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     ) {
         settings.poll_interval_ms = default_poll_interval();
     }
-    if settings.floating_edge.as_deref().is_some_and(|side| FloatingEdge::parse(side).is_none()) {
+    if !settings.desktop_snap || settings.floating_edge.as_deref()
+        .is_some_and(|side| FloatingEdge::parse(side).is_none())
+    {
         settings.floating_edge = None;
     }
     // The current settings UI supports only these two explicit language codes.
@@ -784,6 +790,7 @@ fn save_state_settings() {
             appearance_preset: s.appearance_preset,
             display_position: s.display_position,
             desktop_direction: s.desktop_direction,
+            desktop_snap: s.desktop_snap,
             desktop_auto_collapse: s.desktop_auto_collapse,
             theme_mode: s.theme_mode,
             styles: s.styles.clone(),
@@ -2418,6 +2425,7 @@ pub fn run() {
                 appearance_preset: settings.appearance_preset,
                 display_position: settings.display_position,
                 desktop_direction: settings.desktop_direction,
+                desktop_snap: settings.desktop_snap,
                 desktop_auto_collapse: settings.desktop_auto_collapse,
                 effective_appearance_preset: match settings.appearance_preset {
                     AppearancePreset::Minimal => AppearancePreset::Minimal,
@@ -5526,6 +5534,11 @@ fn initial_floating_visibility(
 // left/right-docked tabs. Reset must calculate the *destination* canvas
 // BEFORE applying the hidden tab's slide distance; using the source canvas
 // pushes the free tab partly offscreen and leaves side tabs below the edge.
+fn floating_canvas_size_for_free_body(body_width: i32, body_height: i32) -> (i32, i32) {
+    let (w, h, _) = floating_canvas_geometry(body_width, body_height, None);
+    (w, h)
+}
+
 fn floating_reset_top_canvas_size(body_width: i32, body_height: i32) -> (i32, i32) {
     let (width, height, _) = floating_canvas_geometry(
         body_width, body_height, Some(FloatingEdge::Top),
@@ -5551,29 +5564,35 @@ fn reset_floating_widget_position() -> bool {
                         x: r.left.saturating_add(width / 2),
                         y: r.top.saturating_add(height / 2),
                     }))?;
-            let (reset_width, reset_height) = floating_reset_top_canvas_size(
-                total_widget_width_for_state(s), widget_height_for_state(s),
-            );
+            let body_w = total_widget_width_for_state(s);
+            let body_h = widget_height_for_state(s);
+            let (reset_width, reset_height) = if s.desktop_snap {
+                floating_reset_top_canvas_size(body_w, body_h)
+            } else {
+                floating_canvas_size_for_free_body(body_w, body_h)
+            };
             Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height,
-                s.display_position, s.desktop_auto_collapse))
+                s.display_position, s.desktop_snap, s.desktop_auto_collapse))
         })
     };
-    let Some((hwnd, anchor, width, height, position, auto_collapse)) = snapshot
+    let Some((hwnd, anchor, width, height, position, snap, auto_collapse)) = snapshot
     else { return false; };
     let Some((monitor, bounds)) = floating_monitor_geometry(anchor)
     else { return false; };
     let (x, y) = floating_reset_top_origin(bounds, width, height);
-    let edge = FloatingEdge::Top;
-    let (collapsed, reveal) = initial_floating_visibility(Some(edge), position, auto_collapse);
+    let edge = snap.then_some(FloatingEdge::Top);
+    let (collapsed, reveal) = initial_floating_visibility(edge, position, auto_collapse);
     let pointer = POINT {
         x: bounds.left.saturating_add((bounds.right - bounds.left) / 2),
         y: bounds.top.saturating_add(1).min(bounds.bottom.saturating_sub(1)),
     };
-    let reserved = floating_edge_requires_clip(monitor, bounds, edge, pointer);
+    let reserved = edge.is_some_and(|edge|
+        floating_edge_requires_clip(monitor, bounds, edge, pointer));
     let (dx, dy) = if reserved {
         (0, 0)
     } else {
-        floating_slide_offset(width, height, edge, reveal)
+        edge.map(|edge| floating_slide_offset(width, height, edge, reveal))
+            .unwrap_or((0, 0))
     };
     let origin = POINT { x: x.saturating_add(dx), y: y.saturating_add(dy) };
 
@@ -5588,7 +5607,7 @@ fn reset_floating_widget_position() -> bool {
         if !s.floating_mode || s.hwnd.to_hwnd() != hwnd || s.dragging { return false; }
         s.floating_x = x;
         s.floating_y = y;
-        s.floating_edge = Some(edge);
+        s.floating_edge = edge;
         s.floating_reserved_dock = reserved;
         s.floating_drag_glow_detached = false;
         s.floating_reserved_drag_reveal = reveal;
@@ -5601,7 +5620,7 @@ fn reset_floating_widget_position() -> bool {
         s.drag_handle_hovered = false;
         s.floating_grip_hover = false;
         s.floating_grip_alpha = if floating_grip_should_show(
-            Some(edge), floating_auto_collapse_allowed(position, auto_collapse),
+            edge, floating_auto_collapse_allowed(position, auto_collapse),
             false, false,
         ) { 100 } else { 0 };
         s.floating_fade_from = s.floating_grip_alpha;
@@ -5619,7 +5638,7 @@ fn reset_floating_widget_position() -> bool {
     }
     save_state_settings();
     diagnose::log_lazy(|| format!(
-        "desktop position reset to top center at ({x},{y}) monitor=({}, {}, {}, {}) collapsed={collapsed} clipped={reserved}",
+        "desktop position reset to top center at ({x},{y}) monitor=({}, {}, {}, {}) snap={snap} collapsed={collapsed} clipped={reserved}",
         monitor.left, monitor.top, monitor.right, monitor.bottom,
     ));
     true
@@ -6109,12 +6128,13 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
 }
 
 fn finish_floating_drag(hwnd: HWND) {
-    let (x, y, body_w, body_h, old_edge) = {
+    let (x, y, body_w, body_h, old_edge, snap_enabled) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return };
         (s.floating_x, s.floating_y,
-         total_widget_width_for_state(s), widget_height_for_state(s), s.floating_edge)
+         total_widget_width_for_state(s), widget_height_for_state(s),
+         s.floating_edge, s.desktop_snap)
     };
     let (old_w, old_h, old_body) = {
         let state = lock_state();
@@ -6133,9 +6153,11 @@ fn finish_floating_drag(hwnd: HWND) {
     // MonitorFromPoint(pointer) above chooses the target monitor. ALL of its
     // four sides are dockable, including seams connected to another display.
     // This also preserves V24.15's nearest-cursor corner selection.
-    let edge = floating_drop_edge_at_pointer(
-        monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
-    );
+    let edge = if snap_enabled {
+        floating_drop_edge_at_pointer(
+            monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
+        )
+    } else { None };
     let reserved_dock = edge.is_some_and(|edge|
         floating_edge_requires_clip(monitor, bounds, edge, pointer));
     diagnose::log_lazy(|| format!(
@@ -9893,6 +9915,7 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
             desktop_direction: if state.desktop_direction == DesktopDirection::Vertical {
                 "vertical"
             } else { "horizontal" }.to_string(),
+            desktop_snap: state.desktop_snap,
             desktop_auto_collapse: state.desktop_auto_collapse,
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
             light: EditableThemeStyle::from_theme_style(&state.styles.light),
@@ -9918,6 +9941,7 @@ fn default_editable_settings() -> EditableSettings {
             layout: "default".to_string(),
             position: "taskbar".to_string(),
             desktop_direction: "horizontal".to_string(),
+            desktop_snap: default_desktop_snap(),
             desktop_auto_collapse: default_desktop_auto_collapse(),
             dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
             light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
@@ -9936,6 +9960,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             appearance_preset: s.appearance_preset,
             display_position: s.display_position,
             desktop_direction: s.desktop_direction,
+            desktop_snap: s.desktop_snap,
             desktop_auto_collapse: s.desktop_auto_collapse,
             vertical_taskbar_mode: s.vertical_taskbar_mode,
             active_style: s.styles.active(s.is_dark).clone(),
@@ -9949,6 +9974,7 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             appearance_preset: AppearancePreset::Default,
             display_position: DisplayPosition::Taskbar,
             desktop_direction: DesktopDirection::Horizontal,
+            desktop_snap: default_desktop_snap(),
             desktop_auto_collapse: default_desktop_auto_collapse(),
             vertical_taskbar_mode: false,
             active_style: ThemeStyle::dark_default(),
@@ -10016,6 +10042,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         s.desktop_direction = if settings.appearance.desktop_direction == "vertical" {
             DesktopDirection::Vertical
         } else { DesktopDirection::Horizontal };
+        s.desktop_snap = settings.appearance.desktop_snap;
         s.desktop_auto_collapse = settings.appearance.desktop_auto_collapse;
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
