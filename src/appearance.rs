@@ -1,35 +1,34 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::localization::LanguageId;
 use crate::models::UsageSection;
 use crate::native_interop;
 use crate::poller::{self, UsageWindowKind};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppearancePreset {
     #[default]
     Default,
     Minimal,
-    Adaptive,
 }
 
-impl<'de> Deserialize<'de> for AppearancePreset {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        match value.as_str() {
-            "compact" | "default" => Ok(Self::Default),
-            "minimal" => Ok(Self::Minimal),
-            "adaptive" => Ok(Self::Adaptive),
-            _ => Err(serde::de::Error::unknown_variant(
-                &value,
-                &["default", "minimal", "adaptive"],
-            )),
-        }
-    }
+/// User-selected location. Automatic taskbar-space fallback never changes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayPosition {
+    #[default]
+    Taskbar,
+    Desktop,
+}
+
+/// User-selected direction for a desktop popup; taskbar positioning ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesktopDirection {
+    #[default]
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +62,7 @@ pub struct StyleMetrics {
 impl AppearancePreset {
     pub fn metrics(self) -> StyleMetrics {
         match self {
-            Self::Default | Self::Adaptive => StyleMetrics {
+            Self::Default => StyleMetrics {
                 widget_height: 42,
                 panel_radius: 0,
                 outer_padding: 6,
@@ -118,6 +117,19 @@ impl AppearancePreset {
         }
     }
 
+}
+
+/// Matches the runtime hover tooltip wording for both layouts. The
+/// renderer may visually wrap the returned string, but its content must not
+/// lose the reset date/time or the minimal-layout quota prefix.
+pub fn quota_reset_tooltip_text(
+    preset: AppearancePreset, label: &str, full_local_reset: &str,
+) -> String {
+    if preset == AppearancePreset::Minimal {
+        format!("{label} · {full_local_reset}")
+    } else {
+        full_local_reset.to_string()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,29 +188,33 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_templates_match_actual_default_and_minimal_hover_text() {
+        let timestamp = "2026-10-19 20:16";
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Default, "5H", timestamp),
+            "2026-10-19 20:16"
+        );
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Minimal, "5H", timestamp),
+            "5H · 2026-10-19 20:16"
+        );
+        assert_eq!(
+            quota_reset_tooltip_text(AppearancePreset::Minimal, "7D", timestamp),
+            "7D · 2026-10-19 20:16"
+        );
+    }
+
+    #[test]
     fn default_is_the_default_preset() {
         assert_eq!(AppearancePreset::default(), AppearancePreset::Default);
     }
 
     #[test]
-    fn legacy_compact_setting_migrates_to_default() {
-        let preset: AppearancePreset = serde_json::from_str("\"compact\"").unwrap();
-        assert_eq!(preset, AppearancePreset::Default);
-        assert_eq!(serde_json::to_string(&preset).unwrap(), "\"default\"");
-    }
-
-    #[test]
-    fn adaptive_uses_default_metrics_as_its_style_baseline() {
-        assert_eq!(
-            AppearancePreset::Adaptive.metrics(),
-            AppearancePreset::Default.metrics()
-        );
-        assert_eq!(
-            serde_json::to_string(&AppearancePreset::Adaptive).unwrap(),
-            "\"adaptive\""
-        );
-        let parsed: AppearancePreset = serde_json::from_str("\"adaptive\"").unwrap();
-        assert_eq!(parsed, AppearancePreset::Adaptive);
+    fn retired_layout_names_are_not_parsed() {
+        for obsolete in ["adaptive", "compact"] {
+            let value = format!("{obsolete:?}");
+            assert!(serde_json::from_str::<AppearancePreset>(&value).is_err());
+        }
     }
 
     #[test]
@@ -260,7 +276,6 @@ mod tests {
         for language in [
             LanguageId::SimplifiedChinese,
             LanguageId::English,
-            LanguageId::Japanese,
         ] {
             let value = taskbar_value_text(
                 AppearancePreset::Default,

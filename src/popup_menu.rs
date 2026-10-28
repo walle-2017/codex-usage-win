@@ -30,6 +30,10 @@ const CS_DROPSHADOW_VALUE: u32 = 0x0002_0000;
 const DWMWA_WINDOW_CORNER_PREFERENCE_VALUE: i32 = 33;
 const DWMWCP_ROUND_VALUE: u32 = 2;
 
+/// Sent to the menu's command owner after the root popup is actually gone.
+/// The owner may now resume hover-based desktop auto-collapse.
+pub const WM_POPUP_MENU_CLOSED: u32 = crate::native_interop::WM_APP + 142;
+
 static ROOT_POPUP: AtomicIsize = AtomicIsize::new(0);
 static DISMISS_MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
 static DISMISS_KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
@@ -680,6 +684,19 @@ pub fn close() {
     }
 }
 
+/// Is the custom context menu (including its submenu chain) owned by this
+/// exact HWND still open? Read on the UI thread alongside popup WndProc.
+pub fn is_open_for(command_target: HWND) -> bool {
+    if command_target.0.is_null() { return false; }
+    let raw = ROOT_POPUP.load(Ordering::Acquire);
+    if raw == 0 { return false; }
+    unsafe {
+        let root = HWND(raw as *mut _);
+        let state = state_ptr(root);
+        !state.is_null() && (*state).is_root && (*state).command_target == command_target
+    }
+}
+
 unsafe fn paint(hwnd: HWND, state: &PopupState) {
     let mut ps = PAINTSTRUCT::default();
     let screen = BeginPaint(hwnd, &mut ps);
@@ -973,6 +990,13 @@ unsafe extern "system" fn wnd_proc(
                         0,
                         Ordering::AcqRel,
                         Ordering::Relaxed,
+                    );
+                    // Custom popups are nonmodal, so WM_MOUSELEAVE may have
+                    // fired on the owner while this menu was open. Prompt the
+                    // owner to recheck the real cursor *after* dismissal.
+                    let _ = PostMessageW(
+                        state.command_target, WM_POPUP_MENU_CLOSED,
+                        WPARAM(0), LPARAM(0),
                     );
                 }
             }

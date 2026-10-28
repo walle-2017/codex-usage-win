@@ -22,6 +22,7 @@ fn main() {
         println!("cargo:rustc-link-lib=CoreMessaging");
         println!("cargo:rustc-link-lib=runtimeobject");
         println!("cargo:rustc-link-lib=d2d1");
+        println!("cargo:rustc-link-lib=msimg32");
         println!("cargo:rustc-link-lib=dwrite");
         println!("cargo:rustc-link-lib=windowscodecs");
         println!("cargo:rustc-link-lib=ole32");

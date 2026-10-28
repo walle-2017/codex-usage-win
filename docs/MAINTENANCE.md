@@ -9,7 +9,7 @@ This document records the maintained product constraints for **Codex Usage Win**
 - Product name: `Codex Usage Win`
 - Standalone executable: `codex-usage-win.exe`
 - Runtime scope: Codex-only
-- Settings compatibility directory: `%APPDATA%\CodexUsage`
+- Settings location: `%APPDATA%\CodexUsage\settings.json`
 
 ## Security constraints
 
@@ -38,11 +38,13 @@ Store packages are built with:
 
 Store builds must not initiate GitHub executable self-updates. Package updates are managed by Microsoft Store.
 
-## Compatibility
+## Settings schema
 
-v1.0.3 intentionally keeps the legacy product name, icon, and `codex-usage.exe` filename, while its rewritten release uses the current repository URL and supports the manual-update migration notice.
-
-v1.0.4 is the renamed Codex Usage Win baseline with the new icon and complete current functionality.
+On startup, the current schema is the sole source of truth. Keep valid matching
+fields, remove unknown fields recursively, and fill missing or invalid values
+from defaults. Malformed JSON is backed up before recovery. Do not introduce
+per-version migration aliases, old application directories, or obsolete CLI
+argument handling.
 
 ## UI invariants
 
@@ -53,6 +55,14 @@ An open Explorer Start menu must not obscure the embedded widget or the reset-ti
 The unified settings window is a single reusable top-level window. Reopening it from the widget or tray menu must restore/raise the existing HWND after the popup menu closes without discarding pending edits, and must not make it permanently topmost.
 
 Panel and tooltip Composition blur are independently active only when the configured frosted intensity is greater than zero **and** the respective background Alpha is below 255. An opaque background disables blur without resetting the stored intensity. The same predicate must govern rendering and frosted handoff logic.
+
+## Desktop widget invariants
+
+- Explicit **Desktop** mode has no distance-based snap switch or snap radius. A dropped widget docks only when its visible panel **or real drag tab** touches the selected monitor's usable desktop boundary. Taskbar-space fallback is a separate mode and retains its original proximity detection.
+- Calculate visible content bounds from the body and tab together; transparent glow gutters may extend outside the work area. Use the same visible rectangle for edge contact and clamping.
+- On release, detect contact with the **currently displayed** drag-tab orientation before considering the next free-tab layout. An above-body tab reaching the top must dock; a below-body tab reaching the taskbar must dock. Without contact, the free tab may move below the body when overhead space is insufficient, without shifting the visible panel.
+- The desktop monitor is selected by the pointer, including negative virtual-desktop coordinates and mixed-DPI connections. Cross-screen dragging must preserve the cursor anchor. Respect actual Explorer taskbar inner bounds; taskbar-edge collapse clips the rendered pixels rather than drawing over Explorer.
+- The appearance submenu contains only **Direction** and **Collapse**. Its joined inset must remain anchored to the **Desktop** position button. Derive both paint and hit-test rectangles from `desktop_submenu_layout()` and keep the two-row vertical geometry synchronized.
 
 ## Stable multi-taskbar architecture
 
@@ -71,7 +81,7 @@ Panel and tooltip Composition blur are independently active only when the config
 - These are Rust child modules, not runtime feature switches. A split must not change HWND parents, mouse capture or rendering order.
 - Verified application baseline (2026-10-16): `9c00439` (`fix/settings-focus-frosted-alpha`), including module extraction, tooltip foreground ownership, outside-taskbar drag and settings/frosted-alpha fixes. Keep it as the rollback point during final cleanup.
 - The historical pre-extraction cleanup baseline is `0c65724`; module-extraction and subsequent fixes have now passed Windows CI and manual regression.
-- The final-cleanup work is on a separate branch. The baseline has not been merged into `main` yet.
+- Continue desktop and vertical-taskbar refinements on `feature/vertical-taskbar-support`; do not change or merge into `main` without final review.
 
 ## Verification
 

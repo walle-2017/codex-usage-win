@@ -142,8 +142,10 @@ if ($minimalPaintBlock -match 'draw_row\(' -or
     $minimalPaintBlock -match 'draw_usage_bar\(') {
     throw 'Minimal layout must not render quota labels or progress bars.'
 }
-if ($windowProduction -notmatch 'Some\(format!\("\{label\}\s*·\s*\{reset\}"\)\)') {
-    throw 'Minimal hover detail must contain the quota type label and reset time.'
+if ($windowProduction -notmatch 'appearance::quota_reset_tooltip_text\(' -or
+    $appearanceProduction -notmatch 'fn quota_reset_tooltip_text\(' -or
+    $appearanceProduction -notmatch 'format!\("\{label\} · \{full_local_reset\}"\)') {
+    throw 'Minimal hover detail must use the shared quota type label and full reset-time template.'
 }
 if ($windowProduction -notmatch 'TrackMouseEvent' -or
     $windowProduction -notmatch 'WM_MOUSELEAVE_MSG') {
@@ -152,10 +154,12 @@ if ($windowProduction -notmatch 'TrackMouseEvent' -or
 
 if ($windowProduction -notmatch 'drag_handle_hovered' -or
     $windowProduction -notmatch 'draw_drag_handle\(hdc, height, &drag_color, drag_handle_hovered\)' -or
-    $windowProduction -notmatch 'if hovered \{ sc\(3\)' -or
+    $windowProduction -notmatch 'fn drag_hover_outline_color\(' -or
+    $windowProduction -notmatch 'fn draw_drag_hover_outline\(' -or
+    $windowProduction -notmatch 'let dot = sc\(2\)\.max\(1\)' -or
     $windowProduction -notmatch 'default_reset_hit\(' -or
     $windowProduction -notmatch 'usage_hover_hit\(') {
-    throw 'Taskbar drag handle must expose hover styling and default reset labels must expose hover hit testing.'
+    throw 'Taskbar drag handle must use a stable six-dot grip, full-panel theme-aware hover styling, and default reset hover hit testing.'
 }
 if ($windowProduction -notmatch 'local\.wYear' -or
     $windowProduction -notmatch 'local\.wMonth' -or

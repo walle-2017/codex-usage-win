@@ -9,26 +9,6 @@ use crate::style::{
 
 pub const EDITABLE_SETTINGS_SCHEMA_VERSION: u32 = 1;
 
-const LEGACY_ROUNDED_RADIUS: u8 = 8;
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CornerRadiusValue {
-    Radius(u8),
-    LegacyRounded(bool),
-}
-
-fn deserialize_corner_radius<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match CornerRadiusValue::deserialize(deserializer)? {
-        CornerRadiusValue::Radius(value) => value,
-        CornerRadiusValue::LegacyRounded(true) => LEGACY_ROUNDED_RADIUS,
-        CornerRadiusValue::LegacyRounded(false) => 0,
-    })
-}
-
 fn localized<'a>(zh: bool, zh_text: &'a str, en_text: &'a str) -> &'a str {
     if zh { zh_text } else { en_text }
 }
@@ -63,6 +43,9 @@ pub struct EditableUsage {
 pub struct EditableAppearance {
     pub theme: String,
     pub layout: String,
+    pub position: String,
+    pub desktop_direction: String,
+    pub desktop_auto_collapse: bool,
     pub dark: EditableThemeStyle,
     pub light: EditableThemeStyle,
 }
@@ -73,7 +56,7 @@ pub struct EditableThemeStyle {
     pub panel_background: String,
     pub panel_border: String,
     pub frosted_strength: u8,
-    #[serde(default, alias = "panel_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub panel_corner_radius: u8,
     #[serde(default)]
     pub tooltip_background: Option<String>,
@@ -81,7 +64,7 @@ pub struct EditableThemeStyle {
     pub tooltip_border: Option<String>,
     #[serde(default)]
     pub tooltip_frosted_strength: Option<u8>,
-    #[serde(default, alias = "tooltip_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub tooltip_corner_radius: u8,
     pub quota_type: String,
     pub remaining: String,
@@ -91,7 +74,7 @@ pub struct EditableThemeStyle {
     pub progress_medium: String,
     pub progress_low: String,
     pub progress_consumed: String,
-    #[serde(default, alias = "progress_rounded", deserialize_with = "deserialize_corner_radius")]
+    #[serde(default)]
     pub progress_corner_radius: u8,
     pub drag_handle: String,
 }
@@ -198,7 +181,6 @@ impl EditableThemeStyle {
         ThemeStyle {
             panel_background: self.panel_background.clone(),
             panel_border: self.panel_border.clone(),
-            panel_blur_radius: 0,
             panel_frosted_strength: self.frosted_strength,
             panel_corner_radius: self.panel_corner_radius,
             tooltip_background: self.tooltip_background.clone(),
@@ -218,6 +200,8 @@ impl EditableThemeStyle {
         }
     }
 }
+
+pub(crate) fn default_desktop_auto_collapse() -> bool { true }
 
 impl EditableSettings {
     pub fn validate_and_normalize(&self) -> Result<Self, String> {
@@ -261,16 +245,20 @@ impl EditableSettings {
                 "appearance.theme: allowed values are system, dark, light".to_string(),
             );
         }
-        if !matches!(self.appearance.layout.as_str(), "default" | "minimal" | "adaptive") {
-            return Err(
-                "appearance.layout: allowed values are default, minimal, adaptive".to_string(),
-            );
+        if !matches!(self.appearance.layout.as_str(), "default" | "minimal") {
+            return Err("appearance.layout: allowed values are default, minimal".to_string());
+        }
+        if !matches!(self.appearance.position.as_str(), "taskbar" | "desktop") {
+            return Err("appearance.position: allowed values are taskbar, desktop".to_string());
+        }
+        if !matches!(self.appearance.desktop_direction.as_str(), "horizontal" | "vertical") {
+            return Err("appearance.desktop_direction: allowed values are horizontal, vertical".to_string());
         }
 
-        let appearance_preset = match self.appearance.layout.as_str() {
-            "minimal" => AppearancePreset::Minimal,
-            "adaptive" => AppearancePreset::Adaptive,
-            _ => AppearancePreset::Default,
+        let appearance_preset = if self.appearance.layout == "minimal" {
+            AppearancePreset::Minimal
+        } else {
+            AppearancePreset::Default
         };
         let panel_radius_max = panel_corner_radius_max(appearance_preset);
         let tooltip_radius_max = tooltip_corner_radius_max();
@@ -348,6 +336,17 @@ r#"{{
     // {layout_options}
     "layout": {layout},
 
+    // {position_desc}
+    // {position_options}
+    "position": {position},
+    // {direction_desc}
+    // {direction_options}
+    "desktop_direction": {desktop_direction},
+
+    // {auto_collapse_desc}
+    // {bool_options}
+    "desktop_auto_collapse": {desktop_auto_collapse},
+
     // {dark_desc}
     "dark": {{
 {dark_json}
@@ -399,10 +398,18 @@ r#"{{
             layout_desc = localized(zh, "组件排版", "Widget layout"),
             layout_options = localized(
                 zh,
-                "可选：default | minimal | adaptive；adaptive 会按可用宽度自动在默认/极简间切换",
-                "Options: default | minimal | adaptive; adaptive switches between Default and Minimal based on available width",
+                "可选：default | minimal；默认排版会在任务栏空间不足时自动临时切换至极简",
+                "Options: default | minimal; Default temporarily switches to Minimal when taskbar space is insufficient",
             ),
             layout = q(&a.layout),
+            position_desc = localized(zh, "组件显示位置；任务栏空间不足时自动临时切换至桌面", "Display location; temporarily fall back to Desktop if the taskbar is too full"),
+            position_options = localized(zh, "可选：taskbar | desktop", "Options: taskbar | desktop"),
+            position = q(&a.position),
+            direction_desc = localized(zh, "桌面模式的横向或纵向布局；任务栏模式下忽略", "Horizontal/vertical layout for Desktop, ignored in Taskbar mode"),
+            direction_options = localized(zh, "可选：horizontal | vertical", "Options: horizontal | vertical"),
+            desktop_direction = q(&a.desktop_direction),
+            auto_collapse_desc = localized(zh, "桌面贴靠边缘后是否自动收缩；任务栏模式下忽略", "Auto-collapse after Desktop edge docking; ignored in Taskbar mode"),
+            desktop_auto_collapse = a.desktop_auto_collapse,
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
             light_desc = localized(zh, "浅色主题可编辑样式", "Editable light-theme style"),
             dark_json = theme_jsonc(dark, zh, 6, &a.layout),
@@ -445,7 +452,6 @@ fn theme_jsonc(style: &EditableThemeStyle, zh: bool, indent: usize, layout: &str
     let mut lines = Vec::new();
     let preset = match layout {
         "minimal" => AppearancePreset::Minimal,
-        "adaptive" => AppearancePreset::Adaptive,
         _ => AppearancePreset::Default,
     };
     let panel_radius_max = panel_corner_radius_max(preset);
@@ -581,14 +587,17 @@ fn normalize_hex(value: &str, path: &str) -> Result<String, String> {
 
 pub fn parse_jsonc(text: &str) -> Result<EditableSettings, String> {
     let stripped = strip_jsonc_comments(text)?;
-    let parsed: EditableSettings = serde_json::from_str(&stripped).map_err(|error| {
-        format!(
-            "line {}, column {}: {}",
-            error.line(),
-            error.column(),
-            error
-        )
+    // Accept the retired Desktop docking option in old JSONC imports without
+    // carrying it forward into the editable schema or exported settings.
+    // Other unknown properties still fail strict schema validation.
+    let mut value: serde_json::Value = serde_json::from_str(&stripped).map_err(|error| {
+        format!("line {}, column {}: {}", error.line(), error.column(), error)
     })?;
+    if let Some(appearance) = value.get_mut("appearance").and_then(|v| v.as_object_mut()) {
+        appearance.remove("desktop_snap");
+    }
+    let parsed: EditableSettings = serde_json::from_value(value)
+        .map_err(|error| error.to_string())?;
     parsed.validate_and_normalize()
 }
 
@@ -686,6 +695,9 @@ mod tests {
             appearance: EditableAppearance {
                 theme: "system".into(),
                 layout: "default".into(),
+                position: "taskbar".into(),
+                desktop_direction: "horizontal".into(),
+                desktop_auto_collapse: true,
                 dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                 light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
             },
@@ -704,6 +716,21 @@ mod tests {
 }"#)
         .unwrap();
         assert!(stripped.contains("https://example.com//x"));
+    }
+
+
+    #[test]
+    fn retired_desktop_snap_option_is_accepted_only_on_input() {
+        let settings = sample();
+        let original = settings.to_pretty_json().unwrap();
+        for enabled in [true, false] {
+            let mut legacy: serde_json::Value = serde_json::from_str(&original).unwrap();
+            legacy["appearance"]["desktop_snap"] = enabled.into();
+            let migrated = parse_jsonc(&serde_json::to_string(&legacy).unwrap()).unwrap();
+            assert_eq!(migrated, settings);
+            assert!(!migrated.to_pretty_json().unwrap().contains("desktop_snap"));
+            assert!(!migrated.to_jsonc(LanguageId::SimplifiedChinese).contains("desktop_snap"));
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ Assert-Contains $Lock 'version = "1.0.6"' 'Cargo.lock root package must be versi
 Assert-Contains $Updater 'const EXE_ASSET_NAME: &str = "codex-usage-win.exe";' 'Updater executable asset must use codex-usage-win.exe.'
 Assert-Contains $Updater 'const CHECKSUM_ASSET_NAME: &str = "codex-usage-win.exe.sha256";' 'Updater checksum asset must use codex-usage-win.exe.sha256.'
 Assert-Contains $Updater '--codex-usage-win-updated-to=' 'Updater must emit the new one-shot success argument.'
-Assert-Contains $Updater '--codex-usage-updated-to=' 'Updater must still accept the v1.0.3 legacy success argument during migration.'
+Assert-NotContains $Updater 'LEGACY_UPDATE_SUCCESS_ARG_PREFIX' 'Updater must reject retired update arguments.'
 
 Assert-Contains $Install "Programs\CodexUsageWin" 'Installer must use the CodexUsageWin install directory.'
 Assert-Contains $Install "codex-usage-win.exe" 'Installer must install codex-usage-win.exe.'

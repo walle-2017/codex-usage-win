@@ -26,7 +26,6 @@ const HELPER_WAIT_SECS: u64 = 60;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const UPDATE_CHECK_NOTIFY_DELAY_MS: u64 = 800;
 const UPDATE_SUCCESS_ARG_PREFIX: &str = "--codex-usage-win-updated-to=";
-const LEGACY_UPDATE_SUCCESS_ARG_PREFIX: &str = "--codex-usage-updated-to=";
 const UPDATE_STAGE_IDLE: u8 = 0;
 const UPDATE_STAGE_CHECKING: u8 = 1;
 const UPDATE_STAGE_UPDATING: u8 = 2;
@@ -740,7 +739,6 @@ fn sibling_path(target: &Path, suffix: &str) -> PathBuf {
 
 pub(crate) fn is_internal_update_arg(arg: &str) -> bool {
     arg.starts_with(UPDATE_SUCCESS_ARG_PREFIX)
-        || arg.starts_with(LEGACY_UPDATE_SUCCESS_ARG_PREFIX)
 }
 
 fn successful_update_version_from_iter<I>(args: I, current_version: &str) -> Option<String>
@@ -748,9 +746,7 @@ where
     I: IntoIterator<Item = String>,
 {
     args.into_iter().find_map(|arg| {
-        let version = arg
-  .strip_prefix(UPDATE_SUCCESS_ARG_PREFIX)
-  .or_else(|| arg.strip_prefix(LEGACY_UPDATE_SUCCESS_ARG_PREFIX))?;
+        let version = arg.strip_prefix(UPDATE_SUCCESS_ARG_PREFIX)?;
         if Version::parse(version).is_some() && version == current_version {
   Some(version.to_string())
         } else {
@@ -965,7 +961,7 @@ mod tests {
     #[test]
     fn internal_success_argument_is_identified_for_filtering() {
         assert!(is_internal_update_arg("--codex-usage-win-updated-to=1.2.3"));
-        assert!(is_internal_update_arg("--codex-usage-updated-to=1.2.3"));
+        assert!(!is_internal_update_arg("--codex-usage-updated-to=1.2.3"));
         assert!(!is_internal_update_arg("--diagnose"));
     }
 

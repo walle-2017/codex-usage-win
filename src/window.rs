@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,7 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appearance::{self, AppearancePreset};
+use crate::appearance::{self, AppearancePreset, DesktopDirection, DisplayPosition};
 use crate::diagnose;
 use crate::fonts;
 use crate::localization::{self, LanguageId, Strings};
@@ -32,7 +33,7 @@ use crate::native_interop::{
 use crate::poller;
 use crate::popup_menu::{self, PopupItem};
 use crate::settings_model::{
-    EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
+    default_desktop_auto_collapse, EditableAppearance, EditableGeneral, EditableSettings, EditableThemeStyle, EditableUsage,
     EDITABLE_SETTINGS_SCHEMA_VERSION,
 };
 use crate::style::{
@@ -47,6 +48,26 @@ mod taskbar_replica;
 mod blur_backdrop;
 use self::taskbar_replica::*;
 use self::blur_backdrop::*;
+
+// Set only while restoring the desktop popup to a different monitor.
+// SetWindowPos may synchronously emit WM_DPICHANGED, which must not re-enter
+// position_at_taskbar() before the target-monitor layout has been committed.
+thread_local! {
+    static FLOATING_INITIAL_PLACEMENT: Cell<bool> = const { Cell::new(false) };
+}
+
+struct FloatingInitialPlacementGuard;
+impl FloatingInitialPlacementGuard {
+    fn begin() -> Self {
+        FLOATING_INITIAL_PLACEMENT.with(|flag| flag.set(true));
+        Self
+    }
+}
+impl Drop for FloatingInitialPlacementGuard {
+    fn drop(&mut self) {
+        FLOATING_INITIAL_PLACEMENT.with(|flag| flag.set(false));
+    }
+}
 
 /// Wrapper to make HWND sendable across threads (safe for PostMessage usage)
 #[derive(Clone, Copy)]
@@ -75,8 +96,45 @@ struct AppState {
     language: LanguageId,
     appearance_preset: AppearancePreset,
     effective_appearance_preset: AppearancePreset,
+    display_position: DisplayPosition,
+    desktop_direction: DesktopDirection,
+    desktop_auto_collapse: bool,
     hidden_for_taskbar_space: bool,
     taskbar_space_warning_shown: bool,
+    floating_mode: bool,
+    floating_hwnd: Option<SendHwnd>,
+    parked_taskbar_foreground: Option<SendHwnd>,
+    floating_x: i32,
+    floating_y: i32,
+    floating_edge: Option<FloatingEdge>,
+    // The undocked tab is below the body when there is not enough room above.
+    floating_free_grip_below: bool,
+    // Whether an edge must be clipped within this monitor: either Explorer
+    // reserves it for a taskbar, or another display shares the physical edge.
+    // Both dock normally with in-place sliding, never bleeding to the next screen.
+    floating_reserved_dock: bool,
+    // Preserve the exact clicked tab location while expanding a collapsed
+    // taskbar-edge popup into a captured drag.
+    floating_reserved_drag_reveal: u8,
+    // During an edge-tab drag, unlock the previously screen-clipped side's
+    // external glow once the panel is clear of the physical monitor boundary.
+    // The tab stays on the grabbed side until mouse-up.
+    floating_drag_glow_detached: bool,
+    floating_collapsed: bool,
+    // 0 = hidden edge tab, 100 = fully expanded; updated by the popup timer.
+    floating_reveal: u8,
+    // Desktop-only: undocked grip is hidden until the pointer hovers the widget.
+    floating_grip_alpha: u8,
+    floating_slide_from: u8,
+    floating_slide_target: u8,
+    floating_slide_started: Instant,
+    floating_fade_from: u8,
+    floating_fade_target: u8,
+    floating_fade_started: Instant,
+    floating_grip_hover: bool,
+    // A fresh edge drop must finish retracting and clear the pointer from its
+    // visible tab before mouse hover is allowed to reveal the popup again.
+    floating_first_collapse_guard: bool,
     theme_mode: ThemeMode,
     styles: StyleSettings,
     composition_blur_active: bool,
@@ -107,11 +165,30 @@ struct AppState {
     taskbar_index: usize,
     taskbar_monitor: Option<String>,
     taskbar_left_offset: i32,
-    legacy_tray_offset: Option<i32>,
+    taskbar_top_offset: i32,
+    vertical_taskbar_mode: bool,
+    vertical_widget_width: i32,
     dragging: bool,
     drag_anchor_logical_x: i32,
+    drag_anchor_logical_y: i32,
+    // Keep desktop grip's physical grab offset constant across DPI changes.
+    floating_drag_anchor_x: i32,
+    floating_drag_anchor_y: i32,
     drag_reparenting: bool,
     failed_drag_target: Option<HWND>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatingEdge { Left, Right, Top, Bottom }
+
+impl FloatingEdge {
+    fn name(self) -> &'static str {
+        match self { Self::Left => "left", Self::Right => "right", Self::Top => "top", Self::Bottom => "bottom" }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        match value { "left" => Some(Self::Left), "right" => Some(Self::Right),
+            "top" => Some(Self::Top), "bottom" => Some(Self::Bottom), _ => None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,15 +213,6 @@ const IDM_START_WITH_WINDOWS: u16 = 20;
 const IDM_RESET_POSITION: u16 = 30;
 const IDM_LANG_SYSTEM: u16 = 40;
 const IDM_LANG_ENGLISH: u16 = 41;
-const IDM_LANG_DUTCH: u16 = 42;
-const IDM_LANG_SPANISH: u16 = 43;
-const IDM_LANG_FRENCH: u16 = 44;
-const IDM_LANG_GERMAN: u16 = 45;
-const IDM_LANG_JAPANESE: u16 = 46;
-const IDM_LANG_KOREAN: u16 = 47;
-const IDM_LANG_TRADITIONAL_CHINESE: u16 = 48;
-const IDM_LANG_RUSSIAN: u16 = 49;
-const IDM_LANG_PORTUGUESE_BRAZIL: u16 = 50;
 const IDM_LANG_SIMPLIFIED_CHINESE: u16 = 51;
 const IDM_CHECK_UPDATE: u16 = 60;
 const IDM_OPEN_RELEASES: u16 = 61;
@@ -157,7 +225,6 @@ const IDM_ALERT_30: u16 = 83;
 
 const IDM_LAYOUT_DEFAULT: u16 = 91;
 const IDM_LAYOUT_MINIMAL: u16 = 92;
-const IDM_LAYOUT_ADAPTIVE: u16 = 97;
 const IDM_THEME_SYSTEM: u16 = 93;
 const IDM_THEME_DARK: u16 = 94;
 const IDM_THEME_LIGHT: u16 = 95;
@@ -199,6 +266,7 @@ const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MINIMAL_TOOLTIP_CLASS: &str = "CodexUsageMinimalTooltip";
 const WM_APP_FOCUS_EXISTING_SETTINGS: u32 = native_interop::WM_APP + 140;
+const WM_APP_DESKTOP_HOVER_EXIT: u32 = native_interop::WM_APP + 141;
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 
 /// How often the watchdog thread polls for an explorer.exe restart (which
@@ -241,6 +309,9 @@ struct TaskbarLayoutSnapshot {
 }
 
 static TASKBAR_LAYOUT_CACHE: Mutex<Vec<TaskbarLayoutSnapshot>> = Mutex::new(Vec::new());
+// Collected by the existing background taskbar worker. Geometry-only reads on
+// the UI thread never synchronously enter Explorer or enumerate every window.
+static TASKBAR_EDGE_RECTS: Mutex<Vec<RECT>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy)]
 struct ColorEditorState {
@@ -280,17 +351,36 @@ fn gdi_text_quality() -> u32 {
 /// Uses GetDpiForWindow which returns the live DPI (unlike GetDpiForSystem
 /// which is cached at process startup and never changes).
 fn refresh_dpi() {
-    let dpi_source = {
+    // While the desktop HWND is being dragged, its rectangular bounds may
+    // straddle two monitors and GetDpiForWindow can switch before the pointer
+    // does. The drag handler owns DPI selection/rebasing from GetCursorPos.
+    // Never replace that value midway through a layered-frame render.
+    if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
+        return;
+    }
+    let source = {
         let state = lock_state();
         state.as_ref().map(|s| {
-            // During a cross-monitor popup move, the foreground HWND can report
-            // the old monitor DPI for a short period. The selected taskbar is
-            // already authoritative for layout, so prefer its DPI.
-            s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd())
+            // A fully retracted popup may lie mostly beyond its own display
+            // or across a multi-monitor seam. GetDpiForWindow(hwnd) then
+            // describes the wrong screen. The *saved expanded position*
+            // identifies the monitor containing the visible drag tab.
+            let desktop_anchor = if s.floating_mode {
+                let (width, height) = floating_canvas_size_for_state(s);
+                floating_restore_anchor(
+                    s.floating_x, s.floating_y, width, height,
+                ).map(|center| floating_docked_monitor_anchor(
+                    s.floating_edge, s.floating_x, s.floating_y, center,
+                ))
+            } else { None };
+            let hwnd = if s.floating_mode { s.hwnd.to_hwnd() }
+                else { s.taskbar_hwnd.unwrap_or_else(|| s.hwnd.to_hwnd()) };
+            (hwnd, desktop_anchor)
         })
     };
-    if let Some(hwnd) = dpi_source {
-        let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if let Some((hwnd, desktop_anchor)) = source {
+        let dpi = desktop_anchor.and_then(floating_monitor_dpi)
+            .unwrap_or_else(|| unsafe { GetDpiForWindow(hwnd) });
         if dpi > 0 {
             CURRENT_DPI.store(dpi, Ordering::Relaxed);
         }
@@ -448,8 +538,14 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The visible widget HWND, not the stable polling/tray service owner.
+/// Settings use it to center their window on the correct monitor.
+pub(crate) fn settings_placement_anchor() -> Option<HWND> {
+    let state = lock_state();
+    state.as_ref().map(|s| s.hwnd.to_hwnd())
+}
+
 const SETTINGS_DIR: &str = "CodexUsage";
-const LEGACY_SETTINGS_DIR: &str = "ClaudeCodeUsageMonitor";
 
 fn appdata_path(directory: &str) -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
@@ -460,18 +556,23 @@ fn settings_path() -> PathBuf {
     appdata_path(SETTINGS_DIR)
 }
 
-fn legacy_settings_path() -> PathBuf {
-    appdata_path(LEGACY_SETTINGS_DIR)
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SettingsFile {
     #[serde(default)]
-    tray_offset: i32,
-    #[serde(default)]
     taskbar_index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_left_offset: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taskbar_top_offset: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floating_x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floating_y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floating_edge: Option<String>,
+    #[serde(default)]
+    floating_free_grip_below: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taskbar_monitor: Option<String>,
     #[serde(default = "default_poll_interval")]
@@ -480,6 +581,12 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     appearance_preset: AppearancePreset,
+    #[serde(default)]
+    display_position: DisplayPosition,
+    #[serde(default)]
+    desktop_direction: DesktopDirection,
+    #[serde(default = "default_desktop_auto_collapse")]
+    desktop_auto_collapse: bool,
     #[serde(default)]
     theme_mode: ThemeMode,
     #[serde(default)]
@@ -497,13 +604,20 @@ struct SettingsFile {
 impl Default for SettingsFile {
     fn default() -> Self {
         Self {
-            tray_offset: 0,
             taskbar_index: 0,
             taskbar_left_offset: None,
+            taskbar_top_offset: None,
+            floating_x: None,
+            floating_y: None,
+            floating_edge: None,
+            floating_free_grip_below: false,
             taskbar_monitor: None,
             poll_interval_ms: default_poll_interval(),
             language: None,
             appearance_preset: AppearancePreset::Default,
+            display_position: DisplayPosition::Taskbar,
+            desktop_direction: DesktopDirection::Horizontal,
+            desktop_auto_collapse: default_desktop_auto_collapse(),
             theme_mode: ThemeMode::System,
             styles: StyleSettings::default(),
             show_session_window: true,
@@ -522,37 +636,98 @@ fn default_show_usage_window() -> bool {
     true
 }
 
+
+// Current settings schema is generated from the active SettingsFile defaults.
+// Optional fields omitted by skip_serializing_if are explicitly included so
+// they remain eligible for retaining an existing saved user value.
+fn settings_schema() -> serde_json::Value {
+    let mut schema = serde_json::to_value(SettingsFile::default())
+        .expect("settings defaults must serialize");
+    let object = schema.as_object_mut().expect("settings schema must be an object");
+    for name in [
+        "taskbar_left_offset", "taskbar_top_offset", "floating_x", "floating_y",
+        "floating_edge", "taskbar_monitor", "language",
+    ] {
+        object.insert(name.to_string(), serde_json::Value::Null);
+    }
+    object.insert("notified_quota_windows".to_string(), serde_json::json!([]));
+    schema
+}
+
+/// Walk only schema-known names. Invalid values (wrong type, retired enum
+/// variants, overflow) revert independently, not the entire user settings.
+fn preserve_matching_settings(
+    output: &mut serde_json::Value,
+    schema: &serde_json::Value,
+    incoming: &serde_json::Value,
+    path: &mut Vec<String>,
+) {
+    let (Some(fields), Some(user_fields)) = (schema.as_object(), incoming.as_object()) else {
+        return;
+    };
+    for (name, default) in fields {
+        let Some(value) = user_fields.get(name) else { continue };
+        path.push(name.clone());
+        if default.is_object() && value.is_object() {
+            preserve_matching_settings(output, default, value, path);
+        } else {
+            let pointer = format!("/{}", path.join("/"));
+            let old = output.pointer(&pointer).cloned().expect("known setting");
+            *output.pointer_mut(&pointer).expect("known setting") = value.clone();
+            if serde_json::from_value::<SettingsFile>(output.clone()).is_err() {
+                *output.pointer_mut(&pointer).expect("known setting") = old;
+            }
+        }
+        path.pop();
+    }
+}
+
+/// Missing fields come from defaults; extra fields are dropped, recursively.
+/// Accepted fields must be representable by the current typed configuration.
+fn reconcile_settings_json(text: &str) -> (SettingsFile, bool) {
+    let Ok(input) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (SettingsFile::default(), true);
+    };
+    let schema = settings_schema();
+    let mut output = schema.clone();
+    preserve_matching_settings(&mut output, &schema, &input, &mut Vec::new());
+    let decoded: SettingsFile = serde_json::from_value(output)
+        .unwrap_or_else(|_| SettingsFile::default());
+    let normalized = normalize_settings(decoded);
+    let encoded = serde_json::to_value(&normalized)
+        .expect("normalized settings must serialize");
+    (normalized, encoded != input)
+}
+
+fn backup_invalid_settings(path: &std::path::Path) {
+    // A malformed JSON document cannot be partially recovered as JSON.
+    // Preserve it once before replacing it with defaults.
+    let backup = path.with_extension("json.invalid.bak");
+    if !backup.exists() {
+        let _ = std::fs::copy(path, backup);
+    }
+}
+
 fn load_settings() -> SettingsFile {
     let current_path = settings_path();
-    let legacy_path = legacy_settings_path();
-    let (settings, migrated) = load_settings_from_paths(&current_path, &legacy_path)
+    let (settings, needs_rewrite) = load_settings_from_path(&current_path)
         .unwrap_or_else(|| (SettingsFile::default(), false));
-    let settings = normalize_settings(settings);
-    if migrated {
+    if needs_rewrite {
         save_settings(&settings);
         diagnose::log(format!(
-            "migrated settings from {} to {}",
-            legacy_path.display(),
+            "reconciled settings file with current schema at {}",
             current_path.display()
         ));
     }
     settings
 }
 
-fn load_settings_from_paths(
-    current_path: &std::path::Path,
-    legacy_path: &std::path::Path,
-) -> Option<(SettingsFile, bool)> {
-    if let Ok(content) = std::fs::read_to_string(current_path) {
-        return serde_json::from_str(&content)
-            .ok()
-            .map(|settings| (settings, false));
+fn load_settings_from_path(path: &std::path::Path) -> Option<(SettingsFile, bool)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+        backup_invalid_settings(path);
     }
-
-    let content = std::fs::read_to_string(legacy_path).ok()?;
-    serde_json::from_str(&content)
-        .ok()
-        .map(|settings| (settings, true))
+    Some(reconcile_settings_json(&text))
 }
 
 fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
@@ -561,6 +736,22 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     }
     if !matches!(settings.alert_threshold_percent, 0 | 10 | 20 | 30) {
         settings.alert_threshold_percent = 0;
+    }
+    if !matches!(
+        settings.poll_interval_ms,
+        POLL_1_MIN | POLL_5_MIN | POLL_15_MIN | POLL_1_HOUR
+    ) {
+        settings.poll_interval_ms = default_poll_interval();
+    }
+    if settings.floating_edge.as_deref()
+            .is_some_and(|side| FloatingEdge::parse(side).is_none())
+    {
+        settings.floating_edge = None;
+    }
+    // The current settings UI supports only these two explicit language codes.
+    // All retired codes fall back to system language on next startup.
+    if settings.language.as_deref().is_some_and(|code| !matches!(code, "zh-CN" | "en")) {
+        settings.language = None;
     }
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
@@ -580,27 +771,38 @@ fn save_settings(settings: &SettingsFile) {
 }
 
 fn save_state_settings() {
-    let state = lock_state();
-    if let Some(s) = state.as_ref() {
-        save_settings(&SettingsFile {
-            // Legacy fields remain serialized for backward compatibility, but
-            // new versions use an absolute left-edge offset plus monitor identity.
-            tray_offset: 0,
+    // Serialize a snapshot, then release STATE before performing file I/O.
+    // Switching desktop orientation must never block state access on the
+    // settings file (e.g. if antivirus scans it simultaneously).
+    let snapshot = {
+        let state = lock_state();
+        state.as_ref().map(|s| SettingsFile {
             taskbar_index: s.taskbar_index,
             taskbar_left_offset: Some(s.taskbar_left_offset),
+            taskbar_top_offset: Some(s.taskbar_top_offset),
+            floating_x: Some(s.floating_x),
+            floating_y: Some(s.floating_y),
+            floating_edge: s.floating_edge.map(|e| e.name().to_string()),
+            floating_free_grip_below: s.floating_free_grip_below,
             taskbar_monitor: s.taskbar_monitor.clone(),
             poll_interval_ms: s.poll_interval_ms,
             language: s
                 .language_override
                 .map(|language| language.code().to_string()),
             appearance_preset: s.appearance_preset,
+            display_position: s.display_position,
+            desktop_direction: s.desktop_direction,
+            desktop_auto_collapse: s.desktop_auto_collapse,
             theme_mode: s.theme_mode,
             styles: s.styles.clone(),
             show_session_window: s.show_session_window,
             show_weekly_window: s.show_weekly_window,
             alert_threshold_percent: s.alert_threshold_percent,
             notified_quota_windows: s.notified_quota_windows.iter().cloned().collect(),
-        });
+        })
+    };
+    if let Some(snapshot) = snapshot {
+        save_settings(&snapshot);
     }
 }
 
@@ -1086,6 +1288,141 @@ impl HorizontalSpan {
     }
 }
 
+/// Explorer taskbars can be docked at the left or right edge of a monitor.
+/// Orientation is determined from geometry, including secondary taskbars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskbarAxis {
+    Horizontal,
+    Vertical,
+}
+
+fn taskbar_axis(rect: RECT) -> TaskbarAxis {
+    if rect.bottom > rect.top
+        && rect.right > rect.left
+        && rect.bottom - rect.top > rect.right - rect.left
+    {
+        TaskbarAxis::Vertical
+    } else {
+        TaskbarAxis::Horizontal
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VerticalSpan {
+    top: i32,
+    bottom: i32,
+}
+
+impl VerticalSpan {
+    fn height(self) -> i32 {
+        (self.bottom - self.top).max(0)
+    }
+}
+
+fn vertical_widget_width(taskbar_rect: RECT) -> Option<i32> {
+    let available = taskbar_rect.right - taskbar_rect.left - sc(VERTICAL_WIDGET_INSET) * 2;
+    (available >= sc(VERTICAL_WIDGET_MIN_WIDTH))
+        .then(|| available.min(sc(VERTICAL_WIDGET_MAX_WIDTH)))
+}
+
+fn free_vertical_spans_from_occupied(
+    taskbar_rect: RECT,
+    tray_top: i32,
+    occupied_rects: &[RECT],
+    margin: i32,
+) -> Vec<VerticalSpan> {
+    let start = taskbar_rect.top;
+    let end = tray_top.clamp(start, taskbar_rect.bottom);
+    if end <= start {
+        return Vec::new();
+    }
+    let margin = margin.max(0);
+    let mut occupied: Vec<VerticalSpan> = occupied_rects
+        .iter()
+        .filter(|rect| rect.right > taskbar_rect.left && rect.left < taskbar_rect.right)
+        .filter_map(|rect| {
+            let top = (rect.top - margin).max(start);
+            let bottom = (rect.bottom + margin).min(end);
+            (bottom > top).then_some(VerticalSpan { top, bottom })
+        })
+        .collect();
+    occupied.sort_by_key(|span| (span.top, span.bottom));
+    let mut merged: Vec<VerticalSpan> = Vec::new();
+    for span in occupied {
+        if let Some(last) = merged.last_mut() {
+            if span.top <= last.bottom {
+                last.bottom = last.bottom.max(span.bottom);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+    let mut free = Vec::new();
+    let mut cursor = start;
+    for span in merged {
+        if span.top > cursor {
+            free.push(VerticalSpan { top: cursor, bottom: span.top });
+        }
+        cursor = cursor.max(span.bottom);
+    }
+    if cursor < end {
+        free.push(VerticalSpan { top: cursor, bottom: end });
+    }
+    free
+}
+
+fn taskbar_free_vertical_spans(
+    taskbar_hwnd: HWND,
+    rect: RECT,
+) -> Option<Vec<VerticalSpan>> {
+    let controls = cached_taskbar_controls(taskbar_hwnd)?;
+    if controls.is_empty() {
+        diagnose::log("vertical taskbar layout cache is empty; failing closed");
+        return None;
+    }
+    let tray_top = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd")
+        .and_then(native_interop::get_window_rect_safe)
+        .filter(|tray| tray.top >= rect.top && tray.top < rect.bottom)
+        .map(|tray| tray.top)
+        .unwrap_or(rect.bottom);
+    Some(free_vertical_spans_from_occupied(
+        rect, tray_top, &controls, sc(TASKBAR_CONTROL_MARGIN_LOGICAL),
+    ))
+}
+
+fn nearest_free_top_offset(
+    taskbar_rect: RECT,
+    free_spans: &[VerticalSpan],
+    widget_height: i32,
+    desired_top_offset: i32,
+) -> Option<i32> {
+    free_spans
+        .iter()
+        .copied()
+        .filter(|span| span.height() >= widget_height)
+        .map(|span| {
+            let min_top = span.top - taskbar_rect.top;
+            let max_top = span.bottom - taskbar_rect.top - widget_height;
+            let offset = desired_top_offset.clamp(min_top, max_top);
+            ((offset - desired_top_offset).abs(), offset)
+        })
+        .min_by_key(|(distance, offset)| (*distance, *offset))
+        .map(|(_, offset)| offset)
+}
+
+fn drag_top_from_cursor(taskbar_rect: RECT, pt: POINT, anchor_px: i32) -> i32 {
+    pt.y - taskbar_rect.top - anchor_px
+}
+
+fn drag_top_for_pointer(rect: RECT, pt: POINT, anchor_px: i32, height: i32) -> i32 {
+    let desired = drag_top_from_cursor(rect, pt, anchor_px);
+    if point_is_in_taskbar_rect(pt, rect) {
+        desired
+    } else {
+        clamp_left_offset(desired, (rect.bottom - rect.top - height).max(0))
+    }
+}
+
 fn tray_left_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT) -> i32 {
     let mut tray_left = taskbar_rect.right;
     if let Some(tray_hwnd) = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd") {
@@ -1096,35 +1433,12 @@ fn tray_left_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT) -> i32 {
     tray_left
 }
 
-fn max_left_offset_for_taskbar(
-    taskbar_hwnd: HWND,
-    taskbar_rect: RECT,
-    widget_width: i32,
-) -> i32 {
-    let tray_left = tray_left_for_taskbar(taskbar_hwnd, taskbar_rect);
-    (tray_left - taskbar_rect.left - widget_width).max(0)
-}
 
 fn clamp_left_offset(left_offset: i32, max_left: i32) -> i32 {
     left_offset.clamp(0, max_left.max(0))
 }
 
-fn legacy_left_offset_from_max(max_left: i32, tray_offset: i32) -> i32 {
-    let max_left = max_left.max(0);
-    max_left - tray_offset.clamp(0, max_left)
-}
 
-fn legacy_left_offset(
-    taskbar_hwnd: HWND,
-    taskbar_rect: RECT,
-    widget_width: i32,
-    tray_offset: i32,
-) -> i32 {
-    legacy_left_offset_from_max(
-        max_left_offset_for_taskbar(taskbar_hwnd, taskbar_rect, widget_width),
-        tray_offset,
-    )
-}
 
 fn free_spans_from_occupied(
     taskbar_rect: RECT,
@@ -1264,9 +1578,24 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
         // Track only failure-state transitions so a persistent Explorer/UIA
         // condition does not flood the runtime log once per second.
         let mut last_failures: BTreeMap<isize, Option<i32>> = BTreeMap::new();
+        let mut last_taskbar_geometry: BTreeMap<isize, (i32, i32, i32, i32)> = BTreeMap::new();
 
         loop {
             let taskbars = native_interop::find_taskbars();
+            // Moving the Windows taskbar between screen edges can change its
+            // rectangle without changing its UIA controls. Refresh desktop
+            // docking on geometry changes too (without a new polling timer).
+            let geometry: BTreeMap<isize, (i32, i32, i32, i32)> = taskbars.iter()
+                .map(|bar| (bar.hwnd.0 as isize, (
+                    bar.rect.left, bar.rect.top, bar.rect.right, bar.rect.bottom,
+                )))
+                .collect();
+            let geometry_changed = geometry != last_taskbar_geometry;
+            last_taskbar_geometry = geometry;
+            if !taskbars.is_empty() {
+                *TASKBAR_EDGE_RECTS.lock().unwrap_or_else(|e| e.into_inner()) =
+                    taskbars.iter().map(|bar| bar.rect).collect();
+            }
             let mut active_taskbars: BTreeSet<isize> = taskbars
                 .iter()
                 .map(|taskbar| taskbar.hwnd.0 as isize)
@@ -1336,7 +1665,7 @@ fn spawn_taskbar_layout_worker(hwnd: HWND) {
                 merge_taskbar_layout_cache(&mut cache, &active_taskbars, successful_updates)
             };
 
-            if changed {
+            if changed || geometry_changed {
                 unsafe {
                     let _ = PostMessageW(
                         target.to_hwnd(),
@@ -1378,45 +1707,17 @@ fn placement_for_free_spans(
     free_spans: &[HorizontalSpan],
     desired_left_offset: i32,
 ) -> Option<(AppearancePreset, i32, i32)> {
-    match configured_preset {
-        AppearancePreset::Default | AppearancePreset::Minimal => {
-            let width = total_widget_width_for_preset(language, configured_preset);
-            nearest_free_left_offset(taskbar_rect, free_spans, width, desired_left_offset)
-                .map(|left| (configured_preset, width, left))
-        }
-        AppearancePreset::Adaptive => {
-            let default_width =
-                total_widget_width_for_preset(language, AppearancePreset::Default);
-            let minimal_width =
-                total_widget_width_for_preset(language, AppearancePreset::Minimal);
-            let mut best: Option<(i32, u8, AppearancePreset, i32, i32)> = None;
-
-            for span in free_spans.iter().copied() {
-                let (preset, width, preference) = if span.width() >= default_width {
-                    (AppearancePreset::Default, default_width, 0u8)
-                } else if span.width() >= minimal_width {
-                    (AppearancePreset::Minimal, minimal_width, 1u8)
-                } else {
-                    continue;
-                };
-
-                let min_left = span.left - taskbar_rect.left;
-                let max_left = span.right - taskbar_rect.left - width;
-                let candidate = desired_left_offset.clamp(min_left, max_left);
-                let distance = (candidate - desired_left_offset).abs();
-                let value = (distance, preference, preset, width, candidate);
-
-                if best
-                    .as_ref()
-                    .map(|current| (distance, preference) < (current.0, current.1))
-                    .unwrap_or(true)
-                {
-                    best = Some(value);
-                }
-            }
-
-            best.map(|(_, _, preset, width, left)| (preset, width, left))
-        }
+    let choice = configured_preset;
+    let preset_width = |preset| total_widget_width_for_preset(language, preset);
+    let place = |preset| {
+        let width = preset_width(preset);
+        nearest_free_left_offset(taskbar_rect, free_spans, width, desired_left_offset)
+            .map(|left| (preset, width, left))
+    };
+    match choice {
+        AppearancePreset::Minimal => place(AppearancePreset::Minimal),
+        AppearancePreset::Default => place(AppearancePreset::Default)
+            .or_else(|| place(AppearancePreset::Minimal)),
     }
 }
 fn drag_anchor_px_for_dpi(logical_x: i32, dpi: u32) -> i32 {
@@ -1486,39 +1787,8 @@ fn refresh_usage_texts(state: &mut AppState) {
 
 fn manual_update_required_message(language: LanguageId, version: &str) -> String {
     match language {
-        LanguageId::English => format!(
-            "Version v{version} is available, but the program or release asset name has changed. Automatic update is unavailable. Open GitHub Releases and update manually."
-        ),
-        LanguageId::Dutch => format!(
-            "Versie v{version} is beschikbaar, maar de programma- of releasebestandsnaam is gewijzigd. Automatisch bijwerken is niet mogelijk. Open GitHub Releases en werk handmatig bij."
-        ),
-        LanguageId::Spanish => format!(
-            "La versión v{version} está disponible, pero el nombre del programa o de los archivos de la versión ha cambiado. La actualización automática no está disponible. Abre GitHub Releases y actualiza manualmente."
-        ),
-        LanguageId::French => format!(
-            "La version v{version} est disponible, mais le nom du programme ou des fichiers de publication a changé. La mise à jour automatique est indisponible. Ouvrez GitHub Releases et mettez à jour manuellement."
-        ),
-        LanguageId::German => format!(
-            "Version v{version} ist verfügbar, aber der Programmname oder der Name der Release-Datei hat sich geändert. Die automatische Aktualisierung ist nicht möglich. Öffnen Sie GitHub Releases und aktualisieren Sie manuell."
-        ),
-        LanguageId::Japanese => format!(
-            "v{version} を利用できますが、プログラム名またはリリースファイル名が変更されています。自動更新できません。GitHub Releases を開き、手動で更新してください。"
-        ),
-        LanguageId::Korean => format!(
-            "v{version} 버전을 사용할 수 있지만 프로그램 이름 또는 릴리스 파일 이름이 변경되었습니다. 자동 업데이트를 사용할 수 없습니다. GitHub Releases를 열어 수동으로 업데이트하세요."
-        ),
-        LanguageId::SimplifiedChinese => format!(
-            "检测到 v{version}，但程序名称或发布文件名称已发生变化，无法自动升级。请前往 GitHub Releases 手动更新。"
-        ),
-        LanguageId::TraditionalChinese => format!(
-            "偵測到 v{version}，但程式名稱或發佈檔案名稱已變更，無法自動升級。請前往 GitHub Releases 手動更新。"
-        ),
-        LanguageId::Russian => format!(
-            "Доступна версия v{version}, но название программы или файла релиза изменилось. Автоматическое обновление недоступно. Откройте GitHub Releases и обновитесь вручную."
-        ),
-        LanguageId::PortugueseBrazil => format!(
-            "A versão v{version} está disponível, mas o nome do programa ou do arquivo da versão mudou. A atualização automática não está disponível. Abra o GitHub Releases e atualize manualmente."
-        ),
+        LanguageId::English => format!("Version v{version} is available, but the release asset is missing. Open GitHub Releases and update manually."),
+        LanguageId::SimplifiedChinese => format!("检测到 v{version}，但对应的发布文件不存在，无法自动升级。请前往 GitHub Releases 手动更新。"),
     }
 }
 
@@ -1581,7 +1851,6 @@ fn update_language_change() -> bool {
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_REGISTRY_KEY: &str = "CodexUsageWin";
-const LEGACY_STARTUP_REGISTRY_KEY: &str = "CodexUsage";
 
 /// Returns true only if the startup registry value points to this executable.
 fn is_startup_enabled() -> bool {
@@ -1660,46 +1929,8 @@ fn read_startup_value(key: &str) -> Option<String> {
     }
 }
 
-fn delete_startup_value(key: &str) {
-    unsafe {
-        let path = native_interop::wide_str(STARTUP_REGISTRY_PATH);
-        let key_name = native_interop::wide_str(key);
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR::from_raw(path.as_ptr()),
-            0,
-            KEY_SET_VALUE,
-            &mut hkey,
-        )
-        .is_ok()
-        {
-            let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(key_name.as_ptr()));
-            let _ = RegCloseKey(hkey);
-        }
-    }
-}
 
-fn migrate_legacy_startup_entry() {
-    let legacy_exists = read_startup_value(LEGACY_STARTUP_REGISTRY_KEY).is_some();
-    let current_exists = read_startup_value(STARTUP_REGISTRY_KEY).is_some();
-    if !legacy_exists {
-        return;
-    }
 
-    if should_write_migrated_startup(legacy_exists, current_exists) {
-        set_startup_enabled(true);
-    }
-
-    if read_startup_value(STARTUP_REGISTRY_KEY).is_some() {
-        delete_startup_value(LEGACY_STARTUP_REGISTRY_KEY);
-        diagnose::log("migrated legacy startup registry entry to CodexUsageWin");
-    }
-}
-
-fn should_write_migrated_startup(legacy_exists: bool, current_exists: bool) -> bool {
-    legacy_exists && !current_exists
-}
 
 fn set_startup_enabled(enable: bool) {
     unsafe {
@@ -1738,8 +1969,6 @@ fn set_startup_enabled(enable: bool) {
             }
         } else {
             let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(key_name.as_ptr()));
-            let legacy_key_name = native_interop::wide_str(LEGACY_STARTUP_REGISTRY_KEY);
-            let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(legacy_key_name.as_ptr()));
         }
 
         let _ = RegCloseKey(hkey);
@@ -1755,8 +1984,78 @@ const DRAG_HANDLE_HIT_W: i32 = 12;
 const SMALL_TASKBAR_THRESHOLD: i32 = 34;
 const SMALL_WIDGET_HEIGHT: i32 = 28;
 const DRAG_HANDLE_HIT_H: i32 = 24;
+const VERTICAL_WIDGET_MIN_WIDTH: i32 = 32;
+const VERTICAL_WIDGET_MAX_WIDTH: i32 = 68;
+// All vertical positions are measured from the start of a quota row.
+const VERTICAL_WIDGET_HEIGHT: i32 = 168;
+const VERTICAL_MINIMAL_WIDGET_HEIGHT: i32 = 82;
+const VERTICAL_WIDGET_INSET: i32 = 2;
+const VERTICAL_DRAG_HANDLE_H: i32 = 18;
+const VERTICAL_FIRST_ROW_TOP: i32 = 20;
+const VERTICAL_QUOTA_ROW_HEIGHT: i32 = 70;
+const VERTICAL_QUOTA_ROW_GAP: i32 = 4;
+// The embedded taskbar reserves an 18px draggable header. Desktop mode has
+// a separate external tab, so content starts at a true panel inset instead.
+// Desktop content has equal inset on all sides, distinct from embedded taskbar.
+const DESKTOP_PANEL_CONTENT_PADDING: i32 = 10;
+const DESKTOP_MINIMAL_ROW_HEIGHT: i32 = 24;
+const DESKTOP_MINIMAL_ROW_GAP: i32 = 6;
+const VERTICAL_LABEL_CENTER_Y: i32 = 9;
+const VERTICAL_RING_CENTER_Y: i32 = 35;
+const VERTICAL_RESET_CENTER_Y: i32 = 61;
+const VERTICAL_RING_MAX_RADIUS: i32 = 13;
+// A 36-degree open gap straddles 6 o'clock; progress sweeps clockwise.
+const VERTICAL_RING_GAP_HALF_RADIANS: f32 = std::f32::consts::PI / 10.0;
+const VERTICAL_RING_START_RADIANS: f32 = std::f32::consts::PI + VERTICAL_RING_GAP_HALF_RADIANS;
+const VERTICAL_MINIMAL_FIRST_PERCENT_Y: i32 = 34;
+const VERTICAL_MINIMAL_SECOND_PERCENT_Y: i32 = 63;
+
+fn vertical_drag_handle_hit(x: i32, y: i32, width: i32, height: i32) -> bool {
+    x >= 0 && x < width && y >= 0 && y < sc(VERTICAL_DRAG_HANDLE_H).min(height)
+}
+
+/// A hit test that Windows has actually delivered for the expanded,
+/// docked grip must not be discarded only because its fade-in animation has
+/// not advanced beyond alpha zero yet. Free-floating tabs retain their
+/// original alpha-zero behavior, and no invisible pixels are added here.
+fn floating_grip_hit_allowed(
+    edge: Option<FloatingEdge>, auto_collapse: bool, collapsed: bool, alpha: u8,
+) -> bool {
+    alpha > 0 || (edge.is_some() && !auto_collapse && !collapsed)
+}
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
+    {
+        let state = lock_state();
+        if let Some(s) = state.as_ref() {
+            if s.floating_mode {
+                if floating_grip_uses_hover_fade(s) && !floating_grip_hit_allowed(
+                    s.floating_edge,
+                    floating_auto_collapse_allowed(s.display_position, s.desktop_auto_collapse),
+                    s.floating_collapsed,
+                    s.floating_grip_alpha,
+                ) {
+                    return false;
+                }
+                return point_in_rect(
+                    floating_state_grip_rect(s), client_x, client_y,
+                );
+            }
+        }
+    }
+    let vertical_mode = lock_state()
+        .as_ref()
+        .is_some_and(|s| s.vertical_taskbar_mode);
+    if vertical_mode {
+        // Only the dedicated top grip starts a drag. Quota content stays
+        // available for hover tooltips without moving the component.
+        let state = lock_state();
+        let Some(state) = state.as_ref() else { return false };
+        return vertical_drag_handle_hit(
+            client_x, client_y,
+            total_widget_width_for_state(state), widget_height_for_state(state),
+        );
+    }
     let hit_h = sc(DRAG_HANDLE_HIT_H);
     let widget_height = {
         let state = lock_state();
@@ -1793,12 +2092,48 @@ fn is_small_taskbar_height(taskbar_height: i32) -> bool {
 
 fn effective_appearance_preset(state: &AppState) -> AppearancePreset {
     match state.appearance_preset {
-        AppearancePreset::Adaptive => state.effective_appearance_preset,
-        preset => preset,
+        AppearancePreset::Default => state.effective_appearance_preset,
+        AppearancePreset::Minimal => AppearancePreset::Minimal,
     }
 }
 
+// The configured Default is always adaptive, without changing stored settings.
+fn vertical_effective_preset(preset: AppearancePreset) -> AppearancePreset {
+    preset
+}
+
+fn vertical_widget_height_for_preset(preset: AppearancePreset) -> i32 {
+    sc(if preset == AppearancePreset::Minimal {
+        VERTICAL_MINIMAL_WIDGET_HEIGHT
+    } else {
+        VERTICAL_WIDGET_HEIGHT
+    })
+}
+
+fn desktop_vertical_content_height(
+    preset: AppearancePreset, show_session: bool, show_weekly: bool,
+) -> i32 {
+    let rows = i32::from(show_session) + i32::from(show_weekly);
+    if rows == 0 { return sc(DESKTOP_PANEL_CONTENT_PADDING * 2); }
+    let (row_height, row_gap) = if preset == AppearancePreset::Minimal {
+        (DESKTOP_MINIMAL_ROW_HEIGHT, DESKTOP_MINIMAL_ROW_GAP)
+    } else {
+        (VERTICAL_QUOTA_ROW_HEIGHT, VERTICAL_QUOTA_ROW_GAP)
+    };
+    sc(DESKTOP_PANEL_CONTENT_PADDING * 2 + row_height * rows
+        + row_gap * (rows - 1))
+}
+
 fn widget_height_for_state(state: &AppState) -> i32 {
+    if state.vertical_taskbar_mode {
+        if state.floating_mode {
+            return desktop_vertical_content_height(
+                effective_appearance_preset(state),
+                state.show_session_window, state.show_weekly_window,
+            );
+        }
+        return vertical_widget_height_for_preset(effective_appearance_preset(state));
+    }
     if state.small_taskbar_mode {
         sc(SMALL_WIDGET_HEIGHT)
     } else {
@@ -1836,7 +2171,7 @@ fn current_style_color(target: StyleColorTarget) -> Color {
 
 fn row_bar_segment_count(preset: AppearancePreset) -> i32 {
     match preset {
-        AppearancePreset::Default | AppearancePreset::Adaptive => 8,
+        AppearancePreset::Default => 8,
         AppearancePreset::Minimal => 6,
     }
 }
@@ -1883,19 +2218,62 @@ fn total_widget_width_for(language: LanguageId) -> i32 {
     total_widget_width_for_preset(language, AppearancePreset::Default)
 }
 
+fn horizontal_content_left(metrics: &appearance::StyleMetrics, floating: bool) -> i32 {
+    if floating {
+        sc(DESKTOP_PANEL_CONTENT_PADDING)
+    } else {
+        sc(metrics.outer_padding) + sc(DRAG_HANDLE_HIT_W)
+    }
+}
+
+/// The desktop tab is outside the body; no embedded drag-strip width is
+/// needed. Compute the right edge from the widest *visible* usage row.
+/// A missing reset label also removes its unused column from the panel.
+fn desktop_horizontal_content_width(
+    language: LanguageId, preset: AppearancePreset,
+    show_session: bool, show_weekly: bool, session: &str, weekly: &str,
+) -> i32 {
+    let metrics = preset.metrics();
+    let padding = sc(DESKTOP_PANEL_CONTENT_PADDING);
+    if preset == AppearancePreset::Minimal {
+        return padding * 2 + sc(metrics.percent_width);
+    }
+    let (label, reset) = usage_layout_widths(language, preset);
+    let segment_count = row_bar_segment_count(preset);
+    let bar = segment_count * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+    let row_width = |value: &str| {
+        sc(label) + sc(metrics.label_bar_gap) + bar
+            + sc(metrics.bar_percent_gap) + sc(metrics.percent_width)
+            + if value.split_once("  ").is_some() && reset > 0 {
+                sc(metrics.percent_reset_gap) + sc(reset)
+            } else { 0 }
+    };
+    let mut content = 0;
+    if show_session { content = content.max(row_width(session)); }
+    if show_weekly { content = content.max(row_width(weekly)); }
+    padding * 2 + content
+}
+
 fn total_widget_width_for_state(state: &AppState) -> i32 {
-    total_widget_width_for_preset(state.language, effective_appearance_preset(state))
+    if state.vertical_taskbar_mode {
+        state.vertical_widget_width
+    } else if state.floating_mode {
+        desktop_horizontal_content_width(
+            state.language, effective_appearance_preset(state),
+            state.show_session_window, state.show_weekly_window,
+            &state.codex_session_text, &state.codex_weekly_text,
+        )
+    } else {
+        total_widget_width_for_preset(state.language, effective_appearance_preset(state))
+    }
 }
 
 fn total_widget_width() -> i32 {
-    let (language, preset) = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| (s.language, effective_appearance_preset(s)))
-            .unwrap_or((LanguageId::English, AppearancePreset::Default))
-    };
-    total_widget_width_for_preset(language, preset)
+    let state = lock_state();
+    state
+        .as_ref()
+        .map(total_widget_width_for_state)
+        .unwrap_or_else(|| total_widget_width_for(LanguageId::English))
 }
 
 fn quota_bar_color(displayed_percent: f64) -> Color {
@@ -1952,8 +2330,6 @@ pub fn run() {
             }
         }
     };
-
-    migrate_legacy_startup_entry();
 
     let class_name = native_interop::wide_str("CodexUsageWin");
 
@@ -2048,12 +2424,36 @@ pub fn run() {
                 language_override,
                 language,
                 appearance_preset: settings.appearance_preset,
+                display_position: settings.display_position,
+                desktop_direction: settings.desktop_direction,
+                desktop_auto_collapse: settings.desktop_auto_collapse,
                 effective_appearance_preset: match settings.appearance_preset {
                     AppearancePreset::Minimal => AppearancePreset::Minimal,
                     _ => AppearancePreset::Default,
                 },
                 hidden_for_taskbar_space: false,
                 taskbar_space_warning_shown: false,
+                floating_mode: false,
+                floating_hwnd: None,
+                parked_taskbar_foreground: None,
+                floating_x: settings.floating_x.unwrap_or(i32::MIN),
+                floating_y: settings.floating_y.unwrap_or(i32::MIN),
+                floating_edge: settings.floating_edge.as_deref().and_then(FloatingEdge::parse),
+                floating_free_grip_below: settings.floating_free_grip_below,
+                floating_reserved_dock: false,
+                floating_reserved_drag_reveal: 100,
+                floating_drag_glow_detached: false,
+                floating_collapsed: false,
+                floating_reveal: 100,
+                floating_grip_alpha: 0,
+                floating_slide_from: 100,
+                floating_slide_target: 100,
+                floating_slide_started: Instant::now(),
+                floating_fade_from: 0,
+                floating_fade_target: 0,
+                floating_fade_started: Instant::now(),
+                floating_grip_hover: false,
+                floating_first_collapse_guard: false,
                 theme_mode: settings.theme_mode,
                 styles: settings.styles.clone(),
                 composition_blur_active: false,
@@ -2081,19 +2481,20 @@ pub fn run() {
                 taskbar_index: settings.taskbar_index,
                 taskbar_monitor: settings.taskbar_monitor.clone(),
                 taskbar_left_offset: settings.taskbar_left_offset.unwrap_or(0),
-                legacy_tray_offset: settings
-                    .taskbar_left_offset
-                    .is_none()
-                    .then_some(settings.tray_offset),
+                taskbar_top_offset: settings.taskbar_top_offset.unwrap_or(0),
+                vertical_taskbar_mode: false,
+                vertical_widget_width: sc(VERTICAL_WIDGET_MIN_WIDTH),
                 dragging: false,
                 drag_anchor_logical_x: 0,
+                drag_anchor_logical_y: 0,
+                floating_drag_anchor_x: 0,
+                floating_drag_anchor_y: 0,
                 drag_reparenting: false,
         failed_drag_target: None,
             });
         }
 
-        // Prefer the stable monitor identity. taskbar_index is retained only
-        // as a compatibility fallback for settings written by older versions.
+        // Prefer a persisted monitor identity; fall back to the saved index if unavailable.
         if attach_to_preferred_taskbar(
             hwnd,
             settings.taskbar_monitor.as_deref(),
@@ -2127,9 +2528,13 @@ pub fn run() {
         // Position and show when a safe taskbar slot exists. If space is
         // temporarily exhausted, position_at_taskbar() keeps the widget hidden.
         position_at_taskbar();
-        if !widget_hidden_for_taskbar_space() {
+        // position_at_taskbar() can switch to a separate desktop HWND and
+        // explicitly hide this taskbar child. Do not immediately show the
+        // old child again after the desktop popup is already visible.
+        let desktop_active = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+        if !desktop_active && !widget_hidden_for_taskbar_space() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            diagnose::log("window shown");
+            diagnose::log("taskbar window shown");
         }
 
         // Initial render via UpdateLayeredWindow (for embedded) or InvalidateRect (fallback)
@@ -2247,6 +2652,13 @@ fn drag_frame_due(force: bool) -> bool {
 /// Render the foreground widget through UpdateLayeredWindow. Frosted mode keeps
 /// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
+    render_layered_at(None);
+}
+
+/// Commit a new desktop grip direction and canvas size together with its
+/// screen position. This avoids exposing stale pixels between SetWindowPos
+/// and UpdateLayeredWindow when the user releases the mouse.
+fn render_layered_at(desktop_origin: Option<POINT>) {
     refresh_dpi();
     if widget_hidden_for_taskbar_space() {
         return;
@@ -2287,6 +2699,9 @@ fn render_layered() {
 
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    // Embedded and desktop panels use the same Gaussian-blur theme path.
+    // The desktop backdrop is clipped to the original body (never the tab).
     let blur_requested = style.panel_frosted_active();
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
@@ -2318,7 +2733,7 @@ fn render_layered() {
     }
 
     let embedded = lock_state().as_ref().is_some_and(|s| s.embedded);
-    if !embedded && !composition_blur_active {
+    if !embedded && !composition_blur_active && !floating {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
             let _ = UpdateWindow(hwnd);
@@ -2428,6 +2843,17 @@ fn render_layered() {
             &surface_style,
         );
 
+        // Taskbar space cannot host an exterior halo reliably. Paint the
+        // hover glow exclusively inside the existing rounded panel fill,
+        // before the text pass, leaving the border and all exterior pixels
+        // untouched. Desktop mode keeps its original exterior-only painter.
+        let drag_hovered = lock_state().as_ref().is_some_and(|s| s.drag_handle_hovered);
+        if !floating && drag_hovered {
+            draw_taskbar_hover_inner_glow(
+                pixel_data, width, height, &style, drag_hover_outline_color(&style),
+            );
+        }
+
         render_taskbar_text(
             pixel_data,
             width,
@@ -2437,6 +2863,8 @@ fn render_layered() {
             &bg_color,
             language,
             strings,
+            codex_session_pct,
+            codex_weekly_pct,
             &codex_session_text,
             &codex_weekly_text,
             show_session_window,
@@ -2445,27 +2873,124 @@ fn render_layered() {
         );
 
         let pt_src = POINT { x: 0, y: 0 };
-        let sz = SIZE {
-            cx: width,
-            cy: height,
-        };
         let blend = BLENDFUNCTION {
             BlendOp: 0,
             BlendFlags: 0,
             SourceConstantAlpha: 255,
             AlphaFormat: 1,
         };
-        let _ = UpdateLayeredWindow(
-            hwnd,
-            screen_dc,
-            None,
-            Some(&sz),
-            mem_dc,
-            Some(&pt_src),
-            COLORREF(0),
-            Some(&blend),
-            ULW_ALPHA,
-        );
+        if floating {
+            let (edge, free_below, hidden, hovered, grip_alpha, reserved, reveal, dragging, drag_reveal) = {
+                let state = lock_state();
+                state.as_ref().map(|s| (
+                    s.floating_edge,
+                    floating_free_grip_below_for_state(s),
+                    s.floating_collapsed && s.floating_reveal == 0,
+                    s.drag_handle_hovered,
+                    if s.dragging || !floating_grip_uses_hover_fade(s) { 100 }
+                    else { s.floating_grip_alpha },
+                    s.floating_reserved_dock,
+                    s.floating_reveal,
+                    s.dragging,
+                    s.floating_reserved_drag_reveal,
+                )).unwrap_or((None, false, false, false, 0, false, 100, false, 100))
+            };
+            // Composite the already rendered taskbar-size panel into a separate
+            // transparent desktop canvas. Neither the panel border nor quota
+            // graphics are ever stretched or shifted to make room for the tab.
+            let (canvas_w, canvas_h, body) = {
+                let state = lock_state();
+                state.as_ref().map(floating_canvas_geometry_for_state)
+                    .unwrap_or_else(|| floating_canvas_geometry(width, height, edge))
+            };
+            let grip = floating_layout_grip_rect(
+                canvas_w, canvas_h, edge, free_below,
+            );
+            let canvas_info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: canvas_w,
+                    biHeight: -canvas_h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let canvas_dc = CreateCompatibleDC(screen_dc);
+            let mut canvas_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let canvas_dib = CreateDIBSection(
+                canvas_dc, &canvas_info, DIB_RGB_COLORS, &mut canvas_bits, None, 0,
+            ).unwrap_or_default();
+            if !canvas_dib.is_invalid() && !canvas_bits.is_null() {
+                let old_canvas_bmp = SelectObject(canvas_dc, canvas_dib);
+                let canvas = std::slice::from_raw_parts_mut(
+                    canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
+                );
+                let accent = drag_hover_outline_color(&style);
+                canvas.fill(0);
+                if hovered && !hidden {
+                    // Paint the external halo FIRST. The body and tab occupy
+                    // exactly the mask used for the glow, so no colored pixels
+                    // can enter the semi-transparent glass or rounded corners.
+                    draw_drag_hover_outer_glow(
+                        canvas, canvas_w, canvas_h, body, grip, &style, accent,
+                    );
+                }
+                if !hidden {
+                    for y in 0..height {
+                        let dst = ((y + body.top) * canvas_w + body.left) as usize;
+                        let src = (y * width) as usize;
+                        for x in 0..width as usize {
+                            let index = dst + x;
+                            // Direct copies erased the underpainting even at
+                            // completely transparent round-corner pixels,
+                            // recreating a dark seam between body and halo.
+                            canvas[index] = composite_premultiplied_pixel(
+                                canvas[index], pixel_data[src + x],
+                            );
+                        }
+                    }
+                }
+                render_floating_handle_bitmap_at(
+                    canvas, canvas_w, canvas_h, grip, hovered, &style, grip_alpha,
+                );
+                if hovered && !hidden {
+                    // Preserve V24.6's alpha-1 transition probe: light is
+                    // visual-only and must never enlarge drag hit targets.
+                    paint_floating_hover_hit_probe(
+                        canvas, canvas_w, canvas_h, body, grip,
+                        if edge.is_none() && free_below { Some(FloatingEdge::Top) } else { edge },
+                    );
+                }
+                if reserved {
+                    if let Some(edge) = edge {
+                        // Same slide as an exposed monitor edge, alpha-clipped
+                        // before reaching Explorer or an adjacent display.
+                        floating_slide_layered_bitmap(
+                            canvas, canvas_w, canvas_h, edge,
+                            if dragging { drag_reveal } else { reveal },
+                        );
+                    }
+                }
+                let sz = SIZE { cx: canvas_w, cy: canvas_h };
+                let _ = UpdateLayeredWindow(
+                    hwnd, screen_dc, desktop_origin.as_ref().map(|p| p as *const POINT), Some(&sz),
+                    canvas_dc, Some(&pt_src),
+                    COLORREF(0), Some(&blend), ULW_ALPHA,
+                );
+                SelectObject(canvas_dc, old_canvas_bmp);
+            }
+            if !canvas_dib.is_invalid() { let _ = DeleteObject(canvas_dib); }
+            let _ = DeleteDC(canvas_dc);
+        } else {
+            let sz = SIZE { cx: width, cy: height };
+            let _ = UpdateLayeredWindow(
+                hwnd, screen_dc, None, Some(&sz), mem_dc, Some(&pt_src),
+                COLORREF(0), Some(&blend), ULW_ALPHA,
+            );
+        }
         SelectObject(mem_dc, old_bmp);
         let _ = DeleteObject(dib);
         let _ = DeleteDC(mem_dc);
@@ -2474,6 +2999,339 @@ fn render_layered() {
 
     if composition_blur_active {
         sync_blur_backdrop_geometry(hwnd);
+    }
+}
+
+/// Keep the drag dots fixed-size. Hover feedback is now on the full panel
+/// outline (and on the independent desktop tab), so it cannot be covered
+/// by the pointer sitting directly above the small grip.
+fn drag_handle_dot_style(color: Color, _hovered: bool, vertical: bool) -> (i32, i32, i32, Color) {
+    let dot = sc(2).max(1);
+    let compact_gap = sc(1).max(1);
+    let long_gap = sc(2).max(1);
+    let (gap_x, gap_y) = if vertical {
+        (compact_gap, long_gap)
+    } else {
+        (long_gap, compact_gap)
+    };
+    (dot, gap_x, gap_y, color)
+}
+
+/// Derive a legible outline from the selected preset or customized palette.
+/// ProgressHigh is the theme accent; fall back to the text color if a custom
+/// theme makes that accent indistinguishable from its panel background.
+fn drag_hover_outline_color(style: &ThemeStyle) -> Color {
+    let background = style.color(StyleColorTarget::PanelBackground);
+    let accent = style.color(StyleColorTarget::ProgressHigh);
+    let separated = |candidate: Color| {
+        (i32::from(candidate.r) - i32::from(background.r)).abs()
+            + (i32::from(candidate.g) - i32::from(background.g)).abs()
+            + (i32::from(candidate.b) - i32::from(background.b)).abs()
+    };
+    let mut chosen = if accent.a > 20 && separated(accent) >= 150 {
+        accent
+    } else {
+        style.color(StyleColorTarget::Remaining)
+    };
+    if chosen.a <= 20 || separated(chosen) < 150 {
+        chosen = if u32::from(background.r) * 299
+            + u32::from(background.g) * 587
+            + u32::from(background.b) * 114 > 128_000 {
+            Color::rgba(18, 92, 132, 255)
+        } else {
+            Color::rgba(112, 214, 238, 255)
+        };
+    }
+    Color::rgba(chosen.r, chosen.g, chosen.b, 255)
+}
+
+/// A narrow highlight stroke sits on a broader Gaussian-like falloff.
+/// Desktop canvases reserve transparent pixels beyond the visible panel
+/// and detached grip; physical monitor edges necessarily clip external light.
+fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
+    let distance = distance_from_edge.abs();
+    // Soft halo falls off on either side of the visible panel perimeter.
+    let diffuse = 120.0 * (-(distance / 4.6).powi(2) * 0.5).exp();
+    // Retain the antialiased hairline while making the outer halo dominant.
+    let hairline = 65.0 * (1.0 - distance / 0.7).max(0.0);
+    (diffuse + hairline).round().clamp(0.0, 200.0) as u8
+}
+
+/// Rounded-rectangle signed distance. Negative is inside the actual panel,
+/// positive is outside; returns zero at its edge.
+#[allow(dead_code)]
+fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
+    let inset = sc(1).max(1) as f32;
+    let half_w = (width as f32 / 2.0 - inset).max(0.5);
+    let half_h = (height as f32 / 2.0 - inset).max(0.5);
+    let radius = (radius as f32).min(half_w.min(half_h)).max(0.0);
+    let dx = (x as f32 + 0.5 - width as f32 / 2.0).abs() - (half_w - radius);
+    let dy = (y as f32 + 0.5 - height as f32 / 2.0).abs() - (half_h - radius);
+    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+}
+
+/// Feather hover feedback around the actual body or detached grip perimeter.
+/// Desktop canvases provide up to 12 logical pixels of outer glow. Visual-only
+/// transparent margins never extend the component's interactive hit targets.
+/// Place the desktop hover glow BEHIND the foreground, never on top of
+/// partially transparent panel/drag-tab pixels. The occupancy mask uses
+/// exactly the same corner geometry as panel_color_at(), so the nearest
+/// exterior glow pixel is adjacent to the actual border even at rounded
+/// corners. The two silhouettes are unioned before glowing: panel light
+/// cannot bleed into the neighboring tab (or vice versa).
+fn draw_drag_hover_outer_glow(
+    pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
+    body: RECT, tab: RECT, style: &ThemeStyle, color: Color,
+) {
+    if canvas_w <= 0 || canvas_h <= 0 { return; }
+    let area = (canvas_w * canvas_h) as usize;
+    let mut occupied = vec![false; area];
+    let mut border_pixels = vec![false; area];
+    for rect in [body, tab] {
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 { continue; }
+        for y in rect.top.max(0)..rect.bottom.min(canvas_h) {
+            for x in rect.left.max(0)..rect.right.min(canvas_w) {
+                if panel_outer_shape_contains(
+                    width, height, x - rect.left, y - rect.top,
+                    style.panel_corner_radius,
+                ) {
+                    let index = (y * canvas_w + x) as usize;
+                    occupied[index] = true;
+                    border_pixels[index] |= !panel_inner_shape_contains(
+                        width, height, x - rect.left, y - rect.top,
+                        style.panel_corner_radius,
+                    );
+                }
+            }
+        }
+    }
+    let extent = sc(12).max(2);
+    let extent_squared = extent * extent;
+    let mut glow = vec![0_u8; area];
+    for y in 0..canvas_h {
+        for x in 0..canvas_w {
+            let index = (y * canvas_w + x) as usize;
+            if !occupied[index] { continue; }
+            // Only a real silhouette boundary casts exterior light. A shared
+            // panel/tab contact cannot create an internal glowing seam.
+            let boundary = x == 0 || x == canvas_w - 1
+                || y == 0 || y == canvas_h - 1
+                || !occupied[(y * canvas_w + (x - 1)) as usize]
+                || !occupied[(y * canvas_w + (x + 1)) as usize]
+                || !occupied[((y - 1) * canvas_w + x) as usize]
+                || !occupied[((y + 1) * canvas_w + x) as usize];
+            if !boundary { continue; }
+            // V24.19: extend the same halo 0.75px below the *real* painted
+            // border. The later alpha-over compositing hides this under
+            // opaque pixels and lets it feather through only the outermost
+            // translucent rim. Never underpaint the actual content interior.
+            if border_pixels[index] {
+                glow[index] = glow[index].max(drag_hover_glow_coverage(0.75));
+            }
+            for dy in -extent..=extent {
+                let ny = y + dy;
+                if ny < 0 || ny >= canvas_h { continue; }
+                for dx in -extent..=extent {
+                    let nx = x + dx;
+                    if nx < 0 || nx >= canvas_w || dx * dx + dy * dy > extent_squared {
+                        continue;
+                    }
+                    let other = (ny * canvas_w + nx) as usize;
+                    if occupied[other] { continue; }
+                    // The mask is pixel-exact, so the first outside pixel
+                    // touches the rounded contour. Subtract one pixel of
+                    // center-to-center distance to avoid a dark gap.
+                    let distance = (((dx * dx + dy * dy) as f32).sqrt() - 1.0).max(0.0);
+                    glow[other] = glow[other].max(drag_hover_glow_coverage(distance));
+                }
+            }
+        }
+    }
+    for (index, coverage) in glow.into_iter().enumerate() {
+        if coverage != 0 {
+            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+        }
+    }
+}
+
+
+/// Taskbar hover is a one-sided inner glow: its hard clip is the same actual
+/// rounded *fill* silhouette as panel_color_at(). The border itself, its outer
+/// antialias region, and every pixel outside the panel remain bit-for-bit
+/// unchanged. Desktop exterior-glow rendering deliberately does not use this.
+fn draw_taskbar_hover_inner_glow(
+    pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle, color: Color,
+) {
+    if width <= 0 || height <= 0 || pixels.len() < (width as usize * height as usize) {
+        return;
+    }
+    let outer_inset = sc(1).max(1);
+    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
+    let outer_radius = sc(i32::from(style.panel_corner_radius))
+        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
+    let inner_radius = if outer_radius > 0 {
+        (outer_radius - PANEL_BORDER_WIDTH_PX).max(1)
+    } else {
+        0
+    } as f32;
+    let half_w = (width as f32 * 0.5 - inner_inset as f32).max(0.5);
+    let half_h = (height as f32 * 0.5 - inner_inset as f32).max(0.5);
+    let radius = inner_radius.min(half_w.min(half_h));
+    let reach = sc(9).max(3) as f32;
+    for y in inner_inset..(height - inner_inset).max(inner_inset) {
+        for x in inner_inset..(width - inner_inset).max(inner_inset) {
+            if !panel_inner_shape_contains(
+                width, height, x, y, style.panel_corner_radius,
+            ) {
+                continue;
+            }
+            // Rounded-box signed distance from the INNER edge of the painted
+            // border. Apply a finite taper so there is no tint in the center.
+            let dx = (x as f32 + 0.5 - width as f32 * 0.5).abs() - (half_w - radius);
+            let dy = (y as f32 + 0.5 - height as f32 * 0.5).abs() - (half_h - radius);
+            let signed_distance = dx.max(0.0).hypot(dy.max(0.0))
+                + dx.max(dy).min(0.0) - radius;
+            let inward = (-signed_distance).max(0.0);
+            if inward >= reach {
+                continue;
+            }
+            let fade = (1.0 - inward / reach).powi(2);
+            let coverage = (f32::from(drag_hover_glow_coverage(inward)) * fade)
+                .round().clamp(0.0, 255.0) as u8;
+            if coverage != 0 {
+                let index = (y * width + x) as usize;
+                pixels[index] = composite_premultiplied_text(
+                    pixels[index], color, coverage,
+                );
+            }
+        }
+    }
+}
+
+/// Fallback GDI taskbar mode must match the embedded layered mode. The GDI
+/// panel is opaque and already painted; blend only inner-fill pixels into the
+/// memory DC, before dots, progress bars and text are drawn.
+fn draw_taskbar_hover_inner_glow_gdi(
+    hdc: HDC, width: i32, height: i32, style: &ThemeStyle, base: Color,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let base_pixel = premultiplied_pixel(Color::rgba(base.r, base.g, base.b, 255));
+    let mut pixels = vec![base_pixel; (width * height) as usize];
+    draw_taskbar_hover_inner_glow(
+        &mut pixels, width, height, style, drag_hover_outline_color(style),
+    );
+    unsafe {
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = pixels[(y * width + x) as usize];
+                if pixel == base_pixel {
+                    continue;
+                }
+                let color = Color::rgba(
+                    ((pixel >> 16) & 255) as u8,
+                    ((pixel >> 8) & 255) as u8,
+                    (pixel & 255) as u8,
+                    255,
+                );
+                let _ = SetPixelV(hdc, x, y, COLORREF(color.to_colorref()));
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn draw_drag_hover_outline(
+    pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
+    bounds: RECT, corner_radius: u8, color: Color,
+) {
+    if canvas_w <= 0 || canvas_h <= 0 || bounds.right <= bounds.left
+        || bounds.bottom <= bounds.top { return; }
+    let w = bounds.right - bounds.left;
+    let h = bounds.bottom - bounds.top;
+    let radius = sc(i32::from(corner_radius))
+        .min((w.min(h) / 2).max(0));
+    let extent = sc(12).max(2);
+    // Restrict work to the edge envelope, avoiding per-pixel work over the
+    // center of larger horizontal panels.
+    for y in bounds.top.saturating_sub(extent).max(0)
+        ..bounds.bottom.saturating_add(extent).min(canvas_h) {
+        for x in bounds.left.saturating_sub(extent).max(0)
+            ..bounds.right.saturating_add(extent).min(canvas_w) {
+            let local_x = x - bounds.left;
+            let local_y = y - bounds.top;
+            let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
+            if distance.abs() > extent as f32 { continue; }
+            let coverage = drag_hover_glow_coverage(distance);
+            if coverage == 0 { continue; }
+            let index = (y * canvas_w + x) as usize;
+            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+        }
+    }
+}
+
+/// Draw the dedicated desktop drag tab into the premultiplied layered surface.
+/// When collapsed, every pixel outside the tab is fully transparent and cannot
+/// obstruct other desktop windows or leave a visible panel edge.
+#[allow(dead_code)]
+fn render_floating_handle_bitmap(
+    pixels: &mut [u32], width: i32, height: i32,
+    edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
+) {
+    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+    render_floating_handle_bitmap_at(pixels, width, height, grip, hovered, style, opacity);
+}
+
+fn render_floating_handle_bitmap_at(
+    pixels: &mut [u32], width: i32, height: i32,
+    grip: RECT, hovered: bool, style: &ThemeStyle, opacity: u8,
+) {
+    // The tab is a miniature panel, not a separate style. Its fill, border,
+    // corner radius, transparency and glass strength follow ThemeStyle.
+    let center_x = (grip.left + grip.right) / 2;
+    let center_y = (grip.top + grip.bottom) / 2;
+    let vertical_grip = grip.bottom - grip.top > grip.right - grip.left;
+    let (dot, gap_x, gap_y, dots) = drag_handle_dot_style(
+        style.color(StyleColorTarget::DragHandle), hovered, vertical_grip,
+    );
+    // Long side of the six-dot grip follows the long side of the tab.
+    let (cols, rows) = if vertical_grip { (2, 3) } else { (3, 2) };
+    let dots_w = cols * dot + (cols - 1) * gap_x;
+    let dots_h = rows * dot + (rows - 1) * gap_y;
+    for y in grip.top.max(0)..grip.bottom.min(height) {
+        for x in grip.left.max(0)..grip.right.min(width) {
+            let local_x = x - grip.left;
+            let local_y = y - grip.top;
+            let grip_w = grip.right - grip.left;
+            let grip_h = grip.bottom - grip.top;
+            let Some(panel_color) = panel_color_at(
+                style, grip_w, grip_h, local_x, local_y,
+            ) else { continue };
+            let dot_pixel = (0..rows).any(|r| (0..cols).any(|c| {
+                let dx = center_x - dots_w / 2 + c * (dot + gap_x);
+                let dy = center_y - dots_h / 2 + r * (dot + gap_y);
+                x >= dx && x < dx + dot && y >= dy && y < dy + dot
+            }));
+            let mut color = if dot_pixel { dots } else { panel_color };
+            color.a = ((u16::from(color.a) * u16::from(opacity.min(100)) + 50) / 100) as u8;
+            let index = (y * width + x) as usize;
+            pixels[index] = composite_premultiplied_pixel(
+                pixels[index], premultiplied_pixel(color),
+            );
+            if opacity > 0 && pixels[index] >> 24 == 0 {
+                // Layered windows discard alpha=0 pixels BEFORE WM_NCHITTEST.
+                // With a fully transparent panel background, only the grip's
+                // border and six dots otherwise receive mouse clicks.
+                // Restore the existing V24.6 alpha-1 hit-test convention for
+                // the real rounded grip interior (never its glow gutter or
+                // transparent rounded corners). The opacity is visually
+                // imperceptible, and this pixel remains valid premultiplied BGRA.
+                pixels[index] = 0x01000000;
+            }
+        }
     }
 }
 
@@ -2535,29 +3393,55 @@ fn point_in_rounded_box(
     dx * dx + dy * dy <= radius * radius
 }
 
-fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
+/// Single source of truth for the *actual painted pixels* of a rounded
+/// panel or drag tab. Reused by the panel renderer and desktop glow mask.
+fn panel_outer_shape_contains(
+    width: i32, height: i32, x: i32, y: i32, corner_radius: u8,
+) -> bool {
+    let inset = sc(1).max(1);
+    if x < inset || x >= width - inset || y < inset || y >= height - inset {
+        return false;
+    }
+    let radius = sc(i32::from(corner_radius))
+        .min(((width - inset * 2).min(height - inset * 2) / 2).max(0));
+    radius == 0 || point_in_rounded_box(width, height, x, y, inset, radius)
+}
+
+/// The inner fill contour must be identical in rendering and halo
+/// underpainting. No light is ever placed underneath this content area.
+fn panel_inner_shape_contains(
+    width: i32, height: i32, x: i32, y: i32, corner_radius: u8,
+) -> bool {
     let outer_inset = sc(1).max(1);
     let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    let outer_radius = sc(i32::from(style.panel_corner_radius))
+    let outer_radius = sc(i32::from(corner_radius))
         .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
-    let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
+    if outer_radius > 0 {
+        point_in_rounded_box(
+            width, height, x, y, inner_inset,
+            (outer_radius - PANEL_BORDER_WIDTH_PX).max(1),
+        )
+    } else {
+        x >= inner_inset && x < width - inner_inset
+            && y >= inner_inset && y < height - inner_inset
+    }
+}
+
+fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &ThemeStyle) {
+    let outer_inset = sc(1).max(1);
     let border = style.color(StyleColorTarget::PanelBorder);
     let fill = style.color(StyleColorTarget::PanelBackground);
     for y in outer_inset..(height - outer_inset).max(outer_inset) {
         for x in outer_inset..(width - outer_inset).max(outer_inset) {
-            let outer_inside = outer_radius == 0
-                || point_in_rounded_box(width, height, x, y, outer_inset, outer_radius);
+            let outer_inside = panel_outer_shape_contains(
+                width, height, x, y, style.panel_corner_radius,
+            );
             if !outer_inside {
                 continue;
             }
-            let inner_inside = if outer_radius > 0 {
-                point_in_rounded_box(width, height, x, y, inner_inset, inner_radius)
-            } else {
-                x >= inner_inset
-                    && x < width - inner_inset
-                    && y >= inner_inset
-                    && y < height - inner_inset
-            };
+            let inner_inside = panel_inner_shape_contains(
+                width, height, x, y, style.panel_corner_radius,
+            );
             let idx = (y * width + x) as usize;
             pixels[idx] = blend_pixel(pixels[idx], if inner_inside { fill } else { border });
         }
@@ -2565,31 +3449,10 @@ fn blend_panel_bitmap(pixels: &mut [u32], width: i32, height: i32, style: &Theme
 }
 
 fn panel_color_at(style: &ThemeStyle, width: i32, height: i32, x: i32, y: i32) -> Option<Color> {
-    let outer_inset = sc(1).max(1);
-    let inner_inset = outer_inset + PANEL_BORDER_WIDTH_PX;
-    let outer_radius = sc(i32::from(style.panel_corner_radius))
-        .min(((width - outer_inset * 2).min(height - outer_inset * 2) / 2).max(0));
-    if outer_radius > 0 {
-        if !point_in_rounded_box(width, height, x, y, outer_inset, outer_radius) {
-            return None;
-        }
-        let inner_radius = (outer_radius - PANEL_BORDER_WIDTH_PX).max(1);
-        if point_in_rounded_box(width, height, x, y, inner_inset, inner_radius) {
-            Some(style.color(StyleColorTarget::PanelBackground))
-        } else {
-            Some(style.color(StyleColorTarget::PanelBorder))
-        }
-    } else if x < outer_inset
-        || x >= width - outer_inset
-        || y < outer_inset
-        || y >= height - outer_inset
-    {
-        None
-    } else if x >= inner_inset
-        && x < width - inner_inset
-        && y >= inner_inset
-        && y < height - inner_inset
-    {
+    if !panel_outer_shape_contains(width, height, x, y, style.panel_corner_radius) {
+        return None;
+    }
+    if panel_inner_shape_contains(width, height, x, y, style.panel_corner_radius) {
         Some(style.color(StyleColorTarget::PanelBackground))
     } else {
         Some(style.color(StyleColorTarget::PanelBorder))
@@ -2634,6 +3497,28 @@ fn finalize_layered_bitmap(
     }
 }
 
+/// Premultiplied BGRA source-over for layered-window pixels. Unlike a
+/// direct assignment, a transparent rounded corner cannot erase the
+/// previously rendered background glow. Solid content remains unchanged.
+fn composite_premultiplied_pixel(dst: u32, src: u32) -> u32 {
+    let alpha = (src >> 24) & 0xFF;
+    if alpha == 0 { return dst; }
+    if alpha == 255 { return src; }
+    let inv = 255 - alpha;
+    let da = (dst >> 24) & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let out_a = alpha + (da * inv + 127) / 255;
+    let out_r = (sr + (dr * inv + 127) / 255).min(255);
+    let out_g = (sg + (dg * inv + 127) / 255).min(255);
+    let out_b = (sb + (db * inv + 127) / 255).min(255);
+    (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
+}
+
 fn composite_premultiplied_text(dst: u32, color: Color, coverage: u8) -> u32 {
     let src_alpha = (coverage as u32 * color.a as u32 + 127) / 255;
     if src_alpha == 0 {
@@ -2676,6 +3561,33 @@ fn restore_text_background_rect(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HorizontalTextAlign { Start, InkStart, Center, End }
+
+/// Align the visible ink, not the reserved width of a text column.
+fn directwrite_mask_x_offset(
+    mask: &[u8], width: i32, height: i32, align: HorizontalTextAlign,
+) -> i32 {
+    if width <= 0 || height <= 0 || align == HorizontalTextAlign::Start { return 0; }
+    let mut first = width;
+    let mut last = -1;
+    for x in 0..width {
+        if (0..height).any(|y| {
+            mask.get((y * width + x) as usize).is_some_and(|&alpha| alpha != 0)
+        }) {
+            first = first.min(x);
+            last = x;
+        }
+    }
+    if last < 0 { return 0; }
+    match align {
+        HorizontalTextAlign::Start => 0,
+        HorizontalTextAlign::InkStart => -first,
+        HorizontalTextAlign::Center => (width - (last - first + 1)) / 2 - first,
+        HorizontalTextAlign::End => width - 1 - last,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_directwrite_text(
     pixels: &mut [u32],
@@ -2687,6 +3599,7 @@ unsafe fn draw_directwrite_text(
     font_height: i32,
     font_weight: i32,
     color: Color,
+    align: HorizontalTextAlign,
 ) {
     let mask_width = rect.right - rect.left;
     let mask_height = rect.bottom - rect.top;
@@ -2709,13 +3622,14 @@ unsafe fn draw_directwrite_text(
         return;
     };
 
+    let x_offset = directwrite_mask_x_offset(&mask, mask_width, mask_height, align);
     for mask_y in 0..mask_height {
         let dst_y = rect.top + mask_y;
         if dst_y < 0 || dst_y >= surface_height {
             continue;
         }
         for mask_x in 0..mask_width {
-            let dst_x = rect.left + mask_x;
+            let dst_x = rect.left + mask_x + x_offset;
             if dst_x < 0 || dst_x >= surface_width {
                 continue;
             }
@@ -2739,12 +3653,94 @@ unsafe fn render_taskbar_text(
     bg: &Color,
     language: LanguageId,
     strings: Strings,
+    codex_session_pct: f64,
+    codex_weekly_pct: f64,
     codex_session_text: &str,
     codex_weekly_text: &str,
     show_session_window: bool,
     show_weekly_window: bool,
     last_poll_ok: bool,
 ) {
+    if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) {
+        // Poller data stores used quota. Convert exactly once for the layered
+        // vertical renderer, matching the horizontal and GDI fallback paths.
+        let codex_session_pct = usage_percent_for_display(language, codex_session_pct);
+        let codex_weekly_pct = usage_percent_for_display(language, codex_weekly_pct);
+        let is_minimal = current_appearance_preset() == AppearancePreset::Minimal;
+        let panel_base = style.color(StyleColorTarget::PanelBackground).blend_over(*bg);
+        let label_color = style.color(StyleColorTarget::QuotaType).blend_over(panel_base);
+        let value_color = style.color(if last_poll_ok {
+            StyleColorTarget::Remaining
+        } else {
+            StyleColorTarget::Error
+        }).blend_over(panel_base);
+        let reset_color = style.color(StyleColorTarget::ResetTime).blend_over(panel_base);
+        let track = style.color(StyleColorTarget::ProgressConsumed).blend_over(panel_base);
+        if is_minimal {
+            // Compact vertical view renders only two remaining percentages:
+            // no rings, type captions or reset timestamps.
+            let (session_center, weekly_center) = vertical_minimal_percent_centers(
+                height, show_session_window, show_weekly_window,
+            );
+            let cx = width / 2;
+            for (center, pct) in [
+                (session_center, codex_session_pct),
+                (weekly_center, codex_weekly_pct),
+            ] {
+                let Some(cy) = center else { continue };
+                let value = vertical_quota_text(pct, last_poll_ok);
+                let size = if value.len() >= 4 { sc(9) } else { sc(12) };
+                render_vertical_centered_text(
+                    pixels, width, height, cx, cy, &value, size,
+                    FW_SEMIBOLD.0 as i32, value_color,
+                );
+            }
+            return;
+        }
+        let (session_reset, weekly_reset) = {
+            let state = lock_state();
+            let codex = state.as_ref().and_then(|s| s.data.as_ref())
+                .and_then(|data| data.codex.as_ref());
+            (
+                vertical_reset_label(codex.and_then(|c| c.session.resets_at), false),
+                vertical_reset_label(codex.and_then(|c| c.weekly.resets_at), true),
+            )
+        };
+        let (session_top, weekly_top) = vertical_row_tops(
+            height, show_session_window, show_weekly_window,
+        );
+        let radius = (((width - sc(7)) as f32) * 0.5)
+            .min(sc(VERTICAL_RING_MAX_RADIUS) as f32).max(1.0);
+        for (top, label, pct, reset) in [
+            (session_top, "5H", codex_session_pct, session_reset),
+            (weekly_top, "7D", codex_weekly_pct, weekly_reset),
+        ] {
+            let Some(top) = top else { continue };
+            let cx = width / 2;
+            let cy = top + sc(VERTICAL_RING_CENTER_Y);
+            render_vertical_ring(
+                pixels, width, height, cx, cy, radius, pct,
+                track, quota_bar_color(pct.clamp(0.0, 100.0)).blend_over(track),
+                last_poll_ok,
+            );
+            render_vertical_centered_text(
+                pixels, width, height, cx, top + sc(VERTICAL_LABEL_CENTER_Y),
+                label, sc(10), FW_MEDIUM.0 as i32, label_color,
+            );
+            let percent = vertical_quota_text(pct, last_poll_ok);
+            let percent_size = if percent.len() >= 4 { sc(8) } else { sc(11) };
+            render_vertical_centered_text(
+                pixels, width, height, cx, cy,
+                &percent, percent_size, FW_SEMIBOLD.0 as i32, value_color,
+            );
+            render_vertical_centered_text(
+                pixels, width, height, cx, top + sc(VERTICAL_RESET_CENTER_Y),
+                &reset, sc(9), FW_NORMAL.0 as i32, reset_color,
+            );
+        }
+        return;
+    }
+
     let preset = current_appearance_preset();
     let metrics = preset.metrics();
     let (label_width, text_width) = usage_layout_widths(language, preset);
@@ -2778,7 +3774,12 @@ unsafe fn render_taskbar_text(
         show_weekly_window
     };
 
-    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let content_x = horizontal_content_left(&metrics, floating);
+    let visible_reset = floating && (
+        (effective_show_session && codex_session_text.split_once("  ").is_some())
+        || (effective_show_weekly && codex_weekly_text.split_once("  ").is_some())
+    );
     let row2_y = height - sc(4) - sc(SEGMENT_H);
     let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
     let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -2805,6 +3806,7 @@ unsafe fn render_taskbar_text(
                 sc(metrics.value_font_height),
                 FW_SEMIBOLD.0 as i32,
                 primary_color,
+                if floating { HorizontalTextAlign::Center } else { HorizontalTextAlign::Start },
             );
             return;
         }
@@ -2824,6 +3826,11 @@ unsafe fn render_taskbar_text(
             sc(metrics.font_height),
             FW_MEDIUM.0 as i32,
             quota_type_color,
+            if floating {
+                HorizontalTextAlign::InkStart
+            } else {
+                HorizontalTextAlign::Start
+            },
         );
 
         let segment_count = row_bar_segment_count(preset);
@@ -2854,6 +3861,11 @@ unsafe fn render_taskbar_text(
             sc(metrics.value_font_height),
             FW_SEMIBOLD.0 as i32,
             primary_color,
+            if floating && !visible_reset {
+                HorizontalTextAlign::End
+            } else {
+                HorizontalTextAlign::Start
+            },
         );
 
         if let Some(secondary) = secondary {
@@ -2874,6 +3886,7 @@ unsafe fn render_taskbar_text(
                 sc(metrics.secondary_font_height),
                 FW_NORMAL.0 as i32,
                 reset_color,
+                if floating { HorizontalTextAlign::End } else { HorizontalTextAlign::Start },
             );
         }
     };
@@ -2891,6 +3904,350 @@ unsafe fn render_taskbar_text(
             strings.weekly_window,
             codex_weekly_text,
         );
+    }
+}
+
+fn vertical_row_tops(height: i32, show_session: bool, show_weekly: bool) -> (Option<i32>, Option<i32>) {
+    vertical_row_tops_for_layout(
+        height, show_session, show_weekly,
+        lock_state().as_ref().is_some_and(|s| s.floating_mode),
+    )
+}
+
+fn vertical_row_tops_for_layout(
+    height: i32, show_session: bool, show_weekly: bool, floating: bool,
+) -> (Option<i32>, Option<i32>) {
+    let first = if floating {
+        sc(DESKTOP_PANEL_CONTENT_PADDING)
+    } else if show_session && show_weekly {
+        sc(VERTICAL_FIRST_ROW_TOP)
+    } else {
+        ((height - sc(VERTICAL_QUOTA_ROW_HEIGHT)) / 2).max(sc(VERTICAL_DRAG_HANDLE_H))
+    };
+    let second = first + sc(VERTICAL_QUOTA_ROW_HEIGHT + VERTICAL_QUOTA_ROW_GAP);
+    (
+        show_session.then_some(first),
+        show_weekly.then_some(if show_session { second } else { first }),
+    )
+}
+
+fn vertical_minimal_percent_centers(
+    height: i32, show_session: bool, show_weekly: bool,
+) -> (Option<i32>, Option<i32>) {
+    vertical_minimal_percent_centers_for_layout(
+        height, show_session, show_weekly,
+        lock_state().as_ref().is_some_and(|s| s.floating_mode),
+    )
+}
+
+fn vertical_minimal_percent_centers_for_layout(
+    height: i32, show_session: bool, show_weekly: bool, floating: bool,
+) -> (Option<i32>, Option<i32>) {
+    if floating {
+        let center = sc(DESKTOP_PANEL_CONTENT_PADDING + DESKTOP_MINIMAL_ROW_HEIGHT / 2);
+        let second = center + sc(DESKTOP_MINIMAL_ROW_HEIGHT + DESKTOP_MINIMAL_ROW_GAP);
+        return (
+            show_session.then_some(center),
+            show_weekly.then_some(if show_session { second } else { center }),
+        );
+    }
+    let one_center = (height + sc(VERTICAL_DRAG_HANDLE_H)) / 2;
+    if show_session && show_weekly {
+        (Some(sc(VERTICAL_MINIMAL_FIRST_PERCENT_Y)), Some(sc(VERTICAL_MINIMAL_SECOND_PERCENT_Y)))
+    } else {
+        (show_session.then_some(one_center), show_weekly.then_some(one_center))
+    }
+}
+
+fn vertical_reset_label(reset_at: Option<SystemTime>, weekly: bool) -> String {
+    let Some(local) = reset_at.and_then(native_interop::system_time_to_local) else {
+        return "--".to_string();
+    };
+    if weekly {
+        format!("{:02}/{:02}", local.wMonth, local.wDay)
+    } else {
+        format!("{:02}:{:02}", local.wHour, local.wMinute)
+    }
+}
+
+/// Antialiased ring composited into the already-premultiplied layered bitmap.
+/// Remaining quota follows a 324-degree clockwise arc, leaving a 36-degree
+/// gap at 6 o'clock, including when remaining quota is 100%.
+fn vertical_ring_fraction(angle: f32) -> Option<f32> {
+    let sweep = std::f32::consts::TAU - 2.0 * VERTICAL_RING_GAP_HALF_RADIANS;
+    let offset = (angle - VERTICAL_RING_START_RADIANS).rem_euclid(std::f32::consts::TAU);
+    let fraction = offset / sweep;
+    (0.0..=1.0).contains(&fraction).then_some(fraction)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_vertical_ring(
+    pixels: &mut [u32],
+    width: i32,
+    height: i32,
+    cx: i32,
+    cy: i32,
+    radius: f32,
+    percent: f64,
+    track: Color,
+    accent: Color,
+    has_data: bool,
+) {
+    let stroke = sc(3) as f32;
+    let half_stroke = stroke * 0.5;
+    let extent = (radius + half_stroke + 1.5).ceil() as i32;
+    let completed = if has_data { (percent / 100.0).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    for y in (cy - extent).max(0)..(cy + extent + 1).min(height) {
+        for x in (cx - extent).max(0)..(cx + extent + 1).min(width) {
+            let dx = x as f32 + 0.5 - cx as f32;
+            let dy = y as f32 + 0.5 - cy as f32;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let coverage = (half_stroke + 0.5 - (distance - radius).abs()).clamp(0.0, 1.0);
+            if coverage <= 0.0 { continue; }
+            let mut angle = dx.atan2(-dy);
+            if angle < 0.0 { angle += std::f32::consts::TAU; }
+            let Some(fraction) = vertical_ring_fraction(angle) else { continue };
+            let color = if completed > 0.0 && fraction <= completed {
+                accent
+            } else {
+                track
+            };
+            // Antialias the open ends as well as the radial edges.
+            let offset = (angle - VERTICAL_RING_START_RADIANS).rem_euclid(std::f32::consts::TAU);
+            let sweep = std::f32::consts::TAU - 2.0 * VERTICAL_RING_GAP_HALF_RADIANS;
+            let start_distance = offset * radius;
+            let end_distance = (sweep - offset) * radius;
+            let end_coverage = (start_distance.min(end_distance) + 0.5).clamp(0.0, 1.0);
+            let opacity = (coverage * end_coverage * 255.0).round() as u8;
+            if opacity == 0 { continue; }
+            let index = (y * width + x) as usize;
+            pixels[index] = composite_premultiplied_text(pixels[index], color, opacity);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn render_vertical_centered_text(
+    pixels: &mut [u32],
+    width: i32,
+    height: i32,
+    center_x: i32,
+    center_y: i32,
+    value: &str,
+    font_size: i32,
+    weight: i32,
+    color: Color,
+) {
+    if value.is_empty() { return; }
+    let mask_width = (width - sc(4)).max(1);
+    let mask_height = sc(18).max(1);
+    let Some(mask) = native_interop::directwrite_text_mask(
+        value,
+        fonts::face(fonts::FontRole::Taskbar, None),
+        font_size as f32,
+        weight,
+        mask_width,
+        mask_height,
+    ) else { return };
+    let mut min_x = mask_width;
+    let mut min_y = mask_height;
+    let mut max_x = -1;
+    let mut max_y = -1;
+    for y in 0..mask_height {
+        for x in 0..mask_width {
+            if mask[(y * mask_width + x) as usize] == 0 { continue; }
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+    }
+    if max_x < 0 { return; }
+    let origin_x = center_x - (min_x + max_x + 1) / 2;
+    let origin_y = center_y - (min_y + max_y + 1) / 2;
+    for y in min_y..=max_y {
+        let target_y = origin_y + y;
+        if target_y < 0 || target_y >= height { continue; }
+        for x in min_x..=max_x {
+            let target_x = origin_x + x;
+            if target_x < 0 || target_x >= width { continue; }
+            let coverage = mask[(y * mask_width + x) as usize];
+            if coverage == 0 { continue; }
+            let index = (target_y * width + target_x) as usize;
+            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+        }
+    }
+}
+
+fn vertical_quota_text(percentage: f64, last_poll_ok: bool) -> String {
+    if !last_poll_ok || !percentage.is_finite() {
+        "--".to_string()
+    } else {
+        format!("{:.0}%", percentage.clamp(0.0, 100.0))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_vertical_widget_content(
+    hdc: HDC,
+    width: i32,
+    height: i32,
+    session_pct: f64,
+    weekly_pct: f64,
+    show_session: bool,
+    show_weekly: bool,
+    last_poll_ok: bool,
+    quota_type_color: Color,
+    primary_color: Color,
+    reset_color: Color,
+    track: Color,
+    drag_color: Color,
+    hovered: bool,
+    paint_text: bool,
+    minimal: bool,
+) {
+    unsafe {
+        if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+            let (dot, gap_x, gap_y, color) =
+                drag_handle_dot_style(drag_color, hovered, false);
+            let matrix_w = 3 * dot + 2 * gap_x;
+            for row in 0..2 {
+                for col in 0..3 {
+                    let left = width / 2 - matrix_w / 2 + col * (dot + gap_x);
+                    let top = sc(5) + row * (dot + gap_y);
+                    let rect = RECT {
+                        left, top, right: left + dot, bottom: top + dot,
+                    };
+                    draw_rounded_rect(hdc, &rect, &color, sc(1).max(1));
+                }
+            }
+        }
+
+        // The layered renderer composites rings and text with DirectWrite.
+        // GDI is only needed for the compact fallback popup (when embedding
+        // into Explorer is unavailable), not for the normal embedded path.
+        if paint_text && minimal {
+            let (session_center, weekly_center) = vertical_minimal_percent_centers(
+                height, show_session, show_weekly,
+            );
+            let font_name = native_interop::wide_str(
+                fonts::face(fonts::FontRole::Taskbar, None),
+            );
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            for (center, percent) in [
+                (session_center, session_pct),
+                (weekly_center, weekly_pct),
+            ] {
+                let Some(cy) = center else { continue };
+                let label = vertical_quota_text(percent, last_poll_ok);
+                let font_size = if label.len() >= 4 { sc(9) } else { sc(12) };
+                let font = CreateFontW(
+                    font_size, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+                    DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+                    CLIP_DEFAULT_PRECIS.0 as u32, gdi_text_quality(),
+                    (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                    PCWSTR::from_raw(font_name.as_ptr()),
+                );
+                let old_font = SelectObject(hdc, font);
+                let _ = SetTextColor(hdc, COLORREF(primary_color.to_colorref()));
+                let mut wide: Vec<u16> = label.encode_utf16().collect();
+                let mut bounds = RECT {
+                    left: sc(1), top: cy - sc(10), right: width - sc(1),
+                    bottom: cy + sc(10),
+                };
+                let _ = DrawTextW(
+                    hdc, &mut wide, &mut bounds,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                let _ = SelectObject(hdc, old_font);
+                let _ = DeleteObject(font);
+            }
+        } else if paint_text {
+            let (session_top, weekly_top) = vertical_row_tops(height, show_session, show_weekly);
+            let radius = ((width - sc(7)) / 2).min(sc(VERTICAL_RING_MAX_RADIUS)).max(1);
+            let font_name = native_interop::wide_str(
+                fonts::face(fonts::FontRole::Taskbar, None),
+            );
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            for (top, percent, label) in [
+                (session_top, session_pct, "5H"),
+                (weekly_top, weekly_pct, "7D"),
+            ] {
+                let Some(top) = top else { continue };
+                let cx = width / 2;
+                let cy = top + sc(VERTICAL_RING_CENTER_Y);
+                let bounds = RECT {
+                    left: cx - radius, top: cy - radius,
+                    right: cx + radius + 1, bottom: cy + radius + 1,
+                };
+                let start = VERTICAL_RING_START_RADIANS;
+                let sweep = std::f32::consts::TAU - 2.0 * VERTICAL_RING_GAP_HALF_RADIANS;
+                let arc_point = |angle: f32| (
+                    cx + (radius as f32 * angle.sin()).round() as i32,
+                    cy - (radius as f32 * angle.cos()).round() as i32,
+                );
+                let (start_x, start_y) = arc_point(start);
+                let (end_x, end_y) = arc_point(start + sweep);
+                // GDI Arc runs counter-clockwise; reverse start/end coordinates
+                // to render the same clockwise fill as the layered bitmap.
+                let pen = CreatePen(PS_SOLID, sc(3), COLORREF(track.to_colorref()));
+                let old_pen = SelectObject(hdc, pen);
+                let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    end_x, end_y, start_x, start_y);
+                let _ = SelectObject(hdc, old_pen);
+                let _ = DeleteObject(pen);
+                if last_poll_ok && percent > 0.0 {
+                    let accent = quota_bar_color(percent).blend_over(track);
+                    let pen = CreatePen(PS_SOLID, sc(3), COLORREF(accent.to_colorref()));
+                    let old_pen = SelectObject(hdc, pen);
+                    let (progress_x, progress_y) = arc_point(
+                        start + sweep * (percent / 100.0).clamp(0.0, 1.0) as f32,
+                    );
+                    let _ = Arc(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                        progress_x, progress_y, start_x, start_y);
+                    let _ = SelectObject(hdc, old_pen);
+                    let _ = DeleteObject(pen);
+                }
+
+                let reset = {
+                    let state = lock_state();
+                    let codex = state.as_ref().and_then(|s| s.data.as_ref())
+                        .and_then(|data| data.codex.as_ref());
+                    vertical_reset_label(codex.and_then(|c| if label == "5H" {
+                        c.session.resets_at
+                    } else {
+                        c.weekly.resets_at
+                    }), label == "7D")
+                };
+                for (text, y, font_height, color) in [
+                    (label.to_string(), top + sc(VERTICAL_LABEL_CENTER_Y), sc(10), quota_type_color),
+                    (vertical_quota_text(percent, last_poll_ok), cy,
+                        if percent >= 99.5 { sc(8) } else { sc(11) }, primary_color),
+                    (reset, top + sc(VERTICAL_RESET_CENTER_Y), sc(9), reset_color),
+                ] {
+                    let font = CreateFontW(
+                        font_height, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+                        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+                        CLIP_DEFAULT_PRECIS.0 as u32, gdi_text_quality(),
+                        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                        PCWSTR::from_raw(font_name.as_ptr()),
+                    );
+                    let old_font = SelectObject(hdc, font);
+                    let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
+                    let mut chars: Vec<u16> = text.encode_utf16().collect();
+                    let mut bounds = RECT {
+                        left: sc(1), top: y - sc(9), right: width - sc(1),
+                        bottom: y + sc(9),
+                    };
+                    let _ = DrawTextW(
+                        hdc, &mut chars, &mut bounds,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                    let _ = SelectObject(hdc, old_font);
+                    let _ = DeleteObject(font);
+                }
+            }
+        }
     }
 }
 
@@ -2967,6 +4324,8 @@ fn paint_content(
             FillRect(hdc, &client_rect, bg_brush);
             let _ = DeleteObject(bg_brush);
 
+            // Keep the original border color. Hover light must only occupy
+            // the actual fill *inside* that border, never recolor the outline.
             let border = style.color(StyleColorTarget::PanelBorder).blend_over(*bg);
             draw_panel(
                 hdc,
@@ -2976,11 +4335,35 @@ fn paint_content(
                 &panel_base,
                 style.panel_corner_radius,
             );
+            if drag_handle_hovered
+                && !lock_state().as_ref().is_some_and(|s| s.floating_mode)
+            {
+                draw_taskbar_hover_inner_glow_gdi(
+                    hdc, width, height, &style, panel_base,
+                );
+            }
         }
 
-        draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
+        let vertical_mode = lock_state()
+            .as_ref()
+            .is_some_and(|s| s.vertical_taskbar_mode);
+        if vertical_mode {
+            paint_vertical_widget_content(
+                hdc, width, height, codex_session_pct, codex_weekly_pct,
+                show_session_window, show_weekly_window, last_poll_ok,
+                quota_type_color, primary_color, reset_color, track, drag_color,
+                drag_handle_hovered, paint_background,
+                preset == AppearancePreset::Minimal,
+            );
+            return;
+        }
 
-        let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+        if !lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+            draw_drag_handle(hdc, height, &drag_color, drag_handle_hovered);
+        }
+
+        let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+        let content_x = horizontal_content_left(&metrics, floating);
         let row2_y = height - sc(4) - sc(SEGMENT_H);
         let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
         let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -3328,75 +4711,2099 @@ fn tray_reposition_is_suppressed() -> bool {
     }
 }
 
-fn show_taskbar_space_warning(language: LanguageId) {
-    let title = native_interop::wide_str(language.strings().window_title);
-    let body = native_interop::wide_str(match language {
-        LanguageId::SimplifiedChinese => {
-            "任务栏当前没有足够的空白区域容纳组件，组件已临时隐藏。空白区域恢复后将自动显示。"
-        }
-        LanguageId::TraditionalChinese => {
-            "工作列目前沒有足夠的空白區域容納元件，元件已暫時隱藏。空白區域恢復後將自動顯示。"
-        }
-        LanguageId::Japanese => {
-            "タスクバーに十分な空き領域がないため、ウィジェットを一時的に非表示にしました。空き領域が確保されると自動的に再表示します。"
-        }
-        LanguageId::Korean => {
-            "작업 표시줄에 충분한 빈 공간이 없어 위젯을 일시적으로 숨겼습니다. 공간이 확보되면 자동으로 다시 표시됩니다."
-        }
-        _ => {
-            "There is not enough empty taskbar space for the widget. It has been temporarily hidden and will reappear automatically when enough space is available."
-        }
-    });
-    unsafe {
-        let _ = MessageBoxW(
-            HWND::default(),
-            PCWSTR::from_raw(body.as_ptr()),
-            PCWSTR::from_raw(title.as_ptr()),
-            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-        );
+// Desktop fallback keeps an independent popup alive instead of
+// detaching/reparenting Explorer's active taskbar child window.
+const FLOAT_EDGE_SNAP: i32 = 24;
+const FLOAT_EDGE_PEEK: i32 = 16;
+const FLOAT_GRIP_LENGTH: i32 = 36;
+// Preserve the component's content size. Transparent canvas gutters allow
+// external glow on free desktops and on the inward-facing sides of docked
+// panels. Reserved taskbar edges use an in-place clip instead of sliding.
+const FLOAT_FREE_GLOW_MARGIN: i32 = 12;
+const FLOAT_EXPAND_DURATION_MS: u64 = 220;
+const FLOAT_RETRACT_DURATION_MS: u64 = 240;
+const FLOAT_GRIP_FADE_IN_MS: u64 = 140;
+const FLOAT_GRIP_FADE_OUT_MS: u64 = 170;
+const TIMER_FLOAT_ANIMATION: usize = 0xF141;
+// Armed only after a docked popup receives a potentially spurious mouse-leave.
+// A 140ms recheck prevents edge-pixel expand/retract oscillation without the
+// permanent 50ms cursor polling removed in V24.5.
+const TIMER_FLOAT_HOVER_RECHECK: usize = 0xF142;
+const FLOAT_HOVER_RECHECK_MS: u32 = 140;
+const FLOAT_HOVER_EDGE_SLOP: i32 = 3;
+
+/// This rectangle is used for the rendered tab, pointer hit testing and
+/// collapsed alpha mask. Desktop-only, independent of the embedded taskbar grip.
+fn floating_grip_rect(width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32) -> RECT {
+    let peek = peek.min(width.min(height)).max(1);
+    let grip_width = sc(FLOAT_GRIP_LENGTH).min(width).max(1);
+    let grip_height = sc(FLOAT_GRIP_LENGTH).min(height).max(1);
+    match edge {
+        Some(FloatingEdge::Left) => RECT {
+            left: width - sc(FLOAT_FREE_GLOW_MARGIN) - peek,
+            right: width - sc(FLOAT_FREE_GLOW_MARGIN),
+            top: (height - grip_height) / 2, bottom: (height + grip_height) / 2,
+        },
+        Some(FloatingEdge::Right) => RECT {
+            left: sc(FLOAT_FREE_GLOW_MARGIN),
+            right: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
+            top: (height - grip_height) / 2, bottom: (height + grip_height) / 2,
+        },
+        Some(FloatingEdge::Top) => RECT {
+            left: (width - grip_width) / 2, right: (width + grip_width) / 2,
+            top: height - sc(FLOAT_FREE_GLOW_MARGIN) - peek,
+            bottom: height - sc(FLOAT_FREE_GLOW_MARGIN),
+        },
+        Some(FloatingEdge::Bottom) => RECT {
+            left: (width - grip_width) / 2, right: (width + grip_width) / 2,
+            top: sc(FLOAT_FREE_GLOW_MARGIN),
+            bottom: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
+        },
+        None => RECT {
+            left: (width - grip_width) / 2, right: (width + grip_width) / 2,
+            top: sc(FLOAT_FREE_GLOW_MARGIN),
+            bottom: sc(FLOAT_FREE_GLOW_MARGIN) + peek,
+        },
     }
+}
+
+/// During hover, fully transparent layered pixels bypass HWND hit-testing.
+/// A near-transparent (alpha=1) probe strip across the panel/tab gap allows
+/// WM_NCHITTEST to observe lateral cursor movement away from the real tab.
+/// Returning HTTRANSPARENT from that strip still forbids dragging there.
+fn floating_hover_probe_rect(body: RECT, grip: RECT, edge: Option<FloatingEdge>) -> RECT {
+    match edge {
+        Some(FloatingEdge::Left) => RECT {
+            left: body.right, right: grip.right,
+            top: body.top, bottom: body.bottom,
+        },
+        Some(FloatingEdge::Right) => RECT {
+            left: grip.left, right: body.left,
+            top: body.top, bottom: body.bottom,
+        },
+        Some(FloatingEdge::Top) => RECT {
+            left: body.left, right: body.right,
+            top: body.bottom, bottom: grip.bottom,
+        },
+        Some(FloatingEdge::Bottom) | None => RECT {
+            left: body.left, right: body.right,
+            top: grip.top, bottom: body.top,
+        },
+    }
+}
+
+fn paint_floating_hover_hit_probe(
+    pixels: &mut [u32], width: i32, height: i32,
+    body: RECT, grip: RECT, edge: Option<FloatingEdge>,
+) {
+    if width <= 0 || height <= 0 { return; }
+    let probe = floating_hover_probe_rect(body, grip, edge);
+    for y in probe.top.max(0)..probe.bottom.min(height) {
+        for x in probe.left.max(0)..probe.right.min(width) {
+            if point_in_rect(body, x, y) || point_in_rect(grip, x, y) { continue; }
+            let index = (y * width + x) as usize;
+            if pixels[index] >> 24 == 0 {
+                // Premultiplied black at 1/255 opacity is not visually
+                // distinguishable from the surrounding desktop.
+                pixels[index] = 0x01000000;
+            }
+        }
+    }
+}
+
+/// One source of truth for where desktop users can start a drag or keep its
+/// glow active, independent of the much larger layered HWND and its halo.
+fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
+    if point_in_rect(body, x, y) || point_in_rect(grip, x, y) { 1 }
+    else { -1 } // HTCLIENT or HTTRANSPARENT
+}
+
+#[allow(dead_code)]
+fn floating_drag_handle_hit(
+    x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
+) -> bool {
+    point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
+}
+
+// The desktop tab lives OUTSIDE the panel body. Hover must be checked against
+// its final screen-space rectangle, especially after the canvas origin changes
+// on drop from a docked edge to the free-floating top tab.
+#[allow(dead_code)]
+fn floating_drag_grip_contains_screen_point(
+    origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
+    edge: Option<FloatingEdge>, pointer: POINT,
+) -> bool {
+    floating_drag_handle_hit(
+        pointer.x - origin_x, pointer.y - origin_y,
+        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+    )
+}
+
+// A stale WM_MOUSELEAVE can be queued when mouse capture ends or a layered
+// popup is repositioned. Recheck where the pointer actually is, rather than
+// clearing an otherwise valid hover until another WM_MOUSEMOVE arrives.
+fn floating_pointer_still_over_free_grip(hwnd: HWND) -> bool {
+    let grip = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == hwnd && s.floating_edge.is_none()
+        ) else { return false };
+        floating_state_grip_rect(s)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else {
+        return false;
+    };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    point_in_rect(grip, pointer.x - rect.left, pointer.y - rect.top)
+}
+
+/// Desktop tabs occupy an independent, transparent gutter. The panel dimensions
+/// remain identical to the taskbar renderer, including progress and ring layout.
+fn floating_canvas_geometry(
+    body_width: i32, body_height: i32, edge: Option<FloatingEdge>,
+) -> (i32, i32, RECT) {
+    let tab = sc(FLOAT_EDGE_PEEK);
+    match edge {
+        Some(FloatingEdge::Left) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + tab + glow, body_height + 2 * glow,
+                RECT { left: 0, top: glow, right: body_width, bottom: glow + body_height })
+        },
+        Some(FloatingEdge::Right) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + tab + glow, body_height + 2 * glow,
+                RECT { left: tab + glow, top: glow,
+                    right: body_width + tab + glow, bottom: glow + body_height })
+        },
+        Some(FloatingEdge::Top) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + 2 * glow, body_height + tab + glow,
+                RECT { left: glow, top: 0, right: glow + body_width, bottom: body_height })
+        },
+        Some(FloatingEdge::Bottom) => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (body_width + 2 * glow, body_height + tab + glow,
+                RECT { left: glow, top: tab + glow,
+                    right: glow + body_width, bottom: tab + glow + body_height })
+        },
+        None => {
+            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+            (
+                body_width + glow * 2,
+                body_height + tab + glow * 2,
+                RECT {
+                    left: glow, top: tab + glow,
+                    right: body_width + glow, bottom: body_height + tab + glow,
+                },
+            )
+        },
+    }
+}
+
+// Switching the free tab to below keeps the canvas size unchanged and
+// shifts only the panel pixels, never the visible panel's screen position.
+fn floating_free_canvas_geometry(
+    body_width: i32, body_height: i32, below: bool,
+) -> (i32, i32, RECT) {
+    let (width, height, mut body) =
+        floating_canvas_geometry(body_width, body_height, None);
+    if below {
+        let shift = sc(FLOAT_EDGE_PEEK);
+        body.top -= shift;
+        body.bottom -= shift;
+    }
+    (width, height, body)
+}
+
+fn floating_layout_grip_rect(
+    width: i32, height: i32, edge: Option<FloatingEdge>, free_below: bool,
+) -> RECT {
+    floating_grip_rect(width, height,
+        if edge.is_none() && free_below { Some(FloatingEdge::Top) } else { edge },
+        sc(FLOAT_EDGE_PEEK))
+}
+
+// This is a layout choice, NOT docking. Prefer the top tab when it fits;
+// otherwise use the empty space below. Preserve the body and tab on-screen.
+fn floating_choose_free_grip_below(bounds: RECT, body_top: i32, body_height: i32) -> bool {
+    let above = body_top.saturating_sub(bounds.top);
+    let below = bounds.bottom.saturating_sub(body_top.saturating_add(body_height));
+    above < sc(FLOAT_EDGE_PEEK) && below >= sc(FLOAT_EDGE_PEEK)
+}
+
+/// During dragging, the existing edge orientation is preserved for a stable
+/// grip. Once the panel has cleared the monitor edge, add transparent pixels
+/// only on the formerly screen-clipped side. The unchanged body dimensions
+/// and original tab orientation then gain an external halo on all sides.
+fn floating_drag_canvas_geometry(
+    body_width: i32, body_height: i32, edge: Option<FloatingEdge>,
+    drag_glow_detached: bool,
+) -> (i32, i32, RECT) {
+    let (width, height, mut body) =
+        floating_canvas_geometry(body_width, body_height, edge);
+    if !drag_glow_detached { return (width, height, body); }
+    let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+    match edge {
+        Some(FloatingEdge::Left) => {
+            body.left += glow;
+            body.right += glow;
+            (width + glow, height, body)
+        }
+        Some(FloatingEdge::Right) => (width + glow, height, body),
+        Some(FloatingEdge::Top) => {
+            body.top += glow;
+            body.bottom += glow;
+            (width, height + glow, body)
+        }
+        Some(FloatingEdge::Bottom) => (width, height + glow, body),
+        None => (width, height, body),
+    }
+}
+
+/// Shared slide distance for physical screen edges and Explorer taskbar edges.
+/// At reveal=0 the grip is flush with the boundary; at reveal=100 the
+/// original content and tab occupy their fully expanded coordinates.
+fn floating_slide_offset(
+    width: i32, height: i32, edge: FloatingEdge, reveal: u8,
+) -> (i32, i32) {
+    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
+    let (dx, dy) = match edge {
+        FloatingEdge::Left => (-grip.left, 0),
+        FloatingEdge::Right => (width - grip.right, 0),
+        FloatingEdge::Top => (0, -grip.top),
+        FloatingEdge::Bottom => (0, height - grip.bottom),
+    };
+    // Use the physical-edge interpolation's original integer rounding
+    // (including halfway frames). This avoids one-pixel differences between
+    // the taskbar slide and the ordinary popup slide.
+    let progress = f64::from(reveal.min(100)) / 100.0;
+    (
+        dx + (f64::from(-dx) * progress).round() as i32,
+        dy + (f64::from(-dy) * progress).round() as i32,
+    )
+}
+
+/// Clip moving desktop pixels to the taskbar-free canvas. The panel and grip
+/// use the exact same offset as physical-edge docking, not a second
+/// shortening/stretching animation invented for reserved work-area edges.
+fn floating_slid_canvas_rect(
+    rect: RECT, width: i32, height: i32, edge: FloatingEdge, reveal: u8,
+) -> RECT {
+    let (dx, dy) = floating_slide_offset(width, height, edge, reveal);
+    RECT {
+        left: (rect.left + dx).clamp(0, width),
+        right: (rect.right + dx).clamp(0, width),
+        top: (rect.top + dy).clamp(0, height),
+        bottom: (rect.bottom + dy).clamp(0, height),
+    }
+}
+
+/// Shift the *completed* premultiplied foreground bitmap as one unit. It
+/// preserves text, rounded corners, double-sided halo, and the six-dot tab,
+/// while the taskbar-facing pixels outside the desktop canvas stay alpha=0.
+fn floating_slide_layered_bitmap(
+    canvas: &mut [u32], width: i32, height: i32,
+    edge: FloatingEdge, reveal: u8,
+) {
+    let (dx, dy) = floating_slide_offset(width, height, edge, reveal);
+    if dx == 0 && dy == 0 { return; }
+    let src = canvas.to_vec();
+    canvas.fill(0);
+    let copy_width = width - dx.abs();
+    if copy_width <= 0 { return; }
+    let dst_left = dx.max(0);
+    let src_left = (-dx).max(0);
+    for dst_y in dy.max(0)..(height + dy).min(height) {
+        let src_y = dst_y - dy;
+        let dst_index = (dst_y * width + dst_left) as usize;
+        let src_index = (src_y * width + src_left) as usize;
+        let count = copy_width as usize;
+        canvas[dst_index..dst_index + count]
+            .copy_from_slice(&src[src_index..src_index + count]);
+    }
+}
+
+fn floating_free_grip_below_for_state(s: &AppState) -> bool {
+    s.display_position == DisplayPosition::Desktop
+        && s.floating_edge.is_none() && s.floating_free_grip_below
+}
+
+fn floating_state_grip_rect(s: &AppState) -> RECT {
+    let (w, h, _) = floating_canvas_geometry_for_state(s);
+    let grip = floating_layout_grip_rect(
+        w, h, s.floating_edge, floating_free_grip_below_for_state(s),
+    );
+    if s.floating_reserved_dock {
+        if let Some(edge) = s.floating_edge {
+            let reveal = if s.dragging { s.floating_reserved_drag_reveal }
+                else { s.floating_reveal };
+            return floating_slid_canvas_rect(grip, w, h, edge, reveal);
+        }
+    }
+    grip
+}
+
+fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
+    let body_w = total_widget_width_for_state(s);
+    let body_h = widget_height_for_state(s);
+    if s.floating_edge.is_none() {
+        floating_free_canvas_geometry(body_w, body_h, floating_free_grip_below_for_state(s))
+    } else {
+        floating_drag_canvas_geometry(
+            body_w, body_h, s.floating_edge,
+            s.dragging && s.floating_drag_glow_detached,
+        )
+    }
+}
+
+/// Check the body against the current docking boundary. At a taskbar edge
+/// this is the desktop side of the taskbar, not the physical screen edge.
+fn floating_drag_has_cleared_edge(
+    window_x: i32, window_y: i32, body: RECT,
+    bounds: RECT, edge: Option<FloatingEdge>,
+) -> bool {
+    let threshold = sc(2);
+    match edge {
+        Some(FloatingEdge::Left) => window_x + body.left >= bounds.left + threshold,
+        Some(FloatingEdge::Right) => window_x + body.right <= bounds.right - threshold,
+        Some(FloatingEdge::Top) => window_y + body.top >= bounds.top + threshold,
+        Some(FloatingEdge::Bottom) => window_y + body.bottom <= bounds.bottom - threshold,
+        None => false,
+    }
+}
+
+/// Physical screen edges only need to restore the outer gutter when the
+/// body moves back onto the desktop. A taskbar edge is INSIDE the monitor,
+/// so the mouse can also pull the body across the reserved boundary toward
+/// Explorer. That direction must restore the formerly clipped halo too.
+///
+/// Test the body's formerly clipped outer edge, not the cursor: a tab grabbed
+/// away from the body can move the HWND by a different distance.
+fn floating_drag_has_crossed_taskbar_edge(
+    window_x: i32, window_y: i32, body: RECT,
+    bounds: RECT, edge: Option<FloatingEdge>,
+) -> bool {
+    let threshold = sc(2);
+    match edge {
+        Some(FloatingEdge::Left) => window_x + body.left <= bounds.left - threshold,
+        Some(FloatingEdge::Right) => window_x + body.right >= bounds.right + threshold,
+        Some(FloatingEdge::Top) => window_y + body.top <= bounds.top - threshold,
+        Some(FloatingEdge::Bottom) => window_y + body.bottom >= bounds.bottom + threshold,
+        None => false,
+    }
+}
+
+fn floating_canvas_size_for_state(state: &AppState) -> (i32, i32) {
+    let (width, height, _) = floating_canvas_geometry_for_state(state);
+    (width, height)
+}
+
+fn vertical_placement_for_gaps(
+    preset: AppearancePreset, taskbar_rect: RECT, spans: &[VerticalSpan], desired: i32,
+) -> Option<(AppearancePreset, i32)> {
+    let normal = vertical_widget_height_for_preset(AppearancePreset::Default);
+    let compact = vertical_widget_height_for_preset(AppearancePreset::Minimal);
+    let choices = match preset {
+        AppearancePreset::Minimal => [Some((AppearancePreset::Minimal, compact)), None],
+        AppearancePreset::Default => [
+            Some((AppearancePreset::Default, normal)),
+            Some((AppearancePreset::Minimal, compact)),
+        ],
+    };
+    for choice in choices.into_iter().flatten() {
+        if let Some(top) = nearest_free_top_offset(taskbar_rect, spans, choice.1, desired) {
+            return Some((choice.0, top));
+        }
+    }
+    None
+}
+
+/// rcWork is useful for finding reserved edges but can differ from the
+/// actual Explorer taskbar rectangle by a few pixels. For a taskbar attached
+/// to the physical monitor edge, place the desktop popup at the taskbar's
+/// *real* inner face; never leave a visible gap or enter the taskbar.
+fn floating_usable_bounds(monitor: RECT, work: RECT) -> RECT {
+    if work.left >= monitor.left && work.top >= monitor.top
+        && work.right <= monitor.right && work.bottom <= monitor.bottom
+        && work.right > work.left && work.bottom > work.top {
+        work
+    } else {
+        monitor
+    }
+}
+
+fn floating_bounds_at_taskbar(monitor: RECT, work: RECT, taskbars: &[RECT]) -> RECT {
+    let mut bounds = floating_usable_bounds(monitor, work);
+    let mw = monitor.right - monitor.left;
+    let mh = monitor.bottom - monitor.top;
+    for bar in taskbars {
+        let overlap_x = (bar.right.min(monitor.right) - bar.left.max(monitor.left)).max(0);
+        let overlap_y = (bar.bottom.min(monitor.bottom) - bar.top.max(monitor.top)).max(0);
+        // Ignore taskbars on other monitors, tiny toolbars and interior windows.
+        if overlap_x >= mw / 2 && bar.bottom >= monitor.bottom - 8
+            && bar.top > monitor.top && bar.top < monitor.bottom {
+            bounds.bottom = bar.top;
+        } else if overlap_x >= mw / 2 && bar.top <= monitor.top + 8
+            && bar.bottom > monitor.top && bar.bottom < monitor.bottom {
+            bounds.top = bar.bottom;
+        } else if overlap_y >= mh / 2 && bar.left <= monitor.left + 8
+            && bar.right > monitor.left && bar.right < monitor.right {
+            bounds.left = bar.right;
+        } else if overlap_y >= mh / 2 && bar.right >= monitor.right - 8
+            && bar.left > monitor.left && bar.left < monitor.right {
+            bounds.right = bar.left;
+        }
+    }
+    if bounds.right > bounds.left && bounds.bottom > bounds.top {
+        bounds
+    } else {
+        floating_usable_bounds(monitor, work)
+    }
+}
+
+/// An inset boundary is reserved by Windows. Collapse at a reserved edge
+/// clips the panel inside the desktop, rather than sliding under Explorer.
+fn floating_edge_is_reserved(monitor: RECT, bounds: RECT, edge: FloatingEdge) -> bool {
+    match edge {
+        FloatingEdge::Left => bounds.left > monitor.left,
+        FloatingEdge::Right => bounds.right < monitor.right,
+        FloatingEdge::Top => bounds.top > monitor.top,
+        FloatingEdge::Bottom => bounds.bottom < monitor.bottom,
+    }
+}
+
+fn floating_monitor_geometry(point: POINT) -> Option<(RECT, RECT)> {
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let taskbars = TASKBAR_EDGE_RECTS.lock().unwrap_or_else(|e| e.into_inner());
+        Some((info.rcMonitor, floating_bounds_at_taskbar(
+            info.rcMonitor, info.rcWork, &taskbars,
+        )))
+    }
+}
+
+fn floating_monitor_bounds(point: POINT) -> Option<RECT> {
+    floating_monitor_geometry(point).map(|(_, usable)| usable)
+}
+
+// Persisted desktop coordinates are virtual-screen coordinates, independent
+// from taskbar_monitor / taskbar_index. Use a point inside the last desktop
+// canvas to resolve its monitor; a missing coordinate is not a valid anchor.
+fn floating_restore_anchor(x: i32, y: i32, width: i32, height: i32) -> Option<POINT> {
+    (x != i32::MIN && y != i32::MIN).then_some(POINT {
+        x: x.saturating_add(width / 2),
+        y: y.saturating_add(height / 2),
+    })
+}
+
+// For an edge-docked popup, the saved coordinate is the expanded HWND
+// origin INSIDE its work area. Its canvas center can end up on the adjacent
+// monitor when the two screens have different DPI scales. Probe just inside
+// that original screen, rather than the hidden popup's current HWND bounds.
+fn floating_docked_monitor_anchor(
+    edge: Option<FloatingEdge>, x: i32, y: i32, center: POINT,
+) -> POINT {
+    if edge.is_some() {
+        POINT { x: x.saturating_add(1), y: y.saturating_add(1) }
+    } else {
+        center
+    }
+}
+
+fn floating_monitor_dpi(point: POINT) -> Option<u32> {
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONULL);
+        if monitor == HMONITOR::default() { return None; }
+        let mut x_dpi = 0;
+        let mut y_dpi = 0;
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x_dpi, &mut y_dpi)
+            .ok()?;
+        (x_dpi > 0).then_some(x_dpi)
+    }
+}
+
+// A disconnected monitor must not make the popup disappear off-screen.
+// Let callers probe a saved point with MONITOR_DEFAULTTONULL, rather than
+// MONITOR_DEFAULTTONEAREST (which silently chooses the taskbar screen).
+fn floating_restore_bounds(
+    saved_anchor: Option<POINT>,
+    taskbar_bounds: RECT,
+    bounds_at_saved_anchor: impl FnOnce(POINT) -> Option<RECT>,
+) -> RECT {
+    saved_anchor.and_then(bounds_at_saved_anchor).unwrap_or(taskbar_bounds)
+}
+
+/// Detect whether the selected monitor's edge is physically exposed.
+/// At a shared display seam we still DOCK; the neighboring monitor only
+/// determines whether to alpha-clip the slide inside the selected monitor.
+/// Sample all three portions of the grip to handle partially shared edges.
+fn floating_edge_exposed(monitor: RECT, edge: FloatingEdge, pointer: POINT) -> bool {
+    let half_grip = sc(FLOAT_GRIP_LENGTH) / 2;
+    let offsets = [-half_grip + 1, 0, half_grip - 1];
+    offsets.into_iter().all(|offset| {
+        let probe = match edge {
+            FloatingEdge::Left => POINT {
+                x: monitor.left.saturating_sub(1),
+                y: (pointer.y + offset).clamp(monitor.top, monitor.bottom - 1),
+            },
+            FloatingEdge::Right => POINT {
+                x: monitor.right,
+                y: (pointer.y + offset).clamp(monitor.top, monitor.bottom - 1),
+            },
+            FloatingEdge::Top => POINT {
+                x: (pointer.x + offset).clamp(monitor.left, monitor.right - 1),
+                y: monitor.top.saturating_sub(1),
+            },
+            FloatingEdge::Bottom => POINT {
+                x: (pointer.x + offset).clamp(monitor.left, monitor.right - 1),
+                y: monitor.bottom,
+            },
+        };
+        unsafe { MonitorFromPoint(probe, MONITOR_DEFAULTTONULL) == HMONITOR::default() }
+    })
+}
+
+/// A taskbar or an adjacent display makes the edge a visual clip
+/// boundary, not a no-dock boundary. Only the mouse's chosen monitor may
+/// show the retracted tab; the other screen receives no overflow pixels.
+fn floating_edge_needs_clip(
+    monitor: RECT, bounds: RECT, edge: FloatingEdge, has_neighbor: bool,
+) -> bool {
+    floating_edge_is_reserved(monitor, bounds, edge) || has_neighbor
+}
+
+fn floating_edge_requires_clip(
+    monitor: RECT, bounds: RECT, edge: FloatingEdge, pointer: POINT,
+) -> bool {
+    floating_edge_needs_clip(
+        monitor, bounds, edge, !floating_edge_exposed(monitor, edge, pointer),
+    )
+}
+
+fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
+    (
+        x.clamp(bounds.left, (bounds.right - width).max(bounds.left)),
+        y.clamp(bounds.top, (bounds.bottom - height).max(bounds.top)),
+    )
+}
+
+// A single geometric definition of the *painted* widget and drag tab.
+// Never include the transparent glow gutter in visibility or edge-contact
+// calculations. Reuse this rectangle in both positioning and docking so
+// changing the free tab side cannot create mismatched edge decisions.
+fn floating_visible_content_rect(
+    width: i32, height: i32, body: RECT,
+    edge: Option<FloatingEdge>, free_below: bool,
+) -> RECT {
+    let grip = floating_layout_grip_rect(width, height, edge, free_below);
+    RECT {
+        left: body.left.min(grip.left),
+        top: body.top.min(grip.top),
+        right: body.right.max(grip.right),
+        bottom: body.bottom.max(grip.bottom),
+    }
+}
+
+// The free desktop canvas has transparent glow gutters on every side.
+// Clamping the whole HWND makes the visible panel stop one glow margin away
+// from each screen edge. Only the real panel and drag tab must stay within
+// the selected monitor's usable desktop; transparent pixels may be offscreen.
+// The currently dragged canvas retains its previous dock orientation until
+// mouse release. Its actual tab can therefore be BELOW or BESIDE the panel,
+// whereas the future free canvas would put the tab ABOVE it. Visibility and
+// contact decisions must use that current orientation, not the future one.
+#[allow(clippy::too_many_arguments)]
+fn floating_clamp_drag_visible_position(
+    bounds: RECT, width: i32, height: i32, body: RECT,
+    edge: Option<FloatingEdge>, free_below: bool, x: i32, y: i32,
+) -> (i32, i32) {
+    let visible = floating_visible_content_rect(width, height, body, edge, free_below);
+    let min_x = bounds.left.saturating_sub(visible.left);
+    let max_x = bounds.right.saturating_sub(visible.right).max(min_x);
+    let min_y = bounds.top.saturating_sub(visible.top);
+    let max_y = bounds.bottom.saturating_sub(visible.bottom).max(min_y);
+    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
+#[allow(dead_code)]
+fn floating_clamp_free_visible_position(
+    bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
+) -> (i32, i32) {
+    floating_clamp_drag_visible_position(bounds, width, height, body, None, false, x, y)
+}
+
+// Explicit Desktop docking requires contact between the body/drag tab that
+// were ACTUALLY displayed at mouse release and the work-area boundary.
+// Never substitute the future free-floating canvas before this check.
+#[allow(clippy::too_many_arguments)]
+fn floating_desktop_contact_edge(
+    bounds: RECT, width: i32, height: i32, body: RECT,
+    edge: Option<FloatingEdge>, free_below: bool, origin: POINT, pointer: POINT,
+) -> Option<FloatingEdge> {
+    let visible = floating_visible_content_rect(width, height, body, edge, free_below);
+    [
+        (FloatingEdge::Left, origin.x + visible.left == bounds.left,
+            pointer.x.abs_diff(bounds.left)),
+        (FloatingEdge::Right, origin.x + visible.right == bounds.right,
+            pointer.x.abs_diff(bounds.right)),
+        (FloatingEdge::Top, origin.y + visible.top == bounds.top,
+            pointer.y.abs_diff(bounds.top)),
+        (FloatingEdge::Bottom, origin.y + visible.bottom == bounds.bottom,
+            pointer.y.abs_diff(bounds.bottom)),
+    ].into_iter()
+        .filter(|(_, touching, _)| *touching)
+        .min_by_key(|(_, _, distance)| *distance)
+        .map(|(edge, _, _)| edge)
+}
+
+// The visible free tab must have priority over choosing a new tab side:
+// when the TOP tab already touches the top edge, flipping it BELOW the body
+// would erase a legitimate docking contact. Same rule for a BELOW-body tab
+// reaching the taskbar. Only actual visible contact counts; no snap radius.
+fn floating_existing_free_tab_contact(
+    bounds: RECT, width: i32, height: i32, body: RECT,
+    free_below: bool, origin: POINT, pointer: POINT,
+) -> Option<FloatingEdge> {
+    let (x, y) = floating_clamp_drag_visible_position(
+        bounds, width, height, body, None, free_below, origin.x, origin.y,
+    );
+    floating_desktop_contact_edge(
+        bounds, width, height, body, None, free_below, POINT { x, y }, pointer,
+    ).filter(|edge| matches!(
+        (free_below, edge),
+        (false, FloatingEdge::Top) | (true, FloatingEdge::Bottom)
+    ))
+}
+
+/// The desktop reset target is the horizontal center of the selected
+/// monitor's usable desktop, snapped against its top work-area boundary.
+/// Keep virtual-desktop coordinates signed for screens left/above primary.
+fn floating_reset_top_origin(bounds: RECT, width: i32, height: i32) -> (i32, i32) {
+    let centered_x = (i64::from(bounds.left) +
+        (i64::from(bounds.right) - i64::from(bounds.left) - i64::from(width)) / 2)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    floating_edge_position(
+        bounds, centered_x, bounds.top, width, height,
+        Some(FloatingEdge::Top), false, sc(FLOAT_EDGE_PEEK),
+    )
+}
+
+fn floating_nearest_edge(bounds: RECT, rect: RECT, threshold: i32) -> Option<FloatingEdge> {
+    let edges = [
+        (FloatingEdge::Left, (rect.left - bounds.left).abs()),
+        (FloatingEdge::Right, (bounds.right - rect.right).abs()),
+        (FloatingEdge::Top, (rect.top - bounds.top).abs()),
+        (FloatingEdge::Bottom, (bounds.bottom - rect.bottom).abs()),
+    ];
+    edges.into_iter().min_by_key(|(_, distance)| *distance)
+        .and_then(|(edge, distance)| (distance <= threshold).then_some(edge))
+}
+
+/// Called only on mouse release, including a release while the original
+/// snapped body is still partly outside the monitor.
+fn floating_drop_edge(
+    bounds: RECT, rect: RECT, threshold: i32, exposed: [bool; 4],
+) -> Option<FloatingEdge> {
+    let edges = [
+        (FloatingEdge::Left, exposed[0],
+            rect.left < bounds.left && rect.right > bounds.left,
+            (rect.left - bounds.left).abs()),
+        (FloatingEdge::Right, exposed[1],
+            rect.right > bounds.right && rect.left < bounds.right,
+            (bounds.right - rect.right).abs()),
+        (FloatingEdge::Top, exposed[2],
+            rect.top < bounds.top && rect.bottom > bounds.top,
+            (rect.top - bounds.top).abs()),
+        (FloatingEdge::Bottom, exposed[3],
+            rect.bottom > bounds.bottom && rect.top < bounds.bottom,
+            (bounds.bottom - rect.bottom).abs()),
+    ];
+    if let Some((edge, _, _, _)) = edges.iter().find(|(_, allowed, overlaps, _)|
+        *allowed && *overlaps
+    ) {
+        return Some(*edge);
+    }
+    // An unexposed seam never qualifies, even if it is the geometrically
+    // nearest edge. A different, real exterior edge may still qualify.
+    if exposed.iter().all(|&allowed| allowed) {
+        return floating_nearest_edge(bounds, rect, threshold);
+    }
+    edges.into_iter()
+        .filter(|(_, allowed, _, distance)| *allowed && *distance <= threshold)
+        .min_by_key(|(_, _, _, distance)| *distance)
+        .map(|(edge, _, _, _)| edge)
+}
+
+/// Select the edge by the RELEASE CURSOR's perpendicular distance.
+/// At screen corners two eligible boundaries can meet. The old logic picked
+/// Left before Top/Bottom regardless of the actual cursor position, while a
+/// reserved taskbar band could suppress the adjoining physical-screen edge.
+/// Use the same distance rule for all four corners and every taskbar location.
+///
+/// The layered HWND rectangle remains an eligibility signal so detached-grip
+/// drags retain their previous snapping behavior. The cursor additionally
+/// qualifies an edge when close to its line or inside a reserved taskbar band,
+/// even if the entire HWND has passed outside the work area.
+fn floating_drop_edge_at_pointer(
+    monitor: RECT, bounds: RECT, rect: RECT, pointer: POINT,
+    threshold: i32, exposed: [bool; 4],
+) -> Option<FloatingEdge> {
+    let within_monitor = pointer.x >= monitor.left && pointer.x < monitor.right
+        && pointer.y >= monitor.top && pointer.y < monitor.bottom;
+    if !within_monitor {
+        // A drag released beyond every monitor retains the legacy nearest
+        // monitor rectangle fallback. Inside any monitor the actual cursor
+        // distance and chosen display's four sides always take precedence.
+        return floating_drop_edge(bounds, rect, threshold, exposed);
+    }
+    let distances = [
+        pointer.x.abs_diff(bounds.left),
+        pointer.x.abs_diff(bounds.right),
+        pointer.y.abs_diff(bounds.top),
+        pointer.y.abs_diff(bounds.bottom),
+    ];
+    let snap_distance = threshold.max(0) as u32;
+    let eligible = [
+        (
+            FloatingEdge::Left, exposed[0],
+            (rect.left < bounds.left && rect.right > bounds.left)
+                || rect.left.abs_diff(bounds.left) <= snap_distance,
+            within_monitor && (distances[0] <= snap_distance
+                || (bounds.left > monitor.left && pointer.x < bounds.left)),
+            distances[0],
+        ),
+        (
+            FloatingEdge::Right, exposed[1],
+            (rect.right > bounds.right && rect.left < bounds.right)
+                || rect.right.abs_diff(bounds.right) <= snap_distance,
+            within_monitor && (distances[1] <= snap_distance
+                || (bounds.right < monitor.right && pointer.x >= bounds.right)),
+            distances[1],
+        ),
+        (
+            FloatingEdge::Top, exposed[2],
+            (rect.top < bounds.top && rect.bottom > bounds.top)
+                || rect.top.abs_diff(bounds.top) <= snap_distance,
+            within_monitor && (distances[2] <= snap_distance
+                || (bounds.top > monitor.top && pointer.y < bounds.top)),
+            distances[2],
+        ),
+        (
+            FloatingEdge::Bottom, exposed[3],
+            (rect.bottom > bounds.bottom && rect.top < bounds.bottom)
+                || rect.bottom.abs_diff(bounds.bottom) <= snap_distance,
+            within_monitor && (distances[3] <= snap_distance
+                || (bounds.bottom < monitor.bottom && pointer.y >= bounds.bottom)),
+            distances[3],
+        ),
+    ];
+    eligible.into_iter()
+        .filter(|(_, allowed, hwnd_near, mouse_near, _)|
+            *allowed && (*hwnd_near || *mouse_near))
+        .min_by_key(|(_, _, _, _, distance)| *distance)
+        .map(|(edge, _, _, _, _)| edge)
+}
+
+// The stable expanded position is always in screen coordinates. Only the
+// visible sliver of a docked popup is on-screen while collapsed.
+#[allow(clippy::too_many_arguments)]
+fn floating_edge_position(
+    bounds: RECT, x: i32, y: i32, width: i32, height: i32,
+    edge: Option<FloatingEdge>, collapsed: bool, peek: i32,
+) -> (i32, i32) {
+    let (x, y) = floating_clamp_position(bounds, width, height, x, y);
+    let grip = floating_grip_rect(width, height, edge, peek);
+    match edge {
+        Some(FloatingEdge::Left) => (
+            if collapsed { bounds.left - grip.left } else { bounds.left }, y,
+        ),
+        Some(FloatingEdge::Right) => (
+            if collapsed { bounds.right - grip.right } else { bounds.right - width }, y,
+        ),
+        Some(FloatingEdge::Top) => (
+            x, if collapsed { bounds.top - grip.top } else { bounds.top },
+        ),
+        Some(FloatingEdge::Bottom) => (
+            x, if collapsed { bounds.bottom - grip.bottom } else { bounds.bottom - height },
+        ),
+        None => (x, y),
+    }
+}
+
+fn refresh_floating_reserved_dock(hwnd: HWND) {
+    let (x, y, w, h, edge) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s| s.floating_mode && !s.dragging) else { return };
+        let (w, h) = floating_canvas_size_for_state(s);
+        (s.floating_x, s.floating_y, w, h, s.floating_edge)
+    };
+    let point = POINT {
+        x: x.saturating_add(w / 2),
+        y: y.saturating_add(h / 2),
+    };
+    let reserved = edge.is_some_and(|edge| floating_monitor_geometry(point)
+        .is_some_and(|(monitor, bounds)| {
+            floating_edge_requires_clip(monitor, bounds, edge, point)
+        }));
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        if !s.floating_mode || s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
+        s.floating_reserved_dock = reserved;
+    }
+}
+
+fn move_floating_widget(hwnd: HWND) {
+    move_floating_widget_with_visibility(hwnd, true);
+}
+
+// When restoring a cached desktop HWND, position it while still hidden.
+// Its previous layered bitmap may be expanded; only show it after the new
+// collapsed/expanded frame has been committed with UpdateLayeredWindow.
+fn move_floating_widget_with_visibility(hwnd: HWND, show: bool) {
+    let (x, y, edge, reveal, width, height, dragging) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if !s.floating_mode { return; }
+        let (width, height) = floating_canvas_size_for_state(s);
+        (s.floating_x, s.floating_y, s.floating_edge, s.floating_reveal,
+         width, height, s.dragging)
+    };
+    let reserved = lock_state().as_ref().is_some_and(|s| s.floating_reserved_dock);
+    let (left, top) = if dragging || edge.is_none() {
+        // Keep mouse positioning stable during drag and across connected
+        // displays. A free popup may straddle two screens at a seam.
+        (x, y)
+    } else {
+        let center = POINT { x: x.saturating_add(width / 2), y: y.saturating_add(height / 2) };
+        let Some(bounds) = floating_monitor_bounds(center) else { return };
+        let (expanded_x, expanded_y) = floating_edge_position(
+            bounds, x, y, width, height, edge, false, sc(FLOAT_EDGE_PEEK),
+        );
+        if reserved {
+            // For Explorer or adjacent-monitor edges, slide bitmap pixels
+            // inside the chosen monitor instead of moving HWND across a seam.
+            (expanded_x, expanded_y)
+        } else {
+            // Both paths use the exact same signed slide distance and easing.
+            let (dx, dy) = edge.map(|edge|
+                floating_slide_offset(width, height, edge, reveal)
+            ).unwrap_or((0, 0));
+            (expanded_x + dx, expanded_y + dy)
+        }
+    };
+    let blur = lock_state().as_ref().is_some_and(|s| s.composition_blur_active);
+    if blur {
+        // The desktop pair is raised when blur is activated or when docking
+        // changes; dragging must only move its HWNDs, never reorder them.
+        move_frosted_pair(hwnd, left, top, width, height);
+    } else {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd, HWND_TOPMOST, left, top, width, height,
+                if show { SWP_NOACTIVATE | SWP_SHOWWINDOW } else { SWP_NOACTIVATE },
+            );
+        }
+    }
+    if show && blur {
+        unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+    }
+}
+
+// A docked panel whose auto-collapse is disabled stays fully expanded, but
+// its separate drag tab behaves visually just like a free desktop tab.
+fn floating_grip_uses_hover_fade(s: &AppState) -> bool {
+    s.floating_edge.is_none() || !floating_auto_collapse_allowed(
+        s.display_position, s.desktop_auto_collapse,
+    )
+}
+
+fn floating_grip_should_show(
+    edge: Option<FloatingEdge>, auto_collapse: bool, hovered: bool, dragging: bool,
+) -> bool {
+    dragging || (edge.is_some() && auto_collapse) || hovered
+}
+
+fn set_floating_grip_hover(hovered: bool) {
+    let hwnd = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || s.dragging || !floating_grip_uses_hover_fade(s)
+            || s.floating_grip_hover == hovered { return; }
+        s.floating_grip_hover = hovered;
+        s.hwnd.to_hwnd()
+    };
+    unsafe {
+        SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
+    }
+}
+
+fn floating_hover_can_reveal(collapsed: bool, guard: bool, dragging: bool) -> bool {
+    collapsed && !guard && !dragging
+}
+
+// In fallback desktop mode (taskbar has no free space), preserve the
+// existing auto-hide behavior. This option only affects explicitly selected
+// Desktop mode, not Explorer's taskbar and not the docking geometry.
+fn floating_auto_collapse_allowed(position: DisplayPosition, enabled: bool) -> bool {
+    position != DisplayPosition::Desktop || enabled
+}
+
+// A docked desktop popup must enter with its *final* visibility; initializing
+// at 100% reveal before sync_desktop_auto_collapse() momentarily exposes the
+// entire panel and then starts a needless contraction animation.
+fn initial_floating_visibility(
+    edge: Option<FloatingEdge>, position: DisplayPosition, auto_collapse: bool,
+) -> (bool, u8) {
+    let collapsed = edge.is_some() && floating_auto_collapse_allowed(position, auto_collapse);
+    (collapsed, if collapsed { 0 } else { 100 })
+}
+
+// The top tab has a different transparent canvas size from free and
+// left/right-docked tabs. Reset must calculate the *destination* canvas
+// BEFORE applying the hidden tab's slide distance; using the source canvas
+// pushes the free tab partly offscreen and leaves side tabs below the edge.
+fn floating_reset_top_canvas_size(body_width: i32, body_height: i32) -> (i32, i32) {
+    let (width, height, _) = floating_canvas_geometry(
+        body_width, body_height, Some(FloatingEdge::Top),
+    );
+    (width, height)
+}
+
+/// Reset a desktop popup without changing the stored taskbar offsets.
+/// The saved expanded desktop origin identifies its screen even if the
+/// current collapsed HWND is partially outside the monitor or across a seam.
+fn reset_floating_widget_position() -> bool {
+    let snapshot = {
+        let state = lock_state();
+        state.as_ref().and_then(|s| {
+            if !s.floating_mode || s.dragging { return None; }
+            let (width, height) = floating_canvas_size_for_state(s);
+            let anchor = floating_restore_anchor(s.floating_x, s.floating_y, width, height)
+                .map(|center| floating_docked_monitor_anchor(
+                    s.floating_edge, s.floating_x, s.floating_y, center,
+                ))
+                .or_else(|| native_interop::get_window_rect_safe(s.hwnd.to_hwnd())
+                    .map(|r| POINT {
+                        x: r.left.saturating_add(width / 2),
+                        y: r.top.saturating_add(height / 2),
+                    }))?;
+            let body_w = total_widget_width_for_state(s);
+            let body_h = widget_height_for_state(s);
+            let (reset_width, reset_height) =
+                floating_reset_top_canvas_size(body_w, body_h);
+            Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height,
+                s.display_position, s.desktop_auto_collapse))
+        })
+    };
+    let Some((hwnd, anchor, width, height, position, auto_collapse)) = snapshot
+    else { return false; };
+    let Some((monitor, bounds)) = floating_monitor_geometry(anchor)
+    else { return false; };
+    // An explicit reset deliberately places the popup at the top boundary.
+    let (x, y) = floating_reset_top_origin(bounds, width, height);
+    let edge = Some(FloatingEdge::Top);
+    let (collapsed, reveal) = initial_floating_visibility(edge, position, auto_collapse);
+    let pointer = POINT {
+        x: bounds.left.saturating_add((bounds.right - bounds.left) / 2),
+        y: bounds.top.saturating_add(1).min(bounds.bottom.saturating_sub(1)),
+    };
+    let reserved = edge.is_some_and(|edge|
+        floating_edge_requires_clip(monitor, bounds, edge, pointer));
+    let (dx, dy) = if reserved {
+        (0, 0)
+    } else {
+        edge.map(|edge| floating_slide_offset(width, height, edge, reveal))
+            .unwrap_or((0, 0))
+    };
+    let origin = POINT { x: x.saturating_add(dx), y: y.saturating_add(dy) };
+
+    hide_minimal_usage_tooltip();
+    floating_cancel_hover_recheck(hwnd);
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION);
+    }
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return false; };
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd || s.dragging { return false; }
+        s.floating_x = x;
+        s.floating_y = y;
+        s.floating_edge = edge;
+        s.floating_free_grip_below = false;
+        s.floating_reserved_dock = reserved;
+        s.floating_drag_glow_detached = false;
+        s.floating_reserved_drag_reveal = reveal;
+        s.floating_collapsed = collapsed;
+        s.floating_reveal = reveal;
+        s.floating_slide_from = reveal;
+        s.floating_slide_target = reveal;
+        s.floating_slide_started = Instant::now();
+        s.floating_first_collapse_guard = false;
+        s.drag_handle_hovered = false;
+        s.floating_grip_hover = false;
+        s.floating_grip_alpha = if floating_grip_should_show(
+            edge, floating_auto_collapse_allowed(position, auto_collapse),
+            false, false,
+        ) { 100 } else { 0 };
+        s.floating_fade_from = s.floating_grip_alpha;
+        s.floating_fade_target = s.floating_grip_alpha;
+        s.floating_fade_started = Instant::now();
+    }
+
+    // Publish new dock orientation, size, alpha mask and screen location in
+    // one UpdateLayeredWindow. SetWindowPos first could briefly show the old
+    // expanded frame or the previous tab at the wrong coordinates.
+    let _placement_guard = FloatingInitialPlacementGuard::begin();
+    render_layered_at(Some(origin));
+    if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
+        sync_blur_backdrop_zorder(hwnd);
+    }
+    save_state_settings();
+    diagnose::log_lazy(|| format!(
+        "desktop position reset to top center at ({x},{y}) monitor=({}, {}, {}, {}) collapsed={collapsed} clipped={reserved}",
+        monitor.left, monitor.top, monitor.right, monitor.bottom,
+    ));
+    true
+}
+
+fn sync_desktop_auto_collapse() {
+    let (hwnd, collapse) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || s.floating_edge.is_none() { return; }
+        let collapse = floating_auto_collapse_allowed(
+            s.display_position, s.desktop_auto_collapse,
+        );
+        if !collapse {
+            s.floating_grip_hover = false;
+        }
+        s.floating_first_collapse_guard = false;
+        (s.hwnd.to_hwnd(), collapse)
+    };
+    floating_cancel_hover_recheck(hwnd);
+    set_floating_collapsed(collapse);
+}
+
+// A nonmodal custom context menu is a separate HWND. Moving from the
+// expanded panel into that menu must not count as a hover exit.
+fn floating_context_menu_blocks_collapse(hwnd: HWND) -> bool {
+    popup_menu::is_open_for(hwnd) && lock_state().as_ref().is_some_and(|s|
+        s.floating_mode && s.hwnd.to_hwnd() == hwnd
+            && s.floating_edge.is_some() && !s.dragging
+    )
+}
+
+fn set_floating_collapsed(collapsed: bool) {
+    let hwnd = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if collapsed && popup_menu::is_open_for(s.hwnd.to_hwnd()) {
+            return;
+        }
+        if !s.floating_mode || s.dragging || s.floating_edge.is_none()
+            || (collapsed && !floating_auto_collapse_allowed(
+                s.display_position, s.desktop_auto_collapse,
+            ))
+            || (!collapsed && s.floating_first_collapse_guard)
+            || s.floating_collapsed == collapsed { return; }
+        s.floating_collapsed = collapsed;
+        s.hwnd.to_hwnd()
+    };
+    if collapsed { hide_minimal_usage_tooltip(); }
+    unsafe {
+        let service = taskbar_replica_service_hwnd(hwnd);
+        SetTimer(service, TIMER_FLOAT_ANIMATION, 16, None);
+    }
+    move_floating_widget(hwnd);
+}
+
+fn step_floating_animation(hwnd: HWND) {
+    let (active, completed, moved, appearance_changed, guarded) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode {
+            unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
+            return;
+        }
+        let now = Instant::now();
+        let destination = if s.floating_collapsed { 0 } else { 100 };
+        let old_reveal = s.floating_reveal;
+        let old_alpha = s.floating_grip_alpha;
+        if s.floating_slide_target != destination {
+            s.floating_slide_from = s.floating_reveal;
+            s.floating_slide_target = destination;
+            s.floating_slide_started = now;
+        }
+        let base_ms = if destination == 100 {
+            FLOAT_EXPAND_DURATION_MS
+        } else {
+            FLOAT_RETRACT_DURATION_MS
+        };
+        let slide_duration = animation_partial_duration(
+            base_ms, s.floating_slide_from, destination,
+        );
+        s.floating_reveal = eased_value_at(
+            s.floating_slide_from, destination,
+            now.duration_since(s.floating_slide_started), slide_duration,
+        );
+        let grip_target = if floating_grip_should_show(
+            s.floating_edge,
+            floating_auto_collapse_allowed(s.display_position, s.desktop_auto_collapse),
+            s.floating_grip_hover, s.dragging,
+        ) { 100 } else { 0 };
+        if s.floating_fade_target != grip_target {
+            s.floating_fade_from = s.floating_grip_alpha;
+            s.floating_fade_target = grip_target;
+            s.floating_fade_started = now;
+        }
+        let fade_ms = if grip_target == 100 {
+            FLOAT_GRIP_FADE_IN_MS
+        } else {
+            FLOAT_GRIP_FADE_OUT_MS
+        };
+        s.floating_grip_alpha = eased_value_at(
+            s.floating_fade_from, grip_target,
+            now.duration_since(s.floating_fade_started),
+            animation_partial_duration(fade_ms, s.floating_fade_from, grip_target),
+        );
+        (s.hwnd.to_hwnd(),
+         s.floating_reveal == destination && s.floating_grip_alpha == grip_target,
+         s.floating_reveal != old_reveal && !s.floating_reserved_dock,
+         s.floating_reveal != old_reveal || s.floating_grip_alpha != old_alpha,
+         s.floating_first_collapse_guard && s.floating_collapsed)
+    };
+    if moved { move_floating_widget(active); }
+    if appearance_changed { render_layered(); }
+
+    // The new dock's first contraction is non-interactive. Re-arm hover only
+    // after it is fully hidden AND the pointer has left the now-visible tab.
+    // Poll slowly when the pointer rests on the tab, without repainting.
+    if completed && guarded {
+        if floating_pointer_is_outside_grip(active) {
+            if let Some(s) = lock_state().as_mut() {
+                if s.hwnd.to_hwnd() == active { s.floating_first_collapse_guard = false; }
+            }
+        } else {
+            unsafe {
+                SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 80, None);
+            }
+            return;
+        }
+    }
+    if completed {
+        unsafe { let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION); }
+    }
+}
+
+/// Like free desktop hover retention, keep an expanded, edge-docked panel's
+/// hidden tab visible while the pointer is anywhere on its real panel or tab.
+/// This is only used when automatic edge collapse was explicitly disabled.
+/// The exterior halo gutter is never a hover target.
+fn floating_pointer_over_expanded_docked_panel(hwnd: HWND) -> bool {
+    let (body, grip) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return false };
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd
+            || s.floating_edge.is_none() || s.floating_collapsed
+            || !floating_grip_uses_hover_fade(s)
+        {
+            return false;
+        }
+        let (w, h, body) = floating_canvas_geometry_for_state(s);
+        let body = if s.floating_reserved_dock {
+            floating_slid_canvas_rect(
+                body, w, h, s.floating_edge.unwrap(),
+                if s.dragging { s.floating_reserved_drag_reveal } else { s.floating_reveal },
+            )
+        } else {
+            body
+        };
+        (body, floating_state_grip_rect(s))
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    floating_drag_tab_hit_code(
+        body, grip, pointer.x - rect.left, pointer.y - rect.top,
+    ) == 1
+}
+
+/// The fully expanded panel and edge tab may be separated by an alpha-zero
+/// gutter. That gutter is NOT a click target, but its traversal must not hide
+/// the tab before the pointer reaches the actual draggable pixels.
+fn floating_transition_corridor_contains(
+    body: RECT, grip: RECT, edge: FloatingEdge, x: i32, y: i32,
+) -> bool {
+    !point_in_rect(body, x, y)
+        && !point_in_rect(grip, x, y)
+        && point_in_rect(floating_hover_probe_rect(body, grip, Some(edge)), x, y)
+}
+
+/// Geometry rectangles abut, but their actual rounded silhouettes each
+/// have an entirely transparent one-pixel outer inset. The two adjacent
+/// alpha-zero pixel rows/columns form a native mouse-leave seam that is NOT
+/// covered by the rectangle-only hover transition probe above.
+///
+/// This is a *hover recheck* region, never an extra hit-test surface: no
+/// pixels are painted and no drag targets are widened.
+fn floating_transparent_panel_grip_seam_contains(
+    body: RECT, grip: RECT, edge: FloatingEdge, x: i32, y: i32,
+) -> bool {
+    let inset = sc(1).max(1);
+    match edge {
+        FloatingEdge::Left => {
+            y >= body.top.max(grip.top) && y < body.bottom.min(grip.bottom)
+                && x >= body.right - inset && x < grip.left + inset
+        }
+        FloatingEdge::Right => {
+            y >= body.top.max(grip.top) && y < body.bottom.min(grip.bottom)
+                && x >= grip.right - inset && x < body.left + inset
+        }
+        FloatingEdge::Top => {
+            x >= body.left.max(grip.left) && x < body.right.min(grip.right)
+                && y >= body.bottom - inset && y < grip.top + inset
+        }
+        FloatingEdge::Bottom => {
+            x >= body.left.max(grip.left) && x < body.right.min(grip.right)
+                && y >= grip.bottom - inset && y < body.top + inset
+        }
+    }
+}
+
+fn floating_pointer_in_expanded_docked_transition(hwnd: HWND) -> bool {
+    let (body, grip, edge) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return false };
+        if !s.floating_mode || s.hwnd.to_hwnd() != hwnd
+            || s.floating_collapsed || !floating_grip_uses_hover_fade(s)
+        {
+            return false;
+        }
+        let Some(edge) = s.floating_edge else { return false };
+        let (w, h, body) = floating_canvas_geometry_for_state(s);
+        let body = if s.floating_reserved_dock {
+            floating_slid_canvas_rect(
+                body, w, h, edge,
+                if s.dragging { s.floating_reserved_drag_reveal } else { s.floating_reveal },
+            )
+        } else { body };
+        (body, floating_state_grip_rect(s), edge)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    let x = pointer.x - rect.left;
+    let y = pointer.y - rect.top;
+    floating_transition_corridor_contains(body, grip, edge, x, y)
+        || floating_transparent_panel_grip_seam_contains(body, grip, edge, x, y)
+}
+
+fn floating_pointer_over_actual_grip(hwnd: HWND) -> bool {
+    let grip = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == hwnd
+        ) else { return false };
+        floating_state_grip_rect(s)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
+    point_in_rect(grip, pointer.x - rect.left, pointer.y - rect.top)
+}
+
+/// False while the pointer still overlaps the collapsed exposed edge grip.
+/// The cursor's hover *retention* area must not change with animation.
+/// In particular a transparent pixel at the physical monitor edge can stop
+/// receiving WM_MOUSEMOVE after expansion despite still being inside the
+/// visually expanded panel. Include both the expanded panel and the collapsed
+/// tab, allowing only a small inward tolerance and never crossing the chosen
+/// monitor's work-area boundary.
+fn floating_docked_hover_rect(
+    expanded_body: RECT, collapsed_grip: RECT, bounds: RECT, slack: i32,
+) -> RECT {
+    let slack = slack.max(0);
+    RECT {
+        left: expanded_body.left.min(collapsed_grip.left)
+            .saturating_sub(slack).max(bounds.left),
+        right: expanded_body.right.max(collapsed_grip.right)
+            .saturating_add(slack).min(bounds.right),
+        top: expanded_body.top.min(collapsed_grip.top)
+            .saturating_sub(slack).max(bounds.top),
+        bottom: expanded_body.bottom.max(collapsed_grip.bottom)
+            .saturating_add(slack).min(bounds.bottom),
+    }
+}
+
+fn floating_docked_hover_rect_for_geometry(
+    bounds: RECT, x: i32, y: i32, width: i32, height: i32,
+    body: RECT, edge: FloatingEdge,
+) -> RECT {
+    let (x, y) = floating_edge_position(
+        bounds, x, y, width, height, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+    );
+    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
+    let (dx, dy) = floating_slide_offset(width, height, edge, 0);
+    let expanded_body = RECT {
+        left: x + body.left, right: x + body.right,
+        top: y + body.top, bottom: y + body.bottom,
+    };
+    let collapsed_grip = RECT {
+        left: x + grip.left + dx, right: x + grip.right + dx,
+        top: y + grip.top + dy, bottom: y + grip.bottom + dy,
+    };
+    floating_docked_hover_rect(
+        expanded_body, collapsed_grip, bounds, sc(FLOAT_HOVER_EDGE_SLOP),
+    )
+}
+
+fn floating_docked_hover_rect_for_state(s: &AppState) -> Option<RECT> {
+    let edge = s.floating_edge?;
+    let (width, height, body) = floating_canvas_geometry_for_state(s);
+    let center = POINT {
+        x: s.floating_x.saturating_add(width / 2),
+        y: s.floating_y.saturating_add(height / 2),
+    };
+    let (_, bounds) = floating_monitor_geometry(center)?;
+    Some(floating_docked_hover_rect_for_geometry(
+        bounds, s.floating_x, s.floating_y, width, height, body, edge,
+    ))
+}
+
+/// Unlike HWND alpha-hit testing, the docked hover envelope is stable for the
+/// entire slide. In the rare case WM_MOUSELEAVE fires inside this envelope,
+/// keep checking *only while the leave is unresolved*, so a later exit from
+/// transparent pixels can still collapse the widget.
+fn floating_pointer_in_docked_hover_zone(hwnd: HWND) -> bool {
+    let hover = {
+        let state = lock_state();
+        state.as_ref().filter(|s|
+            s.floating_mode && s.hwnd.to_hwnd() == hwnd && !s.dragging
+        ).and_then(floating_docked_hover_rect_for_state)
+    };
+    let Some(hover) = hover else { return false; };
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) }.is_err() { return false; }
+    point_in_rect(hover, cursor.x, cursor.y)
+}
+
+fn floating_arm_hover_recheck(hwnd: HWND) {
+    unsafe {
+        let _ = SetTimer(taskbar_replica_service_hwnd(hwnd),
+            TIMER_FLOAT_HOVER_RECHECK, FLOAT_HOVER_RECHECK_MS, None);
+    }
+}
+
+fn floating_cancel_hover_recheck(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_HOVER_RECHECK);
+    }
+}
+
+fn floating_pointer_is_outside_grip(hwnd: HWND) -> bool {
+    let grip = {
+        let state = lock_state();
+        let Some(s) = state.as_ref().filter(|s| s.floating_mode) else { return false };
+        if s.floating_edge.is_none() { return true; }
+        floating_state_grip_rect(s)
+    };
+    let Some(rect) = native_interop::get_window_rect_safe(hwnd) else { return false };
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() { return false; }
+    !point_in_rect(RECT {
+        left: rect.left + grip.left,
+        top: rect.top + grip.top,
+        right: rect.left + grip.right,
+        bottom: rect.top + grip.bottom,
+    }, point.x, point.y)
+}
+
+fn animation_partial_duration(full_ms: u64, from: u8, to: u8) -> u64 {
+    let distance = i32::from(from).abs_diff(i32::from(to));
+    (full_ms * u64::from(distance) / 100).max(48)
+}
+
+/// Time-based cubic easing. Expansion settles quickly (ease-out); retraction
+/// starts and stops gently (ease-in-out), without overshooting screen bounds.
+fn eased_value_at(from: u8, to: u8, elapsed: Duration, duration_ms: u64) -> u8 {
+    if from == to { return to; }
+    let t = (elapsed.as_secs_f64() * 1000.0 / duration_ms.max(1) as f64).clamp(0.0, 1.0);
+    let eased = if to > from {
+        1.0 - (1.0 - t).powi(3)
+    } else if t < 0.5 {
+        4.0 * t.powi(3)
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    };
+    (f64::from(from) + (f64::from(to) - f64::from(from)) * eased)
+        .round().clamp(0.0, 100.0) as u8
+}
+
+// Preserve the cursor's position *within the same part of the drag tab*
+// across per-monitor DPI transitions. The anchor is in physical canvas pixels;
+// after a scale change keeping it unchanged shifts the grip away from the
+// cursor. Negative signed offsets (e.g. an initially clipped edge tab) are
+// supported as well.
+fn floating_drag_anchor_for_dpi(anchor: i32, from_dpi: u32, to_dpi: u32) -> i32 {
+    let numerator = i64::from(anchor) * i64::from(to_dpi.max(1));
+    let denominator = i64::from(from_dpi.max(1));
+    let scaled = if numerator >= 0 {
+        (numerator + denominator / 2) / denominator
+    } else {
+        -((-numerator + denominator / 2) / denominator)
+    };
+    scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn update_floating_drag(hwnd: HWND, pointer: POINT) {
+    // The *pointer* chooses the next screen, not the layered HWND center:
+    // when a wide component straddles a seam, those can disagree for many
+    // frames. Never send a dragging popup through position_at_taskbar().
+    let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
+    let target_dpi = floating_monitor_dpi(pointer).unwrap_or(previous_dpi);
+    let dpi_changed = target_dpi != previous_dpi;
+    if dpi_changed {
+        CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
+    }
+    let (anchor_x, anchor_y, edge, free_below, body_w, body_h, unlocked, reserved, drag_reveal) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || !s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
+        if dpi_changed {
+            s.floating_drag_anchor_x = floating_drag_anchor_for_dpi(
+                s.floating_drag_anchor_x, previous_dpi, target_dpi,
+            );
+            s.floating_drag_anchor_y = floating_drag_anchor_for_dpi(
+                s.floating_drag_anchor_y, previous_dpi, target_dpi,
+            );
+            if s.vertical_taskbar_mode {
+                s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
+            }
+        }
+        (
+            s.floating_drag_anchor_x, s.floating_drag_anchor_y, s.floating_edge,
+            floating_free_grip_below_for_state(s),
+            total_widget_width_for_state(s), widget_height_for_state(s),
+            s.floating_drag_glow_detached, s.floating_reserved_dock,
+            s.floating_reserved_drag_reveal,
+        )
+    };
+    let (old_w, old_h, old_body) = if edge.is_none() {
+        floating_free_canvas_geometry(body_w, body_h, free_below)
+    } else {
+        floating_drag_canvas_geometry(body_w, body_h, edge, unlocked)
+    };
+    // A clipped grip (taskbar or monitor seam) has a virtual pixel offset
+    // inside a stationary HWND. On the first drag frame, transfer that to the HWND origin
+    // and rebase the mouse anchor atomically, without moving the actual grip
+    // on the screen. After this the normal drag path is identical everywhere.
+    let (slide_x, slide_y) = if reserved {
+        edge.map(|edge| floating_slide_offset(old_w, old_h, edge, drag_reveal))
+            .unwrap_or((0, 0))
+    } else { (0, 0) };
+    let mut new_anchor_x = anchor_x - slide_x;
+    let mut new_anchor_y = anchor_y - slide_y;
+    let window_x = pointer.x - new_anchor_x;
+    let window_y = pointer.y - new_anchor_y;
+    let should_unlock = !unlocked && floating_monitor_geometry(pointer)
+        .is_some_and(|(_, bounds)| {
+            floating_drag_has_cleared_edge(
+                window_x, window_y, old_body, bounds, edge,
+            ) || (reserved && floating_drag_has_crossed_taskbar_edge(
+                window_x, window_y, old_body, bounds, edge,
+            ))
+        });
+    if should_unlock {
+        let (_, _, expanded_body) =
+            floating_drag_canvas_geometry(body_w, body_h, edge, true);
+        // Expanding the canvas must not move the actual panel or the tab
+        // under the pointer. Rebase the original mouse-to-HWND offset by
+        // precisely the shift of the real panel content.
+        new_anchor_x += expanded_body.left - old_body.left;
+        new_anchor_y += expanded_body.top - old_body.top;
+    }
+    let new_x = pointer.x - new_anchor_x;
+    let new_y = pointer.y - new_anchor_y;
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        s.floating_x = new_x;
+        s.floating_y = new_y;
+        s.floating_drag_anchor_x = new_anchor_x;
+        s.floating_drag_anchor_y = new_anchor_y;
+        if should_unlock { s.floating_drag_glow_detached = true; }
+        s.floating_reserved_drag_reveal = 100;
+        s.floating_collapsed = false;
+        s.floating_reveal = 100;
+    }
+    // The first reserved-edge drag frame rebases the bitmap's virtual slide
+    // to real coordinates. Commit the new position with the new bitmap so
+    // the drag tab doesn't jump, just like V24.7 halo restoration.
+    if dpi_changed || should_unlock || slide_x != 0 || slide_y != 0 {
+        // DPI changes alter the canvas and grip sizes. Repaint and position
+        // atomically, without exposing an old-size bitmap for one frame.
+        // A disconnected old monitor cannot influence the new cursor anchor.
+        render_layered_at(Some(POINT { x: new_x, y: new_y }));
+        diagnose::log_lazy(|| format!(
+            "desktop drag: rebase edge={edge:?} taskbar={reserved} prior=({old_w},{old_h}) dpi={previous_dpi}->{target_dpi} pointer=({}, {}) anchor=({}, {})",
+            pointer.x, pointer.y, new_anchor_x, new_anchor_y,
+        ));
+    } else {
+        move_floating_widget(hwnd);
+    }
+}
+
+fn finish_floating_drag(hwnd: HWND) {
+    let (x, y, body_w, body_h, old_edge, old_free_below, explicit_desktop) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if !s.floating_mode { return };
+        (s.floating_x, s.floating_y,
+         total_widget_width_for_state(s), widget_height_for_state(s),
+         s.floating_edge, floating_free_grip_below_for_state(s),
+         s.display_position == DisplayPosition::Desktop)
+    };
+    let (old_w, old_h, old_body) = {
+        let state = lock_state();
+        state.as_ref().map(floating_canvas_geometry_for_state)
+            .unwrap_or_else(|| floating_canvas_geometry(body_w, body_h, old_edge))
+    };
+    let mut pointer = POINT { x: x + old_w / 2, y: y + old_h / 2 };
+    unsafe { let _ = GetCursorPos(&mut pointer); }
+    let Some((monitor, bounds)) = floating_monitor_geometry(pointer) else {
+        // Even if monitor enumeration fails, do not leave the drag state
+        // latched and force the detached tab to flicker on the next move.
+        if let Some(s) = lock_state().as_mut() { s.dragging = false; }
+        return;
+    };
+    let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
+    // Decide where the undocked tab fits using the BODY location, before
+    // clamping anything. Reversing the tab must not push the body downward.
+    let body_top = y.saturating_add(old_body.top);
+    let prefer_below = explicit_desktop
+        && floating_choose_free_grip_below(bounds, body_top, body_h);
+    // For a free widget, resolve contact on the ACTUAL dragged tab before
+    // choosing the prospective side. Otherwise touching the top with an
+    // above-body tab would flip the tab down and silently lose the contact.
+    // A previously below-body tab retains its bottom-taskbar priority.
+    let edge = if explicit_desktop {
+        if old_edge.is_none() {
+            let existing_contact = floating_existing_free_tab_contact(
+                bounds, old_w, old_h, old_body, old_free_below,
+                POINT { x, y }, pointer,
+            );
+            existing_contact.or_else(|| {
+                let (w, h, body) =
+                    floating_free_canvas_geometry(body_w, body_h, prefer_below);
+                let desired_x = x + old_body.left - body.left;
+                let desired_y = y + old_body.top - body.top;
+                let (cx, cy) = floating_clamp_drag_visible_position(
+                    bounds, w, h, body, None, prefer_below, desired_x, desired_y,
+                );
+                floating_desktop_contact_edge(
+                    bounds, w, h, body, None, prefer_below,
+                    POINT { x: cx, y: cy }, pointer,
+                )
+            })
+        } else {
+            let (cx, cy) = floating_clamp_drag_visible_position(
+                bounds, old_w, old_h, old_body, old_edge,
+                old_free_below, x, y,
+            );
+            floating_desktop_contact_edge(
+                bounds, old_w, old_h, old_body, old_edge, old_free_below,
+                POINT { x: cx, y: cy }, pointer,
+            )
+        }
+    } else {
+        floating_drop_edge_at_pointer(
+            monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
+        )
+    };
+    let reserved_dock = edge.is_some_and(|edge|
+        floating_edge_requires_clip(monitor, bounds, edge, pointer));
+    diagnose::log_lazy(|| format!(
+        "desktop drop pointer=({}, {}) monitor=({}, {}, {}, {}) distances=[L{}, R{}, T{}, B{}] hwnd=({}, {}, {}, {}) work=({}, {}, {}, {}) edge={edge:?} clipped={reserved_dock}",
+        pointer.x, pointer.y,
+        monitor.left, monitor.top, monitor.right, monitor.bottom,
+        pointer.x.abs_diff(bounds.left), pointer.x.abs_diff(bounds.right),
+        pointer.y.abs_diff(bounds.top), pointer.y.abs_diff(bounds.bottom),
+        rect.left, rect.top, rect.right, rect.bottom,
+        bounds.left, bounds.top, bounds.right, bounds.bottom,
+    ));
+    let free_below = edge.is_none() && prefer_below;
+    let (new_w, new_h, new_body) = if edge.is_none() && explicit_desktop {
+        floating_free_canvas_geometry(body_w, body_h, free_below)
+    } else {
+        floating_canvas_geometry(body_w, body_h, edge)
+    };
+    let desired_x = x + old_body.left - new_body.left;
+    let desired_y = y + old_body.top - new_body.top;
+    // Rebase the HWND when flipping the free tab, preserving the body pixels.
+    let (x, y) = if explicit_desktop && edge.is_none() {
+        floating_clamp_drag_visible_position(
+            bounds, new_w, new_h, new_body, None, free_below, desired_x, desired_y,
+        )
+    } else {
+        floating_edge_position(
+            bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
+        )
+    };
+    // On expanded edge-docked desktops the body stays visible, and the
+    // six-dot tab must follow the same hover fade as a free desktop tab.
+    let grip = floating_layout_grip_rect(new_w, new_h, edge, free_below);
+    let grip_hovered = point_in_rect(grip, pointer.x - x, pointer.y - y);
+    let body_hovered = point_in_rect(
+        RECT {
+            left: x + new_body.left, top: y + new_body.top,
+            right: x + new_body.right, bottom: y + new_body.bottom,
+        }, pointer.x, pointer.y,
+    );
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.floating_x = x;
+            s.floating_y = y;
+            s.dragging = false;
+            s.floating_edge = edge;
+            s.floating_free_grip_below = free_below;
+            s.floating_reserved_dock = reserved_dock;
+            s.floating_drag_glow_detached = false;
+            // Reserved edges retract by pixel clipping, not by moving the
+            // popup underneath Explorer.
+            let retract = edge.is_some() && floating_auto_collapse_allowed(
+                s.display_position, s.desktop_auto_collapse,
+            );
+            s.floating_collapsed = retract;
+            s.floating_first_collapse_guard = retract;
+            s.floating_reveal = 100;
+            s.floating_slide_from = 100;
+            s.floating_slide_target = 100;
+            s.floating_slide_started = Instant::now();
+            let fade_grip = floating_grip_uses_hover_fade(s);
+            s.drag_handle_hovered = grip_hovered && fade_grip;
+            s.floating_grip_hover = fade_grip && (grip_hovered || body_hovered);
+            s.floating_grip_alpha = if floating_grip_should_show(
+                edge, floating_auto_collapse_allowed(
+                    s.display_position, s.desktop_auto_collapse,
+                ), s.floating_grip_hover, false,
+            ) { 100 } else { 0 };
+            s.floating_fade_from = s.floating_grip_alpha;
+            s.floating_fade_target = s.floating_grip_alpha;
+            s.floating_fade_started = Instant::now();
+        }
+    }
+    // Publish the resized/reoriented tab and the final HWND coordinates in
+    // one layered-window update. The drop may be on the next monitor, so
+    // WM_DPICHANGED must not invoke position_at_taskbar() halfway through
+    // committing the new edge and lose the pointer-based drop position.
+    let _placement_guard = FloatingInitialPlacementGuard::begin();
+    render_layered_at(Some(POINT { x, y }));
+    // The frosted pair keeps its existing Z order. The dock geometry now
+    // avoids taskbar overlap instead of attempting taskbar ownership.
+    if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
+        sync_blur_backdrop_zorder(hwnd);
+    }
+    if lock_state().as_ref().is_some_and(|s| s.floating_collapsed) {
+        unsafe {
+            SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None);
+        }
+    }
+    save_state_settings();
+}
+
+// Source dimensions must be recalculated after choosing the desktop
+// monitor DPI. Using the taskbar DPI for a collapsed grip makes its final
+// visible pixels miss the docking edge when the displays have different
+// scaling.
+fn floating_content_size_for_state(s: &AppState, vertical: bool) -> (i32, i32) {
+    let preset = if vertical {
+        vertical_effective_preset(s.appearance_preset)
+    } else {
+        effective_appearance_preset(s)
+    };
+    let width = if vertical {
+        sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48))
+    } else {
+        desktop_horizontal_content_width(
+            s.language, preset, s.show_session_window, s.show_weekly_window,
+            &s.codex_session_text, &s.codex_weekly_text,
+        )
+    };
+    let height = if vertical {
+        desktop_vertical_content_height(
+            preset, s.show_session_window, s.show_weekly_window,
+        )
+    } else {
+        sc(preset.metrics().widget_height)
+    };
+    (width, height)
+}
+
+fn enable_floating_widget(reason: &str, vertical: bool) {
+    let vertical = {
+        let state = lock_state();
+        state.as_ref().is_some_and(|s|
+            if s.display_position == DisplayPosition::Desktop {
+                s.desktop_direction == DesktopDirection::Vertical
+            } else { vertical }
+        )
+    };
+    let is_already_floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    if is_already_floating {
+        let hwnd = {
+            let mut state = lock_state();
+            let Some(s) = state.as_mut() else { return };
+            s.vertical_taskbar_mode = vertical;
+            s.small_taskbar_mode = false;
+            s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
+            s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
+            let (collapsed, reveal) = initial_floating_visibility(
+                s.floating_edge, s.display_position, s.desktop_auto_collapse,
+            );
+            s.floating_collapsed = collapsed;
+            s.floating_reveal = reveal;
+            s.floating_slide_from = reveal;
+            s.floating_slide_target = reveal;
+            s.floating_slide_started = Instant::now();
+            s.floating_reserved_drag_reveal = reveal;
+            s.floating_grip_hover = false;
+            s.floating_first_collapse_guard = false;
+            s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
+            s.floating_fade_from = s.floating_grip_alpha;
+            s.floating_fade_target = s.floating_grip_alpha;
+            s.floating_fade_started = Instant::now();
+            s.hwnd.to_hwnd()
+        };
+        // Diagnostics for the precise native phase if a driver or Explorer
+        // still stalls a future desktop orientation change.
+        if reason == "explicit desktop preference" {
+            diagnose::log_lazy(|| format!(
+                "desktop orientation: moving popup direction={}",
+                if vertical { "Vertical" } else { "Horizontal" },
+            ));
+        }
+        refresh_floating_reserved_dock(hwnd);
+        move_floating_widget(hwnd);
+        if reason == "explicit desktop preference" {
+            diagnose::log_lazy(|| "desktop orientation: popup moved; painting layered frame".to_string());
+        }
+        render_layered();
+        if reason == "explicit desktop preference" {
+            diagnose::log_lazy(|| "desktop orientation: layered frame painted".to_string());
+        }
+        return;
+    }
+    let (existing, old, x, y, edge, free_below, language, width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        let (width, height) = floating_content_size_for_state(s, vertical);
+        (
+            s.floating_hwnd.map(|h| h.to_hwnd()), s.hwnd.to_hwnd(),
+            s.floating_x, s.floating_y, s.floating_edge,
+            floating_free_grip_below_for_state(s), s.language, width, height,
+        )
+    };
+    let (window_width, window_height, _) = if edge.is_none() {
+        floating_free_canvas_geometry(width, height, free_below)
+    } else {
+        floating_canvas_geometry(width, height, edge)
+    };
+    let hwnd = match existing {
+        Some(hwnd) if unsafe { IsWindow(hwnd).as_bool() } => hwnd,
+        _ => unsafe {
+            let class = native_interop::wide_str("CodexUsageWin");
+            let title = native_interop::wide_str(language.strings().window_title);
+            let instance = match GetModuleHandleW(PCWSTR::null()) {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            match CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+                PCWSTR::from_raw(class.as_ptr()), PCWSTR::from_raw(title.as_ptr()),
+                WS_POPUP, 0, 0, window_width, window_height, HWND::default(),
+                HMENU::default(), instance, None,
+            ) {
+                Ok(hwnd) => hwnd,
+                Err(error) => {
+                    diagnose::log(format!("floating popup create failed: {error:?}"));
+                    return;
+                }
+            }
+        },
+    };
+    // Per-pixel UpdateLayeredWindow is required for a grip-only collapsed
+    // popup; SetLayeredWindowAttributes would disable that rendering path.
+    let origin = native_interop::get_window_rect_safe(old);
+    let default_point = origin.map(|r| POINT { x: r.left, y: r.top })
+        .unwrap_or(POINT { x: 0, y: 0 });
+    let taskbar_bounds = floating_monitor_bounds(default_point).unwrap_or(RECT {
+        left: 0, top: 0, right: 1920, bottom: 1080,
+    });
+    let saved_anchor = floating_restore_anchor(x, y, window_width, window_height)
+        .map(|center| floating_docked_monitor_anchor(edge, x, y, center));
+    let saved_monitor_valid = saved_anchor.is_some_and(|point| unsafe {
+        MonitorFromPoint(point, MONITOR_DEFAULTTONULL) != HMONITOR::default()
+    });
+    let bounds = floating_restore_bounds(saved_anchor, taskbar_bounds, |point| {
+        saved_monitor_valid.then(|| floating_monitor_bounds(point)).flatten()
+    });
+    // The target monitor is now known. All pixel dimensions and tab offsets
+    // must use its DPI BEFORE placing the hidden popup on that monitor.
+    // This also avoids a WM_DPICHANGED reentrant relayout with the taskbar
+    // DPI halfway through the transition.
+    let target_point = POINT {
+        x: bounds.left.saturating_add((bounds.right - bounds.left) / 2),
+        y: bounds.top.saturating_add((bounds.bottom - bounds.top) / 2),
+    };
+    let target_dpi = floating_monitor_dpi(target_point)
+        .unwrap_or_else(|| unsafe { GetDpiForWindow(old) }.max(96));
+    let old_dpi = CURRENT_DPI.swap(target_dpi, Ordering::Relaxed);
+    let (width, height) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        floating_content_size_for_state(s, vertical)
+    };
+    let (window_width, window_height, body) = if edge.is_none() {
+        floating_free_canvas_geometry(width, height, free_below)
+    } else {
+        floating_canvas_geometry(width, height, edge)
+    };
+    diagnose::log_lazy(|| format!(
+        "desktop restore saved=({x},{y}) saved_monitor_valid={saved_monitor_valid} target_dpi={target_dpi} previous_dpi={old_dpi} target_bounds=({}, {}, {}, {}) taskbar_bounds=({}, {}, {}, {})",
+        bounds.left, bounds.top, bounds.right, bounds.bottom,
+        taskbar_bounds.left, taskbar_bounds.top, taskbar_bounds.right, taskbar_bounds.bottom,
+    ));
+    let start_x = if x == i32::MIN { bounds.right - window_width - sc(32) } else { x };
+    let start_y = if y == i32::MIN {
+        bounds.top + (bounds.bottom - bounds.top - window_height) / 2
+    } else { y };
+    let free_desktop = lock_state().as_ref().is_some_and(|s|
+        s.display_position == DisplayPosition::Desktop && edge.is_none()
+    );
+    let (x, y) = if free_desktop {
+        floating_clamp_drag_visible_position(
+            bounds, window_width, window_height, body, None,
+            free_below, start_x, start_y,
+        )
+    } else {
+        floating_clamp_position(bounds, window_width, window_height, start_x, start_y)
+    };
+    hide_minimal_usage_tooltip();
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        s.parked_taskbar_foreground = s.embedded.then_some(s.hwnd);
+        // Embedded blur backdrop belongs to Explorer and cannot follow
+        // the desktop popup; the fallback uses opaque GDI or popup blur.
+        s.composition_blur_active = false;
+        s.floating_hwnd = Some(SendHwnd::from_hwnd(hwnd));
+        s.hwnd = SendHwnd::from_hwnd(hwnd);
+        s.floating_mode = true;
+        s.embedded = false;
+        s.hidden_for_taskbar_space = false;
+        let (collapsed, reveal) = initial_floating_visibility(
+            s.floating_edge, s.display_position, s.desktop_auto_collapse,
+        );
+        s.floating_collapsed = collapsed;
+        s.floating_reveal = reveal;
+        s.floating_slide_from = reveal;
+        s.floating_slide_target = reveal;
+        s.floating_slide_started = Instant::now();
+        s.floating_reserved_drag_reveal = reveal;
+        s.floating_grip_hover = false;
+        s.floating_first_collapse_guard = false;
+        s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
+        s.floating_fade_from = s.floating_grip_alpha;
+        s.floating_fade_target = s.floating_grip_alpha;
+        s.floating_fade_started = Instant::now();
+        s.floating_x = x;
+        s.floating_y = y;
+        s.vertical_taskbar_mode = vertical;
+        s.small_taskbar_mode = false;
+        s.effective_appearance_preset = if vertical {
+            vertical_effective_preset(s.appearance_preset)
+        } else {
+            effective_appearance_preset(s)
+        };
+        s.vertical_widget_width = width;
+    }
+    unsafe { let _ = ShowWindow(old, SW_HIDE); }
+    if let Some(backdrop) = blur_backdrop_hwnd() {
+        unsafe { let _ = ShowWindow(backdrop, SW_HIDE); }
+    }
+    // SetWindowPos may synchronously emit WM_DPICHANGED as this HWND enters
+    // the saved desktop monitor. The outer transition already selected the
+    // correct DPI and will repaint, so suppress nested position_at_taskbar().
+    let _placement_guard = FloatingInitialPlacementGuard::begin();
+    refresh_floating_reserved_dock(hwnd);
+    // Keep the floating HWND hidden until the complete first frame is ready.
+    // A reused popup still has the layered bitmap from its previous visit,
+    // which otherwise flashes expanded for one frame before contraction.
+    move_floating_widget_with_visibility(hwnd, false);
+    style_window::set_preview_orientation(vertical);
+    render_layered();
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+    if lock_state().as_ref().is_some_and(|s| s.composition_blur_active) {
+        sync_blur_backdrop_zorder(hwnd);
+    }
+    save_state_settings();
+    diagnose::log(format!("taskbar has no safe slot: desktop popup enabled ({reason})"));
+}
+
+fn restore_floating_widget_to_taskbar(taskbar: HWND) -> bool {
+    let (float, target) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return false };
+        if !s.floating_mode { return true; }
+        let Some(target) = s.parked_taskbar_foreground else { return false };
+        (s.hwnd.to_hwnd(), target.to_hwnd())
+    };
+    if !unsafe { IsWindow(target).as_bool()
+        && GetAncestor(target, GA_PARENT) == taskbar } {
+        return false;
+    }
+    hide_minimal_usage_tooltip();
+    // A desktop backdrop is top-level; it cannot be reused as an Explorer child.
+    destroy_blur_backdrop();
+    {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return false };
+        s.composition_blur_active = false;
+        s.hwnd = SendHwnd::from_hwnd(target);
+        s.embedded = true;
+        s.floating_mode = false;
+        s.floating_collapsed = false;
+        s.floating_reveal = 100;
+        s.floating_grip_hover = false;
+        s.floating_first_collapse_guard = false;
+        s.floating_grip_alpha = 0;
+        s.parked_taskbar_foreground = None;
+        s.hidden_for_taskbar_space = false;
+    }
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(float), TIMER_FLOAT_ANIMATION);
+        let _ = ShowWindow(float, SW_HIDE);
+    }
+    diagnose::log("safe taskbar slot recovered; desktop popup parked");
+    true
 }
 
 fn hide_widget_for_taskbar_space(
     hwnd: HWND,
-    language: LanguageId,
+    _language: LanguageId,
     reason: &str,
-    notify_user: bool,
+    cache_pending: bool,
 ) {
-    let should_warn = {
+    // Ignore a transient uninitialized Explorer layout cache only until the
+    // next worker update. Actual no-space conditions never hide or alert.
+    if !cache_pending {
+        let vertical = lock_state().as_ref()
+            .is_some_and(|s| s.taskbar_hwnd.and_then(native_interop::get_taskbar_rect)
+                .is_some_and(|rect| taskbar_axis(rect) == TaskbarAxis::Vertical));
+        enable_floating_widget(reason, vertical);
+        return;
+    }
+    if lock_state().as_ref().is_some_and(|s| s.floating_mode) { return; }
+    {
         let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
-            return;
-        };
-        s.hidden_for_taskbar_space = true;
-        if notify_user && !s.taskbar_space_warning_shown {
-            s.taskbar_space_warning_shown = true;
-            true
-        } else {
-            false
-        }
-    };
+        if let Some(s) = state.as_mut() { s.hidden_for_taskbar_space = true; }
+    }
+    unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+    diagnose::log(format!("waiting for taskbar layout cache: {reason}"));
+}
 
-    hide_minimal_usage_tooltip();
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        if let Some(backdrop) = blur_backdrop_hwnd() {
-            let _ = ShowWindow(backdrop, SW_HIDE);
-        }
+fn position_vertical_taskbar(
+    hwnd: HWND,
+    _embedded: bool,
+    taskbar_hwnd: HWND,
+    rect: RECT,
+    blur_active: bool,
+    language: LanguageId,
+) {
+    let Some(width) = vertical_widget_width(rect) else {
+        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar is too narrow", false);
+        return;
+    };
+    let (desired_top, configured) = {
+        let state = lock_state();
+        state.as_ref().map(|s| (s.taskbar_top_offset, s.appearance_preset))
+            .unwrap_or((0, AppearancePreset::Default))
+    };
+    let Some(free) = taskbar_free_vertical_spans(taskbar_hwnd, rect) else {
+        hide_widget_for_taskbar_space(hwnd, language, "vertical taskbar layout cache is not ready", true);
+        return;
+    };
+    let Some((preset, top)) =
+        vertical_placement_for_gaps(configured, rect, &free, desired_top)
+    else {
+        hide_widget_for_taskbar_space(hwnd, language, "no safe vertical space is available", false);
+        return;
+    };
+    if !restore_floating_widget_to_taskbar(taskbar_hwnd) {
+        diagnose::log("desktop popup retained: original Explorer child is no longer valid");
+        return;
     }
-    diagnose::log(format!("taskbar widget temporarily hidden: {reason}"));
-    if should_warn {
-        show_taskbar_space_warning(language);
+    let (hwnd, embedded, was_hidden, changed) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        let was_hidden = s.hidden_for_taskbar_space;
+        let changed = s.effective_appearance_preset != preset || !s.vertical_taskbar_mode;
+        s.hidden_for_taskbar_space = false;
+        s.taskbar_space_warning_shown = false;
+        s.vertical_taskbar_mode = true;
+        s.effective_appearance_preset = preset;
+        s.vertical_widget_width = width;
+        s.small_taskbar_mode = false;
+        if changed { refresh_usage_texts(s); }
+        (s.hwnd.to_hwnd(), s.embedded, was_hidden, changed)
+    };
+    let height = vertical_widget_height_for_preset(preset);
+    let x = rect.left + (rect.right - rect.left - width) / 2;
+    if embedded {
+        native_interop::move_window(hwnd, x - rect.left, top, width, height);
+    } else if blur_active {
+        move_frosted_pair(hwnd, x, rect.top + top, width, height);
+    } else {
+        native_interop::move_window(hwnd, x, rect.top + top, width, height);
     }
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+    if blur_active { sync_blur_backdrop_zorder(hwnd); }
+    if changed { render_layered(); }
+    diagnose::log_lazy(|| format!(
+        "vertical taskbar slot top={} w={} h={} preset={preset:?} gaps={} restored={was_hidden}",
+        top, width, height, free.len(),
+    ));
 }
 
 fn position_at_taskbar() {
     refresh_dpi();
+    // A desktop popup does not depend on Explorer's taskbar geometry.
+    // NEVER call SHAppBarMessage(ABM_GETTASKBARPOS) from this branch:
+    // it synchronously enters Explorer while our own UI message is active.
+    // If Explorer is handling one of our embedded child windows concurrently,
+    // the two UI threads can end up waiting for each other and both the
+    // widget and the Windows taskbar become unresponsive.
+    let desktop_selected = lock_state().as_ref()
+        .is_some_and(|s| s.display_position == DisplayPosition::Desktop);
+    if desktop_selected {
+        // The user-selected orientation is resolved inside
+        // enable_floating_widget, not from the current taskbar axis.
+        enable_floating_widget("explicit desktop preference", false);
+        return;
+    }
     let (
         hwnd,
         embedded,
         desired_left_offset,
-        legacy_tray_offset,
         taskbar_hwnd,
         taskbar_monitor,
         blur_active,
@@ -3422,7 +6829,6 @@ fn position_at_taskbar() {
             s.hwnd.to_hwnd(),
             s.embedded,
             s.taskbar_left_offset,
-            s.legacy_tray_offset,
             taskbar_hwnd,
             s.taskbar_monitor.clone(),
             s.composition_blur_active,
@@ -3438,6 +6844,22 @@ fn position_at_taskbar() {
             return;
         }
     };
+    if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
+        position_vertical_taskbar(
+            hwnd, embedded, taskbar_hwnd, taskbar_rect, blur_active, language,
+        );
+        style_window::set_preview_orientation(true);
+        return;
+    }
+    // The horizontal placement path remains unchanged. Restore its native
+    // dimensions when the widget returns from a vertical monitor.
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.vertical_taskbar_mode = false;
+        }
+    }
+    style_window::set_preview_orientation(false);
     let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
     let small_mode = is_small_taskbar_height(taskbar_height);
     {
@@ -3452,41 +6874,12 @@ fn position_at_taskbar() {
         }
     }
 
-    let migration_preset = match configured_preset {
-        AppearancePreset::Minimal => AppearancePreset::Minimal,
-        _ => AppearancePreset::Default,
-    };
-    let migration_width = total_widget_width_for_preset(language, migration_preset);
-    let desired_left_offset = if let Some(legacy_tray_offset) = legacy_tray_offset {
-        let migrated = legacy_left_offset(
-            taskbar_hwnd,
-            taskbar_rect,
-            migration_width,
-            legacy_tray_offset,
-        );
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.taskbar_left_offset = migrated;
-                s.legacy_tray_offset = None;
-            }
-        }
-        diagnose::log(format!(
-            "migrated legacy tray_offset={} to taskbar_left_offset={}",
-            legacy_tray_offset, migrated
-        ));
-        save_state_settings();
-        migrated
-    } else {
-        desired_left_offset
-    };
-
     let Some(free_spans) = taskbar_free_spans(taskbar_hwnd, taskbar_rect) else {
         hide_widget_for_taskbar_space(
             hwnd,
             language,
             "safe taskbar layout cache is not ready",
-            false,
+            true,
         );
         return;
     };
@@ -3503,11 +6896,17 @@ fn position_at_taskbar() {
             hwnd,
             language,
             "no empty span is wide enough",
-            true,
+            false,
         );
         return;
     };
 
+    if !restore_floating_widget_to_taskbar(taskbar_hwnd) {
+        diagnose::log("desktop popup retained: original Explorer taskbar child unavailable");
+        return;
+    }
+    let (hwnd, embedded) = lock_state().as_ref()
+        .map(|s| (s.hwnd.to_hwnd(), s.embedded)).unwrap_or((hwnd, embedded));
     let (was_hidden, effective_changed) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else {
@@ -3549,13 +6948,10 @@ fn position_at_taskbar() {
         }
     }
 
-    if was_hidden {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-        if blur_active {
-            sync_blur_backdrop_zorder(hwnd);
-        }
+    {
+        let active = lock_state().as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or(hwnd);
+        unsafe { let _ = ShowWindow(active, SW_SHOWNOACTIVATE); }
+        if blur_active { sync_blur_backdrop_zorder(active); }
     }
 
     diagnose::log_lazy(|| format!(
@@ -3718,6 +7114,18 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
     }
 }
 
+// GDI's GetTextExtentPoint32W can measure slightly narrower than the
+// DirectWrite glyph mask used for painting. Reserve asymmetric-safe
+// horizontal inset plus extra width so trailing digits are never clipped.
+const TOOLTIP_TEXT_INSET: i32 = 12;
+const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 20;
+
+fn tooltip_width_with_render_slack(measured_text_px: i32, logical: impl Fn(i32) -> i32) -> i32 {
+    (measured_text_px.max(0)
+        + logical(2 * TOOLTIP_TEXT_INSET + TOOLTIP_TEXT_MEASUREMENT_SLACK))
+        .max(logical(48))
+}
+
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
     let (mut background_color, border_color, text_color, tooltip_corner_radius) = {
         let state = lock_state();
@@ -3798,7 +7206,7 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
         }
     }
 
-    let text_margin = sc(8);
+    let text_margin = sc(TOOLTIP_TEXT_INSET);
     let text_rect = RECT {
         left: text_margin,
         top: 0,
@@ -3943,21 +7351,11 @@ fn minimal_hover_text(target: MinimalHoverTarget) -> Option<String> {
         MinimalHoverTarget::Weekly => (strings.weekly_window, &codex.weekly),
     };
 
-    if effective_appearance_preset(s) == AppearancePreset::Minimal {
-        let reset = format_precise_reset_time(section.resets_at)
-            .unwrap_or_else(|| "--".to_string());
-        return Some(format!("{label} · {reset}"));
-    }
-
-    let local = native_interop::system_time_to_local(section.resets_at?)?;
-    Some(match target {
-        MinimalHoverTarget::Session => {
-            format!("{:04}-{:02}-{:02}", local.wYear, local.wMonth, local.wDay)
-        }
-        MinimalHoverTarget::Weekly => {
-            format!("{:02}:{:02}", local.wHour, local.wMinute)
-        }
-    })
+    let reset = format_precise_reset_time(section.resets_at)
+        .unwrap_or_else(|| "--".to_string());
+    Some(appearance::quota_reset_tooltip_text(
+        effective_appearance_preset(s), label, &reset,
+    ))
 }
 
 fn hide_minimal_usage_tooltip() {
@@ -3982,7 +7380,11 @@ fn hide_minimal_usage_tooltip() {
 unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     let hdc = GetDC(HWND::default());
     if hdc.0.is_null() {
-        return sc(48);
+        // Failed measurement must not fall back to a tiny fixed-width box.
+        return tooltip_width_with_render_slack(
+            sc((text.chars().count().min(64) as i32) * 12),
+            sc,
+        );
     }
     let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
     let font = CreateFontW(
@@ -4008,7 +7410,7 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
     let _ = ReleaseDC(HWND::default(), hdc);
-    (size.cx + sc(16)).max(sc(48))
+    tooltip_width_with_render_slack(size.cx, sc)
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
@@ -4158,7 +7560,8 @@ fn minimal_percent_hit(
     }
     let height = client.bottom - client.top;
     let metrics = preset.metrics();
-    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let content_x = horizontal_content_left(&metrics, floating);
     let row2_y = height - sc(4) - sc(SEGMENT_H);
     let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
     let single_row_y = (height - sc(SEGMENT_H)) / 2;
@@ -4227,7 +7630,8 @@ fn default_reset_hit(
     let segment_count = row_bar_segment_count(preset);
     let progress_width =
         segment_count * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
-    let content_x = sc(DRAG_HANDLE_HIT_W) + sc(metrics.outer_padding);
+    let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
+    let content_x = horizontal_content_left(&metrics, floating);
     let bar_x = content_x + sc(label_width) + sc(metrics.label_bar_gap);
     let text_x = bar_x + progress_width + sc(metrics.bar_percent_gap);
     let reset_x = text_x + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
@@ -4257,11 +7661,144 @@ fn default_reset_hit(
     None
 }
 
+fn vertical_usage_hover_hit(
+    width: i32, height: i32, minimal: bool,
+    show_session: bool, show_weekly: bool, x: i32, y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    if minimal {
+        let (session, weekly) = vertical_minimal_percent_centers(
+            height, show_session, show_weekly,
+        );
+        for (target, center) in [
+            (MinimalHoverTarget::Session, session),
+            (MinimalHoverTarget::Weekly, weekly),
+        ] {
+            let Some(cy) = center else { continue };
+            let rect = RECT {
+                left: sc(2), top: cy - sc(12),
+                right: width - sc(2), bottom: cy + sc(12),
+            };
+            if point_in_rect(rect, x, y) {
+                return Some((target, rect));
+            }
+        }
+    } else {
+        // Only the short, visible reset label is hoverable. The type, ring,
+        // percentage and empty space do not trigger the default tooltip.
+        let (session, weekly) = vertical_row_tops(height, show_session, show_weekly);
+        let reset_width = sc(36).min(width - sc(4)).max(1);
+        for (target, top) in [
+            (MinimalHoverTarget::Session, session),
+            (MinimalHoverTarget::Weekly, weekly),
+        ] {
+            let Some(top) = top else { continue };
+            let cy = top + sc(VERTICAL_RESET_CENTER_Y);
+            let rect = RECT {
+                left: (width - reset_width) / 2,
+                top: cy - sc(9),
+                right: (width + reset_width) / 2,
+                bottom: cy + sc(9),
+            };
+            if point_in_rect(rect, x, y) {
+                return Some((target, rect));
+            }
+        }
+    }
+    None
+}
+
+fn desktop_horizontal_usage_hover_hit(
+    width: i32, height: i32, preset: AppearancePreset,
+    show_session: bool, show_weekly: bool, x: i32, y: i32,
+) -> Option<(MinimalHoverTarget, RECT)> {
+    let metrics = preset.metrics();
+    let left = horizontal_content_left(&metrics, true);
+    let row2_y = height - sc(4) - sc(SEGMENT_H);
+    let row1_y = row2_y - sc(metrics.row_gap) - sc(SEGMENT_H);
+    let single_y = (height - sc(SEGMENT_H)) / 2;
+    let (hit_left, hit_right) = if preset == AppearancePreset::Minimal {
+        (left - sc(2), left + sc(metrics.percent_width) + sc(2))
+    } else {
+        let (label_width, reset_width) = usage_layout_widths(LanguageId::English, preset);
+        let bar = row_bar_segment_count(preset)
+            * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+        let x = left + sc(label_width) + sc(metrics.label_bar_gap)
+            + bar + sc(metrics.bar_percent_gap)
+            + sc(metrics.percent_width) + sc(metrics.percent_reset_gap);
+        (x - sc(2), x + sc(reset_width) + sc(2))
+    };
+    for (target, visible, row_y) in [
+        (MinimalHoverTarget::Session, show_session,
+         if show_weekly { row1_y } else { single_y }),
+        (MinimalHoverTarget::Weekly, show_weekly,
+         if show_session { row2_y } else { single_y }),
+    ] {
+        if !visible { continue; }
+        let rect = RECT {
+            left: hit_left, top: row_y - sc(2),
+            right: hit_right.min(width), bottom: row_y + sc(SEGMENT_H) + sc(2),
+        };
+        if point_in_rect(rect, x, y) { return Some((target, rect)); }
+    }
+    None
+}
+
 fn usage_hover_hit(
     hwnd: HWND,
     x: i32,
     y: i32,
 ) -> Option<(MinimalHoverTarget, RECT)> {
+    let desktop = {
+        let state = lock_state();
+        state.as_ref().filter(|s| s.floating_mode).map(|s| (
+            total_widget_width_for_state(s),
+            widget_height_for_state(s),
+            floating_canvas_geometry_for_state(s).2,
+            s.vertical_taskbar_mode,
+            effective_appearance_preset(s),
+            s.show_session_window, s.show_weekly_window,
+        ))
+    };
+    if let Some((width, height, body, vertical, preset, show_session, show_weekly)) = desktop {
+        if !point_in_rect(body, x, y) { return None; }
+        let local_x = x - body.left;
+        let local_y = y - body.top;
+        let hit = if vertical {
+            vertical_usage_hover_hit(
+                width, height, preset == AppearancePreset::Minimal,
+                show_session, show_weekly, local_x, local_y,
+            )
+        } else {
+            desktop_horizontal_usage_hover_hit(
+                width, height, preset, show_session, show_weekly,
+                local_x, local_y,
+            )
+        };
+        return hit.map(|(target, rect)| (target, RECT {
+            left: rect.left + body.left,
+            top: rect.top + body.top,
+            right: rect.right + body.left,
+            bottom: rect.bottom + body.top,
+        }));
+    }
+    let (vertical, minimal, show_session, show_weekly) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        (
+            s.vertical_taskbar_mode,
+            effective_appearance_preset(s) == AppearancePreset::Minimal,
+            s.show_session_window,
+            s.show_weekly_window,
+        )
+    };
+    if vertical {
+        let mut client = RECT::default();
+        unsafe { let _ = GetClientRect(hwnd, &mut client); }
+        return vertical_usage_hover_hit(
+            client.right - client.left, client.bottom - client.top,
+            minimal, show_session, show_weekly, x, y,
+        );
+    }
     minimal_percent_hit(hwnd, x, y).or_else(|| default_reset_hit(hwnd, x, y))
 }
 
@@ -4300,6 +7837,148 @@ unsafe extern "system" fn wnd_proc(
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     match msg {
+        WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.floating_mode) => {
+            // V24.4: both docked and free desktop canvases have a transparent
+            // halo gutter; only the actual panel and drag tab accept clicks.
+            let (body, grip, hover_active) = {
+                let state = lock_state();
+                let s = state.as_ref().expect("desktop mode checked above");
+                let (_, _, body) = floating_canvas_geometry_for_state(s);
+                (
+                    if s.floating_reserved_dock {
+                        s.floating_edge.map(|edge| floating_slid_canvas_rect(
+                            body, floating_canvas_size_for_state(s).0,
+                            floating_canvas_size_for_state(s).1, edge,
+                            if s.dragging { s.floating_reserved_drag_reveal }
+                                else { s.floating_reveal },
+                        )).unwrap_or(body)
+                    } else { body },
+                    floating_state_grip_rect(s),
+                    !s.dragging && (s.drag_handle_hovered ||
+                        (floating_grip_uses_hover_fade(s) && s.floating_grip_hover)),
+                )
+            };
+            let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let Some(rect) = native_interop::get_window_rect_safe(hwnd) else {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            };
+            let client_x = screen_x - rect.left;
+            let client_y = screen_y - rect.top;
+            let hit_code = floating_drag_tab_hit_code(body, grip, client_x, client_y);
+            if hit_code == -1 && hover_active {
+                // Layered transparent pixels do not reliably generate
+                // WM_MOUSEMOVE/WM_MOUSELEAVE. Defer repaint until AFTER the
+                // native hit test, avoiding reentrant UpdateLayeredWindow.
+                let _ = PostMessageW(
+                    hwnd, WM_APP_DESKTOP_HOVER_EXIT, WPARAM(0), LPARAM(0),
+                );
+            }
+            LRESULT(hit_code as isize)
+        }
+        WM_APP_DESKTOP_HOVER_EXIT => {
+            if floating_context_menu_blocks_collapse(hwnd) {
+                return LRESULT(0);
+            }
+            // NCHITTEST can be delivered while layered compositing is still
+            // active, so only the posted message may mutate/repaint the hover.
+            // Recheck the live pointer: a rapid return to the grip or mouse
+            // capture during dragging must not cause another release flicker.
+            let valid = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                    && !s.dragging
+                    && (s.drag_handle_hovered ||
+                        (floating_grip_uses_hover_fade(s) && s.floating_grip_hover))
+            );
+            if valid {
+                let docked_hover_fade = lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                        && s.floating_edge.is_some() && floating_grip_uses_hover_fade(s)
+                );
+                let hovered = if docked_hover_fade {
+                    Some(floating_pointer_over_expanded_docked_panel(hwnd))
+                } else {
+                    let geometry = {
+                        let state = lock_state();
+                        state.as_ref().map(|s| {
+                            floating_state_grip_rect(s)
+                        })
+                    };
+                    geometry.and_then(|grip| {
+                        let rect = native_interop::get_window_rect_safe(hwnd)?;
+                        let mut cursor = POINT::default();
+                        if GetCursorPos(&mut cursor).is_err() { return None; }
+                        Some(point_in_rect(
+                            grip, cursor.x - rect.left, cursor.y - rect.top,
+                        ))
+                    })
+                };
+                if hovered == Some(false) && docked_hover_fade
+                    && floating_pointer_in_expanded_docked_transition(hwnd)
+                {
+                    // HTTRANSPARENT gap: defer exit just as the original edge
+                    // popup does, but keep the panel expanded throughout.
+                    floating_arm_hover_recheck(hwnd);
+                    return LRESULT(0);
+                }
+                if hovered == Some(false) {
+                    if let Some(s) = lock_state().as_mut() {
+                        if s.floating_mode && s.hwnd.to_hwnd() == hwnd && !s.dragging {
+                            s.drag_handle_hovered = false;
+                        }
+                    }
+                    if docked_hover_fade {
+                        set_floating_grip_hover(false);
+                    }
+                    render_layered();
+                }
+            }
+            LRESULT(0)
+        }
+        _ if msg == popup_menu::WM_POPUP_MENU_CLOSED => {
+            // The menu owns its own HWND and does not run a modal native
+            // menu loop. Re-evaluate only when it has truly been destroyed;
+            // an old popup's close must not collapse a newly opened menu.
+            if popup_menu::is_open_for(hwnd) {
+                return LRESULT(0);
+            }
+            let eligible = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                    && s.floating_edge.is_some() && !s.dragging
+                    && !s.floating_collapsed
+                    && floating_auto_collapse_allowed(
+                        s.display_position, s.desktop_auto_collapse,
+                    )
+            );
+            if eligible {
+                if floating_pointer_in_docked_hover_zone(hwnd) {
+                    // WM_MOUSELEAVE tracking is consumed while hovering a
+                    // separate popup. Restore it for the next real exit.
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut track);
+                } else {
+                    floating_cancel_hover_recheck(hwnd);
+                    if let Some(s) = lock_state().as_mut() {
+                        s.minimal_hover_target = None;
+                        s.drag_handle_hovered = false;
+                    }
+                    hide_minimal_usage_tooltip();
+                    set_floating_collapsed(true);
+                    render_layered();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_NCHITTEST if lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode) => {
+            // Quota content remains a client area for tooltips, while only the
+            // top grip starts a drag on WM_LBUTTONDOWN.
+            LRESULT(1) // HTCLIENT
+        }
         WM_PAINT => {
             let (embedded, frosted_active) = {
                 let state = lock_state();
@@ -4308,7 +7987,7 @@ unsafe extern "system" fn wnd_proc(
                     .map(|s| (s.embedded, s.composition_blur_active))
                     .unwrap_or((false, false))
             };
-            if embedded || frosted_active {
+            if embedded || frosted_active || lock_state().as_ref().is_some_and(|s| s.floating_mode) {
                 // Both taskbar mode and frosted foreground use UpdateLayeredWindow.
                 let mut ps = PAINTSTRUCT::default();
                 let _ = BeginPaint(hwnd, &mut ps);
@@ -4323,6 +8002,19 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_DISPLAYCHANGE | WM_DPICHANGED_MSG | WM_SETTINGCHANGE => {
+            if msg == WM_DPICHANGED_MSG
+                && (FLOATING_INITIAL_PLACEMENT.with(|flag| flag.get())
+                    || lock_state().as_ref().is_some_and(|s|
+                        s.floating_mode && s.dragging && s.hwnd.to_hwnd() == hwnd
+                    ))
+            {
+                // SetWindowPos can synchronously deliver WM_DPICHANGED as a
+                // popup crosses a monitor seam. Restarting desktop placement
+                // here resets its canvas and steals the mouse drag anchor.
+                // The next sampled pointer move updates DPI and layered
+                // geometry together instead.
+                return LRESULT(0);
+            }
             if msg == WM_DPICHANGED_MSG {
                 let new_dpi = (wparam.0 & 0xFFFF) as u32;
                 CURRENT_DPI.store(new_dpi, Ordering::Relaxed);
@@ -4339,6 +8031,71 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             let timer_id = wparam.0;
             match timer_id {
+                TIMER_FLOAT_HOVER_RECHECK => {
+                    let popup_owner = {
+                        let state = lock_state();
+                        state.as_ref().and_then(|s|
+                            (s.floating_mode && s.floating_edge.is_some())
+                                .then_some(s.hwnd.to_hwnd())
+                        )
+                    };
+                    if let Some(owner) = popup_owner {
+                        if floating_context_menu_blocks_collapse(owner) {
+                            floating_cancel_hover_recheck(owner);
+                            return LRESULT(0);
+                        }
+                    }
+                    let active = lock_state().as_ref().and_then(|s|
+                        (s.floating_mode && s.floating_edge.is_some()
+                            && !s.floating_collapsed && !s.dragging)
+                            .then(|| (s.hwnd.to_hwnd(), floating_grip_uses_hover_fade(s)))
+                    );
+                    if let Some((active, tab_fades)) = active {
+                        if tab_fades {
+                            // V24.26: only the transient body-to-tab gutter
+                            // receives this grace period. On expiry, use the
+                            // actual cursor position, not a stale leave event.
+                            floating_cancel_hover_recheck(active);
+                            if floating_pointer_over_expanded_docked_panel(active) {
+                                let over_grip = floating_pointer_over_actual_grip(active);
+                                let changed = {
+                                    let mut state = lock_state();
+                                    if let Some(s) = state.as_mut() {
+                                        let changed = s.drag_handle_hovered != over_grip;
+                                        s.drag_handle_hovered = over_grip;
+                                        changed
+                                    } else { false }
+                                };
+                                set_floating_grip_hover(true);
+                                if changed { render_layered(); }
+                            } else {
+                                if let Some(s) = lock_state().as_mut() {
+                                    s.minimal_hover_target = None;
+                                    s.drag_handle_hovered = false;
+                                }
+                                hide_minimal_usage_tooltip();
+                                set_floating_grip_hover(false);
+                                render_layered();
+                            }
+                        } else if !floating_pointer_in_docked_hover_zone(active) {
+                            floating_cancel_hover_recheck(active);
+                            // Preserve the original automatic-collapse
+                            // debounce and animation unchanged.
+                            if let Some(s) = lock_state().as_mut() {
+                                s.minimal_hover_target = None;
+                                s.drag_handle_hovered = false;
+                            }
+                            hide_minimal_usage_tooltip();
+                            set_floating_collapsed(true);
+                            render_layered();
+                        }
+                    } else {
+                        let _ = KillTimer(hwnd, TIMER_FLOAT_HOVER_RECHECK);
+                    }
+                }
+                TIMER_FLOAT_ANIMATION => {
+                    step_floating_animation(hwnd);
+                }
                 TIMER_POLL => {
                     let auth_watch = {
                         let state = lock_state();
@@ -4463,22 +8220,69 @@ unsafe extern "system" fn wnd_proc(
             }
             .max(1);
             let anchor_logical_x = (client_x as f64 * 96.0 / dpi as f64).round() as i32;
+            let anchor_logical_y = (client_y as f64 * 96.0 / dpi as f64).round() as i32;
 
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.dragging = true;
-                s.drag_handle_hovered = true;
-                s.drag_anchor_logical_x = anchor_logical_x;
-                s.failed_drag_target = None;
-            }
+            floating_cancel_hover_recheck(hwnd);
+            let reveal_hidden_panel = {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.dragging = true;
+                    s.drag_handle_hovered = true;
+                    s.drag_anchor_logical_x = anchor_logical_x;
+                    s.drag_anchor_logical_y = anchor_logical_y;
+                    s.floating_drag_anchor_x = client_x;
+                    s.floating_drag_anchor_y = client_y;
+                    s.failed_drag_target = None;
+                    if s.floating_mode {
+                        s.floating_reserved_drag_reveal = s.floating_reveal;
+                        s.floating_drag_glow_detached = false;
+                        s.floating_first_collapse_guard = false;
+                        s.floating_collapsed = false;
+                        s.floating_reveal = 100;
+                        s.floating_slide_from = 100;
+                        s.floating_slide_target = 100;
+                        s.floating_grip_hover = true;
+                        s.floating_grip_alpha = 100;
+                        s.floating_fade_from = 100;
+                        s.floating_fade_target = 100;
+                        true
+                    } else { false }
+                } else { false }
+            };
+            // Restore panel pixels and a fully visible tab at the current HWND
+            // location before dragging, without changing the docking geometry.
+            if reveal_hidden_panel { render_layered(); }
             {
                 let mut last = LAST_DRAG_FRAME.lock().unwrap_or_else(|e| e.into_inner());
                 *last = None;
             }
-            SetCapture(hwnd);
+            let previous_capture = SetCapture(hwnd);
+            diagnose::log_lazy(|| format!(
+                "drag start hwnd={:?} vertical={} client=({}, {}) previous_capture={:?}",
+                hwnd,
+                lock_state().as_ref().is_some_and(|s| s.vertical_taskbar_mode),
+                client_x, client_y, previous_capture,
+            ));
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let docked_hover = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_edge.is_some() && !s.dragging
+            );
+            let in_docked_hover_zone = docked_hover
+                && floating_pointer_in_docked_hover_zone(hwnd);
+            if in_docked_hover_zone {
+                // Real mouse movement resumed over the stable docked region.
+                // The leave-only fallback timer is no longer necessary.
+                floating_cancel_hover_recheck(hwnd);
+            }
+            if lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && floating_hover_can_reveal(
+                    s.floating_collapsed, s.floating_first_collapse_guard, s.dragging,
+                )
+            ) && (!docked_hover || in_docked_hover_zone) {
+                set_floating_collapsed(false);
+            }
             let is_dragging = {
                 let state = lock_state();
                 state.as_ref().map(|s| s.dragging).unwrap_or(false)
@@ -4486,6 +8290,7 @@ unsafe extern "system" fn wnd_proc(
             if is_dragging {
                 hide_minimal_usage_tooltip();
             } else {
+                set_floating_grip_hover(true);
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let drag_hovered = is_drag_handle_point(client_x, client_y);
@@ -4520,6 +8325,10 @@ unsafe extern "system" fn wnd_proc(
                     return LRESULT(0);
                 }
 
+                if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                    update_floating_drag(hwnd, pt);
+                    return LRESULT(0);
+                }
                 let (current_taskbar_hwnd, blur_active) = {
                     let state = lock_state();
                     state
@@ -4598,12 +8407,12 @@ unsafe extern "system" fn wnd_proc(
                     let state = lock_state();
                     state.as_ref().and_then(|s| {
                         s.taskbar_hwnd.map(|taskbar_hwnd| {
-                            (taskbar_hwnd, s.drag_anchor_logical_x, s.embedded)
+                            (taskbar_hwnd, s.drag_anchor_logical_x, s.drag_anchor_logical_y, s.embedded)
                         })
                     })
                 };
 
-                if let Some((taskbar_hwnd, anchor_logical_x, embedded)) = drag_context {
+                if let Some((taskbar_hwnd, anchor_logical_x, anchor_logical_y, embedded)) = drag_context {
                     if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
                         let dpi = GetDpiForWindow(taskbar_hwnd);
                         if dpi > 0 {
@@ -4611,8 +8420,10 @@ unsafe extern "system" fn wnd_proc(
                         }
                         let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
                         let anchor_px = drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
+                        let anchor_y_px = drag_anchor_px_for_dpi(anchor_logical_y, effective_dpi);
                         let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
-                        let small_mode = is_small_taskbar_height(taskbar_height);
+                        let vertical = taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical;
+                        let small_mode = !vertical && is_small_taskbar_height(taskbar_height);
 
                         let (widget_width, widget_height, small_mode_changed) = {
                             let mut state = lock_state();
@@ -4620,9 +8431,16 @@ unsafe extern "system" fn wnd_proc(
                                 Some(s) => s,
                                 None => return LRESULT(0),
                             };
-                            let changed = s.small_taskbar_mode != small_mode;
+                            let changed = s.small_taskbar_mode != small_mode
+                                || s.vertical_taskbar_mode != vertical;
                             if changed {
+                                s.vertical_taskbar_mode = vertical;
                                 s.small_taskbar_mode = small_mode;
+                                if vertical {
+                                    if let Some(width) = vertical_widget_width(taskbar_rect) {
+                                        s.vertical_widget_width = width;
+                                    }
+                                }
                                 if small_mode {
                                     s.small_show_weekly = false;
                                 }
@@ -4633,15 +8451,27 @@ unsafe extern "system" fn wnd_proc(
                                 changed,
                             )
                         };
-                        let drag_left = drag_left_for_pointer(
-                            taskbar_rect, pt, anchor_px, widget_width,
-                        );
-                        let anchor_y =
-                            compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
-                        let (window_x, window_y) = if embedded {
-                            (drag_left, anchor_y - taskbar_rect.top)
+                        let (window_x, window_y) = if vertical {
+                            let left = (taskbar_rect.right - taskbar_rect.left - widget_width) / 2;
+                            let top = drag_top_for_pointer(
+                                taskbar_rect, pt, anchor_y_px, widget_height,
+                            );
+                            if embedded {
+                                (left, top)
+                            } else {
+                                (taskbar_rect.left + left, taskbar_rect.top + top)
+                            }
                         } else {
-                            (taskbar_rect.left + drag_left, anchor_y)
+                            let drag_left = drag_left_for_pointer(
+                                taskbar_rect, pt, anchor_px, widget_width,
+                            );
+                            let anchor_y =
+                                compute_anchor_y(taskbar_rect.top, taskbar_height, widget_height);
+                            if embedded {
+                                (drag_left, anchor_y - taskbar_rect.top)
+                            } else {
+                                (taskbar_rect.left + drag_left, anchor_y)
+                            }
                         };
 
                         // Use the current visible HWND, not the old source HWND
@@ -4670,6 +8500,12 @@ unsafe extern "system" fn wnd_proc(
                             );
                         }
 
+                        if vertical {
+                            diagnose::log_lazy(|| format!(
+                                "vertical drag move hwnd={:?} pointer=({}, {}) new=({}, {}) size=({}, {})",
+                                drag_hwnd, pt.x, pt.y, window_x, window_y, widget_width, widget_height,
+                            ));
+                        }
                         if switched_taskbar || small_mode_changed {
                             render_layered();
                         }
@@ -4679,7 +8515,59 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_MOUSELEAVE_MSG => {
-            
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
+                return LRESULT(0);
+            }
+            if floating_context_menu_blocks_collapse(hwnd) {
+                // The cursor is visiting our context menu, not leaving the
+                // widget interaction. Its close notification handles collapse.
+                floating_cancel_hover_recheck(hwnd);
+                return LRESULT(0);
+            }
+            // A docked HWND can lose alpha hit-testing at its very first
+            // physical pixel when expanding (especially at a display seam).
+            // Defer collapse until the cursor really leaves the *unchanging*
+            // expanded-panel + collapsed-tab envelope. While this ambiguous
+            // leave exists, the short recheck timer handles a later exit even
+            // if Windows sends no second WM_MOUSELEAVE.
+            if lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_edge.is_some() && !s.floating_collapsed
+                    && !floating_grip_uses_hover_fade(s)
+            ) {
+                floating_arm_hover_recheck(hwnd);
+                return LRESULT(0);
+            }
+            if lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.floating_edge.is_some() && !s.floating_collapsed
+                    && floating_grip_uses_hover_fade(s)
+            ) {
+                // WM_MOUSELEAVE is asynchronous: by the time it is delivered
+                // the pointer may already have crossed the alpha-zero seam
+                // into the visible tab. A geometric "still inside" test would
+                // merely re-arm TrackMouseEvent and NEVER update
+                // drag_handle_hovered if Win32 stopped sending WM_MOUSEMOVE.
+                // Always schedule one bounded actual-cursor recheck for this
+                // expanded docked mode, including when the cursor has already
+                // arrived at the tab. The timer changes only hover state,
+                // NEVER panel collapse.
+                floating_arm_hover_recheck(hwnd);
+                return LRESULT(0);
+            }
+            if floating_pointer_still_over_free_grip(hwnd)
+                || floating_pointer_over_expanded_docked_panel(hwnd)
+            {
+                // Capture change or popup movement can dispatch a stale leave
+                // despite the cursor still being over the detached tab.
+                // Re-arm tracking so the *next real exit* still hides the glow.
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+                return LRESULT(0);
+            }
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -4688,11 +8576,13 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             hide_minimal_usage_tooltip();
+            set_floating_grip_hover(false);
+            set_floating_collapsed(true);
             render_layered();
             LRESULT(0)
         }
         WM_CANCELMODE => {
-            
+            floating_cancel_hover_recheck(hwnd);
             {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
@@ -4704,7 +8594,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
-            
+            floating_cancel_hover_recheck(hwnd);
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
                 if !s.drag_reparenting {
@@ -4714,6 +8604,30 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                let was_dragging = lock_state().as_ref().is_some_and(|s| s.dragging);
+                let _ = drag_frame_due(true);
+                if was_dragging {
+                    // Keep the grip fully visible until its final rectangle
+                    // and hover state are committed in one layered frame.
+                    finish_floating_drag(hwnd);
+                } else if let Some(s) = lock_state().as_mut() {
+                    s.dragging = false;
+                }
+                let _ = ReleaseCapture();
+                if floating_pointer_still_over_free_grip(hwnd) {
+                    // Capture ended but no mouse motion is required to
+                    // maintain hover or re-arm leave tracking.
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tme);
+                }
+                return LRESULT(0);
+            }
 
             let mut pt = POINT::default();
             let cursor_valid = GetCursorPos(&mut pt).is_ok();
@@ -4725,7 +8639,7 @@ unsafe extern "system" fn wnd_proc(
                     s.dragging = false;
                     let failed_target = s.failed_drag_target.take();
                     if was_dragging {
-                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, failed_target))
+                        Some((s.taskbar_hwnd, s.drag_anchor_logical_x, s.drag_anchor_logical_y, failed_target))
                     } else {
                         None
                     }
@@ -4759,7 +8673,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
 
-            if let Some((current_taskbar_hwnd, anchor_logical_x, failed_target)) = drag_result {
+            if let Some((current_taskbar_hwnd, anchor_logical_x, anchor_logical_y, failed_target)) = drag_result {
                 // Releasing over the desktop commits the last horizontal
                 // drag position on the current taskbar instead of reverting.
                 // An actual hit on another taskbar still takes precedence.
@@ -4794,6 +8708,41 @@ unsafe extern "system" fn wnd_proc(
                                 CURRENT_DPI.store(dpi, Ordering::Relaxed);
                             }
                             let effective_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
+                            if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
+                                let anchor_y_px = drag_anchor_px_for_dpi(anchor_logical_y, effective_dpi);
+                                let height = {
+                                    let state = lock_state();
+                                    state.as_ref()
+                                        .map(|s| vertical_widget_height_for_preset(effective_appearance_preset(s)))
+                                        .unwrap_or(sc(VERTICAL_WIDGET_HEIGHT))
+                                };
+                                let desired_top = drag_top_from_cursor(
+                                    taskbar_rect, pt, anchor_y_px,
+                                );
+                                let clamped_top = clamp_left_offset(
+                                    desired_top,
+                                    (taskbar_rect.bottom - taskbar_rect.top - height).max(0),
+                                );
+                                let safe_top = taskbar_free_vertical_spans(taskbar_hwnd, taskbar_rect)
+                                    .and_then(|spans| nearest_free_top_offset(
+                                        taskbar_rect, &spans, height, clamped_top,
+                                    ));
+                                if let Some(top) = safe_top {
+                                    diagnose::log_lazy(|| format!(
+                                        "vertical drag released y={} committed_top={}", pt.y, top,
+                                    ));
+                                    let mut state = lock_state();
+                                    if let Some(s) = state.as_mut() {
+                                        s.taskbar_top_offset = top;
+                                    }
+                                } else {
+                                    diagnose::log("drag release found no safe vertical gap");
+                                }
+                                position_at_taskbar();
+                                render_layered();
+                                save_state_settings();
+                                return LRESULT(0);
+                            }
                             let anchor_px =
                                 drag_anchor_px_for_dpi(anchor_logical_x, effective_dpi);
                             let final_drag_left =
@@ -4838,7 +8787,6 @@ unsafe extern "system" fn wnd_proc(
                                     let mut state = lock_state();
                                     if let Some(s) = state.as_mut() {
                                         s.taskbar_left_offset = new_left_offset;
-                                        s.legacy_tray_offset = None;
                                     }
                                 }
                                 let monitor = {
@@ -5070,11 +9018,25 @@ unsafe extern "system" fn wnd_proc(
                     open_github_releases(hwnd);
                 }
                 IDM_RESET_POSITION => {
+                    if lock_state().as_ref().is_some_and(|s| s.floating_mode) {
+                        let _ = reset_floating_widget_position();
+                        return LRESULT(0);
+                    }
                     let target = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| {
                             let taskbar_hwnd = s.taskbar_hwnd?;
                             let taskbar_rect = native_interop::get_taskbar_rect(taskbar_hwnd)?;
+                            if taskbar_axis(taskbar_rect) == TaskbarAxis::Vertical {
+                                let spans = taskbar_free_vertical_spans(taskbar_hwnd, taskbar_rect)?;
+                                let desired_bottom = taskbar_rect.bottom - taskbar_rect.top;
+                                let top = nearest_free_top_offset(
+                                    taskbar_rect, &spans,
+                                    vertical_widget_height_for_preset(effective_appearance_preset(s)),
+                                    desired_bottom,
+                                )?;
+                                return Some((TaskbarAxis::Vertical, top));
+                            }
                             let free_spans = taskbar_free_spans(taskbar_hwnd, taskbar_rect)?;
                             let desired_right = taskbar_rect.right - taskbar_rect.left;
                             placement_for_free_spans(
@@ -5084,14 +9046,16 @@ unsafe extern "system" fn wnd_proc(
                                 &free_spans,
                                 desired_right,
                             )
-                            .map(|(_, _, left)| left)
+                            .map(|(_, _, left)| (TaskbarAxis::Horizontal, left))
                         })
                     };
-                    if let Some(target) = target {
+                    if let Some((axis, target)) = target {
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
-                            s.taskbar_left_offset = target;
-                            s.legacy_tray_offset = None;
+                            match axis {
+                                TaskbarAxis::Horizontal => s.taskbar_left_offset = target,
+                                TaskbarAxis::Vertical => s.taskbar_top_offset = target,
+                            }
                         }
                     }
                     save_state_settings();
@@ -5189,11 +9153,11 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     style_window::sync(style_settings_snapshot());
                 }
-                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL | IDM_LAYOUT_ADAPTIVE => {
-                    let preset = match id {
-                        IDM_LAYOUT_MINIMAL => AppearancePreset::Minimal,
-                        IDM_LAYOUT_ADAPTIVE => AppearancePreset::Adaptive,
-                        _ => AppearancePreset::Default,
+                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL => {
+                    let preset = if id == IDM_LAYOUT_MINIMAL {
+                        AppearancePreset::Minimal
+                    } else {
+                        AppearancePreset::Default
                     };
                     {
                         let mut state = lock_state();
@@ -5262,29 +9226,11 @@ unsafe extern "system" fn wnd_proc(
                 }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
-                | IDM_LANG_DUTCH
-                | IDM_LANG_SPANISH
-                | IDM_LANG_FRENCH
-                | IDM_LANG_GERMAN
-                | IDM_LANG_JAPANESE
-                | IDM_LANG_KOREAN
-                | IDM_LANG_SIMPLIFIED_CHINESE
-                | IDM_LANG_TRADITIONAL_CHINESE
-                | IDM_LANG_RUSSIAN
-                | IDM_LANG_PORTUGUESE_BRAZIL => {
+                | IDM_LANG_SIMPLIFIED_CHINESE => {
                     let language_override = match id {
                         IDM_LANG_SYSTEM => None,
                         IDM_LANG_ENGLISH => Some(LanguageId::English),
-                        IDM_LANG_DUTCH => Some(LanguageId::Dutch),
-                        IDM_LANG_SPANISH => Some(LanguageId::Spanish),
-                        IDM_LANG_FRENCH => Some(LanguageId::French),
-                        IDM_LANG_GERMAN => Some(LanguageId::German),
-                        IDM_LANG_JAPANESE => Some(LanguageId::Japanese),
-                        IDM_LANG_KOREAN => Some(LanguageId::Korean),
                         IDM_LANG_SIMPLIFIED_CHINESE => Some(LanguageId::SimplifiedChinese),
-                        IDM_LANG_TRADITIONAL_CHINESE => Some(LanguageId::TraditionalChinese),
-                        IDM_LANG_RUSSIAN => Some(LanguageId::Russian),
-                        IDM_LANG_PORTUGUESE_BRAZIL => Some(LanguageId::PortugueseBrazil),
                         _ => None,
                     };
                     {
@@ -5404,7 +9350,7 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(s) = state.as_mut() {
                     s.appearance_preset = match wparam.0 {
                         1 => AppearancePreset::Minimal,
-                        2 => AppearancePreset::Adaptive,
+                        2 => AppearancePreset::Default,
                         _ => AppearancePreset::Default,
                     };
                     s.styles.clamp_corner_radii(s.appearance_preset);
@@ -5417,6 +9363,89 @@ unsafe extern "system" fn wnd_proc(
             render_layered();
             sync_tray_icons(hwnd);
             style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_POSITION_CHANGE => {
+            let position = if wparam.0 == 1 {
+                DisplayPosition::Desktop
+            } else {
+                DisplayPosition::Taskbar
+            };
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.display_position = position;
+                }
+            }
+            hide_minimal_usage_tooltip();
+            save_state_settings();
+            position_at_taskbar();
+            sync_desktop_auto_collapse();
+            render_layered();
+            style_window::sync(style_settings_snapshot());
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE => {
+            let enabled = wparam.0 != 0;
+            let changed = {
+                let mut state = lock_state();
+                match state.as_mut() {
+                    Some(s) if s.display_position == DisplayPosition::Desktop
+                        && s.desktop_auto_collapse != enabled => {
+                        s.desktop_auto_collapse = enabled;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                save_state_settings();
+                sync_desktop_auto_collapse();
+                style_window::sync(style_settings_snapshot());
+            }
+            LRESULT(0)
+        }
+        _ if msg == style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE => {
+            let direction = if wparam.0 == 1 {
+                DesktopDirection::Vertical
+            } else {
+                DesktopDirection::Horizontal
+            };
+            let changed = {
+                let mut state = lock_state();
+                match state.as_mut() {
+                    Some(s) if s.display_position == DisplayPosition::Desktop
+                        && s.desktop_direction != direction => {
+                        s.desktop_direction = direction;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if !changed {
+                return LRESULT(0);
+            }
+            let start = Instant::now();
+            diagnose::log_lazy(|| format!(
+                "desktop orientation switch start direction={direction:?}",
+            ));
+            save_state_settings();
+            diagnose::log_lazy(|| "desktop orientation switch: applying window geometry".to_string());
+            // In desktop mode position_at_taskbar() calls
+            // enable_floating_widget(), which already moves and repaints the
+            // popup. A second render_layered() here repeated the expensive
+            // WinRT/DirectComposition updates after every toggle.
+            position_at_taskbar();
+            sync_desktop_auto_collapse();
+            diagnose::log_lazy(|| format!(
+                "desktop orientation switch: geometry applied direction={direction:?} elapsed_ms={}",
+                start.elapsed().as_millis(),
+            ));
+            style_window::sync(style_settings_snapshot());
+            diagnose::log_lazy(|| format!(
+                "desktop orientation switch complete direction={direction:?} elapsed_ms={}",
+                start.elapsed().as_millis(),
+            ));
             LRESULT(0)
         }
         _ if msg == style_window::WM_STYLE_PRESET_CHANGE => {
@@ -6071,9 +10100,15 @@ fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> Edit
             layout: match state.appearance_preset {
                 AppearancePreset::Default => "default",
                 AppearancePreset::Minimal => "minimal",
-                AppearancePreset::Adaptive => "adaptive",
-            }
+                    }
             .to_string(),
+            position: if state.display_position == DisplayPosition::Desktop {
+                "desktop"
+            } else { "taskbar" }.to_string(),
+            desktop_direction: if state.desktop_direction == DesktopDirection::Vertical {
+                "vertical"
+            } else { "horizontal" }.to_string(),
+            desktop_auto_collapse: state.desktop_auto_collapse,
             dark: EditableThemeStyle::from_theme_style(&state.styles.dark),
             light: EditableThemeStyle::from_theme_style(&state.styles.light),
         },
@@ -6096,6 +10131,9 @@ fn default_editable_settings() -> EditableSettings {
         appearance: EditableAppearance {
             theme: "system".to_string(),
             layout: "default".to_string(),
+            position: "taskbar".to_string(),
+            desktop_direction: "horizontal".to_string(),
+            desktop_auto_collapse: default_desktop_auto_collapse(),
             dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
             light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
         },
@@ -6111,6 +10149,10 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             theme_mode: s.theme_mode,
             is_dark: s.is_dark,
             appearance_preset: s.appearance_preset,
+            display_position: s.display_position,
+            desktop_direction: s.desktop_direction,
+            desktop_auto_collapse: s.desktop_auto_collapse,
+            vertical_taskbar_mode: s.vertical_taskbar_mode,
             active_style: s.styles.active(s.is_dark).clone(),
             editable_settings: editable_settings_from_state(s, startup_enabled),
         }
@@ -6120,6 +10162,10 @@ fn style_settings_snapshot() -> style_window::StyleWindowSnapshot {
             theme_mode: ThemeMode::System,
             is_dark: true,
             appearance_preset: AppearancePreset::Default,
+            display_position: DisplayPosition::Taskbar,
+            desktop_direction: DesktopDirection::Horizontal,
+            desktop_auto_collapse: default_desktop_auto_collapse(),
+            vertical_taskbar_mode: false,
             active_style: ThemeStyle::dark_default(),
             editable_settings: default_editable_settings(),
         }
@@ -6155,7 +10201,6 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     };
     let appearance_preset = match settings.appearance.layout.as_str() {
         "minimal" => AppearancePreset::Minimal,
-        "adaptive" => AppearancePreset::Adaptive,
         _ => AppearancePreset::Default,
     };
     let startup_enabled = settings.general.start_with_windows;
@@ -6180,6 +10225,13 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
             ThemeMode::Light => false,
         };
         s.appearance_preset = appearance_preset;
+        s.display_position = if settings.appearance.position == "desktop" {
+            DisplayPosition::Desktop
+        } else { DisplayPosition::Taskbar };
+        s.desktop_direction = if settings.appearance.desktop_direction == "vertical" {
+            DesktopDirection::Vertical
+        } else { DesktopDirection::Horizontal };
+        s.desktop_auto_collapse = settings.appearance.desktop_auto_collapse;
         s.styles.dark = settings.appearance.dark.to_theme_style();
         s.styles.light = settings.appearance.light.to_theme_style();
         s.styles.clamp_corner_radii(s.appearance_preset);
@@ -6204,6 +10256,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     }
     hide_minimal_usage_tooltip();
     position_at_taskbar();
+    sync_desktop_auto_collapse();
     render_layered();
     sync_tray_icons(hwnd);
     notify_quota_alerts(hwnd, &alerts);
@@ -6229,22 +10282,10 @@ fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
         }
     };
 
-    let settings_text = match language {
-        LanguageId::SimplifiedChinese => "设置...",
-        LanguageId::TraditionalChinese => "設定...",
-        _ => "Settings...",
-    };
-    let check_text = match language {
-        LanguageId::SimplifiedChinese => "检查更新",
-        LanguageId::TraditionalChinese => "檢查更新",
-        LanguageId::Japanese => "更新を確認",
-        LanguageId::Korean => "업데이트 확인",
-        _ => "Check for updates",
-    };
-    let github_text = match language {
-        LanguageId::SimplifiedChinese | LanguageId::TraditionalChinese => "前往 GitHub",
-        _ => "Open GitHub",
-    };
+    let zh = language == LanguageId::SimplifiedChinese;
+    let settings_text = if zh { "设置..." } else { "Settings..." };
+    let check_text = if zh { "检查更新" } else { "Check for updates" };
+    let github_text = if zh { "前往 GitHub" } else { "Open GitHub" };
     let version_label = if cfg!(feature = "github-update") {
         match available_update_version.as_deref() {
             Some(latest) => format!("v{} --> v{}", env!("CARGO_PKG_VERSION"), latest),
@@ -6673,9 +10714,8 @@ fn draw_panel(
 }
 
 fn draw_drag_handle(hdc: HDC, height: i32, color: &Color, hovered: bool) {
-    let dot = if hovered { sc(3).max(2) } else { sc(2).max(1) };
-    let gap_x = sc(1).max(1);
-    let gap_y = if hovered { sc(1).max(1) } else { sc(2).max(1) };
+    let (dot, gap_x, gap_y, hover_color) =
+        drag_handle_dot_style(*color, hovered, true);
     let matrix_w = dot * 2 + gap_x;
     let matrix_h = dot * 3 + gap_y * 2;
     // Nudge the visible grip away from the rounded left edge without
@@ -6683,16 +10723,6 @@ fn draw_drag_handle(hdc: HDC, height: i32, color: &Color, hovered: bool) {
     let hit_center_x = sc(DRAG_HANDLE_HIT_W) / 2;
     let origin_x = hit_center_x + sc(2) - matrix_w / 2;
     let origin_y = (height - matrix_h) / 2;
-    let hover_color = if hovered {
-        Color::rgba(
-            color.r.saturating_add(36),
-            color.g.saturating_add(36),
-            color.b.saturating_add(36),
-            color.a,
-        )
-    } else {
-        *color
-    };
 
     for row in 0..3 {
         for col in 0..2 {
@@ -6728,6 +10758,92 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v24_22_taskbar_inner_glow_never_touches_border_or_outside() {
+        // Strictly no external pixels, no border recoloring, no center tint,
+        // including rounded corners and fully transparent/opaque themes.
+        for (width, height) in [(270, 53), (48, 168), (90, 24)] {
+            for radius in [0_u8, 3, 10, 20] {
+                for alpha in [0_u8, 1, 64, 255] {
+                    let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+                    style.panel_corner_radius = radius;
+                    style.set_color(StyleColorTarget::PanelBackground,
+                        Color::rgba(18, 45, 37, alpha));
+                    let color = drag_hover_outline_color(&style);
+                    let original = vec![premultiplied_pixel(
+                        style.color(StyleColorTarget::PanelBackground)
+                    ); (width * height) as usize];
+                    let mut pixels = original.clone();
+                    draw_taskbar_hover_inner_glow(
+                        &mut pixels, width, height, &style, color,
+                    );
+                    let mut inside_changed = 0;
+                    let mut center_changed = 0;
+                    for y in 0..height {
+                        for x in 0..width {
+                            let idx = (y * width + x) as usize;
+                            let inside = panel_inner_shape_contains(
+                                width, height, x, y, radius,
+                            );
+                            if !inside {
+                                assert_eq!(pixels[idx], original[idx],
+                                    "outside and border pixels must be unchanged");
+                            } else if pixels[idx] != original[idx] {
+                                inside_changed += 1;
+                                if x == width / 2 && y == height / 2 {
+                                    center_changed += 1;
+                                }
+                            }
+                            // Layered bitmap must remain premultiplied BGRA.
+                            let a = pixels[idx] >> 24;
+                            for shift in [0, 8, 16] {
+                                assert!(((pixels[idx] >> shift) & 255) <= a);
+                            }
+                        }
+                    }
+                    assert!(inside_changed > 0,
+                        "every supported shape must show an inward halo");
+                    assert_eq!(center_changed, 0,
+                        "far-center quota content must not be tinted");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_22_taskbar_inner_glow_contacts_border_and_fades_inward() {
+        let width = 270;
+        let height = 53;
+        let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+        style.panel_corner_radius = 10;
+        let mut pixels = vec![0u32; (width * height) as usize];
+        draw_taskbar_hover_inner_glow(
+            &mut pixels, width, height, &style, drag_hover_outline_color(&style),
+        );
+        let top = sc(1).max(1) + PANEL_BORDER_WIDTH_PX;
+        let x = width / 2;
+        let alpha = |y: i32| pixels[(y * width + x) as usize] >> 24;
+        assert_eq!(alpha(top - 1), 0, "painted border is unchanged");
+        assert!(alpha(top) > alpha(top + 2),
+            "the glow must start against the inner border and fall inward");
+        assert!(alpha(top + 2) > alpha(top + 4));
+        assert_eq!(alpha(height / 2), 0, "center stays untouched");
+        // Desktop uses a completely separate exterior painter. Both can be
+        // invoked independently without sharing state or mask buffers.
+        let canvas_w = width + sc(24);
+        let canvas_h = height + sc(24);
+        let margin = sc(12);
+        let mut desktop = vec![0u32; (canvas_w * canvas_h) as usize];
+        draw_drag_hover_outer_glow(
+            &mut desktop, canvas_w, canvas_h,
+            RECT { left: margin, top: margin, right: margin + width,
+                bottom: margin + height },
+            RECT::default(), &style, drag_hover_outline_color(&style),
+        );
+        assert!(desktop[((margin - 1) * canvas_w + margin + x) as usize] >> 24 > 0,
+            "existing desktop exterior halo must still render");
+    }
 
     #[test]
     fn premultiplied_text_composition_preserves_partial_coverage() {
@@ -6875,6 +10991,2876 @@ mod tests {
     }
 
     #[test]
+    fn left_and_right_taskbars_select_vertical_axis() {
+        let left = RECT { left: 0, top: 0, right: 48, bottom: 1080 };
+        let right = RECT { left: 1920, top: -100, right: 1980, bottom: 980 };
+        let horizontal = RECT { left: -1920, top: 1040, right: 0, bottom: 1080 };
+        assert_eq!(taskbar_axis(left), TaskbarAxis::Vertical);
+        assert_eq!(taskbar_axis(right), TaskbarAxis::Vertical);
+        assert_eq!(taskbar_axis(horizontal), TaskbarAxis::Horizontal);
+        assert!(vertical_widget_width(left).is_some());
+        assert!(vertical_widget_width(right).is_some());
+        assert_eq!(vertical_widget_width(RECT { right: 28, ..left }), None);
+    }
+
+    #[test]
+    fn vertical_taskbar_free_gaps_exclude_pinned_icons_and_tray() {
+        let taskbar = RECT { left: 1880, top: -100, right: 1928, bottom: 980 };
+        let controls = [
+            RECT { left: 1880, top: -100, right: 1928, bottom: 20 },
+            RECT { left: 1880, top: 120, right: 1928, bottom: 340 },
+            RECT { left: 1880, top: 860, right: 1928, bottom: 980 },
+            // A window outside the taskbar's horizontal footprint is not an obstacle.
+            RECT { left: 0, top: 400, right: 60, bottom: 500 },
+        ];
+        let gaps = free_vertical_spans_from_occupied(taskbar, 860, &controls, 4);
+        assert_eq!(gaps, vec![
+            VerticalSpan { top: 24, bottom: 116 },
+            VerticalSpan { top: 344, bottom: 856 },
+        ]);
+        assert_eq!(nearest_free_top_offset(taskbar, &gaps, 104, -100), Some(444));
+        assert_eq!(nearest_free_top_offset(taskbar, &gaps, 104, 900), Some(852));
+    }
+
+    #[test]
+    fn vertical_ring_has_correct_clockwise_progress_and_clear_center() {
+        let width = 48;
+        let height = 128;
+        let mut pixels = vec![0u32; (width * height) as usize];
+        let track = Color::rgba(70, 70, 70, 255);
+        let accent = Color::rgba(0, 230, 0, 255);
+        render_vertical_ring(
+            &mut pixels, width, height, 24, 40, 15.0, 25.0,
+            track, accent, true,
+        );
+        let pixel = |x: i32, y: i32| pixels[(y * width + x) as usize];
+        // The bottom opening stays transparent; 25% begins at the lower left
+        // and advances clockwise to the left rather than representing usage.
+        assert_eq!(pixel(24, 55), 0);
+        assert!((pixel(9, 40) & 0x0000FF00) > (pixel(24, 25) & 0x0000FF00));
+        assert_eq!(pixel(24, 40), 0);
+        assert_ne!(pixel(24, 25), 0);
+        assert!(vertical_ring_fraction(0.0).is_some());
+        assert_eq!(vertical_ring_fraction(std::f32::consts::PI), None);
+        let mut complete_pixels = vec![0u32; (width * height) as usize];
+        render_vertical_ring(
+            &mut complete_pixels, width, height, 24, 40, 15.0, 100.0,
+            track, accent, true,
+        );
+        assert_eq!(complete_pixels[(55 * width + 24) as usize], 0);
+        assert_ne!(complete_pixels[(25 * width + 24) as usize], 0);
+        assert_eq!(vertical_quota_text(2.0, true), "2%");
+        assert_eq!(vertical_quota_text(100.0, true), "100%");
+    }
+
+    #[test]
+    fn vertical_layout_keeps_both_reset_lines_inside_compact_height() {
+        let height = sc(VERTICAL_WIDGET_HEIGHT);
+        let (session, weekly) = vertical_row_tops(height, true, true);
+        let first = session.unwrap();
+        let second = weekly.unwrap();
+        // The handle, text, ring, reset time and next row must be disjoint.
+        assert!(first >= sc(VERTICAL_DRAG_HANDLE_H));
+        assert!(second - first >= sc(VERTICAL_QUOTA_ROW_HEIGHT + VERTICAL_QUOTA_ROW_GAP));
+        let outer_radius = sc(VERTICAL_RING_MAX_RADIUS) + sc(2);
+        assert!(sc(VERTICAL_LABEL_CENTER_Y + 9) < sc(VERTICAL_RING_CENTER_Y) - outer_radius);
+        assert!(sc(VERTICAL_RING_CENTER_Y) + outer_radius < sc(VERTICAL_RESET_CENTER_Y - 9));
+        assert!(second + sc(VERTICAL_RESET_CENTER_Y + 9) <= height - sc(2));
+        assert!(vertical_drag_handle_hit(16, sc(8), sc(32), height));
+        assert!(!vertical_drag_handle_hit(16, first, sc(32), height));
+        assert!(!vertical_drag_handle_hit(16, second, sc(32), height));
+        assert!(!vertical_drag_handle_hit(16, sc(18), sc(32), height));
+        assert_eq!(vertical_reset_label(None, false), "--");
+        assert_eq!(vertical_reset_label(None, true), "--");
+    }
+
+    #[test]
+    fn desktop_vertical_panel_height_tracks_visible_rows_and_minimal_preset() {
+        for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
+            let one = desktop_vertical_content_height(preset, true, false);
+            let weekly_only = desktop_vertical_content_height(preset, false, true);
+            let both = desktop_vertical_content_height(preset, true, true);
+            assert_eq!(one, weekly_only);
+            assert!(both > one);
+            assert!(both < vertical_widget_height_for_preset(preset));
+            let inset = sc(DESKTOP_PANEL_CONTENT_PADDING);
+            if preset == AppearancePreset::Minimal {
+                for (height, session, weekly) in [
+                    (one, true, false), (one, false, true), (both, true, true),
+                ] {
+                    let (a, b) = vertical_minimal_percent_centers_for_layout(
+                        height, session, weekly, true,
+                    );
+                    for center in [a, b].into_iter().flatten() {
+                        assert!(center - sc(12) >= inset - sc(1));
+                        assert!(center + sc(12) <= height - inset + sc(1));
+                    }
+                }
+            } else {
+                for (height, session, weekly) in [
+                    (one, true, false), (one, false, true), (both, true, true),
+                ] {
+                    let (a, b) = vertical_row_tops_for_layout(
+                        height, session, weekly, true,
+                    );
+                    let first_visible = a.or(b).unwrap();
+                    assert_eq!(first_visible, inset,
+                        "first visible row must begin at the top panel inset");
+                    if let (Some(first), Some(second)) = (a, b) {
+                        assert_eq!(second - first,
+                            sc(VERTICAL_QUOTA_ROW_HEIGHT + VERTICAL_QUOTA_ROW_GAP));
+                    }
+                }
+                let (_, weekly) = vertical_row_tops_for_layout(both, true, true, true);
+                let last_reset_bottom =
+                    weekly.unwrap() + sc(VERTICAL_RESET_CENTER_Y + 9);
+                assert!(last_reset_bottom <= both - inset + sc(1));
+            }
+        }
+        assert_eq!(
+            vertical_widget_height_for_preset(AppearancePreset::Default),
+            sc(VERTICAL_WIDGET_HEIGHT),
+            "embedded taskbar's legacy height must stay unchanged",
+        );
+    }
+
+    #[test]
+    fn desktop_horizontal_width_tracks_active_usage_text_without_embedded_drag_strip() {
+        let lang = LanguageId::English;
+        let normal = AppearancePreset::Default;
+        let both_resets = desktop_horizontal_content_width(
+            lang, normal, true, true, "70%  15:05", "88%  10/25",
+        );
+        let one_reset = desktop_horizontal_content_width(
+            lang, normal, true, false, "70%  15:05", "88%",
+        );
+        assert_eq!(both_resets, one_reset, "rows share one aligned width");
+        assert_eq!(
+            both_resets + sc(DRAG_HANDLE_HIT_W)
+                - 2 * (sc(DESKTOP_PANEL_CONTENT_PADDING)
+                    - sc(normal.metrics().outer_padding)),
+            total_widget_width_for_preset(lang, normal),
+            "desktop replaces the taskbar drag strip with equal larger content insets",
+        );
+        let no_reset = desktop_horizontal_content_width(
+            lang, normal, true, true, "70%", "88%",
+        );
+        assert!(no_reset < both_resets, "absent reset labels free their whole column");
+        let minimal = desktop_horizontal_content_width(
+            lang, AppearancePreset::Minimal, true, true, "70%", "88%",
+        );
+        assert_eq!(
+            minimal + sc(DRAG_HANDLE_HIT_W)
+                - 2 * (sc(DESKTOP_PANEL_CONTENT_PADDING)
+                    - sc(AppearancePreset::Minimal.metrics().outer_padding)),
+            total_widget_width_for_preset(lang, AppearancePreset::Minimal),
+        );
+        assert_eq!(horizontal_content_left(&normal.metrics(), true),
+            sc(DESKTOP_PANEL_CONTENT_PADDING));
+        assert_eq!(horizontal_content_left(&normal.metrics(), false),
+            sc(normal.metrics().outer_padding + DRAG_HANDLE_HIT_W));
+    }
+
+    #[test]
+    fn desktop_visual_ink_alignment_avoids_reserved_reset_column_whitespace() {
+        let width = 34;
+        let height = 12;
+        let mut mask = vec![0u8; (width * height) as usize];
+        // Mimic a 5-character time mask with 4 pixels of leading bearing
+        // and trailing blank columns from the fixed-width text rectangle.
+        for y in 2..10 {
+            for x in 4..27 {
+                mask[(y * width + x) as usize] = 255;
+            }
+        }
+        assert_eq!(directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::Start,
+        ), 0, "embedded taskbar keeps its original layout");
+        let shift_start = directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::InkStart,
+        );
+        assert_eq!(4 + shift_start, 0,
+            "desktop first visible glyph must align to the left content inset");
+        let shift_end = directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::End,
+        );
+        assert_eq!(26 + shift_end, width - 1,
+            "reset text must reach the content inset, not stop at its reserved width");
+        let shift_center = directwrite_mask_x_offset(
+            &mask, width, height, HorizontalTextAlign::Center,
+        );
+        assert!(((4 + shift_center) - (width - 1 - (26 + shift_center))).abs() <= 1,
+            "the minimal single value must be optically centered");
+        assert_eq!(directwrite_mask_x_offset(
+            &vec![0; (width * height) as usize],
+            width, height, HorizontalTextAlign::End,
+        ), 0);
+    }
+
+    #[test]
+    fn desktop_horizontal_and_vertical_content_margins_are_symmetric() {
+        let preset = AppearancePreset::Default;
+        let metrics = preset.metrics();
+        let left = horizontal_content_left(&metrics, true);
+        let width = desktop_horizontal_content_width(
+            LanguageId::English, preset, true, true, "74%  15:05", "88%  10/25",
+        );
+        let label = sc(metrics.label_width);
+        let bar = row_bar_segment_count(preset)
+            * (sc(SEGMENT_W) + sc(SEGMENT_GAP)) - sc(SEGMENT_GAP);
+        let rightmost_text_edge = left + label + sc(metrics.label_bar_gap)
+            + bar + sc(metrics.bar_percent_gap)
+            + sc(metrics.percent_width) + sc(metrics.percent_reset_gap)
+            + sc(metrics.reset_width);
+        assert_eq!(left, sc(DESKTOP_PANEL_CONTENT_PADDING));
+        assert_eq!(width - rightmost_text_edge, left,
+            "left and right gutters must match around text ink");
+        for p in [AppearancePreset::Default, AppearancePreset::Minimal] {
+            for (show_session, show_weekly) in [(true, true), (true, false), (false, true)] {
+                let h = desktop_vertical_content_height(p, show_session, show_weekly);
+                let row_height = if p == AppearancePreset::Minimal {
+                    sc(DESKTOP_MINIMAL_ROW_HEIGHT)
+                } else {
+                    sc(VERTICAL_QUOTA_ROW_HEIGHT)
+                };
+                let (first, last) = if p == AppearancePreset::Minimal {
+                    let (a, b) = vertical_minimal_percent_centers_for_layout(
+                        h, show_session, show_weekly, true,
+                    );
+                    let a = a.or(b).unwrap() - row_height / 2;
+                    let b = b.unwrap_or(a + row_height / 2) + row_height / 2;
+                    (a, b)
+                } else {
+                    let (a, b) = vertical_row_tops_for_layout(
+                        h, show_session, show_weekly, true,
+                    );
+                    let first = a.or(b).unwrap();
+                    let last = b.or(a).unwrap() + row_height;
+                    (first, last)
+                };
+                assert!((first - (h - last)).abs() <= 1,
+                    "vertical visible row envelope must have equal top/bottom padding");
+            }
+        }
+        assert_eq!(horizontal_content_left(&metrics, false),
+            sc(metrics.outer_padding + DRAG_HANDLE_HIT_W),
+            "taskbar mode must preserve its original leading drag strip");
+    }
+
+    #[test]
+    fn desktop_responsive_tooltip_uses_content_relative_coordinates() {
+        let width = desktop_horizontal_content_width(
+            LanguageId::English, AppearancePreset::Minimal,
+            true, false, "70%", "88%",
+        );
+        let height = sc(AppearancePreset::Minimal.metrics().widget_height);
+        let hit = desktop_horizontal_usage_hover_hit(
+            width, height, AppearancePreset::Minimal, true, false,
+            sc(10), height / 2,
+        );
+        assert_eq!(hit.map(|(target, _)| target), Some(MinimalHoverTarget::Session));
+        assert_eq!(desktop_horizontal_usage_hover_hit(
+            width, height, AppearancePreset::Minimal, true, false,
+            width + 1, height / 2,
+        ), None);
+    }
+
+    #[test]
+    fn v24_3_drag_release_preserves_hover_on_detached_tab_without_mouse_motion() {
+        let edges = [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)];
+        for (body_w, body_h) in [(240, 42), (48, 168)] {
+            for edge in edges {
+                let (width, height, body) =
+                    floating_canvas_geometry(body_w, body_h, edge);
+                let tab = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+                let origin = POINT { x: -500, y: 320 };
+                let pointer = POINT {
+                    x: origin.x + (tab.left + tab.right) / 2,
+                    y: origin.y + (tab.top + tab.bottom) / 2,
+                };
+                assert!(floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, pointer,
+                ));
+                // The grip is independent of the body. The previous
+                // body-based check cleared hover despite a stationary cursor.
+                assert!(!point_in_rect(body,
+                    pointer.x - origin.x, pointer.y - origin.y));
+                let outside = POINT { x: origin.x + body.left + 2,
+                    y: origin.y + body.top + body_h / 2 };
+                assert!(!floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge, outside,
+                ));
+                assert!(!floating_drag_grip_contains_screen_point(
+                    origin.x, origin.y, width, height, edge,
+                    POINT { x: origin.x - 3, y: origin.y - 3 },
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn v24_3_release_grip_hover_and_glow_use_the_same_frame() {
+        let style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        let (width, height, body) = floating_canvas_geometry(240, 42, None);
+        let tab = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+        let pointer = POINT { x: 420 + (tab.left + tab.right) / 2,
+            y: 180 + (tab.top + tab.bottom) / 2 };
+        let hovered = floating_drag_grip_contains_screen_point(
+            420, 180, width, height, None, pointer,
+        );
+        assert!(hovered);
+        let alpha = if hovered { 100 } else { 0 };
+        assert_eq!(alpha, 100, "tab must not fade on mouse release");
+        let mut canvas = vec![0u32; (width * height) as usize];
+        render_floating_handle_bitmap(
+            &mut canvas, width, height, None, hovered, &style, alpha,
+        );
+        let grip_pixel = ((tab.top + tab.bottom) / 2 * width
+            + (tab.left + tab.right) / 2) as usize;
+        assert_ne!(canvas[grip_pixel], 0, "tab remains visible");
+        let accent = drag_hover_outline_color(&style);
+        draw_drag_hover_outline(
+            &mut canvas, width, height, body, style.panel_corner_radius, accent,
+        );
+        let ring_pixel = ((body.top + body.bottom) / 2 * width + body.left - 1)
+            as usize;
+        assert_ne!(canvas[ring_pixel], 0, "body hover glow stays visible");
+    }
+
+    #[test]
+    fn v24_2_free_desktop_canvas_has_real_outer_halo_space() {
+        for (width, height) in [(240, 42), (48, 168)] {
+            let halo = sc(FLOAT_FREE_GLOW_MARGIN);
+            let (cw, ch, body) = floating_canvas_geometry(width, height, None);
+            let tab = floating_grip_rect(cw, ch, None, sc(FLOAT_EDGE_PEEK));
+            assert_eq!(cw, width + halo * 2);
+            assert_eq!(ch, height + sc(FLOAT_EDGE_PEEK) + halo * 2);
+            assert_eq!(body.left, halo);
+            assert_eq!(body.top, halo + sc(FLOAT_EDGE_PEEK));
+            assert_eq!(cw - body.right, halo);
+            assert_eq!(ch - body.bottom, halo);
+            assert_eq!(tab.top, halo);
+            assert_eq!(tab.bottom, body.top);
+            assert!(floating_drag_handle_hit(
+                (tab.left + tab.right) / 2, (tab.top + tab.bottom) / 2,
+                cw, ch, None, sc(FLOAT_EDGE_PEEK),
+            ));
+            assert!(!floating_drag_handle_hit(
+                0, tab.top, cw, ch, None, sc(FLOAT_EDGE_PEEK),
+            ));
+            let style = ThemeStyle::preset(true, ThemePreset::Forest);
+            let mut bitmap = vec![0u32; (cw * ch) as usize];
+            draw_drag_hover_outline(&mut bitmap, cw, ch, body,
+                style.panel_corner_radius, drag_hover_outline_color(&style));
+            // A genuine halo pixel exists left of the panel, and fades
+            // completely before the outermost transparent canvas boundary.
+            let y = (body.top + body.bottom) / 2;
+            let alpha_at = |x: i32| bitmap[(y * cw + x) as usize] >> 24;
+            assert!(alpha_at(body.left - 2) > alpha_at(body.left - 6));
+            assert!(alpha_at(body.left - 6) > alpha_at(body.left - 10));
+            assert_eq!(alpha_at(0), 0);
+        }
+        // All docked edges now have a transparent halo gutter on the three
+        // inward-facing sides, while keeping the actual body at its monitor edge.
+        let (w, h, dock) = floating_canvas_geometry(
+            240, 42, Some(FloatingEdge::Bottom),
+        );
+        let glow = sc(FLOAT_FREE_GLOW_MARGIN);
+        assert_eq!((w, h, dock.left, dock.top),
+            (240 + glow * 2, 42 + sc(FLOAT_EDGE_PEEK) + glow,
+             glow, sc(FLOAT_EDGE_PEEK) + glow));
+    }
+
+    #[test]
+    fn v24_6_hit_probe_has_no_extra_drag_targets_in_any_orientation() {
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+                let (w, h, body) = floating_canvas_geometry(bw, bh, edge);
+                let grip = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                let probe = floating_hover_probe_rect(body, grip, edge);
+                let mut canvas = vec![0u32; (w * h) as usize];
+                paint_floating_hover_hit_probe(&mut canvas, w, h, body, grip, edge);
+                let grip_center = ((grip.left + grip.right) / 2,
+                    (grip.top + grip.bottom) / 2);
+                assert_eq!(floating_drag_tab_hit_code(
+                    body, grip, grip_center.0, grip_center.1,
+                ), 1, "rendered draggable tab must stay clickable");
+                // The grab hotspot stays identical between actual dragging,
+                // hover rendering and the non-client mouse hit classification.
+                assert!(floating_drag_handle_hit(
+                    grip_center.0, grip_center.1, w, h, edge, sc(FLOAT_EDGE_PEEK),
+                ));
+                assert_eq!(canvas[(grip_center.1 * w + grip_center.0) as usize], 0,
+                    "hit-test probe must not paint over the real draggable tab");
+                let body_center = ((body.left + body.right) / 2,
+                    (body.top + body.bottom) / 2);
+                assert_eq!(floating_drag_tab_hit_code(
+                    body, grip, body_center.0, body_center.1,
+                ), 1, "component panel remains interactive");
+                for y in probe.top.max(0)..probe.bottom.min(h) {
+                    for x in probe.left.max(0)..probe.right.min(w) {
+                        if point_in_rect(grip, x, y) || point_in_rect(body, x, y) {
+                            continue;
+                        }
+                        assert_eq!(canvas[(y * w + x) as usize], 0x01000000,
+                            "fully transparent hover probe must be alpha=1 only");
+                        assert_eq!(floating_drag_tab_hit_code(body, grip, x, y), -1);
+                        assert!(!floating_drag_handle_hit(
+                            x, y, w, h, edge, sc(FLOAT_EDGE_PEEK),
+                        ), "probe region must not allow drag start");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_6_free_tab_lateral_exit_probe_extends_beyond_grip_width() {
+        let (w, h, body) = floating_canvas_geometry(240, 42, None);
+        let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+        let probe = floating_hover_probe_rect(body, grip, None);
+        assert_eq!(probe.left, body.left);
+        assert_eq!(probe.right, body.right);
+        assert_eq!(probe.top, grip.top);
+        assert_eq!(probe.bottom, body.top);
+        let y = (grip.top + grip.bottom) / 2;
+        let red_box_x = (body.left + grip.left) / 2;
+        assert!(red_box_x < grip.left, "lateral point must be left of the tab");
+        assert!(point_in_rect(probe, red_box_x, y));
+        assert!(!floating_drag_handle_hit(
+            red_box_x, y, w, h, None, sc(FLOAT_EDGE_PEEK),
+        ));
+        let mut pixels = vec![0u32; (w * h) as usize];
+        paint_floating_hover_hit_probe(&mut pixels, w, h, body, grip, None);
+        assert_eq!(pixels[(y * w + red_box_x) as usize], 0x01000000);
+        assert_eq!(floating_drag_tab_hit_code(body, grip, red_box_x, y), -1);
+    }
+
+    #[test]
+    fn v24_7_drag_clears_physical_edge_and_restores_all_outer_gutters() {
+        let g = sc(FLOAT_FREE_GLOW_MARGIN);
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom] {
+                let (ow, oh, old) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), false);
+                let (nw, nh, new) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), true);
+                assert_eq!(new.right - new.left, bw);
+                assert_eq!(new.bottom - new.top, bh);
+                let shift_x = new.left - old.left;
+                let shift_y = new.top - old.top;
+                assert_eq!((nw - ow, nh - oh), match edge {
+                    FloatingEdge::Left | FloatingEdge::Right => (g, 0),
+                    FloatingEdge::Top | FloatingEdge::Bottom => (0, g),
+                });
+                assert_eq!((shift_x, shift_y), match edge {
+                    FloatingEdge::Left => (g, 0),
+                    FloatingEdge::Top => (0, g),
+                    _ => (0, 0),
+                });
+                // Keep both the panel and the grabbed tab in exactly the
+                // same screen coordinates when transparent gutter is added.
+                let old_tab = floating_grip_rect(ow, oh, Some(edge), sc(FLOAT_EDGE_PEEK));
+                let new_tab = floating_grip_rect(nw, nh, Some(edge), sc(FLOAT_EDGE_PEEK));
+                assert_eq!(old_tab.left + shift_x, new_tab.left);
+                assert_eq!(old_tab.top + shift_y, new_tab.top);
+                assert_eq!(old_tab.right + shift_x, new_tab.right);
+                assert_eq!(old_tab.bottom + shift_y, new_tab.bottom);
+                let old_x = 250;
+                let old_y = 250;
+                let new_x = old_x - shift_x;
+                let new_y = old_y - shift_y;
+                assert_eq!(old_x + old.left, new_x + new.left);
+                assert_eq!(old_y + old.top, new_y + new.top);
+                assert_eq!(old_x + old_tab.left, new_x + new_tab.left);
+                assert_eq!(old_y + old_tab.top, new_y + new_tab.top);
+
+                let (flush_x, flush_y) = match edge {
+                    FloatingEdge::Left => (monitor.left - old.left, 250),
+                    FloatingEdge::Right => (monitor.right - old.right, 250),
+                    FloatingEdge::Top => (250, monitor.top - old.top),
+                    FloatingEdge::Bottom => (250, monitor.bottom - old.bottom),
+                };
+                assert!(!floating_drag_has_cleared_edge(
+                    flush_x, flush_y, old, monitor, Some(edge),
+                ), "glow must stay clipped while the panel is flush");
+                let (moved_x, moved_y) = match edge {
+                    FloatingEdge::Left => (flush_x + sc(2), flush_y),
+                    FloatingEdge::Right => (flush_x - sc(2), flush_y),
+                    FloatingEdge::Top => (flush_x, flush_y + sc(2)),
+                    FloatingEdge::Bottom => (flush_x, flush_y - sc(2)),
+                };
+                assert!(floating_drag_has_cleared_edge(
+                    moved_x, moved_y, old, monitor, Some(edge),
+                ), "external glow must unlock during the drag, not on release");
+
+                let style = ThemeStyle::preset(true, ThemePreset::Forest);
+                let accent = drag_hover_outline_color(&style);
+                let mut pixels = vec![0u32; (nw * nh) as usize];
+                draw_drag_hover_outline(
+                    &mut pixels, nw, nh, new, style.panel_corner_radius, accent,
+                );
+                let mx = (new.left + new.right) / 2;
+                let my = (new.top + new.bottom) / 2;
+                assert_eq!(pixels[(my * nw + mx) as usize], 0,
+                    "glow must not color the actual panel interior");
+                let outside = match edge {
+                    FloatingEdge::Left => (new.left - 2, my),
+                    FloatingEdge::Right => (new.right + 2, my),
+                    FloatingEdge::Top => (mx, new.top - 2),
+                    FloatingEdge::Bottom => (mx, new.bottom + 2),
+                };
+                assert!((outside.0 >= 0) && (outside.0 < nw)
+                    && (outside.1 >= 0) && (outside.1 < nh));
+                assert!(pixels[(outside.1 * nw + outside.0) as usize] >> 24 > 0,
+                    "newly unlocked side must have real external glow");
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_drag_restores_clipped_glow_in_both_directions() {
+        // V24.14: on the bottom taskbar an outward (downward) drag must
+        // unlock its missing lower glow, just like an inward (upward) drag.
+        // Preserve the old inward-only physical-screen-edge contract.
+        let bounds = RECT { left: 100, top: 100, right: 1100, bottom: 850 };
+        let threshold = sc(2);
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [
+                FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom,
+            ] {
+                let (w, h, body) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), false);
+                let (flush_x, flush_y) = match edge {
+                    FloatingEdge::Left => (bounds.left - body.left, 300),
+                    FloatingEdge::Right => (bounds.right - body.right, 300),
+                    FloatingEdge::Top => (300, bounds.top - body.top),
+                    FloatingEdge::Bottom => (300, bounds.bottom - body.bottom),
+                };
+                assert!(!floating_drag_has_cleared_edge(
+                    flush_x, flush_y, body, bounds, Some(edge),
+                ));
+                assert!(!floating_drag_has_crossed_taskbar_edge(
+                    flush_x, flush_y, body, bounds, Some(edge),
+                ));
+                // Outward movement into the taskbar, including the lower
+                // side shown in the user's screenshot.
+                let (out_x, out_y) = match edge {
+                    FloatingEdge::Left => (flush_x - threshold, flush_y),
+                    FloatingEdge::Right => (flush_x + threshold, flush_y),
+                    FloatingEdge::Top => (flush_x, flush_y - threshold),
+                    FloatingEdge::Bottom => (flush_x, flush_y + threshold),
+                };
+                assert!(floating_drag_has_crossed_taskbar_edge(
+                    out_x, out_y, body, bounds, Some(edge),
+                ), "taskbar-side movement must unlock the clipped glow");
+                assert!(!floating_drag_has_cleared_edge(
+                    out_x, out_y, body, bounds, Some(edge),
+                ), "old one-sided check must still identify only inward motion");
+                let (in_x, in_y) = match edge {
+                    FloatingEdge::Left => (flush_x + threshold, flush_y),
+                    FloatingEdge::Right => (flush_x - threshold, flush_y),
+                    FloatingEdge::Top => (flush_x, flush_y + threshold),
+                    FloatingEdge::Bottom => (flush_x, flush_y - threshold),
+                };
+                assert!(floating_drag_has_cleared_edge(
+                    in_x, in_y, body, bounds, Some(edge),
+                ));
+                assert!(!floating_drag_has_crossed_taskbar_edge(
+                    in_x, in_y, body, bounds, Some(edge),
+                ));
+                // The restored canvas really does contain a drawable gutter
+                // beyond the previously taskbar-facing panel edge.
+                let (nw, nh, full_body) =
+                    floating_drag_canvas_geometry(bw, bh, Some(edge), true);
+                let accent = drag_hover_outline_color(
+                    &ThemeStyle::preset(true, ThemePreset::Forest),
+                );
+                let mut pixels = vec![0u32; (nw * nh) as usize];
+                draw_drag_hover_outline(
+                    &mut pixels, nw, nh, full_body, 8, accent,
+                );
+                let (px, py) = match edge {
+                    FloatingEdge::Left => (full_body.left - 2, (full_body.top + full_body.bottom)/2),
+                    FloatingEdge::Right => (full_body.right + 2, (full_body.top + full_body.bottom)/2),
+                    FloatingEdge::Top => ((full_body.left + full_body.right)/2, full_body.top - 2),
+                    FloatingEdge::Bottom => ((full_body.left + full_body.right)/2, full_body.bottom + 2),
+                };
+                assert!(px >= 0 && px < nw && py >= 0 && py < nh);
+                assert!(pixels[(py*nw + px) as usize] >> 24 > 0,
+                    "full glow must be drawable on formerly clipped side");
+                assert!(w <= nw && h <= nh);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_drag_does_not_unlock_from_small_jitter() {
+        let bounds = RECT { left: 100, top: 100, right: 1100, bottom: 850 };
+        let (_, _, body) = floating_canvas_geometry(240, 42, Some(FloatingEdge::Bottom));
+        let flush_y = bounds.bottom - body.bottom;
+        let t = sc(2);
+        for delta in (-t + 1)..t {
+            assert!(!floating_drag_has_cleared_edge(
+                300, flush_y + delta, body, bounds, Some(FloatingEdge::Bottom),
+            ));
+            assert!(!floating_drag_has_crossed_taskbar_edge(
+                300, flush_y + delta, body, bounds, Some(FloatingEdge::Bottom),
+            ));
+        }
+        assert!(!floating_drag_has_crossed_taskbar_edge(
+            300, flush_y + t, body, bounds, None,
+        ));
+    }
+
+    #[test]
+    fn v24_19_transparent_round_corners_do_not_erase_underlying_halo() {
+        // The V24.18 source bitmap was copied over a prepainted glow, so
+        // alpha-zero corner pixels erased the halo and left a visible gap.
+        // At any exterior pixel with glow, source-over must preserve it.
+        let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        for radius in [0_u8, 3, 8, 16, 22] {
+            style.panel_corner_radius = radius;
+            for edge in [None, Some(FloatingEdge::Left),
+                Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                Some(FloatingEdge::Bottom)] {
+                let (w, h, body) = floating_drag_canvas_geometry(
+                    240, 60, edge, edge.is_some(),
+                );
+                let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                let mut halo = vec![0_u32; (w * h) as usize];
+                draw_drag_hover_outer_glow(
+                    &mut halo, w, h, body, tab, &style,
+                    drag_hover_outline_color(&style),
+                );
+                let mut corner_pixels = 0;
+                for rect in [body, tab] {
+                    let rw = rect.right - rect.left;
+                    let rh = rect.bottom - rect.top;
+                    for y in rect.top.max(0)..rect.bottom.min(h) {
+                        for x in rect.left.max(0)..rect.right.min(w) {
+                            if panel_outer_shape_contains(
+                                rw, rh, x - rect.left, y - rect.top, radius,
+                            ) { continue; }
+                            let index = (y * w + x) as usize;
+                            if halo[index] >> 24 == 0 { continue; }
+                            assert_eq!(composite_premultiplied_pixel(halo[index], 0),
+                                halo[index],
+                                "transparent rounded corner must not punch a dark gap");
+                            corner_pixels += 1;
+                        }
+                    }
+                }
+                assert!(corner_pixels > 0,
+                    "halo must pass through transparent pixels beside the rounded contour");
+            }
+        }
+    }
+
+    #[test]
+    fn v24_19_border_underside_continuity_without_inner_tint() {
+        for radius in [0_u8, 2, 7, 15, 22] {
+            for alpha in [24_u8, 96, 180, 255] {
+                let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+                style.panel_corner_radius = radius;
+                style.set_color(StyleColorTarget::PanelBorder,
+                    Color::rgba(68, 108, 136, alpha));
+                style.set_color(StyleColorTarget::PanelBackground,
+                    Color::rgba(20, 35, 52, alpha));
+                for edge in [None, Some(FloatingEdge::Left),
+                    Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                    Some(FloatingEdge::Bottom)] {
+                    let (w, h, body) = floating_drag_canvas_geometry(
+                        240, 64, edge, edge.is_some(),
+                    );
+                    let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                    let mut halo = vec![0_u32; (w*h) as usize];
+                    draw_drag_hover_outer_glow(
+                        &mut halo, w, h, body, tab, &style,
+                        drag_hover_outline_color(&style),
+                    );
+                    let mut border_count = 0;
+                    for rect in [body, tab] {
+                        let rw = rect.right - rect.left;
+                        let rh = rect.bottom - rect.top;
+                        for y in rect.top.max(0)..rect.bottom.min(h) {
+                            for x in rect.left.max(0)..rect.right.min(w) {
+                                let lx = x - rect.left;
+                                let ly = y - rect.top;
+                                let index = (y*w + x) as usize;
+                                let is_border = panel_outer_shape_contains(
+                                    rw, rh, lx, ly, radius,
+                                ) && !panel_inner_shape_contains(
+                                    rw, rh, lx, ly, radius,
+                                );
+                                let is_content = panel_inner_shape_contains(
+                                    rw, rh, lx, ly, radius,
+                                );
+                                if is_content {
+                                    assert_eq!(halo[index], 0,
+                                        "no underpaint under the translucent panel content");
+                                } else if is_border && halo[index] >> 24 > 0 {
+                                    border_count += 1;
+                                    let border = premultiplied_pixel(
+                                        style.color(StyleColorTarget::PanelBorder),
+                                    );
+                                    let result = composite_premultiplied_pixel(
+                                        halo[index], border,
+                                    );
+                                    if alpha == 255 {
+                                        assert_eq!(result, border,
+                                            "opaque border completely obscures underpaint");
+                                    } else {
+                                        assert_ne!(result, border,
+                                            "semi-transparent border keeps a narrow seamless glow");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    assert!(border_count > 0,
+                        "underpaint must contact the actual outer border");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_19_premultiplied_foreground_source_over_preserves_color_rules() {
+        let under = premultiplied_pixel(Color::rgba(20, 180, 240, 175));
+        assert_eq!(composite_premultiplied_pixel(under, 0), under);
+        assert_eq!(composite_premultiplied_pixel(0, under), under);
+        let solid = premultiplied_pixel(Color::rgba(30, 50, 70, 255));
+        assert_eq!(composite_premultiplied_pixel(under, solid), solid);
+        let translucent = premultiplied_pixel(Color::rgba(100, 120, 160, 85));
+        let mixed = composite_premultiplied_pixel(under, translucent);
+        assert!(mixed >> 24 > under >> 24);
+        for shift in [0, 8, 16] {
+            assert!((mixed >> shift) & 255 <= mixed >> 24,
+                "result must remain premultiplied for UpdateLayeredWindow");
+        }
+    }
+
+    #[test]
+    fn v24_18_outer_glow_leaves_all_panel_and_tab_pixels_untinted() {
+        // Desktop overlay and glass surfaces may be translucent: painting
+        // the halo behind the foreground is not sufficient without a strict
+        // union silhouette mask, since inner light would show through.
+        for radius in [0_u8, 2, 8, 20] {
+            for alpha in [32_u8, 105, 255] {
+                let mut style = ThemeStyle::preset(false, ThemePreset::Ocean);
+                style.panel_corner_radius = radius;
+                style.set_color(StyleColorTarget::PanelBackground,
+                    Color::rgba(23, 42, 68, alpha));
+                style.set_color(StyleColorTarget::PanelBorder,
+                    Color::rgba(67, 123, 151, alpha));
+                let accent = drag_hover_outline_color(&style);
+                for edge in [None, Some(FloatingEdge::Left),
+                    Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                    Some(FloatingEdge::Bottom)] {
+                    let (w, h, body) = floating_drag_canvas_geometry(
+                        240, 52, edge, edge.is_some(),
+                    );
+                    let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                    let mut foreground = vec![0u32; (w * h) as usize];
+                    for y in body.top..body.bottom {
+                        for x in body.left..body.right {
+                            if let Some(color) = panel_color_at(
+                                &style, body.right - body.left, body.bottom - body.top,
+                                x - body.left, y - body.top,
+                            ) {
+                                foreground[(y * w + x) as usize] = premultiplied_pixel(color);
+                            }
+                        }
+                    }
+                    render_floating_handle_bitmap(
+                        &mut foreground, w, h, edge, true, &style, 100,
+                    );
+                    let mut composite = vec![0u32; (w * h) as usize];
+                    draw_drag_hover_outer_glow(
+                        &mut composite, w, h, body, tab, &style, accent,
+                    );
+                    let mut halo_found = false;
+                    for y in 0..h {
+                        for x in 0..w {
+                            let index = (y * w + x) as usize;
+                            let body_mask = panel_outer_shape_contains(
+                                body.right - body.left, body.bottom - body.top,
+                                x - body.left, y - body.top, radius,
+                            );
+                            let tab_mask = panel_outer_shape_contains(
+                                tab.right - tab.left, tab.bottom - tab.top,
+                                x - tab.left, y - tab.top, radius,
+                            );
+                            let in_content = panel_inner_shape_contains(
+                                body.right - body.left, body.bottom - body.top,
+                                x - body.left, y - body.top, radius,
+                            ) || panel_inner_shape_contains(
+                                tab.right - tab.left, tab.bottom - tab.top,
+                                x - tab.left, y - tab.top, radius,
+                            );
+                            if in_content {
+                                assert_eq!(composite[index], 0,
+                                    "halo must never underpaint the inner fill area");
+                            } else if !(body_mask || tab_mask)
+                                && composite[index] >> 24 > 0 {
+                                halo_found = true;
+                            }
+                            // Production uses source-over, not direct copy.
+                            // Inner fill has no light behind and must remain
+                            // bit-for-bit identical across translucent themes.
+                            let blended = composite_premultiplied_pixel(
+                                composite[index], foreground[index],
+                            );
+                            if in_content {
+                                assert_eq!(blended, foreground[index],
+                                    "inner text and panel colors must remain untinted");
+                            }
+                            composite[index] = blended;
+                        }
+                    }
+                    assert!(halo_found, "outer halo must remain visible at every dock edge");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_18_outer_glow_contacts_actual_rounded_contour_without_any_gap() {
+        // At every four-neighbor boundary of the true panel or drag tab,
+        // the directly adjacent outside pixel must receive light. This
+        // guards the circular corner seam that made an earlier outside-only
+        // experiment look detached from the panel.
+        let mut style = ThemeStyle::preset(true, ThemePreset::Forest);
+        for radius in [0_u8, 2, 5, 12, 20] {
+            style.panel_corner_radius = radius;
+            for edge in [None, Some(FloatingEdge::Left),
+                Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                Some(FloatingEdge::Bottom)] {
+                let (w, h, body) = floating_drag_canvas_geometry(
+                    230, 70, edge, edge.is_some(),
+                );
+                let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                let mask_at = |x: i32, y: i32| {
+                    [body, tab].iter().any(|rect| panel_outer_shape_contains(
+                        rect.right - rect.left, rect.bottom - rect.top,
+                        x - rect.left, y - rect.top, radius,
+                    ))
+                };
+                let mut pixels = vec![0u32; (w * h) as usize];
+                draw_drag_hover_outer_glow(
+                    &mut pixels, w, h, body, tab,
+                    &style, drag_hover_outline_color(&style),
+                );
+                let mut boundary_pairs = 0;
+                for y in 0..h {
+                    for x in 0..w {
+                        if !mask_at(x, y) { continue; }
+                        for (dx, dy) in [(1,0), (-1,0), (0,1), (0,-1)] {
+                            let px = x + dx;
+                            let py = y + dy;
+                            if px < 0 || px >= w || py < 0 || py >= h
+                                || mask_at(px, py) { continue; }
+                            let opacity = pixels[(py*w + px) as usize] >> 24;
+                            assert!(opacity > 0,
+                                "glow must touch every rounded exterior contour pixel, no gap");
+                            if [body, tab].iter().any(|rect| panel_inner_shape_contains(
+                                rect.right - rect.left, rect.bottom - rect.top,
+                                x - rect.left, y - rect.top, radius,
+                            )) {
+                                assert_eq!(pixels[(y*w + x) as usize], 0,
+                                    "halo cannot reach the painted content region");
+                            } else {
+                                assert!(pixels[(y*w + x) as usize] >> 24 > 0,
+                                    "the narrow outer border needs a subpixel underpaint");
+                            }
+                            boundary_pairs += 1;
+                        }
+                    }
+                }
+                assert!(boundary_pairs > 10);
+            }
+        }
+    }
+
+    #[test]
+    fn v24_18_nearby_panel_and_tab_glows_do_not_tint_each_other() {
+        let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        style.panel_corner_radius = 10;
+        for edge in [None, Some(FloatingEdge::Left),
+            Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+            Some(FloatingEdge::Bottom)] {
+            let (w, h, body) = floating_canvas_geometry(240, 52, edge);
+            let tab = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+            let mut pixels = vec![0u32; (w*h) as usize];
+            draw_drag_hover_outer_glow(
+                &mut pixels, w, h, body, tab, &style,
+                drag_hover_outline_color(&style),
+            );
+            for y in 0..h {
+                for x in 0..w {
+                    if [body, tab].iter().any(|r| panel_inner_shape_contains(
+                        r.right-r.left, r.bottom-r.top,
+                        x-r.left, y-r.top, style.panel_corner_radius,
+                    )) {
+                        assert_eq!(pixels[(y*w+x) as usize], 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_4_docked_glow_gutters_respect_physical_monitor_edges() {
+        let g = sc(FLOAT_FREE_GLOW_MARGIN);
+        let peek = sc(FLOAT_EDGE_PEEK);
+        let bounds = RECT { left: -1920, top: -80, right: 0, bottom: 1000 };
+        let style = ThemeStyle::preset(true, ThemePreset::Forest);
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom] {
+                let (cw, ch, body) = floating_canvas_geometry(bw, bh, Some(edge));
+                let grip = floating_grip_rect(cw, ch, Some(edge), peek);
+                assert_eq!(body.right - body.left, bw);
+                assert_eq!(body.bottom - body.top, bh);
+                // Outer gutter on the three sides facing the inside of the
+                // monitor; no fake blank strip against the physical edge.
+                match edge {
+                    FloatingEdge::Left => {
+                        assert_eq!(body.left, 0);
+                        assert_eq!(body.top, g);
+                        assert_eq!(ch - body.bottom, g);
+                        assert_eq!(cw - grip.right, g);
+                        assert_eq!(grip.left, body.right);
+                    }
+                    FloatingEdge::Right => {
+                        assert_eq!(cw - body.right, 0);
+                        assert_eq!(body.top, g);
+                        assert_eq!(ch - body.bottom, g);
+                        assert_eq!(grip.left, g);
+                        assert_eq!(grip.right, body.left);
+                    }
+                    FloatingEdge::Top => {
+                        assert_eq!(body.top, 0);
+                        assert_eq!(body.left, g);
+                        assert_eq!(cw - body.right, g);
+                        assert_eq!(ch - grip.bottom, g);
+                        assert_eq!(grip.top, body.bottom);
+                    }
+                    FloatingEdge::Bottom => {
+                        assert_eq!(ch - body.bottom, 0);
+                        assert_eq!(body.left, g);
+                        assert_eq!(cw - body.right, g);
+                        assert_eq!(grip.top, g);
+                        assert_eq!(grip.bottom, body.top);
+                    }
+                }
+                let expanded = floating_edge_position(
+                    bounds, bounds.left + 300, bounds.top + 300, cw, ch,
+                    Some(edge), false, peek,
+                );
+                let collapsed = floating_edge_position(
+                    bounds, bounds.left + 300, bounds.top + 300, cw, ch,
+                    Some(edge), true, peek,
+                );
+                let grip_screen = RECT {
+                    left: collapsed.0 + grip.left, right: collapsed.0 + grip.right,
+                    top: collapsed.1 + grip.top, bottom: collapsed.1 + grip.bottom,
+                };
+                match edge {
+                    FloatingEdge::Left => {
+                        assert_eq!(expanded.0 + body.left, bounds.left);
+                        assert_eq!(grip_screen.left, bounds.left);
+                    }
+                    FloatingEdge::Right => {
+                        assert_eq!(expanded.0 + body.right, bounds.right);
+                        assert_eq!(grip_screen.right, bounds.right);
+                    }
+                    FloatingEdge::Top => {
+                        assert_eq!(expanded.1 + body.top, bounds.top);
+                        assert_eq!(grip_screen.top, bounds.top);
+                    }
+                    FloatingEdge::Bottom => {
+                        assert_eq!(expanded.1 + body.bottom, bounds.bottom);
+                        assert_eq!(grip_screen.bottom, bounds.bottom);
+                    }
+                }
+                assert!(floating_drag_handle_hit(
+                    (grip.left + grip.right) / 2, (grip.top + grip.bottom) / 2,
+                    cw, ch, Some(edge), peek,
+                ));
+                let mut pixels = vec![0u32; (cw * ch) as usize];
+                draw_drag_hover_outline(
+                    &mut pixels, cw, ch, body,
+                    style.panel_corner_radius, drag_hover_outline_color(&style),
+                );
+                let center_y = (body.top + body.bottom) / 2;
+                let center_x = (body.left + body.right) / 2;
+                let al = |x: i32, y: i32| -> u32 {
+                    pixels[(y * cw + x) as usize] >> 24
+                };
+                match edge {
+                    FloatingEdge::Left => {
+                        assert!(al(body.right + 2, center_y) > 0);
+                        assert!(al(center_x, body.top - 2) > 0);
+                        assert!(al(center_x, body.bottom + 2) > 0);
+                    }
+                    FloatingEdge::Right => {
+                        assert!(al(body.left - 2, center_y) > 0);
+                        assert!(al(center_x, body.top - 2) > 0);
+                        assert!(al(center_x, body.bottom + 2) > 0);
+                    }
+                    FloatingEdge::Top => {
+                        assert!(al(body.left - 2, center_y) > 0);
+                        assert!(al(body.right + 2, center_y) > 0);
+                        assert!(al(center_x, body.bottom + 2) > 0);
+                    }
+                    FloatingEdge::Bottom => {
+                        assert!(al(body.left - 2, center_y) > 0);
+                        assert!(al(body.right + 2, center_y) > 0);
+                        assert!(al(center_x, body.top - 2) > 0);
+                    }
+                }
+                // Glow stays visual-only: the component center remains clear.
+                assert_eq!(al(center_x, center_y), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_repeated_direction_switch_preserves_panel_and_external_grip() {
+        // Reproduces the user's rapid horizontal/vertical toggles at the pure
+        // geometry layer. Every switch must preserve the panel and its
+        // external drag area without accumulating size or offset errors.
+        let horizontal = (240, 42);
+        let vertical = (48, 184);
+        let edges = [
+            None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom),
+        ];
+        for i in 0..1_000 {
+            let (body_w, body_h) = if i % 2 == 0 { horizontal } else { vertical };
+            for edge in edges {
+                let (canvas_w, canvas_h, body) =
+                    floating_canvas_geometry(body_w, body_h, edge);
+                let grip = floating_grip_rect(
+                    canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+                );
+                assert_eq!(body.right - body.left, body_w);
+                assert_eq!(body.bottom - body.top, body_h);
+                assert!(grip.left >= 0 && grip.top >= 0
+                    && grip.right <= canvas_w && grip.bottom <= canvas_h);
+                assert!(grip.right <= body.left || grip.left >= body.right
+                    || grip.bottom <= body.top || grip.top >= body.bottom);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_grip_stays_inside_only_visible_edge_peek() {
+        let width = 240;
+        let height = 168;
+        let peek = sc(FLOAT_EDGE_PEEK);
+        for edge in [Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom), None] {
+            let r = floating_grip_rect(width, height, edge, peek);
+            assert!(r.left >= 0 && r.top >= 0 && r.right <= width && r.bottom <= height);
+            assert!(floating_drag_handle_hit((r.left + r.right) / 2,
+                (r.top + r.bottom) / 2, width, height, edge, peek));
+            assert!(!floating_drag_handle_hit(-1, -1, width, height, edge, peek));
+            match edge {
+                Some(FloatingEdge::Left) => {
+                    assert_eq!(r.left, width - sc(FLOAT_FREE_GLOW_MARGIN) - peek);
+                }
+                Some(FloatingEdge::Right) => {
+                    assert_eq!(r.right, sc(FLOAT_FREE_GLOW_MARGIN) + peek);
+                }
+                Some(FloatingEdge::Top) => {
+                    assert_eq!(r.bottom, height - sc(FLOAT_FREE_GLOW_MARGIN));
+                }
+                Some(FloatingEdge::Bottom) => {
+                    assert_eq!(r.top, sc(FLOAT_FREE_GLOW_MARGIN));
+                },
+                None => assert_eq!(r.top, sc(FLOAT_FREE_GLOW_MARGIN)),
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_drag_grip_geometry_stays_fixed_until_release() {
+        let body_w = 240;
+        let body_h = 168;
+        for edge in [FloatingEdge::Left, FloatingEdge::Right,
+                     FloatingEdge::Top, FloatingEdge::Bottom] {
+            let (w, h, body) = floating_canvas_geometry(body_w, body_h, Some(edge));
+            let original_tab = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let anchor_x = (original_tab.left + original_tab.right) / 2;
+            let anchor_y = (original_tab.top + original_tab.bottom) / 2;
+            for pointer in [POINT { x: 300, y: 400 }, POINT { x: 700, y: 250 }] {
+                let window_x = pointer.x - anchor_x;
+                let window_y = pointer.y - anchor_y;
+                let tab = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+                assert_eq!((window_x + tab.left + (tab.right - tab.left) / 2,
+                            window_y + tab.top + (tab.bottom - tab.top) / 2),
+                            (pointer.x, pointer.y));
+                assert_eq!((body.right - body.left, body.bottom - body.top),
+                           (body_w, body_h));
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_grip_fade_is_reversible_and_never_changes_body_pixels() {
+        assert_eq!(eased_value_at(0, 100, Duration::ZERO, 140), 0);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(70), 140), 88);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(140), 140), 100);
+        assert_eq!(eased_value_at(100, 0, Duration::ZERO, 170), 100);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(85), 170), 50);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(170), 170), 0);
+        let width = 240;
+        let height = 168;
+        let style = ThemeStyle::light_default();
+        let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+        let mut body = vec![0xFF445566u32; (width * height) as usize];
+        for y in grip.top..grip.bottom {
+            for x in grip.left..grip.right {
+                body[(y * width + x) as usize] = 0; // detached tab gutter
+            }
+        }
+        let mut hidden = body.clone();
+        let mut visible = body.clone();
+        render_floating_handle_bitmap(
+            &mut hidden, width, height, None, false, &style, 0,
+        );
+        render_floating_handle_bitmap(
+            &mut visible, width, height, None, false, &style, 100,
+        );
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                if !point_in_rect(grip, x, y) {
+                    assert_eq!(hidden[idx], body[idx]);
+                    assert_eq!(visible[idx], body[idx]);
+                } else {
+                    assert_eq!((hidden[idx] >> 24) & 0xFF, 0,
+                        "fully transparent free grip must not intercept clicks");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v24_drag_grip_dots_remain_stable_on_hover() {
+        let base = Color::rgba(40, 70, 110, 160);
+        for vertical in [false, true] {
+            assert_eq!(
+                drag_handle_dot_style(base, false, vertical),
+                drag_handle_dot_style(base, true, vertical),
+                "hover must no longer grow the grip under the mouse",
+            );
+        }
+    }
+
+    #[test]
+    fn v24_hover_color_follows_theme_and_stays_readable() {
+        for dark in [false, true] {
+            for preset in ThemePreset::ALL {
+                let style = ThemeStyle::preset(dark, preset);
+                let color = drag_hover_outline_color(&style);
+                assert_eq!(color.a, 255);
+                let background = style.color(StyleColorTarget::PanelBackground);
+                let difference = (i32::from(color.r) - i32::from(background.r)).abs()
+                    + (i32::from(color.g) - i32::from(background.g)).abs()
+                    + (i32::from(color.b) - i32::from(background.b)).abs();
+                assert!(difference >= 150, "theme hover outline must remain visible");
+                assert_eq!(color, Color::rgba(
+                    style.color(StyleColorTarget::ProgressHigh).r,
+                    style.color(StyleColorTarget::ProgressHigh).g,
+                    style.color(StyleColorTarget::ProgressHigh).b,
+                    255,
+                ));
+            }
+        }
+        let mut custom = ThemeStyle::dark_default();
+        custom.set_color(StyleColorTarget::ProgressHigh,
+            custom.color(StyleColorTarget::PanelBackground));
+        assert_ne!(drag_hover_outline_color(&custom),
+            custom.color(StyleColorTarget::ProgressHigh));
+    }
+
+    #[test]
+    fn v24_1_glow_is_feathered_not_a_thick_solid_outline() {
+        assert!(drag_hover_glow_coverage(0.0) > drag_hover_glow_coverage(1.0));
+        assert!(drag_hover_glow_coverage(1.0) > drag_hover_glow_coverage(2.0));
+        assert!(drag_hover_glow_coverage(2.0) > drag_hover_glow_coverage(3.0));
+        assert!(drag_hover_glow_coverage(3.0) > drag_hover_glow_coverage(4.0));
+        assert_eq!(drag_hover_glow_coverage(0.0), drag_hover_glow_coverage(-0.0));
+        assert_eq!(drag_hover_glow_coverage(2.0), drag_hover_glow_coverage(-2.0));
+        let style = ThemeStyle::preset(true, ThemePreset::Forest);
+        let mut pixels = vec![0u32; 190 * 62];
+        let body = RECT { left: 7, top: 7, right: 183, bottom: 55 };
+        draw_drag_hover_outline(&mut pixels, 190, 62, body,
+            style.panel_corner_radius, drag_hover_outline_color(&style));
+        let sample_alpha = |y: usize| -> u32 { pixels[y * 190 + 95] >> 24 };
+        // There is real translucent glow outside a panel when canvas space
+        // exists, but it never paints the center or expands the body geometry.
+        assert!(sample_alpha(6) > 0, "halo should extend beyond outer body edge");
+        assert!(sample_alpha(6) < sample_alpha(8));
+        assert!(sample_alpha(8) > sample_alpha(10));
+        assert!(sample_alpha(10) > sample_alpha(12));
+        assert_eq!(sample_alpha(20), 0);
+        assert_eq!(pixels.len(), 190 * 62);
+    }
+
+    #[test]
+    fn v24_hover_outlines_only_panel_and_detached_tab_without_resizing() {
+        let style = ThemeStyle::preset(true, ThemePreset::Forest);
+        let accent = drag_hover_outline_color(&style);
+        for (w, h) in [(180, 40), (50, 168)] {
+            let bounds = RECT { left: 0, top: 0, right: w, bottom: h };
+            let mut pixels = vec![0xFF14211Du32; (w * h) as usize];
+            let idle = pixels.clone();
+            draw_drag_hover_outline(&mut pixels, w, h, bounds,
+                style.panel_corner_radius, accent);
+            assert_ne!(pixels, idle);
+            assert_eq!(pixels[(h / 2 * w + w / 2) as usize],
+                idle[(h / 2 * w + w / 2) as usize],
+                "center content must never be covered by the hover ring");
+            assert_ne!(pixels[(w + w / 2) as usize],
+                idle[(w + w / 2) as usize], "top border must highlight");
+        }
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let (cw, ch, body) = floating_canvas_geometry(180, 40, edge);
+            let tab = floating_grip_rect(cw, ch, edge, sc(FLOAT_EDGE_PEEK));
+            let mut canvas = vec![0u32; (cw * ch) as usize];
+            draw_drag_hover_outline(&mut canvas, cw, ch, body,
+                style.panel_corner_radius, accent);
+            let after_body = canvas.clone();
+            draw_drag_hover_outline(&mut canvas, cw, ch, tab,
+                style.panel_corner_radius, accent);
+            assert_ne!(canvas, after_body, "desktop tab must highlight independently");
+            assert_eq!(canvas.len(), (cw * ch) as usize);
+            let body_center = ((body.top + body.bottom) / 2 * cw
+                + (body.left + body.right) / 2) as usize;
+            assert_eq!(canvas[body_center], 0,
+                "independent hover borders must not fill the actual content");
+        }
+    }
+
+    #[test]
+    fn desktop_transparent_drag_tab_whole_rounded_surface_remains_hit_testable() {
+        // UpdateLayeredWindow discards alpha-zero pixels before WM_NCHITTEST.
+        // An invisible 1/255 alpha probe in the *real* grip silhouette must
+        // make empty background cells draggable, without showing a fill.
+        for (body_w, body_h) in [(240, 42), (48, 168)] {
+            for edge in [None, Some(FloatingEdge::Left),
+                Some(FloatingEdge::Right), Some(FloatingEdge::Top),
+                Some(FloatingEdge::Bottom)] {
+                let (w, h, _) = floating_canvas_geometry(body_w, body_h, edge);
+                let grip = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+                for radius in [0_u8, 3, 10, 20] {
+                    let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+                    style.panel_corner_radius = radius;
+                    style.set_color(StyleColorTarget::PanelBackground,
+                        Color::rgba(25, 42, 66, 0));
+                    style.set_color(StyleColorTarget::PanelBorder,
+                        Color::rgba(61, 103, 143, 255));
+                    for hovered in [false, true] {
+                        let mut pixels = vec![0u32; (w * h) as usize];
+                        render_floating_handle_bitmap(
+                            &mut pixels, w, h, edge, hovered, &style, 100,
+                        );
+                        let mut empty_cells = 0;
+                        for y in 0..h {
+                            for x in 0..w {
+                                let index = (y * w + x) as usize;
+                                let inside = panel_outer_shape_contains(
+                                    grip.right - grip.left, grip.bottom - grip.top,
+                                    x - grip.left, y - grip.top, radius,
+                                );
+                                if inside {
+                                    assert!(pixels[index] >> 24 > 0,
+                                        "even a fully transparent grip interior must receive mouse events");
+                                    assert_eq!(floating_drag_tab_hit_code(
+                                        RECT::default(), grip, x, y,
+                                    ), 1);
+                                    assert!(floating_drag_handle_hit(
+                                        x, y, w, h, edge, sc(FLOAT_EDGE_PEEK),
+                                    ));
+                                    if panel_inner_shape_contains(
+                                        grip.right - grip.left, grip.bottom - grip.top,
+                                        x - grip.left, y - grip.top, radius,
+                                    ) && pixels[index] == 0x01000000 {
+                                        empty_cells += 1;
+                                    }
+                                } else {
+                                    assert_eq!(pixels[index], 0,
+                                        "rounded transparent corners and external glow gutter must remain click-through");
+                                }
+                            }
+                        }
+                        assert!(empty_cells > 0,
+                            "a transparent drag tab must contain invisible clickable blank pixels");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_transparent_drag_tab_probe_respects_fade_out_and_rounded_corners() {
+        let (w, h, _) = floating_canvas_geometry(240, 42, None);
+        let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+        let mut style = ThemeStyle::preset(true, ThemePreset::Ocean);
+        style.panel_corner_radius = 10;
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(0, 0, 0, 0));
+        style.set_color(StyleColorTarget::PanelBorder, Color::rgba(50, 80, 120, 0));
+        for opacity in [1_u8, 25, 100] {
+            let mut pixels = vec![0u32; (w * h) as usize];
+            render_floating_handle_bitmap(&mut pixels, w, h, None, false, &style, opacity);
+            let x = grip.left + sc(6);
+            let y = (grip.top + grip.bottom) / 2;
+            let pixel = pixels[(y * w + x) as usize];
+            assert!(pixel >> 24 > 0);
+            assert!(pixels.contains(&0x01000000),
+                "transparent tab retains an imperceptible premultiplied mouse-hit surface");
+            assert_eq!(pixels[0], 0,
+                "outside the actual drag block remains transparent");
+        }
+        let mut faded_out = vec![0u32; (w * h) as usize];
+        render_floating_handle_bitmap(&mut faded_out, w, h, None, false, &style, 0);
+        assert!(faded_out.iter().all(|pixel| *pixel == 0),
+            "a genuinely faded-out free tab must remain noninteractive");
+    }
+
+    #[test]
+    fn desktop_mini_grip_matches_panel_palette_corner_radius_and_alpha() {
+        let mut style = ThemeStyle::dark_default();
+        style.set_color(StyleColorTarget::PanelBackground, Color::rgba(14, 32, 25, 68));
+        style.set_color(StyleColorTarget::PanelBorder, Color::rgba(40, 110, 87, 127));
+        style.panel_corner_radius = 2;
+        let (w, h, _) = floating_canvas_geometry(
+            sc(FLOAT_GRIP_LENGTH), sc(FLOAT_EDGE_PEEK), None,
+        );
+        let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+        assert_eq!(grip.right - grip.left, sc(36));
+        assert_eq!(grip.bottom - grip.top, sc(16));
+        let mut pixels = vec![0u32; (w * h) as usize];
+        render_floating_handle_bitmap(&mut pixels, w, h, None, false, &style, 100);
+        let center = ((grip.top + grip.bottom) / 2 * w + grip.left + sc(6)) as usize;
+        assert_eq!(pixels[center], premultiplied_pixel(
+            style.color(StyleColorTarget::PanelBackground),
+        ));
+        // Panel corner clipping and the new outer halo gutter stay transparent.
+        assert_eq!(pixels[0], 0);
+        let mut transparent = vec![0u32; (w * h) as usize];
+        render_floating_handle_bitmap(&mut transparent, w, h, None, false, &style, 0);
+        assert!(transparent.iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
+    fn desktop_edge_slide_easing_is_time_based_and_directional() {
+        assert_eq!(eased_value_at(0, 100, Duration::ZERO, 220), 0);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(110), 220), 88);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(120), 240), 50);
+        assert_eq!(eased_value_at(0, 100, Duration::from_millis(220), 220), 100);
+        assert_eq!(eased_value_at(100, 0, Duration::from_millis(240), 240), 0);
+        assert_eq!(animation_partial_duration(240, 50, 0), 120);
+        assert_eq!(animation_partial_duration(240, 100, 0), 240);
+    }
+
+    #[test]
+    fn desktop_first_snap_retraction_ignores_hover_until_rearmed() {
+        assert!(!floating_hover_can_reveal(true, true, false));
+        assert!(!floating_hover_can_reveal(true, false, true));
+        assert!(!floating_hover_can_reveal(false, false, false));
+        assert!(floating_hover_can_reveal(true, false, false));
+        // The first hidden tab remains visible, but the cursor crossing its
+        // path during collapse cannot reverse the animation.
+        assert_eq!(eased_value_at(
+            100, 0, Duration::from_millis(FLOAT_RETRACT_DURATION_MS / 2),
+            FLOAT_RETRACT_DURATION_MS,
+        ), 50);
+        assert_eq!(eased_value_at(
+            100, 0, Duration::from_millis(FLOAT_RETRACT_DURATION_MS),
+            FLOAT_RETRACT_DURATION_MS,
+        ), 0);
+    }
+
+    #[test]
+    fn desktop_corner_snap_picks_nearest_mouse_edge_at_all_four_corners() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        // Both HWND edges cross each physical corner. The old fixed
+        // left/right/top/bottom priority was independent of cursor position.
+        let scenarios = [
+            (RECT { left: -10, top: -10, right: 220, bottom: 120 },
+                POINT { x: 4, y: 18 }, FloatingEdge::Left),
+            (RECT { left: -10, top: -10, right: 220, bottom: 120 },
+                POINT { x: 18, y: 4 }, FloatingEdge::Top),
+            (RECT { left: 1800, top: -10, right: 1950, bottom: 120 },
+                POINT { x: 1916, y: 20 }, FloatingEdge::Right),
+            (RECT { left: 1800, top: -10, right: 1950, bottom: 120 },
+                POINT { x: 1895, y: 2 }, FloatingEdge::Top),
+            (RECT { left: -10, top: 980, right: 220, bottom: 1110 },
+                POINT { x: 3, y: 1056 }, FloatingEdge::Left),
+            (RECT { left: -10, top: 980, right: 220, bottom: 1110 },
+                POINT { x: 24, y: 1078 }, FloatingEdge::Bottom),
+            (RECT { left: 1790, top: 950, right: 1950, bottom: 1110 },
+                POINT { x: 1918, y: 1045 }, FloatingEdge::Right),
+            (RECT { left: 1790, top: 950, right: 1950, bottom: 1110 },
+                POINT { x: 1880, y: 1077 }, FloatingEdge::Bottom),
+        ];
+        for (widget, cursor, expected) in scenarios {
+            assert_eq!(floating_drop_edge_at_pointer(
+                monitor, monitor, widget, cursor, 24, [true; 4],
+            ), Some(expected), "mouse=({}, {}) should choose nearest corner edge",
+                cursor.x, cursor.y);
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_corner_snap_uses_actual_inner_taskbar_edge_distances() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        // Bottom and left taskbars both inset from the physical monitor.
+        // The mouse lies inside both reserved bands: compare distances to
+        // x=48 and y=1032 instead of taking the old hard-coded Left.
+        let work = RECT { left: 48, top: 0, right: 1920, bottom: 1032 };
+        let widget = RECT { left: 35, top: 1000, right: 235, bottom: 1060 };
+        for (mouse, edge) in [
+            (POINT { x: 46, y: 1035 }, FloatingEdge::Left),
+            (POINT { x: 45, y: 1033 }, FloatingEdge::Bottom),
+            (POINT { x: 20, y: 1050 }, FloatingEdge::Bottom),
+        ] {
+            let dx = mouse.x.abs_diff(work.left);
+            let dy = mouse.y.abs_diff(work.bottom);
+            let actual = floating_drop_edge_at_pointer(
+                monitor, work, widget, mouse, 24, [true; 4]);
+            assert_eq!(actual, Some(edge), "left distance={dx}, bottom distance={dy}");
+        }
+        // Bottom taskbar meets an unreserved physical screen side.
+        let bottom = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let widget = RECT { left: -10, top: 1000, right: 200, bottom: 1070 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 3, y: 1052 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 30, y: 1038 }, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom));
+        // Left-side taskbar meets top: choose mouse distance to x=48/y=0.
+        let left = RECT { left: 48, top: 0, right: 1920, bottom: 1080 };
+        let widget = RECT { left: 20, top: -8, right: 220, bottom: 90 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, left, widget, POINT { x: 60, y: 4 }, 24, [true; 4],
+        ), Some(FloatingEdge::Top));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, left, widget, POINT { x: 49, y: 22 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+        // Right-side taskbar meets bottom.
+        let right = RECT { left: 0, top: 0, right: 1872, bottom: 1080 };
+        let widget = RECT { left: 1810, top: 980, right: 1900, bottom: 1110 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, right, widget, POINT { x: 1900, y: 1079 }, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, right, widget, POINT { x: 1874, y: 1045 }, 24, [true; 4],
+        ), Some(FloatingEdge::Right));
+    }
+
+    #[test]
+    fn desktop_shared_seam_corner_uses_nearest_mouse_edge_including_taskbar() {
+        // A seam is a normal candidate. The mouse-selected display owns the
+        // dock; at its corner the shorter perpendicular distance wins.
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let bottom = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let widget = RECT { left: -10, top: 1010, right: 210, bottom: 1080 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 2, y: 1040 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left), "left seam is closer than taskbar");
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, bottom, widget, POINT { x: 16, y: 1035 }, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom), "taskbar boundary is closer than seam");
+        let full = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let widget = RECT { left: -10, top: -10, right: 210, bottom: 100 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, full, widget, POINT { x: 1, y: 3 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, full, widget, POINT { x: 8, y: 1 }, 24, [true; 4],
+        ), Some(FloatingEdge::Top));
+    }
+
+    #[test]
+    fn desktop_taskbar_drop_with_entire_canvas_beyond_work_area_still_snaps() {
+        // V24.11 field failure: secondary display taskbar occupies y=912..960.
+        // The cursor is inside Explorer; the detached window is completely
+        // below the work area, so the old rectangle-only test returns None.
+        let monitor = RECT { left: 2048, top: 0, right: 3755, bottom: 960 };
+        let work = RECT { left: 2048, top: 0, right: 3755, bottom: 912 };
+        let widget = RECT { left: 2500, top: 925, right: 2760, bottom: 1025 };
+        let cursor = POINT { x: 2550, y: 954 };
+        assert_eq!(floating_drop_edge(work, widget, 24, [true; 4]), None);
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, work, widget, cursor, 24, [true; 4],
+        ), Some(FloatingEdge::Bottom));
+        let (canvas_w, canvas_h, _) =
+            floating_canvas_geometry(240, 48, Some(FloatingEdge::Bottom));
+        let (_, snapped_y) = floating_edge_position(
+            work, widget.left, widget.top, canvas_w, canvas_h,
+            Some(FloatingEdge::Bottom), false, 16,
+        );
+        assert_eq!(snapped_y + canvas_h, work.bottom);
+    }
+
+    #[test]
+    fn desktop_taskbar_drop_overshoot_detects_all_four_reserved_edges() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let rect = RECT { left: 650, top: 800, right: 880, bottom: 915 };
+        for (work, cursor, expected) in [
+            (
+                RECT { left: 0, top: 0, right: 1920, bottom: 1032 },
+                POINT { x: 720, y: 1070 },
+                FloatingEdge::Bottom,
+            ),
+            (
+                RECT { left: 0, top: 48, right: 1920, bottom: 1080 },
+                POINT { x: 720, y: 5 },
+                FloatingEdge::Top,
+            ),
+            (
+                RECT { left: 48, top: 0, right: 1920, bottom: 1080 },
+                POINT { x: 4, y: 670 },
+                FloatingEdge::Left,
+            ),
+            (
+                RECT { left: 0, top: 0, right: 1872, bottom: 1080 },
+                POINT { x: 1915, y: 670 },
+                FloatingEdge::Right,
+            ),
+        ] {
+            assert_eq!(floating_drop_edge_at_pointer(
+                monitor, work, rect, cursor, 24, [true; 4],
+            ), Some(expected));
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_drop_does_not_snap_when_cursor_not_in_reserved_band() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let off_work = RECT { left: 650, top: 1040, right: 880, bottom: 1135 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, work, off_work, POINT { x: 730, y: 700 }, 24, [true; 4],
+        ), None);
+        // A free widget must not snap just because it was dragged toward a
+        // neighboring monitor earlier; the current pointer and popup are
+        // both far from all four candidate edges.
+        let inset = RECT { left: 48, top: 0, right: 1920, bottom: 1080 };
+        let free_widget = RECT { left: 500, top: 400, right: 720, bottom: 500 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, inset, free_widget, POINT { x: 200, y: 700 }, 24, [true; 4],
+        ), None);
+        // At an actual free screen edge, retain the original algorithm.
+        let free = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let near_left = RECT { left: -5, top: 400, right: 225, bottom: 500 };
+        assert_eq!(floating_drop_edge_at_pointer(
+            monitor, free, near_left, POINT { x: 15, y: 440 }, 24, [true; 4],
+        ), Some(FloatingEdge::Left));
+    }
+
+    #[test]
+    fn desktop_taskbar_rect_corrects_rcwork_gap_on_every_screen_edge() {
+        let monitor = RECT { left: 2048, top: 0, right: 3755, bottom: 960 };
+        let bottom = RECT { left: 2048, top: 912, right: 3755, bottom: 960 };
+        let work = RECT { left: 2048, top: 0, right: 3755, bottom: 900 };
+        assert_eq!(floating_bounds_at_taskbar(monitor, work, &[bottom]).bottom, 912);
+        let top = RECT { left: 2048, top: 0, right: 3755, bottom: 48 };
+        let top_work = RECT { top: 60, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, top_work, &[top]).top, 48);
+        let left = RECT { left: 2048, top: 0, right: 2096, bottom: 960 };
+        let left_work = RECT { left: 2108, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, left_work, &[left]).left, 2096);
+        let right = RECT { left: 3707, top: 0, right: 3755, bottom: 960 };
+        let right_work = RECT { right: 3695, ..monitor };
+        assert_eq!(floating_bounds_at_taskbar(monitor, right_work, &[right]).right, 3707);
+        let other_monitor_bar = RECT { left: 0, top: 1104, right: 2048, bottom: 1152 };
+        assert_eq!(floating_bounds_at_taskbar(monitor, work, &[other_monitor_bar]).bottom, 900);
+    }
+
+    #[test]
+    fn desktop_reset_top_grip_aligns_after_all_previous_docking_states() {
+        let body_w = 320;
+        let body_h = 90;
+        let work = RECT { left: -1920, top: -200, right: 0, bottom: 880 };
+        let (target_w, target_h) = floating_reset_top_canvas_size(body_w, body_h);
+        let (expanded_x, expanded_y) =
+            floating_reset_top_origin(work, target_w, target_h);
+        let grip = floating_grip_rect(
+            target_w, target_h, Some(FloatingEdge::Top), sc(FLOAT_EDGE_PEEK),
+        );
+        let (dx, dy) = floating_slide_offset(
+            target_w, target_h, FloatingEdge::Top, 0,
+        );
+        assert_eq!(dx, 0);
+        assert_eq!(expanded_x + (grip.left + grip.right) / 2,
+            (work.left + work.right) / 2, "the tab remains horizontally centered");
+
+        for old_edge in [
+            None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+            Some(FloatingEdge::Top), Some(FloatingEdge::Bottom),
+        ] {
+            let (old_w, old_h, _) = floating_canvas_geometry(
+                body_w, body_h, old_edge,
+            );
+            // Distinct source geometries are the regression: a free tab was
+            // 12px too high, left/right tabs 4px too low, while bottom was OK.
+            match old_edge {
+                None => assert!(old_h > target_h),
+                Some(FloatingEdge::Left | FloatingEdge::Right) =>
+                    assert!(old_h < target_h),
+                Some(FloatingEdge::Top | FloatingEdge::Bottom) =>
+                    assert_eq!(old_h, target_h),
+            }
+            assert_eq!(
+                floating_reset_top_canvas_size(body_w, body_h),
+                (target_w, target_h),
+                "reset geometry must be independent of the previous edge: {old_edge:?}",
+            );
+            for reserved in [false, true] {
+                // Physical edges slide the popup HWND. Taskbar/seam edges
+                // keep the HWND fixed and shift the layered bitmap instead.
+                let origin_y = expanded_y + if reserved { 0 } else { dy };
+                let visible_grip_top = origin_y + grip.top
+                    + if reserved { dy } else { 0 };
+                assert_eq!(visible_grip_top, work.top,
+                    "tab not flush after {old_edge:?}, reserved={reserved}");
+            }
+            let _ = old_w;
+        }
+
+        // Work-area insets and actual taskbar reservations are preserved.
+        let monitor = RECT { left: -1920, top: -200, right: 0, bottom: 880 };
+        let tiny_inset = RECT { top: -194, ..monitor };
+        assert_eq!(
+            floating_bounds_at_taskbar(monitor, tiny_inset, &[]).top,
+            tiny_inset.top,
+            "reset must not change global work-area boundaries",
+        );
+        let top_taskbar = RECT {
+            left: monitor.left, top: monitor.top,
+            right: monitor.right, bottom: monitor.top + 48,
+        };
+        let real_work = RECT { top: monitor.top + 54, ..monitor };
+        assert_eq!(
+            floating_bounds_at_taskbar(monitor, real_work, &[top_taskbar]).top,
+            top_taskbar.bottom,
+        );
+    }
+
+    #[test]
+    fn desktop_taskbar_and_physical_edges_use_identical_slide_offsets() {
+        let bounds = RECT { left: -200, top: 60, right: 1100, bottom: 850 };
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
+            let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let (expanded_x, expanded_y) = floating_edge_position(
+                bounds, 450, 350, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let (collapsed_x, collapsed_y) = floating_edge_position(
+                bounds, 450, 350, w, h, Some(edge), true, sc(FLOAT_EDGE_PEEK),
+            );
+            for reveal in [0_u8, 12, 30, 50, 70, 91, 100] {
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                let fraction = f64::from(reveal) / 100.0;
+                let physical_x = collapsed_x
+                    + (f64::from(expanded_x - collapsed_x) * fraction).round() as i32;
+                let physical_y = collapsed_y
+                    + (f64::from(expanded_y - collapsed_y) * fraction).round() as i32;
+                assert_eq!((expanded_x + dx, expanded_y + dy), (physical_x, physical_y),
+                    "all dock edges must have the same slide travel and easing");
+                let moving_tab = floating_slid_canvas_rect(grip, w, h, edge, reveal);
+                assert_eq!(moving_tab.left, (grip.left + dx).clamp(0, w));
+                assert_eq!(moving_tab.top, (grip.top + dy).clamp(0, h));
+                let body_visible = floating_slid_canvas_rect(body, w, h, edge, reveal);
+                if reveal == 0 {
+                    assert!(body_visible.right == body_visible.left
+                        || body_visible.top == body_visible.bottom,
+                        "the panel must be completely out of the work area at rest");
+                    match edge {
+                        FloatingEdge::Left => {
+                            assert_eq!(expanded_x, bounds.left);
+                            assert_eq!(expanded_x + moving_tab.left, bounds.left);
+                        }
+                        FloatingEdge::Right => {
+                            assert_eq!(expanded_x + w, bounds.right);
+                            assert_eq!(expanded_x + moving_tab.right, bounds.right);
+                        }
+                        FloatingEdge::Top => {
+                            assert_eq!(expanded_y, bounds.top);
+                            assert_eq!(expanded_y + moving_tab.top, bounds.top);
+                        }
+                        FloatingEdge::Bottom => {
+                            assert_eq!(expanded_y + h, bounds.bottom);
+                            assert_eq!(expanded_y + moving_tab.bottom, bounds.bottom);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_bitmap_slide_is_exact_translation_clipped_on_all_four_sides() {
+        // Every colored pixel moves precisely as it would when the HWND itself
+        // slides beyond a physical screen edge. Work-area pixels alone survive.
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, _) = floating_canvas_geometry(84, 42, Some(edge));
+            let original: Vec<u32> = (0..w*h).map(|i| 0xAA000000 | i as u32).collect();
+            for reveal in [0_u8, 15, 40, 60, 85, 100] {
+                let mut pixels = original.clone();
+                floating_slide_layered_bitmap(&mut pixels, w, h, edge, reveal);
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                for y in 0..h {
+                    for x in 0..w {
+                        let src_x = x - dx;
+                        let src_y = y - dy;
+                        let expected = if src_x >= 0 && src_x < w
+                            && src_y >= 0 && src_y < h {
+                            original[(src_y*w + src_x) as usize]
+                        } else { 0 };
+                        assert_eq!(pixels[(y*w + x) as usize], expected,
+                            "taskbar edge must be the same slide, only alpha-clipped");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_taskbar_tab_grab_anchor_stays_fixed_when_virtual_slide_becomes_real() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, _) = floating_canvas_geometry(240, 72, Some(edge));
+            let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let hwnd_origin = POINT { x: 200, y: 400 };
+            for reveal in [0_u8, 25, 50, 85, 100] {
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                let anchor = POINT {
+                    x: (grip.left + grip.right) / 2 + dx,
+                    y: (grip.top + grip.bottom) / 2 + dy,
+                };
+                let cursor = POINT {
+                    x: hwnd_origin.x + anchor.x,
+                    y: hwnd_origin.y + anchor.y,
+                };
+                // This is the rebasing performed on the very first drag frame.
+                let new_anchor = POINT { x: anchor.x - dx, y: anchor.y - dy };
+                let new_origin = POINT {
+                    x: cursor.x - new_anchor.x,
+                    y: cursor.y - new_anchor.y,
+                };
+                assert_eq!(new_origin, POINT {
+                    x: hwnd_origin.x + dx, y: hwnd_origin.y + dy,
+                });
+                assert_eq!(new_origin.x + (grip.left + grip.right) / 2, cursor.x);
+                assert_eq!(new_origin.y + (grip.top + grip.bottom) / 2, cursor.y);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_bottom_taskbar_docks_above_taskbar_without_sliding_into_it() {
+        let monitor = RECT { left: -1920, top: -100, right: 0, bottom: 980 };
+        let work = RECT { left: -1920, top: -100, right: 0, bottom: 930 };
+        let bounds = floating_usable_bounds(monitor, work);
+        assert_eq!(bounds.bottom, work.bottom);
+        assert!(floating_edge_is_reserved(monitor, bounds, FloatingEdge::Bottom));
+        let (cw, ch, body) = floating_canvas_geometry(240, 168, Some(FloatingEdge::Bottom));
+        let (_, y) = floating_edge_position(
+            bounds, -600, 850, cw, ch, Some(FloatingEdge::Bottom),
+            false, sc(FLOAT_EDGE_PEEK),
+        );
+        assert_eq!(y + ch, work.bottom);
+        assert!(y + body.bottom <= work.bottom);
+        // The stationary HWND is kept out of the taskbar, while translated
+        // foreground and backdrop pixels are clipped at its real boundary.
+    }
+
+    #[test]
+    fn desktop_taskbar_dock_respects_top_right_and_left_work_boundaries() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        for (work, edge) in [
+            (RECT { left: 0, top: 48, right: 1920, bottom: 1080 }, FloatingEdge::Top),
+            (RECT { left: 0, top: 0, right: 1860, bottom: 1080 }, FloatingEdge::Right),
+            (RECT { left: 55, top: 0, right: 1920, bottom: 1080 }, FloatingEdge::Left),
+        ] {
+            let bounds = floating_usable_bounds(monitor, work);
+            assert!(floating_edge_is_reserved(monitor, bounds, edge));
+            let (w, h, _) = floating_canvas_geometry(240, 80, Some(edge));
+            let (x, y) = floating_edge_position(bounds, 900, 300, w, h,
+                Some(edge), false, sc(FLOAT_EDGE_PEEK));
+            assert!(x >= work.left && y >= work.top);
+            assert!(x + w <= work.right && y + h <= work.bottom);
+            match edge {
+                FloatingEdge::Left => assert_eq!(x, work.left),
+                FloatingEdge::Right => assert_eq!(x + w, work.right),
+                FloatingEdge::Top => assert_eq!(y, work.top),
+                FloatingEdge::Bottom => unreachable!(),
+            }
+        }
+        assert!(!floating_edge_is_reserved(monitor, monitor, FloatingEdge::Bottom));
+        assert_eq!(floating_usable_bounds(monitor,
+            RECT { left: -100, top: 0, right: 1920, bottom: 1080 }).left, monitor.left);
+    }
+
+    #[test]
+    fn desktop_docked_hover_envelope_is_stable_at_extreme_monitor_pixels() {
+        // Simulate cursor at the first/last physical pixel of the selected
+        // monitor, including on a seam where the other screen continues.
+        // The body can move/clip but this envelope is independent of reveal.
+        let bounds = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
+            let hover = floating_docked_hover_rect_for_geometry(
+                bounds, 700, 450, w, h, body, edge,
+            );
+            let (dock_x, dock_y) = floating_edge_position(
+                bounds, 700, 450, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let expanded_body = RECT {
+                left: dock_x + body.left,
+                right: dock_x + body.right,
+                top: dock_y + body.top,
+                bottom: dock_y + body.bottom,
+            };
+            let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let (dx, dy) = floating_slide_offset(w, h, edge, 0);
+            let tab_center = POINT {
+                x: dock_x + (grip.left + grip.right) / 2 + dx,
+                y: dock_y + (grip.top + grip.bottom) / 2 + dy,
+            };
+            assert!(point_in_rect(hover, tab_center.x, tab_center.y));
+            let panel_corner = POINT {
+                x: match edge {
+                    FloatingEdge::Right => bounds.right - 1,
+                    _ => expanded_body.left,
+                },
+                y: match edge {
+                    FloatingEdge::Bottom => bounds.bottom - 1,
+                    _ => expanded_body.top,
+                },
+            };
+            assert!(point_in_rect(hover, panel_corner.x, panel_corner.y),
+                "an alpha-transparent rounded corner at the screen boundary must retain hover");
+            let outside_monitor = match edge {
+                FloatingEdge::Left => POINT { x: bounds.left - 1, y: tab_center.y },
+                FloatingEdge::Right => POINT { x: bounds.right, y: tab_center.y },
+                FloatingEdge::Top => POINT { x: tab_center.x, y: bounds.top - 1 },
+                FloatingEdge::Bottom => POINT { x: tab_center.x, y: bounds.bottom },
+            };
+            assert!(!point_in_rect(hover, outside_monitor.x, outside_monitor.y),
+                "hover must not leak into the adjacent screen");
+            assert!(hover.left >= bounds.left && hover.top >= bounds.top);
+            assert!(hover.right <= bounds.right && hover.bottom <= bounds.bottom);
+            // Move strictly beyond the 3px inward tolerance, in the
+            // direction perpendicular to the dock line, to request collapse.
+            let beyond = POINT {
+                x: match edge {
+                    FloatingEdge::Left => hover.right.saturating_add(1),
+                    FloatingEdge::Right => hover.left.saturating_sub(1),
+                    _ => tab_center.x,
+                },
+                y: match edge {
+                    FloatingEdge::Top => hover.bottom.saturating_add(1),
+                    FloatingEdge::Bottom => hover.top.saturating_sub(1),
+                    _ => tab_center.y,
+                },
+            };
+            assert!(!point_in_rect(hover, beyond.x, beyond.y),
+                "a real departure must still be allowed to collapse");
+        }
+    }
+
+    #[test]
+    fn desktop_docked_hover_respects_taskbar_work_area_and_partial_slide() {
+        let monitor = RECT { left: 2048, top: 0, right: 3755, bottom: 960 };
+        let work = RECT { left: 2048, top: 0, right: 3755, bottom: 912 };
+        let (w, h, body) = floating_canvas_geometry(240, 72, Some(FloatingEdge::Bottom));
+        let hover = floating_docked_hover_rect_for_geometry(
+            work, 2550, 900, w, h, body, FloatingEdge::Bottom,
+        );
+        assert_eq!(hover.bottom, work.bottom);
+        let point = POINT { x: (hover.left + hover.right) / 2, y: 911 };
+        assert!(point_in_rect(hover, point.x, point.y));
+        assert!(!point_in_rect(hover, point.x, 912),
+            "hover must not extend into Explorer's reserved taskbar");
+        for reveal in [0_u8, 10, 35, 65, 90, 100] {
+            // Current opaque pixels translate; the logical retention area
+            // remains exactly the same across all animation frames.
+            let (_, dy) = floating_slide_offset(w, h, FloatingEdge::Bottom, reveal);
+            let moving = floating_slid_canvas_rect(
+                body, w, h, FloatingEdge::Bottom, reveal,
+            );
+            assert!(moving.top + dy >= body.top.saturating_sub(h));
+            assert_eq!(floating_docked_hover_rect_for_geometry(
+                work, 2550, 900, w, h, body, FloatingEdge::Bottom,
+            ), hover);
+        }
+        // One-pixel work-area boundaries on taskbar-less physical edges
+        // must be included too.
+        assert!(monitor.right > hover.right);
+    }
+
+    #[test]
+    fn desktop_shared_seam_docks_to_monitor_under_cursor_and_auto_hides() {
+        // Left monitor ends where right monitor starts (x=0); when the
+        // cursor is on the left side the chosen edge is Right, on the
+        // other monitor it is Left. The rendered grip never crosses x=0.
+        let left = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let right = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        for (monitor, widget, pointer, edge) in [
+            (
+                left, RECT { left: -180, top: 460, right: 18, bottom: 550 },
+                POINT { x: -2, y: 505 }, FloatingEdge::Right,
+            ),
+            (
+                right, RECT { left: -10, top: 460, right: 210, bottom: 550 },
+                POINT { x: 3, y: 505 }, FloatingEdge::Left,
+            ),
+        ] {
+            assert_eq!(floating_drop_edge_at_pointer(
+                monitor, monitor, widget, pointer, 24, [true; 4],
+            ), Some(edge), "release screen alone selects docking monitor");
+            assert!(floating_edge_needs_clip(monitor, monitor, edge, true),
+                "shared seam must alpha-clip the popup into the mouse screen");
+            let (w, h, body) = floating_canvas_geometry(240, 72, Some(edge));
+            let (expanded_x, expanded_y) = floating_edge_position(
+                monitor, pointer.x, pointer.y, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let tab = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+            let collapsed = floating_slid_canvas_rect(tab, w, h, edge, 0);
+            let panel = floating_slid_canvas_rect(body, w, h, edge, 0);
+            assert!(panel.right == panel.left || panel.bottom == panel.top,
+                "panel must fully retract at the shared seam");
+            let grip_x = match edge {
+                FloatingEdge::Right => expanded_x + collapsed.right,
+                FloatingEdge::Left => expanded_x + collapsed.left,
+                _ => unreachable!(),
+            };
+            assert_eq!(grip_x, 0, "retracted tab must be flush with shared seam");
+            assert!(expanded_y >= monitor.top && expanded_y + h <= monitor.bottom);
+            assert!(expanded_x >= monitor.left && expanded_x + w <= monitor.right);
+        }
+    }
+
+    #[test]
+    fn desktop_shared_seam_dock_clips_sliding_pixels_inside_chosen_monitor() {
+        let monitor_left = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let monitor_right = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        for (monitor, edge) in [
+            (monitor_left, FloatingEdge::Right),
+            (monitor_right, FloatingEdge::Left),
+        ] {
+            let (w, h, _) = floating_canvas_geometry(240, 72, Some(edge));
+            let (x, y) = floating_edge_position(
+                monitor, monitor.left, 360, w, h, Some(edge), false, sc(FLOAT_EDGE_PEEK),
+            );
+            let source = vec![0xFFFFFFFF; (w * h) as usize];
+            for reveal in [0_u8, 15, 50, 85, 100] {
+                let mut bitmap = source.clone();
+                floating_slide_layered_bitmap(&mut bitmap, w, h, edge, reveal);
+                let (dx, dy) = floating_slide_offset(w, h, edge, reveal);
+                assert!(bitmap.iter().any(|&pixel| pixel != 0),
+                    "drag tab must remain visible even when panel is hidden");
+                for py in 0..h {
+                    for px in 0..w {
+                        let sx = px - dx;
+                        let sy = py - dy;
+                        let pixel = bitmap[(py * w + px) as usize];
+                        assert_eq!(pixel != 0, sx >= 0 && sx < w && sy >= 0 && sy < h);
+                        assert!(x + px >= monitor.left && x + px < monitor.right);
+                        assert!(y + py >= monitor.top && y + py < monitor.bottom);
+                    }
+                }
+            }
+        }
+        // Independent external edges need no clipping, unless Explorer
+        // reserves that edge for its own taskbar.
+        assert!(!floating_edge_needs_clip(
+            monitor_right, monitor_right, FloatingEdge::Top, false,
+        ));
+        assert!(floating_edge_needs_clip(
+            monitor_right, RECT { top: 48, ..monitor_right }, FloatingEdge::Top, false,
+        ));
+    }
+
+    #[test]
+    fn desktop_left_taskbar_dock_never_crosses_work_area() {
+        let monitor = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let work = RECT { left: -1872, top: 0, right: 0, bottom: 1040 };
+        let bounds = floating_usable_bounds(monitor, work);
+        assert_eq!(bounds.left, work.left);
+        let (width, height, _) = floating_canvas_geometry(
+            240, 168, Some(FloatingEdge::Left));
+        let (x, y) = floating_edge_position(
+            bounds, -1860, 140, width, height,
+            Some(FloatingEdge::Left), false, sc(FLOAT_EDGE_PEEK));
+        assert_eq!(x, work.left);
+        assert!(y >= work.top && y + height <= work.bottom);
+        assert!(floating_edge_is_reserved(monitor, bounds, FloatingEdge::Left));
+    }
+
+    #[test]
+    fn desktop_release_tab_switch_preserves_body_screen_origin() {
+        let body_w = 240;
+        let body_h = 150;
+        let (old_w, old_h, old_body) =
+            floating_canvas_geometry(body_w, body_h, Some(FloatingEdge::Left));
+        let _ = (old_w, old_h);
+        let (new_w, new_h, new_body) =
+            floating_canvas_geometry(body_w, body_h, None);
+        let _ = (new_w, new_h);
+        let old_x = 500;
+        let old_y = 250;
+        let final_x = old_x + old_body.left - new_body.left;
+        let final_y = old_y + old_body.top - new_body.top;
+        assert_eq!(final_x + new_body.left, old_x + old_body.left);
+        assert_eq!(final_y + new_body.top, old_y + old_body.top);
+    }
+
+    #[test]
+    fn desktop_drag_drop_recognizes_partially_offscreen_old_canvas() {
+        let bounds = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let still_peeking = RECT { left: -200, top: 300, right: 20, bottom: 400 };
+        assert_eq!(floating_drop_edge(bounds, still_peeking, 24, [true; 4]), Some(FloatingEdge::Left));
+        let free = RECT { left: 640, top: 300, right: 860, bottom: 400 };
+        assert_eq!(floating_drop_edge(bounds, free, 24, [true; 4]), None);
+    }
+
+    #[test]
+    fn desktop_tab_is_outside_taskbar_sized_panel() {
+        let body_w = 240;
+        let body_h = 168;
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let (width, height, body) = floating_canvas_geometry(body_w, body_h, edge);
+            let tab = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+            assert_eq!(body.right - body.left, body_w);
+            assert_eq!(body.bottom - body.top, body_h);
+            assert!(tab.right <= body.left || tab.left >= body.right
+                || tab.bottom <= body.top || tab.top >= body.bottom);
+            assert!(tab.left >= 0 && tab.top >= 0
+                && tab.right <= width && tab.bottom <= height);
+        }
+    }
+
+    #[test]
+    fn desktop_collapsed_bitmap_only_keeps_grip_pixels_visible() {
+        let w = 240;
+        let h = 168;
+        let style = ThemeStyle::dark_default();
+        for edge in [None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                     Some(FloatingEdge::Top), Some(FloatingEdge::Bottom)] {
+            let mut pixels = vec![0u32; (w * h) as usize];
+            render_floating_handle_bitmap(&mut pixels, w, h, edge, false, &style, 100);
+            let r = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+            for y in 0..h {
+                for x in 0..w {
+                    let pixel = pixels[(y * w + x) as usize];
+                    if !point_in_rect(r, x, y) { assert_eq!(pixel, 0); }
+                }
+            }
+            assert_ne!(pixels[(((r.top + r.bottom) / 2) * w +
+                (r.left + r.right) / 2) as usize], 0);
+        }
+    }
+
+
+    #[test]
+    fn v24_27_real_alpha_zero_seam_receives_hover_recheck_on_every_edge() {
+        // V24.26 missed this case: the nominal rectangles are adjacent,
+        // and the *two transparent contour pixels are INSIDE those RECTs*.
+        // The rectangle-only gap test therefore returns false, while Windows
+        // may issue WM_MOUSELEAVE before the cursor reaches the visible tab.
+        let inset = sc(1).max(1);
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            for edge in [
+                FloatingEdge::Left, FloatingEdge::Right,
+                FloatingEdge::Top, FloatingEdge::Bottom,
+            ] {
+                let (_, _, body) = floating_canvas_geometry(bw, bh, Some(edge));
+                let (canvas_w, canvas_h, _) =
+                    floating_canvas_geometry(bw, bh, Some(edge));
+                let grip = floating_grip_rect(
+                    canvas_w, canvas_h, Some(edge), sc(FLOAT_EDGE_PEEK),
+                );
+                let (body_x, body_y, grip_x, grip_y) = match edge {
+                    FloatingEdge::Left => (
+                        body.right - 1, (grip.top + grip.bottom) / 2,
+                        grip.left, (grip.top + grip.bottom) / 2,
+                    ),
+                    FloatingEdge::Right => (
+                        body.left, (grip.top + grip.bottom) / 2,
+                        grip.right - 1, (grip.top + grip.bottom) / 2,
+                    ),
+                    FloatingEdge::Top => (
+                        (grip.left + grip.right) / 2, body.bottom - 1,
+                        (grip.left + grip.right) / 2, grip.top,
+                    ),
+                    FloatingEdge::Bottom => (
+                        (grip.left + grip.right) / 2, body.top,
+                        (grip.left + grip.right) / 2, grip.bottom - 1,
+                    ),
+                };
+                assert_eq!(match edge {
+                    FloatingEdge::Left => body.right,
+                    FloatingEdge::Right => body.left,
+                    FloatingEdge::Top => body.bottom,
+                    FloatingEdge::Bottom => body.top,
+                }, match edge {
+                    FloatingEdge::Left => grip.left,
+                    FloatingEdge::Right => grip.right,
+                    FloatingEdge::Top => grip.top,
+                    FloatingEdge::Bottom => grip.bottom,
+                }, "the geometric rectangles must touch, not leave a gap");
+                let body_w = body.right - body.left;
+                let body_h = body.bottom - body.top;
+                let grip_w = grip.right - grip.left;
+                let grip_h = grip.bottom - grip.top;
+                for (x, y, rect, w, h) in [
+                    (body_x, body_y, body, body_w, body_h),
+                    (grip_x, grip_y, grip, grip_w, grip_h),
+                ] {
+                    assert!(point_in_rect(rect, x, y),
+                        "native bounds label the pixel as inside the panel/tab");
+                    assert!(!panel_outer_shape_contains(
+                        w, h, x - rect.left, y - rect.top, 8,
+                    ), "actual shape paints alpha zero at this boundary pixel");
+                    assert!(!floating_transition_corridor_contains(
+                        body, grip, edge, x, y,
+                    ), "old V24.26 transition incorrectly ignored these pixels");
+                    assert!(floating_transparent_panel_grip_seam_contains(
+                        body, grip, edge, x, y,
+                    ), "actual transparent seam needs timed mouse hover recovery");
+                    assert_eq!(floating_drag_tab_hit_code(body, grip, x, y), 1,
+                        "the existing geometrical hit code remains unchanged");
+                }
+                // Neighboring visible pixels and other halo gutters must
+                // never be treated as a transition into the drag tab.
+                let (x, y) = match edge {
+                    FloatingEdge::Left => (body.right - inset - 1, body_y),
+                    FloatingEdge::Right => (body.left + inset, body_y),
+                    FloatingEdge::Top => (body_x, body.bottom - inset - 1),
+                    FloatingEdge::Bottom => (body_x, body.top + inset),
+                };
+                assert!(!floating_transparent_panel_grip_seam_contains(
+                    body, grip, edge, x, y,
+                ));
+                assert!(!floating_transparent_panel_grip_seam_contains(
+                    body, grip, edge, 0, 0,
+                ), "faraway transparent halo gutter must stay unaffected");
+            }
+        }
+    }
+
+    #[test]
+    fn v24_26_direct_body_to_grip_uses_visual_corridor_without_enlarging_drag_hit() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            for (body_width, body_height) in [(240, 42), (48, 168)] {
+                let (w, h, body) = floating_canvas_geometry(
+                    body_width, body_height, Some(edge),
+                );
+                let grip = floating_grip_rect(w, h, Some(edge), sc(FLOAT_EDGE_PEEK));
+                let transition = floating_hover_probe_rect(body, grip, Some(edge));
+                let mut gap_count = 0;
+                for y in transition.top.max(0)..transition.bottom.min(h) {
+                    for x in transition.left.max(0)..transition.right.min(w) {
+                        if floating_transition_corridor_contains(body, grip, edge, x, y) {
+                            gap_count += 1;
+                            assert_eq!(floating_drag_tab_hit_code(body, grip, x, y), -1,
+                                "gutter is only a hover transition, never a draggable region");
+                        }
+                    }
+                }
+                if matches!(edge, FloatingEdge::Right | FloatingEdge::Bottom) {
+                    assert!(gap_count > 0,
+                        "the offset between body and tab must be protected on this edge");
+                }
+                let center_x = (grip.left + grip.right) / 2;
+                let center_y = (grip.top + grip.bottom) / 2;
+                assert!(!floating_transition_corridor_contains(
+                    body, grip, edge, center_x, center_y,
+                ), "real tab is never mistaken for transition gutter");
+                assert!(floating_grip_hit_allowed(Some(edge), false, false, 0),
+                    "an expanded docked grip may trigger glow before fade-in progresses");
+                assert!(!floating_grip_hit_allowed(Some(edge), true, false, 0),
+                    "normal auto-collapse must keep its original behavior");
+                assert!(!floating_grip_hit_allowed(None, false, false, 0),
+                    "a free floating hidden tab must not become a new hit target");
+                assert!(!floating_grip_hit_allowed(Some(edge), false, true, 0),
+                    "a collapsed tab must not use expanded-panel recovery logic");
+                assert!(floating_grip_hit_allowed(Some(edge), false, false, 1));
+            }
+        }
+    }
+
+    #[test]
+    fn docked_expanded_grip_fades_like_free_desktop_without_changing_auto_hide() {
+        assert!(floating_grip_should_show(None, false, true, false));
+        assert!(!floating_grip_should_show(None, false, false, false));
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            assert!(!floating_grip_should_show(Some(edge), false, false, false),
+                "expanded docked desktop must hide its grip off-hover");
+            assert!(floating_grip_should_show(Some(edge), false, true, false));
+            assert!(floating_grip_should_show(Some(edge), false, false, true),
+                "grip must remain visible for the duration of a drag");
+            assert!(floating_grip_should_show(Some(edge), true, false, false),
+                "legacy auto-collapsed edge grip must stay visible");
+        }
+    }
+
+    #[test]
+    fn desktop_reset_top_center_respects_monitor_bounds_and_edges() {
+        let primary = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        assert_eq!(floating_reset_top_origin(primary, 320, 110), (800, 0));
+        let left = RECT { left: -2560, top: -100, right: -640, bottom: 980 };
+        assert_eq!(floating_reset_top_origin(left, 320, 110), (-1760, -100));
+        let above = RECT { left: 0, top: -1200, right: 1600, bottom: -120 };
+        assert_eq!(floating_reset_top_origin(above, 320, 110), (640, -1200));
+        let narrow = RECT { left: 1920, top: 40, right: 2130, bottom: 440 };
+        assert_eq!(floating_reset_top_origin(narrow, 320, 110), (1920, 40));
+        assert_eq!(
+            initial_floating_visibility(Some(FloatingEdge::Top), DisplayPosition::Desktop, true),
+            (true, 0),
+            "reset must publish the already-collapsed grip without a flash",
+        );
+        assert_eq!(
+            initial_floating_visibility(Some(FloatingEdge::Top), DisplayPosition::Desktop, false),
+            (false, 100),
+            "desktop with auto-collapse disabled must stay expanded",
+        );
+    }
+
+    #[test]
+    fn docked_desktop_first_frame_is_already_fully_collapsed() {
+        for edge in [
+            FloatingEdge::Left, FloatingEdge::Right,
+            FloatingEdge::Top, FloatingEdge::Bottom,
+        ] {
+            assert_eq!(
+                initial_floating_visibility(Some(edge), DisplayPosition::Desktop, true),
+                (true, 0),
+                "edge-docked desktop must never publish an expanded first frame"
+            );
+            assert_eq!(
+                initial_floating_visibility(Some(edge), DisplayPosition::Desktop, false),
+                (false, 100),
+                "disabling automatic collapse must leave the body visible"
+            );
+            assert_eq!(
+                initial_floating_visibility(Some(edge), DisplayPosition::Taskbar, false),
+                (true, 0),
+                "taskbar-space fallback still collapses automatically"
+            );
+        }
+        assert_eq!(
+            initial_floating_visibility(None, DisplayPosition::Desktop, true),
+            (false, 100),
+            "an undocked desktop must stay fully expanded"
+        );
+    }
+
+    #[test]
+    fn desktop_auto_collapse_defaults_enabled_round_trips_and_respects_mode() {
+        let legacy: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert!(legacy.desktop_auto_collapse);
+        let disabled = SettingsFile {
+            display_position: DisplayPosition::Desktop,
+            desktop_auto_collapse: false,
+            ..Default::default()
+        };
+        let parsed: SettingsFile =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert!(!parsed.desktop_auto_collapse);
+        assert!(!floating_auto_collapse_allowed(DisplayPosition::Desktop, false));
+        assert!(floating_auto_collapse_allowed(DisplayPosition::Desktop, true));
+        assert!(floating_auto_collapse_allowed(DisplayPosition::Taskbar, false),
+            "taskbar-space fallback keeps its existing automatic collapse behavior");
+    }
+
+    #[test]
+    fn desktop_cross_monitor_drag_keeps_pointer_anchor_at_each_dpi() {
+        // Same logical grip point at 100%, 150% and 200% scaling. Cursor
+        // coordinates are absolute virtual-desktop pixels, including a
+        // monitor to the left of the primary.
+        for pointer in [
+            POINT { x: -8, y: 530 },
+            POINT { x: 0, y: 530 },
+            POINT { x: 1920, y: 530 },
+            POINT { x: 3700, y: -120 },
+        ] {
+            for (from_dpi, to_dpi) in [
+                (96, 96), (96, 144), (144, 96), (96, 192), (192, 144),
+            ] {
+                for anchor in [0, 8, 25, 110, -16] {
+                    let new_anchor = floating_drag_anchor_for_dpi(
+                        anchor, from_dpi, to_dpi,
+                    );
+                    let new_origin = pointer.x - new_anchor;
+                    assert_eq!(new_origin + new_anchor, pointer.x,
+                        "drag must stay attached across the seam");
+                    let expected = (f64::from(anchor) * f64::from(to_dpi)
+                        / f64::from(from_dpi)).round() as i32;
+                    assert_eq!(new_anchor, expected,
+                        "drag-grip location must scale to the target monitor");
+                }
+            }
+        }
+        assert_eq!(floating_drag_anchor_for_dpi(25, 96, 144), 38);
+        assert_eq!(floating_drag_anchor_for_dpi(-25, 96, 144), -38);
+        assert_eq!(floating_drag_anchor_for_dpi(30, 144, 96), 20);
+    }
+
+    #[test]
+    fn free_grip_moves_below_near_top_without_pushing_body_or_docking() {
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            let (w, h, top_body) =
+                floating_free_canvas_geometry(body_width, body_height, false);
+            let (bw, bh, bottom_body) =
+                floating_free_canvas_geometry(body_width, body_height, true);
+            assert_eq!((w, h), (bw, bh), "switch must not resize the HWND");
+            let top_grip = floating_layout_grip_rect(w, h, None, false);
+            let bottom_grip = floating_layout_grip_rect(w, h, None, true);
+            assert_eq!(top_grip.bottom, top_body.top);
+            assert_eq!(bottom_grip.top, bottom_body.bottom);
+
+            let body_x = bounds.left + 400;
+            let body_y = bounds.top + 5;
+            assert!(floating_choose_free_grip_below(bounds, body_y, body_height));
+            // A previously below-body tab can sit 5px below the top
+            // without moving the real panel or producing a false dock.
+            // A top tab actually crossing this edge is tested BEFORE flipping.
+            let (x, y) = floating_clamp_drag_visible_position(
+                bounds, w, h, bottom_body, None, true,
+                body_x - bottom_body.left, body_y - bottom_body.top,
+            );
+            assert_eq!(y + bottom_body.top, body_y);
+            assert_eq!(x + bottom_body.left, body_x);
+            let pointer = POINT { x: body_x + body_width / 2, y: body_y + 2 };
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, bottom_body, None, true, POINT { x, y }, pointer,
+            ), None, "a free tab switch is not a top-edge dock");
+
+            // At the real top boundary, contact still docks normally.
+            let (x, y) = floating_clamp_drag_visible_position(
+                bounds, w, h, bottom_body, None, true,
+                body_x - bottom_body.left, bounds.top - bottom_body.top,
+            );
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, bottom_body, None, true, POINT { x, y }, pointer,
+            ), Some(FloatingEdge::Top));
+
+            // When an already-below tab reaches the taskbar, the REAL
+            // bottom grip contact still qualifies even though the next
+            // free layout would prefer the tab above the body.
+            let tab_touch_y = bounds.bottom - body_height - sc(FLOAT_EDGE_PEEK);
+            assert!(!floating_choose_free_grip_below(bounds, tab_touch_y, body_height));
+            let (old_x, old_y) = floating_clamp_drag_visible_position(
+                bounds, w, h, bottom_body, None, true,
+                body_x - bottom_body.left, tab_touch_y - bottom_body.top,
+            );
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, bottom_body, None, true,
+                POINT { x: old_x, y: old_y }, pointer,
+            ), Some(FloatingEdge::Bottom));
+            // Moving near the lower taskbar keeps the standard top tab.
+            let near_bottom = bounds.bottom - body_height - 5;
+            assert!(!floating_choose_free_grip_below(bounds, near_bottom, body_height));
+            let (x, y) = floating_clamp_drag_visible_position(
+                bounds, w, h, top_body, None, false,
+                body_x - top_body.left, near_bottom - top_body.top,
+            );
+            assert_eq!(y + top_body.top, near_bottom);
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, top_body, None, false, POINT { x, y }, pointer,
+            ), None);
+        }
+        let legacy: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.floating_free_grip_below);
+        let current = SettingsFile {
+            floating_edge: None, floating_free_grip_below: true,
+            ..SettingsFile::default()
+        };
+        let restored: SettingsFile =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert!(restored.floating_free_grip_below,
+            "a free tab below the panel must survive restart");
+    }
+
+    #[test]
+    fn visible_content_geometry_matches_clamp_and_contact_in_all_orientations() {
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            for edge in [
+                None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                Some(FloatingEdge::Top), Some(FloatingEdge::Bottom),
+            ] {
+                for below in [false, true] {
+                    if edge.is_some() && below { continue; }
+                    let (w, h, body) = if edge.is_none() {
+                        floating_free_canvas_geometry(body_width, body_height, below)
+                    } else {
+                        floating_canvas_geometry(body_width, body_height, edge)
+                    };
+                    let grip = floating_layout_grip_rect(w, h, edge, below);
+                    let visible = floating_visible_content_rect(w, h, body, edge, below);
+                    assert_eq!(visible.left, body.left.min(grip.left));
+                    assert_eq!(visible.top, body.top.min(grip.top));
+                    assert_eq!(visible.right, body.right.max(grip.right));
+                    assert_eq!(visible.bottom, body.bottom.max(grip.bottom));
+                    let desired_x = bounds.left - visible.left;
+                    let desired_y = bounds.top - visible.top;
+                    let (x, y) = floating_clamp_drag_visible_position(
+                        bounds, w, h, body, edge, below, desired_x, desired_y,
+                    );
+                    assert_eq!((x, y), (desired_x, desired_y),
+                        "clamping must use the same visible bounds as contact");
+                    assert_eq!(floating_desktop_contact_edge(
+                        bounds, w, h, body, edge, below,
+                        POINT { x, y }, POINT { x: x + w / 2, y: bounds.top },
+                    ), Some(FloatingEdge::Top),
+                        "top contact remains exact in every orientation");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn free_top_grip_contact_docks_before_adaptive_flip() {
+        // Reproduction: a free widget dragged upward from the desktop
+        // center shows its six-dot tab ABOVE the panel. Once that tab hits
+        // the top boundary, it must dock instead of silently flipping below.
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            let (w, h, body) = floating_free_canvas_geometry(bw, bh, false);
+            let grip = floating_layout_grip_rect(w, h, None, false);
+            let origin_x = bounds.left + 400;
+            let pointer = POINT { x: origin_x + w / 2, y: bounds.top + 20 };
+            let test_release = |grip_top: i32| {
+                floating_existing_free_tab_contact(
+                    bounds, w, h, body, false,
+                    POINT { x: origin_x, y: grip_top - grip.top }, pointer,
+                )
+            };
+            // Even the last pixel before contact must remain free.
+            for gap in [1, 5, 12, 23] {
+                assert_eq!(test_release(bounds.top + gap), None,
+                    "near-top drag tabs must never magnetically dock");
+            }
+            assert_eq!(test_release(bounds.top), Some(FloatingEdge::Top));
+            assert_eq!(test_release(bounds.top - 1), Some(FloatingEdge::Top),
+                "a tab crossing the top is clamped to an actual contact");
+
+            let body_top_at_contact = bounds.top + body.top - grip.top;
+            assert!(floating_choose_free_grip_below(bounds, body_top_at_contact - 1, bh),
+                "the prospective layout would flip, but existing contact wins");
+
+            // If the tab was ALREADY below the body, proximity to the top
+            // does not create a top contact; body position is preserved.
+            let (_, _, below_body) = floating_free_canvas_geometry(bw, bh, true);
+            let below_y = bounds.top + 5 - below_body.top;
+            assert_eq!(floating_existing_free_tab_contact(
+                bounds, w, h, below_body, true,
+                POINT { x: origin_x, y: below_y }, pointer,
+            ), None);
+            // Prior bottom-taskbar behavior remains intact.
+            let bottom_grip = floating_layout_grip_rect(w, h, None, true);
+            let bottom_y = bounds.bottom - bottom_grip.bottom;
+            assert_eq!(floating_existing_free_tab_contact(
+                bounds, w, h, below_body, true,
+                POINT { x: origin_x, y: bottom_y }, pointer,
+            ), Some(FloatingEdge::Bottom));
+        }
+    }
+
+    #[test]
+    fn explicit_desktop_only_docks_on_actual_visible_contact() {
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            let (w, h, body) = floating_canvas_geometry(body_width, body_height, None);
+            let grip = floating_grip_rect(w, h, None, sc(FLOAT_EDGE_PEEK));
+            let (left, right) = (body.left.min(grip.left), body.right.max(grip.right));
+            let (top, bottom) = (body.top.min(grip.top), body.bottom.max(grip.bottom));
+            let inside_x = bounds.left + 350;
+            let inside_y = bounds.top + 250;
+            let pointer = POINT { x: bounds.left + 450, y: bounds.top + 300 };
+            let drop_edge = |requested_x, requested_y| {
+                let (x, y) = floating_clamp_free_visible_position(
+                    bounds, w, h, body, requested_x, requested_y,
+                );
+                floating_desktop_contact_edge(
+                    bounds, w, h, body, None, false, POINT { x, y }, pointer,
+                )
+            };
+            assert_eq!(drop_edge(inside_x, inside_y), None);
+            for gap in [1, 5, 12, 23] {
+                assert_eq!(drop_edge(bounds.left + gap - left, inside_y), None);
+                assert_eq!(drop_edge(bounds.right - gap - right, inside_y), None);
+                assert_eq!(drop_edge(inside_x, bounds.top + gap - top), None);
+                assert_eq!(drop_edge(inside_x, bounds.bottom - gap - bottom), None);
+            }
+            assert_eq!(drop_edge(bounds.left - left, inside_y), Some(FloatingEdge::Left));
+            assert_eq!(drop_edge(bounds.right - right, inside_y), Some(FloatingEdge::Right));
+            assert_eq!(drop_edge(inside_x, bounds.top - top), Some(FloatingEdge::Top));
+            assert_eq!(drop_edge(inside_x, bounds.bottom - bottom), Some(FloatingEdge::Bottom));
+            // A genuinely overhanging drop is corrected to the boundary.
+            assert_eq!(drop_edge(bounds.left - left - 50, inside_y), Some(FloatingEdge::Left));
+        }
+    }
+
+    #[test]
+    fn desktop_drag_retains_actual_tab_side_when_testing_top_and_bottom_contact() {
+        // Regression for a TOP-docked widget being dragged with its tab still
+        // below the panel. The free canvas would move that tab above the
+        // panel, introducing a false top contact and hiding bottom contact.
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        let body_w = 240;
+        let body_h = 42;
+        let edge = Some(FloatingEdge::Top);
+        for detached in [false, true] {
+            let (w, h, body) =
+                floating_drag_canvas_geometry(body_w, body_h, edge, detached);
+            let grip = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+            let x = bounds.left + 400;
+            let pointer = POINT { x: x + w / 2, y: bounds.top + 40 };
+            let release = |requested_y: i32| {
+                let (cx, cy) = floating_clamp_drag_visible_position(
+                    bounds, w, h, body, edge, false, x, requested_y,
+                );
+                floating_desktop_contact_edge(
+                    bounds, w, h, body, edge, false, POINT { x: cx, y: cy }, pointer,
+                )
+            };
+            // Screenshot 1: the actual panel is still 15px below the top.
+            // A hypothetical free tab would extend above it and fabricate
+            // a top collision. The real tab is BELOW the panel.
+            let above_gap = bounds.top + 15 - body.top;
+            assert_eq!(release(above_gap), None,
+                "top must not dock before the visible drag canvas reaches it");
+            assert_eq!(release(bounds.top - body.top), Some(FloatingEdge::Top));
+
+            // Screenshot 2: the actual bottom tab meets the taskbar's inner
+            // boundary, although the panel itself remains one tab away.
+            let at_taskbar = bounds.bottom - grip.bottom;
+            assert!(at_taskbar + body.bottom < bounds.bottom);
+            assert_eq!(release(at_taskbar), Some(FloatingEdge::Bottom),
+                "bottom tab contact must dock even though the panel is above it");
+            for gap in [1, 5, 12, 23] {
+                assert_eq!(release(at_taskbar - gap), None,
+                    "near the taskbar is not the same as touching it");
+            }
+            assert_eq!(release(at_taskbar + 10), Some(FloatingEdge::Bottom),
+                "an overlapping tab should clamp and register real contact");
+        }
+    }
+
+    #[test]
+    fn taskbar_fallback_retains_legacy_proximity_and_ignores_retired_setting() {
+        let monitor = RECT { left: -1920, top: -120, right: 0, bottom: 960 };
+        let work = RECT { left: -1920, top: -120, right: 0, bottom: 912 };
+        let near_edge = RECT { left: -1908, top: 120, right: -1608, bottom: 220 };
+        let pointer = POINT { x: -1899, y: 159 };
+        assert_eq!(
+            floating_drop_edge_at_pointer(monitor, work, near_edge, pointer, 24, [true; 4]),
+            Some(FloatingEdge::Left),
+        );
+        let mut old = serde_json::to_value(SettingsFile::default()).unwrap();
+        old["desktop_snap"] = false.into();
+        let restored: SettingsFile = serde_json::from_value(old).unwrap();
+        assert!(!serde_json::to_string(&restored).unwrap().contains("desktop_snap"));
+    }
+
+    #[test]
+    fn free_desktop_can_put_visible_body_and_grip_flush_against_all_edges() {
+        // The panel's halo gutter is transparent and must not become a
+        // permanent gap. Keep both body and drag tab inside the usable area,
+        // including a secondary monitor with negative coordinates.
+        let work = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            let (width, height, body) =
+                floating_canvas_geometry(body_width, body_height, None);
+            let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+            let clamp = |x, y| floating_clamp_free_visible_position(
+                work, width, height, body, x, y,
+            );
+
+            let (left, _) = clamp(-5000, 100);
+            assert_eq!(left + body.left, work.left, "panel can touch left edge");
+            assert!(left < work.left, "transparent left gutter may be offscreen");
+
+            let (right, _) = clamp(2000, 100);
+            assert_eq!(right + body.right, work.right, "panel can touch right edge");
+
+            let (_, top) = clamp(-1000, -5000);
+            assert_eq!(top + grip.top, work.top, "drag tab can touch top edge");
+
+            let (_, bottom) = clamp(-1000, 5000);
+            assert_eq!(bottom + body.bottom, work.bottom, "panel can touch bottom edge");
+
+            let unchanged = (work.left + 200, work.top + 200);
+            assert_eq!(clamp(unchanged.0, unchanged.1), unchanged,
+                "interior drop must keep the mouse-relative position");
+
+            for (requested_x, requested_y) in [
+                (-5000, -5000), (2000, -5000), (-5000, 5000), (2000, 5000),
+            ] {
+                let (x, y) = clamp(requested_x, requested_y);
+                assert!(x + body.left >= work.left && x + body.right <= work.right);
+                assert!(y + body.top >= work.top && y + body.bottom <= work.bottom);
+                assert!(x + grip.left >= work.left && x + grip.right <= work.right);
+                assert!(y + grip.top >= work.top && y + grip.bottom <= work.bottom);
+            }
+        }
+    }
+
+    #[test]
+    fn docked_restore_uses_saved_desktop_monitor_instead_of_dpi_scaled_canvas_center() {
+        let left = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let right = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        // A docked popup on the right monitor can have a canvas center
+        // crossing the seam after a DPI change or a display rearrangement.
+        let origin = (-20, 200);
+        let guessed_center = floating_restore_anchor(origin.0, origin.1, 140, 200).unwrap();
+        assert!(guessed_center.x >= right.left);
+        let anchored = floating_docked_monitor_anchor(
+            Some(FloatingEdge::Right), origin.0, origin.1, guessed_center
+        );
+        assert!(anchored.x < left.right);
+        assert_eq!(anchored, POINT { x: -19, y: 201 });
+        assert_eq!(
+            floating_docked_monitor_anchor(None, origin.0, origin.1, guessed_center),
+            guessed_center,
+            "free desktop widgets should keep their canvas-center monitor selection",
+        );
+    }
+
+    #[test]
+    fn desktop_restore_prefers_saved_monitor_over_taskbar_and_handles_disconnection() {
+        let taskbar = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        let left_screen = RECT { left: -1600, top: -200, right: 0, bottom: 900 };
+        let right_screen = RECT { left: 1920, top: 0, right: 3840, bottom: 1080 };
+        let resolve = |p: POINT| {
+            [left_screen, taskbar, right_screen].into_iter().find(|r| {
+                p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+            })
+        };
+        // Negative virtual-screen coordinates and different taskbar screens
+        // must not override the saved desktop display.
+        let left = floating_restore_anchor(-1550, 120, 280, 90);
+        assert_eq!(floating_restore_bounds(left, taskbar, resolve), left_screen);
+        let right = floating_restore_anchor(2300, 300, 280, 90);
+        assert_eq!(floating_restore_bounds(right, taskbar, resolve), right_screen);
+        // If the saved screen is unplugged or the settings had no coordinates,
+        // use the known taskbar monitor rather than parking the UI off-screen.
+        let unplugged = floating_restore_anchor(-4000, 0, 280, 90);
+        assert_eq!(floating_restore_bounds(unplugged, taskbar, resolve), taskbar);
+        assert!(floating_restore_anchor(i32::MIN, 100, 280, 90).is_none());
+        assert!(floating_restore_anchor(100, i32::MIN, 280, 90).is_none());
+        assert_eq!(floating_restore_bounds(None, taskbar, resolve), taskbar);
+
+        // Taskbar and desktop position values remain separate across a
+        // settings JSON round trip (including a docked edge).
+        let saved = SettingsFile {
+            taskbar_index: 0,
+            taskbar_left_offset: Some(400),
+            taskbar_monitor: Some("taskbar-monitor".into()),
+            floating_x: Some(-1550),
+            floating_y: Some(120),
+            floating_edge: Some("left".into()),
+            display_position: DisplayPosition::Desktop,
+            ..SettingsFile::default()
+        };
+        let restored: SettingsFile = serde_json::from_str(
+            &serde_json::to_string(&saved).unwrap()
+        ).unwrap();
+        assert_eq!(restored.taskbar_left_offset, Some(400));
+        assert_eq!(restored.taskbar_monitor.as_deref(), Some("taskbar-monitor"));
+        assert_eq!(restored.floating_x, Some(-1550));
+        assert_eq!(restored.floating_y, Some(120));
+        assert_eq!(restored.floating_edge.as_deref(), Some("left"));
+        assert_eq!(restored.display_position, DisplayPosition::Desktop);
+    }
+
+    #[test]
+    fn desktop_horizontal_and_vertical_direction_round_trip() {
+        let settings = SettingsFile {
+            display_position: DisplayPosition::Desktop,
+            desktop_direction: DesktopDirection::Vertical,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let parsed: SettingsFile = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed.desktop_direction, DesktopDirection::Vertical);
+        assert_eq!(parsed.display_position, DisplayPosition::Desktop);
+        let legacy: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.desktop_direction, DesktopDirection::Horizontal);
+        assert_eq!(legacy.display_position, DisplayPosition::Taskbar);
+    }
+
+    #[test]
+    fn vertical_default_uses_compact_before_desktop_fallback() {
+        let bar = RECT { left: 1800, top: 0, right: 1850, bottom: 800 };
+        let ample = [VerticalSpan { top: 20, bottom: 280 }];
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &ample, 24),
+            Some((AppearancePreset::Default, 24)));
+        let short = [VerticalSpan { top: 20, bottom: 130 }];
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24),
+            Some((AppearancePreset::Minimal, 24)));
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &short, 24),
+            Some((AppearancePreset::Minimal, 24)));
+        let exhausted = [VerticalSpan { top: 20, bottom: 65 }];
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Default, bar, &exhausted, 24), None);
+        assert_eq!(vertical_placement_for_gaps(AppearancePreset::Minimal, bar, &short, 24),
+            Some((AppearancePreset::Minimal, 24)));
+    }
+
+    #[test]
+    fn floating_widget_snaps_to_edges_and_preserves_a_visible_peek() {
+        let bounds = RECT { left: -1920, top: -80, right: 0, bottom: 1000 };
+        let (x, y) = floating_clamp_position(bounds, 48, 168, -3000, 1200);
+        assert_eq!((x, y), (-1920, 832));
+        assert_eq!(floating_nearest_edge(bounds,
+            RECT { left: -1910, top: 200, right: -1862, bottom: 368 }, 24),
+            Some(FloatingEdge::Left));
+        assert_eq!(floating_nearest_edge(bounds,
+            RECT { left: -1100, top: 200, right: -1052, bottom: 368 }, 24), None);
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Left), true, 15),
+            (bounds.left - floating_grip_rect(48, 168, Some(FloatingEdge::Left), 15).left, 100));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Left), false, 15), (-1920, 100));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Right), true, 15),
+            (bounds.right - floating_grip_rect(48, 168, Some(FloatingEdge::Right), 15).right, 100));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Top), true, 15),
+            (-1500, bounds.top - floating_grip_rect(48, 168, Some(FloatingEdge::Top), 15).top));
+        assert_eq!(floating_edge_position(bounds, -1500, 100, 48, 168,
+            Some(FloatingEdge::Bottom), true, 15),
+            (-1500, bounds.bottom - floating_grip_rect(48, 168, Some(FloatingEdge::Bottom), 15).bottom));
+        assert_eq!(FloatingEdge::parse("right"), Some(FloatingEdge::Right));
+        assert_eq!(FloatingEdge::parse("unknown"), None);
+    }
+
+    #[test]
+    fn vertical_minimal_layout_shows_two_separate_remaining_percentages() {
+        let height = vertical_widget_height_for_preset(AppearancePreset::Minimal);
+        assert_eq!(height, sc(VERTICAL_MINIMAL_WIDGET_HEIGHT));
+        assert_eq!(vertical_widget_height_for_preset(AppearancePreset::Default), sc(VERTICAL_WIDGET_HEIGHT));
+        let (session, weekly) = vertical_minimal_percent_centers(height, true, true);
+        let session = session.unwrap();
+        let weekly = weekly.unwrap();
+        assert!(session - sc(12) >= sc(VERTICAL_DRAG_HANDLE_H));
+        assert!(weekly - session >= sc(24));
+        assert!(weekly + sc(12) < height);
+        assert_eq!(vertical_minimal_percent_centers(height, true, false).1, None);
+        assert_eq!(vertical_minimal_percent_centers(height, false, true).0, None);
+        // Stored percentages are USED; display is always REMAINING.
+        assert_eq!(usage_percent_for_display(LanguageId::English, 88.0), 12.0);
+        assert_eq!(usage_percent_for_display(LanguageId::English, 63.0), 37.0);
+        assert_eq!(vertical_quota_text(12.0, true), "12%");
+        assert_eq!(vertical_quota_text(37.0, true), "37%");
+    }
+
+    #[test]
+    fn vertical_default_tooltip_hits_only_reset_timestamp() {
+        let width = sc(48);
+        let height = sc(VERTICAL_WIDGET_HEIGHT);
+        let (session, weekly) = vertical_row_tops(height, true, true);
+        let first = session.unwrap();
+        let second = weekly.unwrap();
+        // Label, ring, center percentage and empty space do not trigger it.
+        for y in [first + sc(VERTICAL_LABEL_CENTER_Y),
+                  first + sc(VERTICAL_RING_CENTER_Y), second + sc(VERTICAL_RING_CENTER_Y)] {
+            assert!(vertical_usage_hover_hit(width, height, false, true, true, width / 2, y).is_none());
+        }
+        assert_eq!(vertical_usage_hover_hit(
+            width, height, false, true, true,
+            width / 2, first + sc(VERTICAL_RESET_CENTER_Y),
+        ).unwrap().0, MinimalHoverTarget::Session);
+        assert_eq!(vertical_usage_hover_hit(
+            width, height, false, true, true,
+            width / 2, second + sc(VERTICAL_RESET_CENTER_Y),
+        ).unwrap().0, MinimalHoverTarget::Weekly);
+        assert!(vertical_usage_hover_hit(width, height, false, true, true, sc(1),
+            first + sc(VERTICAL_RESET_CENTER_Y)).is_none());
+    }
+
+    #[test]
+    fn vertical_minimal_tooltip_hits_percentages_not_drag_grip() {
+        let width = sc(48);
+        let height = sc(VERTICAL_MINIMAL_WIDGET_HEIGHT);
+        let (session, weekly) = vertical_minimal_percent_centers(height, true, true);
+        assert!(vertical_usage_hover_hit(width, height, true, true, true, width / 2, sc(8)).is_none());
+        assert_eq!(vertical_usage_hover_hit(width, height, true, true, true,
+            width / 2, session.unwrap()).unwrap().0, MinimalHoverTarget::Session);
+        assert_eq!(vertical_usage_hover_hit(width, height, true, true, true,
+            width / 2, weekly.unwrap()).unwrap().0, MinimalHoverTarget::Weekly);
+        assert!(vertical_usage_hover_hit(width, height, true, true, true,
+            sc(1), session.unwrap()).is_none());
+    }
+
+    #[test]
+    fn vertical_drag_tracks_y_outside_taskbar_without_leaving_parent() {
+        let taskbar = RECT { left: 1900, top: -200, right: 1950, bottom: 800 };
+        let anchor = 12;
+        let height = 104;
+        // Keep ordinary tracking when cursor is inside the vertical taskbar.
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1920, y: 240 }, anchor, height), 428);
+        // Outside left/right keeps using Y and clamps to the current taskbar.
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1800, y: 240 }, anchor, height), 428);
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1990, y: -500 }, anchor, height), 0);
+        assert_eq!(drag_top_for_pointer(taskbar, POINT { x: 1990, y: 1000 }, anchor, height), 896);
+    }
+
+    #[test]
+    fn taskbar_offsets_round_trip() {
+        let old = r#"{"taskbar_index":0,"taskbar_left_offset":123}"#;
+        let parsed: SettingsFile = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.taskbar_left_offset, Some(123));
+        assert_eq!(parsed.taskbar_top_offset, None);
+        let mut new = parsed;
+        new.taskbar_top_offset = Some(415);
+        let serialized = serde_json::to_string(&new).unwrap();
+        let decoded: SettingsFile = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(decoded.taskbar_top_offset, Some(415));
+        assert_eq!(decoded.taskbar_left_offset, Some(123));
+    }
+
+    #[test]
     fn free_taskbar_spans_exclude_occupied_controls_and_tray() {
         let taskbar = RECT {
             left: 0,
@@ -6925,7 +13911,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_layout_prefers_default_then_falls_back_to_minimal() {
+    fn default_layout_prefers_full_then_falls_back_to_minimal() {
         let taskbar = RECT {
             left: 0,
             top: 0,
@@ -6942,7 +13928,7 @@ mod tests {
             right: 100 + default_width + 20,
         }];
         let placement = placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &wide,
@@ -6956,7 +13942,7 @@ mod tests {
             right: 100 + minimal_width,
         }];
         let placement = placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &narrow,
@@ -6967,7 +13953,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_layout_prefers_nearby_minimal_gap_over_distant_default_gap() {
+    fn default_layout_prioritizes_full_display_before_compact_elsewhere() {
         let taskbar = RECT {
             left: 0,
             top: 0,
@@ -6989,19 +13975,19 @@ mod tests {
             },
         ];
         let placement = placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &free,
             900,
         )
         .unwrap();
-        assert_eq!(placement.0, AppearancePreset::Minimal);
-        assert_eq!(placement.2, 900);
+        assert_eq!(placement.0, AppearancePreset::Default);
+        assert_eq!(placement.2, 120);
     }
 
     #[test]
-    fn adaptive_layout_reports_no_placement_when_even_minimal_does_not_fit() {
+    fn default_layout_reports_no_placement_when_even_minimal_does_not_fit() {
         let taskbar = RECT {
             left: 0,
             top: 0,
@@ -7015,7 +14001,7 @@ mod tests {
             right: 100 + minimal_width - 1,
         }];
         assert!(placement_for_free_spans(
-            AppearancePreset::Adaptive,
+            AppearancePreset::Default,
             LanguageId::English,
             taskbar,
             &too_small,
@@ -7041,6 +14027,17 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_width_keeps_extra_directwrite_trailing_glyph_clearance() {
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v), 144);
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v * 2), 188);
+        assert_eq!(tooltip_width_with_render_slack(0, |v| v), 48);
+        assert_eq!(tooltip_width_with_render_slack(0, |v| v * 2), 96);
+        let allocated = tooltip_width_with_render_slack(124, |v| v);
+        let drawable = allocated - 2 * TOOLTIP_TEXT_INSET;
+        assert!(drawable >= 124 + TOOLTIP_TEXT_MEASUREMENT_SLACK);
+    }
+
+    #[test]
     fn service_tooltip_combines_visible_quota_rows() {
         assert_eq!(
             service_tooltip(
@@ -7054,21 +14051,42 @@ mod tests {
         );
     }
 
-    fn test_settings_json(language: &str) -> String {
-        format!(
-            r#"{{
-  "tray_offset": 321,
-  "taskbar_index": 1,
-  "poll_interval_ms": 60000,
-  "language": "{language}"
-}}"#
-        )
+    #[test]
+    fn empty_settings_default_to_default_appearance() {
+        let settings: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
     }
 
     #[test]
-    fn legacy_settings_default_to_default_appearance() {
+    fn display_position_and_retired_adaptive_value_is_rejected() {
         let settings: SettingsFile = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(settings.display_position, DisplayPosition::Taskbar);
+        let desktop = SettingsFile {
+            display_position: DisplayPosition::Desktop,
+            appearance_preset: AppearancePreset::Default,
+            ..Default::default()
+        };
+        let parsed: SettingsFile = serde_json::from_str(
+            &serde_json::to_string(&desktop).unwrap()
+        ).unwrap();
+        assert_eq!(parsed.display_position, DisplayPosition::Desktop);
+        assert_eq!(parsed.appearance_preset, AppearancePreset::Default);
+        assert!(serde_json::from_str::<AppearancePreset>(r#""adaptive""#).is_err());
+    }
+
+    #[test]
+    fn default_adapts_on_vertical_taskbar_without_mutating_selection() {
+        let bar = RECT { left: 1800, top: 0, right: 1850, bottom: 800 };
+        let ample = [VerticalSpan { top: 20, bottom: 280 }];
+        let narrow = [VerticalSpan { top: 20, bottom: 130 }];
+        let exhausted = [VerticalSpan { top: 20, bottom: 65 }];
+        let configured = AppearancePreset::Default;
+        assert_eq!(vertical_placement_for_gaps(configured, bar, &ample, 24).unwrap().0,
+            AppearancePreset::Default);
+        assert_eq!(vertical_placement_for_gaps(configured, bar, &narrow, 24).unwrap().0,
+            AppearancePreset::Minimal);
+        assert_eq!(vertical_placement_for_gaps(configured, bar, &exhausted, 24), None);
+        assert_eq!(configured, AppearancePreset::Default);
     }
 
     #[test]
@@ -7127,14 +14145,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tray_offset_migrates_to_equivalent_left_offset() {
-        assert_eq!(legacy_left_offset_from_max(1000, 0), 1000);
-        assert_eq!(legacy_left_offset_from_max(1000, 321), 679);
-        assert_eq!(legacy_left_offset_from_max(1000, 1200), 0);
-    }
-
-    #[test]
-    fn monitor_identity_wins_over_legacy_taskbar_index() {
+    fn monitor_identity_wins_over_selected_taskbar_index() {
         let taskbars = vec![
             native_interop::TaskbarWindow {
                 hwnd: HWND::default(),
@@ -7165,53 +14176,100 @@ mod tests {
     }
 
     #[test]
-    fn loads_legacy_settings_when_new_path_is_missing() {
-        let base = std::env::temp_dir().join(format!(
-            "codex-usage-settings-test-{}-{}",
-            std::process::id(),
-            now_unix_secs()
-        ));
-        let current = base.join("CodexUsage").join("settings.json");
-        let legacy = base.join("ClaudeCodeUsageMonitor").join("settings.json");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, test_settings_json("zh-CN")).unwrap();
-        let (settings, migrated) = load_settings_from_paths(&current, &legacy).unwrap();
-        assert!(migrated);
-        assert_eq!(settings.tray_offset, 321);
-        assert_eq!(settings.taskbar_left_offset, None);
-        assert_eq!(settings.taskbar_monitor, None);
-        assert_eq!(settings.poll_interval_ms, 60_000);
+    fn schema_repair_retains_matching_fields_and_removes_nested_obsolete_names() {
+        let mut config = serde_json::to_value(SettingsFile::default()).unwrap();
+        config["appearance_preset"] = serde_json::json!("adaptive");
+        config["display_position"] = serde_json::json!("desktop");
+        config["desktop_direction"] = serde_json::json!("vertical");
+        config["taskbar_left_offset"] = serde_json::json!(163);
+        config["styles"]["dark"]["remaining"] = serde_json::json!("#ABCDEF88");
+        config["styles"]["dark"]["removed_field"] = serde_json::json!(123);
+        config["obsolete_setting"] = serde_json::json!("ignored");
+        config.as_object_mut().unwrap().remove("poll_interval_ms");
+        let (settings, dirty) = reconcile_settings_json(&config.to_string());
+        assert!(dirty);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(settings.display_position, DisplayPosition::Desktop);
+        assert_eq!(settings.desktop_direction, DesktopDirection::Vertical);
+        assert_eq!(settings.taskbar_left_offset, Some(163));
+        assert_eq!(settings.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(settings.styles.dark.remaining, "#ABCDEF88");
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("obsolete_setting").is_none());
+        assert!(saved["styles"]["dark"].get("removed_field").is_none());
+        assert!(!reconcile_settings_json(&saved.to_string()).1);
+    }
+
+    #[test]
+    fn schema_repair_defaults_bad_leaf_without_losing_other_user_values() {
+        let bad = serde_json::json!({
+            "appearance_preset": "old-variant",
+            "theme_mode": "dark",
+            "poll_interval_ms": "wrong-type",
+            "taskbar_left_offset": 280,
+            "styles": { "dark": {
+                "panel_corner_radius": "invalid",
+                "remaining": "#123456FF"
+            }}
+        });
+        let (settings, changed) = reconcile_settings_json(&bad.to_string());
+        assert!(changed);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(settings.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(settings.taskbar_left_offset, Some(280));
+        assert_eq!(settings.styles.dark.remaining, "#123456FF");
+        assert_eq!(settings.styles.dark.panel_corner_radius,
+            ThemeStyle::dark_default().panel_corner_radius);
+    }
+
+    #[test]
+    fn unsupported_semantic_values_are_restored_to_current_defaults() {
+        let invalid = serde_json::json!({
+            "poll_interval_ms": 0,
+            "floating_edge": "diagonal",
+            "language": "zh-CN",
+            "display_position": "desktop"
+        });
+        let (settings, changed) = reconcile_settings_json(&invalid.to_string());
+        assert!(changed);
+        assert_eq!(settings.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(settings.floating_edge, None);
         assert_eq!(settings.language.as_deref(), Some("zh-CN"));
-        assert!(settings.show_session_window);
-        assert!(settings.show_weekly_window);
-        let _ = std::fs::remove_dir_all(base);
+        assert_eq!(settings.display_position, DisplayPosition::Desktop);
     }
 
     #[test]
-    fn new_settings_take_precedence_over_legacy_settings() {
-        let base = std::env::temp_dir().join(format!(
-            "codex-usage-settings-precedence-test-{}-{}",
-            std::process::id(),
-            now_unix_secs()
+    fn current_schema_discards_retired_language_and_old_shape() {
+        let input = serde_json::json!({
+            "language": "ja-JP",
+            "styles": {"dark": {"panel_rounded": true}},
+            "tray_offset": 123,
+            "taskbar_left_offset": 80,
+        });
+        let (settings, changed) = reconcile_settings_json(&input.to_string());
+        assert!(changed);
+        assert_eq!(settings.language, None);
+        assert_eq!(settings.taskbar_left_offset, Some(80));
+        assert_eq!(settings.styles.dark.panel_corner_radius, ThemeStyle::dark_default().panel_corner_radius);
+        let output = serde_json::to_value(settings).unwrap();
+        assert!(output.get("tray_offset").is_none());
+        assert!(output["styles"]["dark"].get("panel_rounded").is_none());
+    }
+
+    #[test]
+    fn malformed_settings_are_backed_up_before_recovery() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-settings-invalid-{}-{}", std::process::id(), now_unix_secs()
         ));
-        let current = base.join("CodexUsage").join("settings.json");
-        let legacy = base.join("ClaudeCodeUsageMonitor").join("settings.json");
-        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&current, test_settings_json("en")).unwrap();
-        std::fs::write(&legacy, test_settings_json("zh-CN")).unwrap();
-        let (settings, migrated) = load_settings_from_paths(&current, &legacy).unwrap();
-        assert!(!migrated);
-        assert_eq!(settings.language.as_deref(), Some("en"));
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn startup_migration_only_writes_when_legacy_exists_without_current_entry() {
-        assert!(should_write_migrated_startup(true, false));
-        assert!(!should_write_migrated_startup(false, false));
-        assert!(!should_write_migrated_startup(true, true));
-        assert!(!should_write_migrated_startup(false, true));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("settings.json");
+        std::fs::write(&current, "{invalid json").unwrap();
+        let (settings, rewrite) = load_settings_from_path(&current).unwrap();
+        assert!(rewrite);
+        assert_eq!(settings.appearance_preset, AppearancePreset::Default);
+        assert_eq!(std::fs::read_to_string(current.with_extension("json.invalid.bak")).unwrap(), "{invalid json");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

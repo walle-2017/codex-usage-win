@@ -31,6 +31,14 @@ unsafe extern "C" {
         clip_inset: f32,
         clip_radius: f32,
     ) -> i32;
+    fn codex_composition_blur_set_desktop_bounds(
+        context: *mut std::ffi::c_void,
+        canvas_w: f32, canvas_h: f32,
+        panel_x: f32, panel_y: f32, panel_w: f32, panel_h: f32,
+        grip_x: f32, grip_y: f32, grip_w: f32, grip_h: f32,
+        panel_inset: f32, panel_radius: f32, grip_inset: f32, grip_radius: f32,
+        grip_opacity: f32, panel_visible: i32,
+    ) -> i32;
     fn codex_composition_blur_set_amount(
         context: *mut std::ffi::c_void,
         blur_amount: f32,
@@ -53,6 +61,15 @@ unsafe extern "C" {
         height: i32,
         coverage: *mut u8,
         coverage_len: usize,
+    ) -> i32;
+    fn codex_draw_desktop_inset_well(
+        hdc_raw: isize,
+        well_left: i32, well_top: i32, well_right: i32, well_bottom: i32,
+        foot_left: i32, foot_top: i32, foot_right: i32, foot_bottom: i32,
+        reveal_right: i32, radius: f32,
+        top_r: u8, top_g: u8, top_b: u8,
+        bottom_r: u8, bottom_g: u8, bottom_b: u8,
+        shadow_opacity: f32,
     ) -> i32;
     fn codex_draw_rounded_rect(
         hdc_raw: isize,
@@ -78,18 +95,20 @@ unsafe extern "C" {
         out_rects: *mut TaskbarControlRect,
         capacity: usize,
     ) -> i32;
-    fn codex_draw_settings_icon(
+    fn codex_alpha_blend_cached_card(
+        dest_raw: isize, source_raw: isize,
+        left: i32, top: i32, width: i32, height: i32, opacity: u8,
+    ) -> i32;
+    fn codex_blend_settings_icon(
         hdc_raw: isize,
         left: i32,
         top: i32,
-        right: i32,
-        bottom: i32,
-        icon_kind: i32,
-        color_r: u8,
-        color_g: u8,
-        color_b: u8,
-        color_a: u8,
+        width: i32,
+        height: i32,
+        premultiplied_bgra: *const u8,
+        buffer_len: usize,
     ) -> i32;
+
 }
 
 #[repr(C)]
@@ -400,6 +419,31 @@ pub fn set_composition_blur_bounds(
     }
 }
 
+/// Update the desktop's two independent rounded Gaussian-blur regions in one
+/// DirectComposition transaction, while keeping the Explorer child mode intact.
+#[allow(clippy::too_many_arguments)]
+pub fn set_composition_blur_desktop_bounds(
+    context: usize,
+    canvas_width: i32, canvas_height: i32,
+    panel: RECT, grip: RECT,
+    panel_inset: f32, panel_radius: f32, grip_inset: f32, grip_radius: f32,
+    grip_opacity: u8, panel_visible: bool,
+) -> bool {
+    if context == 0 || canvas_width <= 0 || canvas_height <= 0 { return false; }
+    unsafe {
+        codex_composition_blur_set_desktop_bounds(
+            context as *mut std::ffi::c_void,
+            canvas_width as f32, canvas_height as f32,
+            panel.left as f32, panel.top as f32,
+            (panel.right - panel.left) as f32, (panel.bottom - panel.top) as f32,
+            grip.left as f32, grip.top as f32,
+            (grip.right - grip.left) as f32, (grip.bottom - grip.top) as f32,
+            panel_inset, panel_radius, grip_inset, grip_radius,
+            f32::from(grip_opacity.min(100)) / 100.0, i32::from(panel_visible),
+        ) != 0
+    }
+}
+
 pub fn set_composition_blur_amount(context: usize, blur_amount: f32) -> bool {
     if context == 0 {
         return false;
@@ -464,27 +508,54 @@ pub fn directwrite_text_mask(
     (ok != 0).then_some(coverage)
 }
 
-pub fn draw_antialiased_settings_icon(
-    hdc: HDC,
-    rect: RECT,
-    icon_kind: i32,
-    color: Color,
-) -> bool {
-    if hdc.0.is_null() || rect.right <= rect.left || rect.bottom <= rect.top {
+pub fn blend_svg_icon(hdc: HDC, rect: RECT, pixels: &[u8]) -> bool {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if hdc.0.is_null() || width <= 0 || height <= 0 {
         return false;
     }
     unsafe {
-        codex_draw_settings_icon(
+        codex_blend_settings_icon(
+            hdc.0 as isize, rect.left, rect.top, width, height,
+            pixels.as_ptr(), pixels.len(),
+        ) != 0
+    }
+}
+
+/// Draw the *single* recessed L-shaped Desktop settings surface.  Both
+/// fill and interior shadow are clipped to one continuous D2D path.
+#[allow(clippy::too_many_arguments)] // FFI mirrors the fixed native drawing signature.
+pub fn draw_antialiased_desktop_inset_well(
+    hdc: HDC, well: RECT, foot: RECT, reveal_right: i32,
+    radius: f32, top: Color, bottom: Color, shadow_opacity: f32,
+) -> bool {
+    if hdc.0.is_null() || well.right <= well.left || well.bottom <= well.top
+        || foot.right <= foot.left || foot.bottom <= foot.top
+    {
+        return false;
+    }
+    unsafe {
+        codex_draw_desktop_inset_well(
             hdc.0 as isize,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            icon_kind,
-            color.r,
-            color.g,
-            color.b,
-            color.a,
+            well.left,well.top,well.right,well.bottom,
+            foot.left,foot.top,foot.right,foot.bottom,
+            reveal_right,radius,
+            top.r,top.g,top.b,bottom.r,bottom.g,bottom.b,
+            shadow_opacity,
+        ) != 0
+    }
+}
+
+/// Compose a pre-rendered settings-card state with one native AlphaBlend.
+pub fn alpha_blend_cached_card(dest: HDC, source: HDC, rect: RECT, opacity: u8) -> bool {
+    if dest.0.is_null() || source.0.is_null() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return false;
+    }
+    unsafe {
+        codex_alpha_blend_cached_card(
+            dest.0 as isize, source.0 as isize,
+            rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+            opacity,
         ) != 0
     }
 }

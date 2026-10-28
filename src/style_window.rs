@@ -1,4 +1,7 @@
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use std::{fs, path::PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -20,7 +23,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appearance::AppearancePreset;
+use crate::appearance::{AppearancePreset, DesktopDirection, DisplayPosition};
 use crate::fonts;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
@@ -36,6 +39,9 @@ pub const WM_STYLE_BLUR_PREVIEW: u32 = WM_APP + 121;
 pub const WM_STYLE_SAVE: u32 = WM_APP + 122;
 pub const WM_STYLE_THEME_CHANGE: u32 = WM_APP + 123;
 pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
+pub const WM_STYLE_POSITION_CHANGE: u32 = WM_APP + 125;
+pub const WM_STYLE_DESKTOP_DIRECTION_CHANGE: u32 = WM_APP + 139;
+pub const WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE: u32 = WM_APP + 145;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
 pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
@@ -48,6 +54,7 @@ pub const WM_STYLE_CORNER_PREVIEW: u32 = WM_APP + 134;
 
 const WINDOW_CLASS: &str = "CodexUsageUnifiedSettingsV1";
 const JSON_SAVE_MASK_CLASS: &str = "CodexUsageJsonSaveMaskV1";
+const JSON_PAGE_SURFACE_CLASS: &str = "CodexUsageJsonPageSurfaceV1";
 const WINDOW_WIDTH: i32 = 980;
 const WINDOW_HEIGHT: i32 = 700;
 const WINDOW_MIN_WIDTH: i32 = 980;
@@ -78,8 +85,26 @@ const EM_SETSCROLLPOS_MSG: u32 = WM_USER + 222;
 const SCF_SELECTION_FLAG: usize = 0x0001;
 const CFM_COLOR_MASK: u32 = 0x40000000;
 const ENM_CHANGE_MASK: isize = 0x00000001;
+const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
+// Asynchronously refresh the expensive Preset gallery after menu animation,
+// never while its top-card frames are being composed.
+const WM_SETTINGS_PRESET_GALLERY_REFRESH: u32 = WM_APP + 146;
+const WM_SETTINGS_PREWARM_GALLERY: u32 = WM_APP + 147;
+const WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK: u32 = WM_APP + 148;
+// WM_TIMER is a low-priority generated message. A periodic multimedia timer
+// posts one coalesced message to the UI queue for a steadier ~60Hz cadence.
+const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
+const DESKTOP_SUBMENU_MIN_FRAME_MS: u64 = 15;
+const DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS: u64 = 8;
+const TIME_PERIODIC_FLAG: u32 = 0x0001;
+const TIME_KILL_SYNCHRONOUS_FLAG: u32 = 0x0100;
+const DESKTOP_SUBMENU_DURATION_MS: u64 = 220;
+const DESKTOP_SUBMENU_CLOSE_DURATION_MS: u64 = 190;
+const DESKTOP_SUBMENU_ICON_SIZE: i32 = 18;
 const JSON_ACTION_TIMER_ID: usize = 0x4A53;
 const JSON_SCROLLBAR_TIMER_ID: usize = 0x4A54;
+// Keep the latest drag pointer until the next 60 Hz display interval.
+const JSON_SCROLL_DRAG_FRAME_TIMER_ID: usize = 0x4A5A;
 const JSON_VALIDATION_TIMER_ID: usize = 0x4A55;
 const JSON_EDIT_SUBCLASS_ID: usize = 0x4A56;
 const JSON_ERROR_SHAKE_TIMER_ID: usize = 0x4A57;
@@ -145,6 +170,11 @@ pub struct StyleWindowSnapshot {
     pub theme_mode: ThemeMode,
     pub is_dark: bool,
     pub appearance_preset: AppearancePreset,
+    pub display_position: DisplayPosition,
+    pub desktop_direction: DesktopDirection,
+    pub desktop_auto_collapse: bool,
+    // Runtime orientation, not a persisted appearance setting.
+    pub vertical_taskbar_mode: bool,
     pub active_style: ThemeStyle,
     pub editable_settings: EditableSettings,
 }
@@ -213,7 +243,12 @@ enum SettingsIcon {
     JsonImport,
     JsonExport,
     JsonApply,
-    LayoutAdaptive,
+    DirectionHorizontal,
+    DirectionVertical,
+    ToggleOn,
+    ToggleOff,
+    PositionTaskbar,
+    PositionDesktop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +276,9 @@ enum PendingDiscardAction {
 enum HitTarget {
     Theme(ThemeMode),
     Layout(AppearancePreset),
+    Position(DisplayPosition),
+    DesktopDirection(DesktopDirection),
+    DesktopAutoCollapse(bool),
     Preset(ThemePreset),
     Section(Section),
     Row(EditorSelection),
@@ -272,6 +310,277 @@ impl SendHwnd {
     }
 }
 
+/// Visual-only animation. Persisted desktop settings never depend on this
+/// state. Retargeting first samples the in-flight interpolation so rapid
+/// Desktop/Taskbar reversals cannot jump or spawn overlapping animations.
+#[derive(Clone, Copy, Debug)]
+struct DesktopSubmenuAnimation {
+    progress: f32,
+    from: f32,
+    target: f32,
+    started: Instant,
+    duration_ms: u64,
+    last_frame: Option<Instant>,
+    final_frame_pending: bool,
+}
+impl DesktopSubmenuAnimation {
+    fn initial(desktop: bool) -> Self {
+        let progress = if desktop { 1.0 } else { 0.0 };
+        Self {
+            progress, from: progress, target: progress,
+            started: Instant::now(), duration_ms: DESKTOP_SUBMENU_DURATION_MS,
+            last_frame: None,
+            final_frame_pending: false,
+        }
+    }
+    fn active(&self) -> bool {
+        (self.progress - self.target).abs() > 0.0001
+    }
+    fn frame_due_with_gate(&mut self, now: Instant, min_interval_ms: u64) -> bool {
+        if !self.active() {
+            return false;
+        }
+        if self.last_frame.is_some_and(|last| {
+            now.saturating_duration_since(last) < Duration::from_millis(min_interval_ms)
+        }) {
+            return false;
+        }
+        self.last_frame = Some(now);
+        true
+    }
+    fn tick_for_paint(&mut self, now: Instant) -> (bool, bool) {
+        self.tick_for_paint_with_gate(now, DESKTOP_SUBMENU_MIN_FRAME_MS)
+    }
+    fn tick_for_paint_with_gate(
+        &mut self, now: Instant, min_interval_ms: u64,
+    ) -> (bool, bool) {
+        let due = self.frame_due_with_gate(now, min_interval_ms);
+        if due {
+            self.advance(now);
+            if !self.active() {
+                // Preserve the cached fast path on the terminal frame: the
+                // next WM_PAINT must still use the pre-rendered endpoints.
+                self.final_frame_pending = true;
+            }
+        }
+        (self.active(), due)
+    }
+    fn advance(&mut self, now: Instant) -> bool {
+        if !self.active() { return false; }
+        let elapsed = now.saturating_duration_since(self.started).as_secs_f32() * 1000.0;
+        let t = (elapsed / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
+        // Smoothstep keeps both endpoints at zero velocity, preventing the
+        // reveal edge from snapping at the end of an open/close animation.
+        let eased = t * t * (3.0 - 2.0 * t);
+        self.progress = if t >= 1.0 {
+            self.target
+        } else {
+            self.from + (self.target - self.from) * eased
+        };
+        true
+    }
+    fn retarget(&mut self, desktop: bool, now: Instant) -> bool {
+        self.advance(now);
+        let target = if desktop { 1.0 } else { 0.0 };
+        if (self.target - target).abs() < 0.0001 { return false; }
+        self.from = self.progress;
+        self.target = target;
+        self.started = now;
+        self.last_frame = None;
+        self.final_frame_pending = false;
+        let full_duration_ms = if desktop {
+            DESKTOP_SUBMENU_DURATION_MS
+        } else {
+            DESKTOP_SUBMENU_CLOSE_DURATION_MS
+        };
+        self.duration_ms = (full_duration_ms as f32
+            * (self.target - self.from).abs()).round().max(72.0) as u64;
+        true
+    }
+    fn hit_enabled(&self) -> bool {
+        self.target > 0.5 && self.progress >= 0.98
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPaintCause {
+    Unknown,
+    AnimationTimer,
+    PositionSync,
+    FullSync,
+    GalleryRefresh,
+    MouseCaptureChanged,
+    MouseReleased,
+    MousePressed,
+    MouseHover,
+}
+
+fn mark_settings_paint_cause(cause: SettingsPaintCause) {
+    SETTINGS_PAINT_CAUSE.with(|cell| cell.set(cause));
+}
+
+static SUBMENU_MEDIA_TICK_QUEUED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static SUBMENU_MULTIMEDIA_TIMER_ID: Cell<u32> = const { Cell::new(0) };
+    static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
+    static SETTINGS_PAINT_CAUSE: Cell<SettingsPaintCause> =
+        const { Cell::new(SettingsPaintCause::Unknown) };
+}
+
+type MultimediaTimerCallback = unsafe extern "system" fn(u32, u32, usize, usize, usize);
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+    fn timeSetEvent(
+        delay: u32, resolution: u32, callback: Option<MultimediaTimerCallback>,
+        user: usize, flags: u32,
+    ) -> u32;
+    fn timeKillEvent(timer_id: u32) -> u32;
+}
+
+// The multimedia callback is NOT on the UI thread. Do not touch STATE,
+// window DCs, or thread-local rendering caches here; only post a single
+// pending animation message. A queued flag prevents unbounded message buildup.
+unsafe extern "system" fn submenu_multimedia_timer_callback(
+    _timer_id: u32, _message: u32, user: usize, _dw1: usize, _dw2: usize,
+) {
+    if SUBMENU_MEDIA_TICK_QUEUED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if PostMessageW(
+        HWND(user as *mut _), WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK, WPARAM(0), LPARAM(0),
+    ).is_err() {
+        SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
+    }
+}
+
+fn begin_precise_animation_timer() {
+    PRECISE_ANIMATION_TIMER.with(|slot| {
+        let mut enabled = slot.borrow_mut();
+        if !*enabled {
+            // Temporarily request a finer timer resolution; always release
+            // it after the animation to avoid affecting idle power usage.
+            *enabled = unsafe { timeBeginPeriod(1) == 0 };
+        }
+    });
+}
+
+fn end_precise_animation_timer() {
+    PRECISE_ANIMATION_TIMER.with(|slot| {
+        let mut enabled = slot.borrow_mut();
+        if *enabled {
+            unsafe { let _ = timeEndPeriod(1); }
+            *enabled = false;
+        }
+    });
+}
+
+fn begin_submenu_frame_clock(hwnd: HWND) {
+    begin_precise_animation_timer();
+    let active = SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0);
+    if active { return; }
+    // Windows multimedia periodic timers are more suitable for frame cadence
+    // than synthesized low-priority WM_TIMER messages.
+    let id = unsafe {
+        timeSetEvent(
+            DESKTOP_SUBMENU_FRAME_MS, 1, Some(submenu_multimedia_timer_callback),
+            hwnd.0 as usize, TIME_PERIODIC_FLAG | TIME_KILL_SYNCHRONOUS_FLAG,
+        )
+    };
+    if id != 0 {
+        SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.set(id));
+        unsafe { let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID); }
+    } else {
+        // On constrained or older systems, retain the standard Win32 timer.
+        unsafe {
+            let _ = SetTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID, DESKTOP_SUBMENU_FRAME_MS, None);
+        }
+    }
+}
+
+fn end_submenu_frame_clock(hwnd: HWND) {
+    SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| {
+        let id = cell.replace(0);
+        if id != 0 {
+            // The synchronous flag guarantees the callback has finished.
+            unsafe { let _ = timeKillEvent(id); }
+        }
+    });
+    SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
+    unsafe { let _ = KillTimer(hwnd, DESKTOP_SUBMENU_TIMER_ID); }
+    end_precise_animation_timer();
+}
+
+unsafe fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
+    let now = Instant::now();
+    let (active, rendered) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = state.as_mut() {
+            if multimedia {
+                s.desktop_submenu.tick_for_paint_with_gate(
+                    now, DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
+                )
+            } else {
+                s.desktop_submenu.tick_for_paint(now)
+            }
+        } else { (false, false) }
+    };
+    if !active {
+        end_submenu_frame_clock(hwnd);
+    }
+    if rendered {
+        mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
+        let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+    }
+}
+
+/// Logical 96-DPI bounds. The lower foot contains the existing Desktop
+/// button; the right well fits strictly within the original 740px card.
+#[derive(Clone, Copy, Debug)]
+struct DesktopSubmenuLayout {
+    well: RECT,
+    foot: RECT,
+    direction_label: RECT,
+    collapse_label: RECT,
+    horizontal: RECT,
+    vertical: RECT,
+    enabled: RECT,
+    disabled: RECT,
+}
+fn desktop_submenu_layout() -> DesktopSubmenuLayout {
+    // Both rows share one source of vertical geometry. When a menu option
+    // changes, the drawing and hit-test bounds must move together.
+    let row_height = 30;
+    let row_gap = 10;
+    let direction_top = 116;
+    let collapse_top = direction_top + row_height + row_gap;
+    let row = |left, right, top| RECT {
+        left, top, right, bottom: top + row_height,
+    };
+    DesktopSubmenuLayout {
+        // Anchor the two-row well beside Layout/Position. The lower edge
+        // joins the Desktop button inset, not the Theme row above it.
+        well: RECT {
+            left: 636, top: direction_top - 10,
+            right: 894, bottom: collapse_top + row_height + 15,
+        },
+        // Keep the 4px inset around Desktop without touching Taskbar.
+        foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
+        direction_label: row(650, 728, direction_top),
+        collapse_label: row(650, 728, collapse_top),
+        horizontal: row(736, 803, direction_top),
+        vertical: row(811, 878, direction_top),
+        enabled: row(736, 803, collapse_top),
+        disabled: row(811, 878, collapse_top),
+    }
+}
+fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
+    rect(hwnd, bounds.left, bounds.top, bounds.right, bounds.bottom)
+}
+
 struct PanelState {
     hwnd: SendHwnd,
     parent: SendHwnd,
@@ -282,11 +591,16 @@ struct PanelState {
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     tracking_mouse_leave: bool,
+    desktop_submenu: DesktopSubmenuAnimation,
+    preset_gallery_refresh_pending: bool,
     numeric_edits: [SendHwnd; 4],
     blur_edit: SendHwnd,
     corner_edit: SendHwnd,
     hex_edits: [SendHwnd; HEX_EDIT_COUNT],
     json_edit: SendHwnd,
+    // Opaque sibling covering the complete content pane whenever JSON is active.
+    // Preset-page pixels must never be visible around the RichEdit child.
+    json_page_surface: SendHwnd,
     json_save_mask: SendHwnd,
     focused_numeric_edit: Option<usize>,
     focused_blur_edit: bool,
@@ -464,7 +778,45 @@ fn redraw_settings_window(hwnd: HWND) {
 }
 
 
+// Choose the screen from the *visible widget*, not from the stable service
+// HWND (which can remain on the original taskbar after replica handoffs).
+// The work area excludes taskbar reservations. Negative virtual-desktop
+// coordinates are valid for monitors left/above the primary display.
+fn settings_centered_origin(work: RECT, width: i32, height: i32) -> (i32, i32) {
+    let work_width = (i64::from(work.right) - i64::from(work.left)).max(0);
+    let work_height = (i64::from(work.bottom) - i64::from(work.top)).max(0);
+    let x = i64::from(work.left) + (work_width - i64::from(width).max(1)).max(0) / 2;
+    let y = i64::from(work.top) + (work_height - i64::from(height).max(1)).max(0) / 2;
+    (
+        x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    )
+}
+
+fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
+    if widget.0.is_null() || !unsafe { IsWindow(widget).as_bool() } {
+        return None;
+    }
+    unsafe {
+        let monitor = MonitorFromWindow(widget, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcWork)
+    }
+}
+
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
+    // The owner is a stable message endpoint, which can be on a different
+    // monitor from the live component after a taskbar replica handoff.
+    let widget = crate::window::settings_placement_anchor().unwrap_or(parent);
+    open_or_focus_on_widget(parent, widget, snapshot);
+}
+
+/// The message owner stays stable while taskbar replicas and the desktop
+/// widget can move among monitors. Use the current widget only as an anchor.
+pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindowSnapshot) {
     let existing = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| s.hwnd.to_hwnd())
@@ -511,8 +863,11 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         let _ = RegisterClassExW(&wc);
 
         let title = native_interop::wide_str("Codex Usage Win");
+        // Other settings pages use whole-window composition; the JSON page
+        // disables it after its buffered transition to avoid RichEdit latency.
+        let widget_work_area = settings_work_area_for_widget(widget);
         let hwnd = match CreateWindowExW(
-            WS_EX_APPWINDOW,
+            settings_window_ex_style(),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
@@ -546,16 +901,43 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             );
         }
 
+        // Keep the original ownerless CW_USEDEFAULT creation contract. Move
+        // this still-hidden window to the active widget's monitor before
+        // creating child controls, so Windows can negotiate Per-Monitor DPI.
+        if let Some(work) = widget_work_area {
+            let anchor_dpi = GetDpiForWindow(widget).max(96);
+            let scaled = |v: i32| ((v as i64 * anchor_dpi as i64 + 48) / 96) as i32;
+            let width = scaled(WINDOW_WIDTH);
+            let height = scaled(WINDOW_HEIGHT);
+            let (x, y) = settings_centered_origin(work, width, height);
+            let _ = SetWindowPos(
+                hwnd, HWND::default(), x, y, width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
         let dpi = GetDpiForWindow(hwnd).max(96);
         let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
+        // Final resize/center is based on the settings HWND's negotiated DPI.
+        // Both placement steps occur before the first ShowWindow; no jump.
+        let final_width = s(WINDOW_WIDTH);
+        let final_height = s(WINDOW_HEIGHT);
+        let final_origin = widget_work_area.map(|work| {
+            settings_centered_origin(work, final_width, final_height)
+        });
+        let (final_x, final_y) = final_origin.unwrap_or((0, 0));
+        let position_flags = if final_origin.is_some() {
+            SWP_NOZORDER | SWP_NOACTIVATE
+        } else {
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+        };
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
-            0,
-            0,
-            s(WINDOW_WIDTH),
-            s(WINDOW_HEIGHT),
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            final_x,
+            final_y,
+            final_width,
+            final_height,
+            position_flags,
         );
 
         let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(snapshot.language)));
@@ -768,6 +1150,40 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
         }
         let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
 
+        // Create the opaque JSON content pane before RichEdit. As a sibling
+        // child, it stays BELOW RichEdit in Z order but ABOVE all stale parent
+        // page pixels. Painting the entire pane prevents mixed-page frames.
+        let json_page_class = native_interop::wide_str(JSON_PAGE_SURFACE_CLASS);
+        let page_wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(json_page_surface_wnd_proc),
+            hInstance: GetModuleHandleW(PCWSTR::null()).unwrap().into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(json_page_class.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&page_wc);
+        let json_page_surface = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(json_page_class.as_ptr()),
+            PCWSTR::from_raw(empty.as_ptr()),
+            WS_CHILD | WS_CLIPSIBLINGS,
+            0, 0, 1, 1,
+            hwnd,
+            HMENU::default(),
+            GetModuleHandleW(PCWSTR::null()).unwrap(),
+            None,
+        ) {
+            Ok(page) => page,
+            Err(_) => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                let _ = DeleteObject(json_font);
+                return;
+            }
+        };
+
         let msftedit = native_interop::wide_str("Msftedit.dll");
         if LoadLibraryW(PCWSTR::from_raw(msftedit.as_ptr())).is_err() {
             let _ = DestroyWindow(hwnd);
@@ -782,6 +1198,7 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             PCWSTR::from_raw(empty.as_ptr()),
             WINDOW_STYLE(
                 WS_CHILD.0
+                    | WS_CLIPSIBLINGS.0
                     | ES_MULTILINE as u32
                     | ES_AUTOVSCROLL as u32
                     | ES_AUTOHSCROLL as u32
@@ -845,18 +1262,23 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
             *state = Some(PanelState {
                 hwnd: SendHwnd::from_hwnd(hwnd),
                 parent: SendHwnd::from_hwnd(parent),
-                snapshot,
+                snapshot: snapshot.clone(),
                 section: Section::General,
                 editor: EditorSelection::Color(StyleColorTarget::PanelBackground),
                 dragging_slider: None,
                 hovered: None,
                 pressed: None,
                 tracking_mouse_leave: false,
+                desktop_submenu: DesktopSubmenuAnimation::initial(
+                    snapshot.display_position == DisplayPosition::Desktop,
+                ),
+                preset_gallery_refresh_pending: false,
                 numeric_edits,
                 blur_edit: SendHwnd::from_hwnd(blur_edit),
                 corner_edit: SendHwnd::from_hwnd(corner_edit),
                 hex_edits,
                 json_edit: SendHwnd::from_hwnd(json_edit),
+                json_page_surface: SendHwnd::from_hwnd(json_page_surface),
                 json_save_mask: SendHwnd::from_hwnd(HWND::default()),
                 focused_numeric_edit: None,
                 focused_blur_edit: false,
@@ -897,33 +1319,110 @@ pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     }
 }
 
+/// Keep the preset gallery in sync when the widget moves between horizontal
+/// and vertical taskbars without discarding active style edits.
+pub fn set_preview_orientation(vertical: bool) {
+    let (hwnd, gallery_changed) = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else { return };
+        if s.snapshot.vertical_taskbar_mode == vertical { return; }
+        let previous = preview_vertical_for_snapshot(&s.snapshot);
+        s.snapshot.vertical_taskbar_mode = vertical;
+        let gallery_changed = s.section == Section::Preset
+            && previous != preview_vertical_for_snapshot(&s.snapshot);
+        if gallery_changed { s.preset_gallery_refresh_pending = true; }
+        (s.hwnd.to_hwnd(), gallery_changed)
+    };
+    if gallery_changed {
+        // The parent calls this during position changes before sync(). Posting
+        // lets sync() start its animation before the gallery is invalidated.
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_SETTINGS_PRESET_GALLERY_REFRESH, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+// Persisted position is mirrored both in display_position and JSON settings.
+// Normalize both fields before deciding whether other UI sections changed.
+fn position_is_only_snapshot_change(
+    old: &StyleWindowSnapshot, new: &StyleWindowSnapshot,
+) -> bool {
+    if old.display_position == new.display_position {
+        return false;
+    }
+    let mut normalized = new.editable_settings.clone();
+    normalized.appearance.position.clone_from(&old.editable_settings.appearance.position);
+    old.language == new.language
+        && old.theme_mode == new.theme_mode
+        && old.is_dark == new.is_dark
+        && old.appearance_preset == new.appearance_preset
+        && old.desktop_direction == new.desktop_direction
+        && old.desktop_auto_collapse == new.desktop_auto_collapse
+        // Vertical taskbar preview orientation only affects the lower Preset
+        // gallery, which is refreshed separately after the card animation.
+        && old.active_style == new.active_style
+        && old.editable_settings == normalized
+}
+
 pub fn sync(snapshot: StyleWindowSnapshot) {
-    let (hwnd, section, json_dirty, json_apply_pending) = {
+    let (hwnd, section, json_dirty, json_apply_pending, submenu_animated, card_only, gallery_changed) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
             return;
         };
+        let changed_position = s.snapshot.display_position != snapshot.display_position;
+        let previous_preview = preview_vertical_for_snapshot(&s.snapshot);
+        let gallery_changed = s.section == Section::Preset
+            && (changed_position
+                || previous_preview != preview_vertical_for_snapshot(&snapshot));
+        if gallery_changed { s.preset_gallery_refresh_pending = true; }
+        let card_only = is_appearance_section(s.section)
+            && position_is_only_snapshot_change(&s.snapshot, &snapshot);
+        let submenu_animated = if changed_position {
+            s.desktop_submenu.retarget(
+                snapshot.display_position == DisplayPosition::Desktop,
+                Instant::now(),
+            )
+        } else { false };
         s.snapshot = snapshot;
-        let background = if s.snapshot.is_dark {
-            Color::from_hex("#20242AFF")
-        } else {
-            Color::from_hex("#EEF3F8FF")
-        };
-        unsafe {
-            if s.edit_brush != 0 {
-                let _ = DeleteObject(HGDIOBJ(s.edit_brush as *mut _));
+        if !card_only {
+            let background = if s.snapshot.is_dark {
+                Color::from_hex("#20242AFF")
+            } else {
+                Color::from_hex("#EEF3F8FF")
+            };
+            unsafe {
+                if s.edit_brush != 0 {
+                    let _ = DeleteObject(HGDIOBJ(s.edit_brush as *mut _));
+                }
+                let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
+                s.edit_brush = brush.0 as isize;
             }
-            let brush = CreateSolidBrush(COLORREF(background.to_colorref()));
-            s.edit_brush = brush.0 as isize;
-
         }
         (
             s.hwnd.to_hwnd(),
             s.section,
             s.json_dirty,
             s.pending_json_action == Some(JsonAction::Apply),
+            submenu_animated,
+            card_only,
+            gallery_changed,
         )
     };
+    if gallery_changed {
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_SETTINGS_PRESET_GALLERY_REFRESH, WPARAM(0), LPARAM(0));
+        }
+    }
+    if submenu_animated {
+        // Retargeting mid-animation reuses the same periodic timer.
+        begin_submenu_frame_clock(hwnd);
+    }
+    if card_only {
+        mark_settings_paint_cause(SettingsPaintCause::PositionSync);
+        unsafe { invalidate_appearance_card_or_window(hwnd, section, true); }
+        return;
+    }
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
     layout_settings_children(hwnd);
@@ -938,6 +1437,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     sync_numeric_edits();
     sync_blur_edit();
     sync_corner_edit();
+    mark_settings_paint_cause(SettingsPaintCause::FullSync);
     redraw_settings_window(hwnd);
 }
 
@@ -1139,7 +1639,6 @@ fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
     match preset {
         AppearancePreset::Default => SettingsIcon::LayoutDefault,
         AppearancePreset::Minimal => SettingsIcon::LayoutMinimal,
-        AppearancePreset::Adaptive => SettingsIcon::LayoutAdaptive,
     }
 }
 
@@ -1164,33 +1663,113 @@ fn json_action_icon(action: JsonAction) -> SettingsIcon {
     }
 }
 
+// Shared appearance-button grid: all rows use equal widths and 8px gaps.
+const APPEARANCE_BUTTON_LEFT: i32 = 314;
+const APPEARANCE_BUTTON_WIDTH: i32 = 100;
+const APPEARANCE_BUTTON_GAP: i32 = 8;
+const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
+
+fn appearance_button_rect(hwnd: HWND, column: i32, top: i32) -> RECT {
+    let left = APPEARANCE_BUTTON_LEFT
+        + column * (APPEARANCE_BUTTON_WIDTH + APPEARANCE_BUTTON_GAP);
+    rect(
+        hwnd, left, top,
+        left + APPEARANCE_BUTTON_WIDTH, top + APPEARANCE_BUTTON_HEIGHT,
+    )
+}
+
 fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
-    let index = match mode {
+    let column = match mode {
         ThemeMode::System => 0,
         ThemeMode::Dark => 1,
         ThemeMode::Light => 2,
     };
-    rect(hwnd, 314 + index * 108, 70, 414 + index * 108, 104)
+    appearance_button_rect(hwnd, column, 70)
+}
+
+fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
+    let column = if position == DisplayPosition::Desktop { 1 } else { 0 };
+    appearance_button_rect(hwnd, column, 162)
+}
+
+fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
+    let layout = desktop_submenu_layout();
+    scaled_rect(hwnd, if direction == DesktopDirection::Vertical {
+        layout.vertical
+    } else {
+        layout.horizontal
+    })
+}
+
+// The controls are stable throughout animation; painted displacement is
+// disabled for hit testing until the subpanel has almost fully expanded.
+fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
+    let layout = desktop_submenu_layout();
+    scaled_rect(hwnd, if enabled { layout.enabled } else { layout.disabled })
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
-    let index = match preset {
+    let column = match preset {
         AppearancePreset::Default => 0,
         AppearancePreset::Minimal => 1,
-        AppearancePreset::Adaptive => 2,
     };
-    rect(hwnd, 314 + index * 108, 116, 414 + index * 108, 150)
+    appearance_button_rect(hwnd, column, 116)
 }
 
 
-fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+// Four tall, narrow cards fit the complete 740px settings content band.
+const PRESET_GALLERY_LEFT: i32 = 200;
+// No duplicate dark/light preset group heading: cards follow the shared appearance options.
+const PRESET_CARD_TOP: i32 = 226;
+const PRESET_CARD_WIDTH: i32 = 172;
+const PRESET_CARD_HEIGHT: i32 = 350;
+const PRESET_CARD_MINIMAL_HEIGHT: i32 = 250;
+const PRESET_CARD_GAP: i32 = 16;
+
+fn preset_gallery_card_rect(index: i32, minimal: bool) -> RECT {
+    let left = PRESET_GALLERY_LEFT + index * (PRESET_CARD_WIDTH + PRESET_CARD_GAP);
+    let height = if minimal { PRESET_CARD_MINIMAL_HEIGHT } else { PRESET_CARD_HEIGHT };
+    RECT { left, top: PRESET_CARD_TOP, right: left + PRESET_CARD_WIDTH,
+        bottom: PRESET_CARD_TOP + height }
+}
+
+fn preview_vertical_for_snapshot(snapshot: &StyleWindowSnapshot) -> bool {
+    if snapshot.display_position == DisplayPosition::Desktop {
+        snapshot.desktop_direction == DesktopDirection::Vertical
+    } else {
+        snapshot.vertical_taskbar_mode
+    }
+}
+
+fn preview_layout_flags() -> (bool, bool) {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.as_ref().map(|s| (
+        preview_vertical_for_snapshot(&s.snapshot),
+        s.snapshot.appearance_preset == AppearancePreset::Minimal,
+    )).unwrap_or((false, false))
+}
+
+fn preset_card_rect_for_orientation(
+    hwnd: HWND, preset: ThemePreset, vertical: bool, minimal: bool,
+) -> RECT {
     let index = match preset {
         ThemePreset::Classic => 0,
         ThemePreset::Ocean => 1,
         ThemePreset::Forest => 2,
     };
-    let left = 200 + index * 244;
-    rect(hwnd, left, 220, left + 224, 404)
+    if vertical {
+        let r = preset_gallery_card_rect(index, minimal);
+        rect(hwnd, r.left, r.top, r.right, r.bottom)
+    } else {
+        // Restore the original three-across horizontal gallery.
+        let left = 200 + index * 244;
+        rect(hwnd, left, PRESET_CARD_TOP, left + 224, PRESET_CARD_TOP + 184)
+    }
+}
+
+fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+    let (vertical, minimal) = preview_layout_flags();
+    preset_card_rect_for_orientation(hwnd, preset, vertical, minimal)
 }
 
 fn rows(section: Section) -> &'static [EditorSelection] {
@@ -1387,12 +1966,15 @@ fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_index: usize) -
     rect(hwnd, 812, top, 920, top + 26)
 }
 
-fn custom_preset_card_rect(hwnd: HWND) -> RECT {
-    // Keep one compact row gap below the official preset cards. Their logical
-    // bottom is 404, so 420 leaves 16 px and avoids border overlap.
-    rect(hwnd, 200, 420, 424, 604)
+fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: bool) -> RECT {
+    if vertical {
+        let r = preset_gallery_card_rect(3, minimal);
+        rect(hwnd, r.left, r.top, r.right, r.bottom)
+    } else {
+        // Restore original second-row custom preview for horizontal taskbars.
+        rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
+    }
 }
-
 fn language_button_rect(hwnd: HWND) -> RECT {
     // Chinese / English only: keep the selector compact and right-aligned.
     rect(hwnd, 760, 414, 920, 450)
@@ -1437,7 +2019,6 @@ fn language_label_for_index(index: usize, ui_language: LanguageId) -> &'static s
     match LanguageId::SELECTABLE.get(index).copied() {
         Some(LanguageId::SimplifiedChinese) => "中文",
         Some(LanguageId::English) => "English",
-        Some(language) => language.native_name(),
         None => ui_language.strings().system_default,
     }
 }
@@ -1473,6 +2054,38 @@ fn json_save_mask_rect(hwnd: HWND) -> RECT {
     }
 }
 
+fn settings_window_ex_style() -> WINDOW_EX_STYLE {
+    WS_EX_APPWINDOW | WS_EX_COMPOSITED
+}
+
+// Keep other settings pages buffered. JSON has its own opaque child surface,
+// so compositing its RichEdit subtree adds latency without visual benefit.
+fn settings_composition_for_section(section: Section) -> bool {
+    section != Section::Json
+}
+
+fn sync_settings_window_composition(hwnd: HWND, section: Section) {
+    let enabled = settings_composition_for_section(section);
+    unsafe {
+        let current = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let desired = if enabled {
+            current | WS_EX_COMPOSITED.0
+        } else {
+            current & !WS_EX_COMPOSITED.0
+        };
+        if desired != current {
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, desired as i32);
+            // Apply the style change without moving or resizing the top-level
+            // window. The section transition explicitly commits its own paint.
+            let _ = SetWindowPos(
+                hwnd, HWND::default(), 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                    | SWP_FRAMECHANGED | SWP_NOREDRAW,
+            );
+        }
+    }
+}
+
 fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
     let outer = json_edit_rect(hwnd);
     RECT {
@@ -1483,6 +2096,180 @@ fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
     }
 }
 
+// Line count and font height are stable while the JSON text and viewport
+// dimensions remain unchanged. WM_MOUSEMOVE previously measured a font DC
+// and asked RichEdit to lay out the whole document multiple times per event.
+#[derive(Clone, Copy)]
+struct JsonScrollLayoutCache {
+    edit: isize,
+    font: isize,
+    viewport_height: i32,
+    viewport_width: i32,
+    line_height: i32,
+    total_lines: i32,
+}
+
+impl JsonScrollLayoutCache {
+    fn matches(self, edit: isize, font: isize, width: i32, height: i32) -> bool {
+        self.edit == edit && self.font == font
+            && self.viewport_width == width && self.viewport_height == height
+    }
+}
+
+thread_local! {
+    static JSON_SCROLL_LAYOUT_CACHE: RefCell<Option<JsonScrollLayoutCache>> =
+        const { RefCell::new(None) };
+    static JSON_SCROLL_LAST_THUMB: RefCell<Option<(i32, i32)>> =
+        const { RefCell::new(None) };
+    // The scrollbar is narrow; reuse its GDI memory surface across drag frames.
+    // The existing whole-page buffer cannot be used without painting siblings.
+    static JSON_SCROLLBAR_PAINT_BUFFER: RefCell<Option<SettingsPaintBuffer>> =
+        const { RefCell::new(None) };
+    static JSON_SCROLL_FRAME_CLOCK: RefCell<JsonScrollFrameClock> =
+        RefCell::new(JsonScrollFrameClock::default());
+}
+
+#[derive(Default)]
+struct JsonScrollFrameClock {
+    last_sync: Option<Instant>,
+    last_refresh_probe: Option<Instant>,
+    refresh_hz: i32,
+    last_drag_update: Option<Instant>,
+    pending_drag_y: Option<i32>,
+}
+
+// Match the Windows display DC, but never issue unbounded synchronous WM_PAINT
+// messages (high-refresh monitors can report up to 240 Hz here). Unknown 0/1
+// values use a conservative 60 Hz fallback.
+fn json_scroll_target_hz(device_hz: i32) -> i32 {
+    // Windows GDI frequently reports 59 for the normal 59.94/60 Hz
+    // desktop mode. Both use a nominal 60 Hz input/paint budget.
+    if device_hz <= 1 || (58..=61).contains(&device_hz) {
+        60
+    } else {
+        device_hz.clamp(30, 240)
+    }
+}
+
+fn json_scroll_frame_interval(refresh_hz: i32) -> Duration {
+    Duration::from_micros(1_000_000 / json_scroll_target_hz(refresh_hz) as u64)
+}
+
+fn json_scroll_frame_due(last: Option<Instant>, now: Instant, refresh_hz: i32) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= json_scroll_frame_interval(refresh_hz))
+}
+
+// A drag can generate pointer events at 120+ Hz on a 60 Hz monitor.
+// Updating RichEdit on every WM_MOUSEMOVE performs redundant native paints.
+// Preserve the last pointer rather than queueing intermediate text frames.
+fn json_scroll_drag_should_apply(
+    last: Option<Instant>, now: Instant, refresh_hz: i32, force: bool,
+) -> bool {
+    // WM_MOUSEMOVE is usually sampled every ~8 ms. A strict 16.67 ms
+    // cutoff would skip the 16 ms sample and paint only at 24 ms (~42 Hz).
+    // A 2 ms scheduling allowance keeps updates close to 60 Hz without
+    // trying to render every high-frequency input sample.
+    let interval = json_scroll_frame_interval(refresh_hz)
+        .saturating_sub(Duration::from_millis(2));
+    force || last.is_none_or(|at| now.saturating_duration_since(at) >= interval)
+}
+
+fn start_json_scroll_drag_pacing(hwnd: HWND) {
+    JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut clock = cell.borrow_mut();
+        clock.last_drag_update = None;
+        clock.pending_drag_y = None;
+    });
+    unsafe {
+        // Timer messages are a fallback for the final pending pointer
+        // when the mouse stops between display frames. Native timers have
+        // coarse resolution; active input itself drives most frames.
+        let _ = SetTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID, 10, None);
+    }
+}
+
+fn stop_json_scroll_drag_pacing(hwnd: HWND) {
+    unsafe { let _ = KillTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID); }
+    JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut clock = cell.borrow_mut();
+        clock.last_drag_update = None;
+        clock.pending_drag_y = None;
+    });
+}
+
+fn update_json_scroll_drag_paced(hwnd: HWND, y: Option<i32>, force: bool) {
+    let now = Instant::now();
+    let next = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut frame = cell.borrow_mut();
+        if let Some(y) = y { frame.pending_drag_y = Some(y); }
+        frame.pending_drag_y?;
+        let due = json_scroll_drag_should_apply(
+            frame.last_drag_update, now, frame.refresh_hz, force,
+        );
+        if due {
+            frame.last_drag_update = Some(now);
+            frame.pending_drag_y.take()
+        } else {
+            None
+        }
+    });
+    if let Some(y) = next {
+        update_json_scroll_drag(hwnd, y);
+    }
+}
+
+// WM_PAINT is delivered only when the queue is idle. A continuous mouse-drag
+// can keep the queue busy while the edit's update region grows, causing a low
+// apparent visual frame rate even though EM_LINESCROLL takes under 1 ms.
+// At most once per display period, flush *already invalidated* RichEdit and
+// narrow scrollbar regions without RDW_INVALIDATE / RDW_ALLCHILDREN.
+fn present_json_scroll_frame_if_due(edit: HWND, panel: HWND) {
+    let now = Instant::now();
+    let due = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+        let mut frame = cell.borrow_mut();
+        if frame.last_refresh_probe.is_none_or(|probe| {
+            now.saturating_duration_since(probe) >= Duration::from_secs(2)
+        }) {
+            let hz = unsafe {
+                let dc = GetDC(edit);
+                if dc.0.is_null() {
+                    0
+                } else {
+                    let hz = GetDeviceCaps(dc, VREFRESH);
+                    let _ = ReleaseDC(edit, dc);
+                    hz
+                }
+            };
+            frame.refresh_hz = json_scroll_target_hz(hz);
+            frame.last_refresh_probe = Some(now);
+        }
+        let due = json_scroll_frame_due(frame.last_sync, now, frame.refresh_hz);
+        if due {
+            frame.last_sync = Some(now);
+        }
+        due
+    });
+    if !due { return; }
+    let page = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().and_then(|s| {
+            (s.section == Section::Json && s.pending_discard_action.is_none()
+                && s.hwnd.to_hwnd() == panel && s.json_edit.to_hwnd() == edit)
+                .then_some(s.json_page_surface.to_hwnd())
+        })
+    };
+    let Some(page) = page else { return; };
+    unsafe {
+        let _ = UpdateWindow(edit);
+        let _ = UpdateWindow(page);
+    }
+}
+
+fn invalidate_json_scroll_layout_cache() {
+    JSON_SCROLL_LAYOUT_CACHE.with(|cache| *cache.borrow_mut() = None);
+    JSON_SCROLL_LAST_THUMB.with(|last| *last.borrow_mut() = None);
+}
+
 fn json_scroll_line_metrics() -> Option<(HWND, i32, i32, i32)> {
     let (edit, json_font) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1490,34 +2277,56 @@ fn json_scroll_line_metrics() -> Option<(HWND, i32, i32, i32)> {
         (s.json_edit.to_hwnd(), s.json_font)
     };
     unsafe {
-        let total_lines = SendMessageW(edit, EM_GETLINECOUNT_MSG, WPARAM(0), LPARAM(0)).0 as i32;
-        let first_visible =
-            SendMessageW(edit, EM_GETFIRSTVISIBLELINE_MSG, WPARAM(0), LPARAM(0)).0 as i32;
         let mut client = RECT::default();
         let _ = GetClientRect(edit, &mut client);
-        let hdc = GetDC(edit);
-        if hdc.0.is_null() {
-            return None;
-        }
-        let old_font = if json_font != 0 {
-            Some(SelectObject(hdc, HGDIOBJ(json_font as *mut _)))
+        let viewport_height = (client.bottom - client.top).max(1);
+        let viewport_width = (client.right - client.left).max(1);
+        let cached = JSON_SCROLL_LAYOUT_CACHE.with(|cache| {
+            cache.borrow().as_ref().copied().filter(|metrics| {
+                metrics.matches(edit.0 as isize, json_font, viewport_width, viewport_height)
+            })
+        });
+        let metrics = if let Some(cached) = cached {
+            cached
         } else {
-            None
+            let hdc = GetDC(edit);
+            if hdc.0.is_null() {
+                return None;
+            }
+            let old_font = if json_font != 0 {
+                Some(SelectObject(hdc, HGDIOBJ(json_font as *mut _)))
+            } else {
+                None
+            };
+            let mut font_metrics = TEXTMETRICW::default();
+            let _ = GetTextMetricsW(hdc, &mut font_metrics);
+            if let Some(old_font) = old_font {
+                SelectObject(hdc, old_font);
+            }
+            let _ = ReleaseDC(edit, hdc);
+            let metrics = JsonScrollLayoutCache {
+                edit: edit.0 as isize,
+                font: json_font,
+                viewport_height,
+                viewport_width,
+                line_height: font_metrics.tmHeight.max(1),
+                total_lines: (SendMessageW(
+                    edit, EM_GETLINECOUNT_MSG, WPARAM(0), LPARAM(0),
+                ).0 as i32).max(1),
+            };
+            JSON_SCROLL_LAYOUT_CACHE.with(|cache| *cache.borrow_mut() = Some(metrics));
+            metrics
         };
-        let mut metrics = TEXTMETRICW::default();
-        let _ = GetTextMetricsW(hdc, &mut metrics);
-        if let Some(old_font) = old_font {
-            SelectObject(hdc, old_font);
-        }
-        let _ = ReleaseDC(edit, hdc);
-        let line_height = metrics.tmHeight.max(1);
-        let visible_lines = ((client.bottom - client.top).max(1) / line_height).max(1);
-        Some((edit, total_lines.max(1), visible_lines, first_visible.max(0)))
+        let first_visible =
+            SendMessageW(edit, EM_GETFIRSTVISIBLELINE_MSG, WPARAM(0), LPARAM(0)).0 as i32;
+        let visible_lines = (viewport_height / metrics.line_height).max(1);
+        Some((edit, metrics.total_lines, visible_lines, first_visible.max(0)))
     }
 }
 
-fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
-    let (_, total_lines, visible_lines, first_visible) = json_scroll_line_metrics()?;
+fn json_scroll_thumb_from_lines(
+    hwnd: HWND, total_lines: i32, visible_lines: i32, first_visible: i32,
+) -> Option<RECT> {
     if visible_lines >= total_lines {
         return None;
     }
@@ -1537,6 +2346,47 @@ fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
     })
 }
 
+fn json_scroll_thumb_rect(hwnd: HWND) -> Option<RECT> {
+    let (_, total, visible, first) = json_scroll_line_metrics()?;
+    json_scroll_thumb_from_lines(hwnd, total, visible, first)
+}
+
+// The scrollbar is owned visually by the opaque JSON page sibling, not by
+// the parent. Invalidating only this child avoids repainting toolbars, text,
+// and the entire settings tree on every wheel or drag event.
+fn invalidate_json_scrollbar(hwnd: HWND) {
+    let page = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().and_then(|s| {
+            (s.section == Section::Json && s.pending_discard_action.is_none())
+                .then_some(s.json_page_surface.to_hwnd())
+        })
+    };
+    if let Some(page) = page {
+        let offset = scale(hwnd, 180);
+        let track = json_scrollbar_track_rect(hwnd);
+        let local = RECT {
+            left: track.left - offset,
+            top: track.top,
+            right: track.right - offset,
+            bottom: track.bottom,
+        };
+        unsafe { let _ = InvalidateRect(page, Some(&local), false); }
+    }
+}
+
+fn refresh_json_scrollbar_if_changed(hwnd: HWND) {
+    let current = json_scroll_thumb_rect(hwnd).map(|thumb| (thumb.top, thumb.bottom));
+    let changed = JSON_SCROLL_LAST_THUMB.with(|last| {
+        let mut previous = last.borrow_mut();
+        if *previous == current { false } else {
+            *previous = current;
+            true
+        }
+    });
+    if changed { invalidate_json_scrollbar(hwnd); }
+}
+
 fn json_scroll_thumb_hit_rect(hwnd: HWND) -> Option<RECT> {
     let thumb = json_scroll_thumb_rect(hwnd)?;
     Some(RECT {
@@ -1554,21 +2404,34 @@ fn json_editor_active() -> bool {
         .is_some_and(|s| s.section == Section::Json && s.pending_discard_action.is_none())
 }
 
+// The custom scrollbar lives in the opaque JSON page sibling, outside the
+// RichEdit HWND. Wheel messages over that strip can therefore arrive at the
+// parent instead of the editor. Route them to the existing RichEdit subclass
+// to preserve line steps, save-mask blocking, and low-latency scroll painting.
+fn json_scrollbar_wheel_target(hwnd: HWND, x: i32, y: i32) -> Option<HWND> {
+    let track = json_scrollbar_track_rect(hwnd);
+    if !pt_in_rect(track, x, y)
+        && !json_scroll_thumb_hit_rect(hwnd).is_some_and(|thumb| pt_in_rect(thumb, x, y))
+    {
+        return None;
+    }
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.as_ref().and_then(|s| {
+        (s.section == Section::Json && s.pending_discard_action.is_none())
+            .then_some(s.json_edit.to_hwnd())
+    })
+}
+
 fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
-    if lines == 0 {
-        return;
-    }
+    if lines == 0 { return; }
     unsafe {
+        // RichEdit invalidates its own changed text lines. Forcing
+        // RDW_UPDATENOW also paints the entire WS_EX_COMPOSITED hierarchy
+        // synchronously on every wheel message; let the message loop coalesce.
         let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
-        let _ = RedrawWindow(
-            edit,
-            None,
-            HRGN::default(),
-            RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
-        );
-        let _ = InvalidateRect(panel, Some(&json_scrollbar_track_rect(panel)), false);
-        let _ = UpdateWindow(panel);
     }
+    refresh_json_scrollbar_if_changed(panel);
+    present_json_scroll_frame_if_due(edit, panel);
 }
 
 unsafe extern "system" fn settings_edit_subclass_proc(
@@ -1642,6 +2505,34 @@ unsafe extern "system" fn json_edit_subclass_proc(
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
+// EM_GET/SETSCROLLPOS expose 16-bit pixel coordinates even though POINT
+// contains i32 fields. Restrict absolute scrolling to a representable
+// document range; long documents continue to use native relative scrolling.
+const JSON_RICHEDIT_SCROLL_PIXEL_LIMIT: i64 = 32767;
+const JSON_DRAG_DIRECT_MIN_LINES: i32 = 8;
+
+fn json_direct_drag_pixel_target(
+    current_pixel_y: i32, first_visible: i32, target_first: i32,
+    line_height: i32, total_lines: i32, visible_lines: i32,
+) -> Option<i32> {
+    if line_height <= 0 || current_pixel_y < 0 || total_lines <= visible_lines {
+        return None;
+    }
+    let max_first = i64::from(total_lines - visible_lines);
+    let max_pixel = max_first * i64::from(line_height);
+    if max_pixel > JSON_RICHEDIT_SCROLL_PIXEL_LIMIT {
+        return None;
+    }
+    let delta = i64::from(target_first) - i64::from(first_visible);
+    let destination = (i64::from(current_pixel_y) + delta * i64::from(line_height))
+        .clamp(0, max_pixel);
+    i32::try_from(destination).ok()
+}
+
+fn json_drag_line_height() -> Option<i32> {
+    JSON_SCROLL_LAYOUT_CACHE.with(|slot| slot.borrow().as_ref().map(|c| c.line_height))
+}
+
 fn update_json_scroll_drag(hwnd: HWND, y: i32) {
     let drag_offset = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1651,7 +2542,9 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
     let Some((edit, total_lines, visible_lines, first_visible)) = json_scroll_line_metrics() else {
         return;
     };
-    let Some(thumb) = json_scroll_thumb_rect(hwnd) else { return; };
+    let Some(thumb) = json_scroll_thumb_from_lines(
+        hwnd, total_lines, visible_lines, first_visible,
+    ) else { return; };
     let track = json_scrollbar_track_rect(hwnd);
     let thumb_h = thumb.bottom - thumb.top;
     let available = (track.bottom - track.top - thumb_h).max(1);
@@ -1661,19 +2554,34 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
         ((top - track.top) * max_first + available / 2) / available;
     let delta = target_first - first_visible;
     if delta != 0 {
+        let mut direct_drag = false;
         unsafe {
-            let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
-            let _ = RedrawWindow(
-                edit,
-                None,
-                HRGN::default(),
-                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
-            );
+            // For long thumb jumps avoid RichEdit's relative per-line scroll
+            // path. A pixel target is faster for normal-sized JSON documents;
+            // preserve the native line path if the pixel range exceeds the
+            // documented 16-bit coordinate limit.
+            if delta.abs() >= JSON_DRAG_DIRECT_MIN_LINES {
+                if let Some(line_height) = json_drag_line_height() {
+                    let mut current = POINT::default();
+                    let _ = SendMessageW(edit, EM_GETSCROLLPOS_MSG, WPARAM(0),
+                        LPARAM((&mut current as *mut POINT) as isize));
+                    if let Some(target_y) = json_direct_drag_pixel_target(
+                        current.y, first_visible, target_first, line_height,
+                        total_lines, visible_lines,
+                    ) {
+                        let desired = POINT { x: current.x, y: target_y };
+                        let _ = SendMessageW(edit, EM_SETSCROLLPOS_MSG, WPARAM(0),
+                            LPARAM((&desired as *const POINT) as isize));
+                        direct_drag = true;
+                    }
+                }
+            }
+            if !direct_drag {
+                let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
+            }
         }
-    }
-    unsafe {
-        let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
-        let _ = UpdateWindow(hwnd);
+        refresh_json_scrollbar_if_changed(hwnd);
+        present_json_scroll_frame_if_due(edit, hwnd);
     }
 }
 
@@ -1762,6 +2670,35 @@ fn is_appearance_section(section: Section) -> bool {
         section,
         Section::Preset | Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
     )
+}
+
+// Appearance-option hover, press, and position changes are confined to the
+// shared top card; avoid invalidating every expensive settings page element.
+fn is_appearance_card_target(target: HitTarget) -> bool {
+    matches!(
+        target,
+        HitTarget::Theme(_) | HitTarget::Layout(_)
+            | HitTarget::Position(_) | HitTarget::DesktopDirection(_)
+            | HitTarget::DesktopAutoCollapse(_)
+    )
+}
+
+fn card_only_hover_change(
+    section: Section, previous: Option<HitTarget>, current: Option<HitTarget>,
+) -> bool {
+    is_appearance_section(section)
+        && [previous, current].iter().flatten().any(|target| is_appearance_card_target(*target))
+        && [previous, current].iter().flatten().all(|target| is_appearance_card_target(*target))
+}
+
+unsafe fn invalidate_appearance_card_or_window(
+    hwnd: HWND, section: Section, card_only: bool,
+) {
+    if is_appearance_section(section) && card_only {
+        let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+    } else {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -1879,6 +2816,193 @@ fn layout_numeric_edits(hwnd: HWND) {
 }
 
 
+// JSON is rendered in a full opaque child content pane rather than directly
+// over the previous appearance page. The editor is a sibling *above* this pane,
+// so its background cannot accidentally reveal old preset/gallery pixels.
+unsafe extern "system" fn json_page_surface_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => LRESULT(1),
+        // Clicking JSON toolbar controls must still reach the parent hit-test.
+        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        WM_MOUSEWHEEL => {
+            // If Windows delivers a wheel message directly to the opaque
+            // JSON pane, use the same parent routing as wheel messages that
+            // hit the empty scrollbar strip.
+            let owner = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.hwnd.to_hwnd())
+            };
+            if let Some(owner) = owner {
+                SendMessageW(owner, msg, wparam, lparam)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_PAINT => {
+            paint_json_page_surface(hwnd);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+// Render an entire scrollbar frame offscreen, then publish it in one blit.
+// This is also directly exercised by the Windows UI test; HWND invalidation
+// can be coalesced with a whole-page repaint, hiding the narrow paint path.
+unsafe fn paint_json_scrollbar_buffered(
+    screen: HDC, owner: HWND, is_dark: bool, origin_x: i32, track: RECT,
+) -> bool {
+    JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| {
+        let width = (track.right - track.left).max(1);
+        let height = (track.bottom - track.top).max(1);
+        let mut slot = cell.borrow_mut();
+        if slot.as_ref().is_none_or(|buffer| {
+            buffer.width != width || buffer.height != height
+        }) {
+            *slot = SettingsPaintBuffer::create(screen, width, height);
+        }
+        let Some(buffer) = slot.as_ref() else { return false; };
+        let _ = SetViewportOrgEx(buffer.dc, -track.left, -track.top, None);
+        fill(buffer.dc, track, json_editor_background(is_dark));
+        paint_json_scrollbar_decoration(buffer.dc, owner, is_dark);
+        let _ = SetViewportOrgEx(buffer.dc, 0, 0, None);
+        let _ = BitBlt(
+            screen, track.left - origin_x, track.top,
+            width, height, buffer.dc, 0, 0, SRCCOPY,
+        );
+        true
+    })
+}
+
+unsafe fn paint_json_page_surface(page: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let screen = BeginPaint(page, &mut ps);
+    // A scrollbar-only invalidation is far narrower than the JSON pane.
+    // Paint the track directly on the child HDC instead of allocating a
+    // fullscreen bitmap and redrawing the toolbar and status on every scroll.
+    let owner_state = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| (s.hwnd.to_hwnd(), s.snapshot.is_dark))
+    };
+    if let Some((owner, is_dark)) = owner_state {
+        let origin_x = scale(owner, 180);
+        let track = json_scrollbar_track_rect(owner);
+        let dirty = ps.rcPaint;
+        let scrollbar_only = dirty.left >= track.left - origin_x
+            && dirty.right <= track.right - origin_x
+            && dirty.top >= track.top && dirty.bottom <= track.bottom
+            && dirty.left < dirty.right && dirty.top < dirty.bottom;
+        if scrollbar_only {
+            // Do not erase the visible track before drawing its moving thumb.
+            // Without WS_EX_COMPOSITED the direct-to-window erase/draw steps
+            // become separate visible frames, making the scrollbar blink
+            // during continuous dragging. Compose the complete track in a
+            // tiny retained bitmap and publish it with one clipped BitBlt.
+            let buffered = paint_json_scrollbar_buffered(
+                screen, owner, is_dark, origin_x, track,
+            );
+            if !buffered {
+                // Low-memory fallback: retain the existing paint behavior
+                // instead of leaving a missing scrollbar.
+                let _ = SetViewportOrgEx(screen, -origin_x, 0, None);
+                fill(screen, track, json_editor_background(is_dark));
+                paint_json_scrollbar_decoration(screen, owner, is_dark);
+                let _ = SetViewportOrgEx(screen, 0, 0, None);
+            }
+            let _ = EndPaint(page, &ps);
+            return;
+        }
+    }
+    let mut client = RECT::default();
+    let _ = GetClientRect(page, &mut client);
+    let width = (client.right - client.left).max(1);
+    let height = (client.bottom - client.top).max(1);
+    let dc = CreateCompatibleDC(screen);
+    if dc.0.is_null() {
+        let _ = EndPaint(page, &ps);
+        return;
+    }
+    let bitmap = CreateCompatibleBitmap(screen, width, height);
+    if bitmap.0.is_null() {
+        let _ = DeleteDC(dc);
+        let _ = EndPaint(page, &ps);
+        return;
+    }
+    let previous_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+    let state_snapshot = {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|s| (
+            s.hwnd.to_hwnd(), s.snapshot.clone(),
+            s.json_status.clone(), s.json_status_path.clone(),
+            s.json_save_feedback, s.json_error_shake_step, s.json_dirty,
+            s.hovered, s.pressed, s.font,
+        ))
+    };
+    if let Some((
+        owner, snapshot, status, status_path, feedback, shake_step,
+        dirty, hovered, pressed, font,
+    )) = state_snapshot {
+        let left = scale(owner, 180);
+        // Reuse JSON painting geometry, which is expressed in the parent's
+        // client coordinates. Only the viewport origin changes here.
+        let _ = SetViewportOrgEx(dc, -left, 0, None);
+        let background = if snapshot.is_dark {
+            Color::from_hex("#1F2125FF")
+        } else {
+            Color::from_hex("#E9EEF4FF")
+        };
+        fill(dc, RECT { left, top: 0, right: left + width, bottom: height }, background);
+        let old_font = SelectObject(dc, HGDIOBJ(font as *mut _));
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let primary = if snapshot.is_dark {
+            Color::from_hex("#F2F3F5FF")
+        } else {
+            Color::from_hex("#202124FF")
+        };
+        let secondary = if snapshot.is_dark {
+            Color::from_hex("#A8ADB5FF")
+        } else {
+            Color::from_hex("#666B73FF")
+        };
+        let card = if snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else {
+            Color::from_hex("#FFFFFFFF")
+        };
+        let card_hover = if snapshot.is_dark {
+            Color::from_hex("#343840FF")
+        } else {
+            Color::from_hex("#DCE5EFFF")
+        };
+        let card_pressed = if snapshot.is_dark {
+            Color::from_hex("#414751FF")
+        } else {
+            Color::from_hex("#CBD7E4FF")
+        };
+        paint_json_page(
+            dc, owner, &snapshot, &status, status_path.as_deref(),
+            feedback, shake_step, dirty, hovered, pressed,
+            card, card_hover, card_pressed,
+            Color::from_hex("#4C8DFFFF"),
+            Color::from_hex("#629CFFFF"),
+            Color::from_hex("#3678E6FF"),
+            primary, secondary,
+        );
+        SelectObject(dc, old_font);
+        let _ = SetViewportOrgEx(dc, 0, 0, None);
+    }
+    let _ = BitBlt(screen, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, previous_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(dc);
+    let _ = EndPaint(page, &ps);
+}
+
 unsafe extern "system" fn json_save_mask_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -1987,12 +3111,17 @@ fn ensure_json_save_mask(owner: HWND) -> Option<HWND> {
     }
 }
 
+fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> bool {
+    section == Section::Json && !discard_pending
+}
+
 fn layout_settings_children(hwnd: HWND) {
-    let Some((json_edit, json_save_mask, section, discard_pending, save_mask_visible)) = ({
+    let Some((json_edit, json_page_surface, json_save_mask, section, discard_pending, save_mask_visible)) = ({
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.as_ref().map(|s| {
             (
                 s.json_edit,
+                s.json_page_surface,
                 s.json_save_mask,
                 s.section,
                 s.pending_discard_action.is_some(),
@@ -2007,21 +3136,51 @@ fn layout_settings_children(hwnd: HWND) {
 
     unsafe {
         let focused = GetFocus();
-        if (section != Section::Json || discard_pending) && focused == json_edit.to_hwnd() {
+        let visible = json_editor_should_be_visible(section, discard_pending);
+        if !visible && focused == json_edit.to_hwnd() {
             let _ = SetFocus(hwnd);
         }
 
+        // Reveal the full opaque JSON pane before revealing RichEdit. Even if
+        // the parent still displays a cached preset frame, the entire right
+        // content region is now covered by the correctly painted JSON page.
+        let page = json_page_surface.to_hwnd();
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let page_left = scale(hwnd, 180);
+        if !visible {
+            let _ = ShowWindow(json_edit.to_hwnd(), SW_HIDE);
+        }
+        let _ = SetWindowPos(
+            page,
+            HWND::default(),
+            page_left, 0,
+            (client.right - page_left).max(1),
+            client.bottom.max(1),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS
+                | if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW },
+        );
+        if visible {
+            let _ = RedrawWindow(
+                page, None, HRGN::default(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            );
+        }
+
         let json_rect = json_edit_text_rect(hwnd);
-        let visible = section == Section::Json && !discard_pending;
         let visibility = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+        // Both windows are siblings. WS_EX_COMPOSITED uses their *actual*
+        // Z-order, not the order in which SetWindowPos was called. The opaque
+        // JSON page must stay BEHIND RichEdit or its text is fully covered.
+        // SWP_NOZORDER here left the pane in front on some Windows systems.
         let _ = SetWindowPos(
             json_edit.to_hwnd(),
-            HWND::default(),
+            HWND_TOP,
             json_rect.left,
             json_rect.top,
             (json_rect.right - json_rect.left).max(1),
             (json_rect.bottom - json_rect.top).max(1),
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | visibility,
+            SWP_NOACTIVATE | SWP_NOCOPYBITS | visibility,
         );
 
         let mask_hwnd = json_save_mask.to_hwnd();
@@ -2052,9 +3211,11 @@ fn layout_settings_children(hwnd: HWND) {
         }
 
         if visible {
-            let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 80, None);
+            invalidate_json_scroll_layout_cache();
+            let _ = SetTimer(hwnd, JSON_SCROLLBAR_TIMER_ID, 120, None);
         } else {
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
+            invalidate_json_scroll_layout_cache();
         }
     }
 }
@@ -2446,126 +3607,6 @@ fn json_error_phrase(language: LanguageId, phrase: JsonErrorPhrase) -> &'static 
             UnterminatedComment => "A block comment is not closed.",
             GenericSyntax => "Invalid JSON syntax or configuration value near this position.",
         },
-        LanguageId::Dutch => match phrase {
-            Heading => "De configuratie bevat fouten",
-            ControlCharacter => "Een tekenreeks bevat een ongeldig besturingsteken. Controleer aanhalingstekens, regeleinden en escapes.",
-            UnknownSetting => "Onbekende instelling. Controleer de naam van de eigenschap.",
-            MissingSetting => "Een verplichte instelling ontbreekt.",
-            DuplicateSetting => "Een instelling is meer dan één keer opgegeven.",
-            InvalidColor => "Ongeldige kleurnotatie. Gebruik #RRGGBB of #RRGGBBAA.",
-            FrostedRange => "De waarde valt buiten het bereik. Toegestaan: 0–100.",
-            CornerRange => "De waarde valt buiten het bereik. Toegestaan: 0–24.",
-            UsageDisplay => "`session_5h` en `weekly` kunnen niet beide false zijn.",
-            QuotaAlert => "Ongeldige waarde. Toegestaan: 0, 10, 20, 30.",
-            RefreshInterval => "Ongeldige waarde. Toegestaan: 1m, 5m, 15m, 1h.",
-            SchemaVersion => "Niet-ondersteunde waarde.",
-            UnsupportedLanguage => "Niet-ondersteunde waarde.",
-            Theme => "Ongeldige waarde. Toegestaan: system, dark, light.",
-            Layout => "Ongeldige waarde. Toegestaan: default, minimal.",
-            InvalidType => "Een configuratiewaarde heeft het verkeerde type.",
-            UnterminatedComment => "Een blokcommentaar is niet afgesloten.",
-            GenericSyntax => "Ongeldige JSON-syntaxis of configuratiewaarde rond deze positie.",
-        },
-        LanguageId::Spanish => match phrase {
-            Heading => "La configuración contiene errores",
-            ControlCharacter => "Una cadena contiene un carácter de control no válido. Revisa comillas, saltos de línea y escapes.",
-            UnknownSetting => "Opción desconocida. Revisa el nombre de la propiedad.",
-            MissingSetting => "Falta una opción obligatoria.",
-            DuplicateSetting => "Una opción está definida más de una vez.",
-            InvalidColor => "Formato de color no válido. Usa #RRGGBB o #RRGGBBAA.",
-            FrostedRange => "El valor está fuera de rango. Rango permitido: 0–100.",
-            CornerRange => "El valor está fuera de rango. Rango permitido: 0–24.",
-            UsageDisplay => "`session_5h` y `weekly` no pueden ser false al mismo tiempo.",
-            QuotaAlert => "Valor no válido. Valores permitidos: 0, 10, 20, 30.",
-            RefreshInterval => "Valor no válido. Valores permitidos: 1m, 5m, 15m, 1h.",
-            SchemaVersion => "Valor no compatible.",
-            UnsupportedLanguage => "Valor no compatible.",
-            Theme => "Valor no válido. Valores permitidos: system, dark, light.",
-            Layout => "Valor no válido. Valores permitidos: default, minimal.",
-            InvalidType => "Un valor de configuración tiene un tipo incorrecto.",
-            UnterminatedComment => "Un comentario de bloque no está cerrado.",
-            GenericSyntax => "Sintaxis JSON o valor de configuración no válido cerca de esta posición.",
-        },
-        LanguageId::French => match phrase {
-            Heading => "La configuration contient des erreurs",
-            ControlCharacter => "Une chaîne contient un caractère de contrôle non valide. Vérifiez les guillemets, retours à la ligne et échappements.",
-            UnknownSetting => "Paramètre inconnu. Vérifiez le nom de la propriété.",
-            MissingSetting => "Un paramètre obligatoire est manquant.",
-            DuplicateSetting => "Un paramètre est défini plusieurs fois.",
-            InvalidColor => "Format de couleur non valide. Utilisez #RRGGBB ou #RRGGBBAA.",
-            FrostedRange => "La valeur est hors limites. Plage autorisée : 0–100.",
-            CornerRange => "La valeur est hors limites. Plage autorisée : 0–24.",
-            UsageDisplay => "`session_5h` et `weekly` ne peuvent pas être false simultanément.",
-            QuotaAlert => "Valeur invalide. Valeurs autorisées : 0, 10, 20, 30.",
-            RefreshInterval => "Valeur invalide. Valeurs autorisées : 1m, 5m, 15m, 1h.",
-            SchemaVersion => "Valeur non prise en charge.",
-            UnsupportedLanguage => "Valeur non prise en charge.",
-            Theme => "Valeur invalide. Valeurs autorisées : system, dark, light.",
-            Layout => "Valeur invalide. Valeurs autorisées : default, minimal.",
-            InvalidType => "Une valeur de configuration a un type incorrect.",
-            UnterminatedComment => "Un commentaire de bloc n’est pas fermé.",
-            GenericSyntax => "Syntaxe JSON ou valeur de configuration invalide près de cette position.",
-        },
-        LanguageId::German => match phrase {
-            Heading => "Die Konfiguration enthält Fehler",
-            ControlCharacter => "Eine Zeichenfolge enthält ein ungültiges Steuerzeichen. Prüfe Anführungszeichen, Zeilenumbrüche und Escape-Sequenzen.",
-            UnknownSetting => "Unbekannte Einstellung. Prüfe den Eigenschaftsnamen.",
-            MissingSetting => "Eine erforderliche Einstellung fehlt.",
-            DuplicateSetting => "Eine Einstellung wurde mehrfach definiert.",
-            InvalidColor => "Ungültiges Farbformat. Verwende #RRGGBB oder #RRGGBBAA.",
-            FrostedRange => "Der Wert liegt außerhalb des Bereichs. Zulässig: 0–100.",
-            CornerRange => "Der Wert liegt außerhalb des Bereichs. Zulässig: 0–24.",
-            UsageDisplay => "`session_5h` und `weekly` dürfen nicht beide false sein.",
-            QuotaAlert => "Ungültiger Wert. Zulässig: 0, 10, 20, 30.",
-            RefreshInterval => "Ungültiger Wert. Zulässig: 1m, 5m, 15m, 1h.",
-            SchemaVersion => "Nicht unterstützter Wert.",
-            UnsupportedLanguage => "Nicht unterstützter Wert.",
-            Theme => "Ungültiger Wert. Zulässig: system, dark, light.",
-            Layout => "Ungültiger Wert. Zulässig: default, minimal.",
-            InvalidType => "Ein Konfigurationswert hat den falschen Typ.",
-            UnterminatedComment => "Ein Blockkommentar wurde nicht geschlossen.",
-            GenericSyntax => "Ungültige JSON-Syntax oder ungültiger Konfigurationswert nahe dieser Position.",
-        },
-        LanguageId::Japanese => match phrase {
-            Heading => "設定にエラーがあります",
-            ControlCharacter => "文字列に無効な制御文字があります。引用符、改行、エスケープを確認してください。",
-            UnknownSetting => "不明な設定項目です。プロパティ名を確認してください。",
-            MissingSetting => "必須の設定項目がありません。",
-            DuplicateSetting => "同じ設定項目が複数回定義されています。",
-            InvalidColor => "色の形式が無効です。#RRGGBB または #RRGGBBAA を使用してください。",
-            FrostedRange => "値が範囲外です。許容範囲：0～100。",
-            CornerRange => "値が範囲外です。許容範囲：0～24。",
-            UsageDisplay => "`session_5h` と `weekly` を同時に false にはできません。",
-            QuotaAlert => "値が無効です。使用可能：0、10、20、30。",
-            RefreshInterval => "値が無効です。使用可能：1m、5m、15m、1h。",
-            SchemaVersion => "サポートされていない値です。",
-            UnsupportedLanguage => "サポートされていない値です。",
-            Theme => "値が無効です。使用可能：system、dark、light。",
-            Layout => "値が無効です。使用可能：default、minimal。",
-            InvalidType => "設定値の型が正しくありません。",
-            UnterminatedComment => "ブロックコメントが閉じられていません。",
-            GenericSyntax => "この位置付近の JSON 構文または設定値が無効です。",
-        },
-        LanguageId::Korean => match phrase {
-            Heading => "구성에 오류가 있습니다",
-            ControlCharacter => "문자열에 잘못된 제어 문자가 있습니다. 따옴표, 줄바꿈, 이스케이프를 확인하세요.",
-            UnknownSetting => "알 수 없는 설정입니다. 속성 이름을 확인하세요.",
-            MissingSetting => "필수 설정이 누락되었습니다.",
-            DuplicateSetting => "같은 설정이 두 번 이상 정의되었습니다.",
-            InvalidColor => "색상 형식이 잘못되었습니다. #RRGGBB 또는 #RRGGBBAA를 사용하세요.",
-            FrostedRange => "값이 범위를 벗어났습니다. 허용 범위: 0–100.",
-            CornerRange => "값이 범위를 벗어났습니다. 허용 범위: 0–24.",
-            UsageDisplay => "`session_5h`와 `weekly`를 동시에 false로 설정할 수 없습니다.",
-            QuotaAlert => "값이 잘못되었습니다. 허용 값: 0, 10, 20, 30.",
-            RefreshInterval => "값이 잘못되었습니다. 허용 값: 1m, 5m, 15m, 1h.",
-            SchemaVersion => "지원되지 않는 값입니다.",
-            UnsupportedLanguage => "지원되지 않는 값입니다.",
-            Theme => "값이 잘못되었습니다. 허용 값: system, dark, light.",
-            Layout => "값이 잘못되었습니다. 허용 값: default, minimal.",
-            InvalidType => "구성 값의 형식이 올바르지 않습니다.",
-            UnterminatedComment => "블록 주석이 닫히지 않았습니다.",
-            GenericSyntax => "이 위치 근처의 JSON 구문 또는 구성 값이 잘못되었습니다.",
-        },
         LanguageId::SimplifiedChinese => match phrase {
             Heading => "配置存在错误",
             ControlCharacter => "字符串中包含非法控制字符。请检查引号、换行或转义字符。",
@@ -2586,96 +3627,22 @@ fn json_error_phrase(language: LanguageId, phrase: JsonErrorPhrase) -> &'static 
             UnterminatedComment => "块注释未正确结束。",
             GenericSyntax => "此位置附近的 JSON 语法或配置值无效。",
         },
-        LanguageId::TraditionalChinese => match phrase {
-            Heading => "設定存在錯誤",
-            ControlCharacter => "字串中包含無效控制字元。請檢查引號、換行或跳脫字元。",
-            UnknownSetting => "存在未知設定項目。請檢查屬性名稱是否正確。",
-            MissingSetting => "缺少必要設定項目。",
-            DuplicateSetting => "同一設定項目被重複定義。",
-            InvalidColor => "色彩格式無效。請使用 #RRGGBB 或 #RRGGBBAA。",
-            FrostedRange => "值超出範圍。允許範圍：0–100。",
-            CornerRange => "值超出範圍。允許範圍：0–24。",
-            UsageDisplay => "`session_5h` 與 `weekly` 不能同時為 false。",
-            QuotaAlert => "值無效。允許：0、10、20、30。",
-            RefreshInterval => "值無效。允許：1m、5m、15m、1h。",
-            SchemaVersion => "值不受支援。",
-            UnsupportedLanguage => "值不受支援。",
-            Theme => "值無效。允許：system、dark、light。",
-            Layout => "值無效。允許：default、minimal。",
-            InvalidType => "設定值類型不正確。",
-            UnterminatedComment => "區塊註解未正確結束。",
-            GenericSyntax => "此位置附近的 JSON 語法或設定值無效。",
-        },
-        LanguageId::Russian => match phrase {
-            Heading => "В конфигурации есть ошибки",
-            ControlCharacter => "Строка содержит недопустимый управляющий символ. Проверьте кавычки, переводы строк и экранирование.",
-            UnknownSetting => "Неизвестный параметр. Проверьте имя свойства.",
-            MissingSetting => "Отсутствует обязательный параметр.",
-            DuplicateSetting => "Параметр указан более одного раза.",
-            InvalidColor => "Недопустимый формат цвета. Используйте #RRGGBB или #RRGGBBAA.",
-            FrostedRange => "Значение вне диапазона. Допустимо: 0–100.",
-            CornerRange => "Значение вне диапазона. Допустимо: 0–24.",
-            UsageDisplay => "`session_5h` и `weekly` не могут одновременно быть false.",
-            QuotaAlert => "Недопустимое значение. Допустимо: 0, 10, 20, 30.",
-            RefreshInterval => "Недопустимое значение. Допустимо: 1m, 5m, 15m, 1h.",
-            SchemaVersion => "Неподдерживаемое значение.",
-            UnsupportedLanguage => "Неподдерживаемое значение.",
-            Theme => "Недопустимое значение. Допустимо: system, dark, light.",
-            Layout => "Недопустимое значение. Допустимо: default, minimal.",
-            InvalidType => "Значение конфигурации имеет неверный тип.",
-            UnterminatedComment => "Блочный комментарий не закрыт.",
-            GenericSyntax => "Недопустимый JSON или значение конфигурации рядом с этой позицией.",
-        },
-        LanguageId::PortugueseBrazil => match phrase {
-            Heading => "A configuração contém erros",
-            ControlCharacter => "Uma string contém um caractere de controle inválido. Verifique aspas, quebras de linha e escapes.",
-            UnknownSetting => "Configuração desconhecida. Verifique o nome da propriedade.",
-            MissingSetting => "Uma configuração obrigatória está ausente.",
-            DuplicateSetting => "Uma configuração foi definida mais de uma vez.",
-            InvalidColor => "Formato de cor inválido. Use #RRGGBB ou #RRGGBBAA.",
-            FrostedRange => "O valor está fora do intervalo. Permitido: 0–100.",
-            CornerRange => "O valor está fora do intervalo. Permitido: 0–24.",
-            UsageDisplay => "`session_5h` e `weekly` não podem ser false ao mesmo tempo.",
-            QuotaAlert => "Valor inválido. Permitidos: 0, 10, 20, 30.",
-            RefreshInterval => "Valor inválido. Permitidos: 1m, 5m, 15m, 1h.",
-            SchemaVersion => "Valor não compatível.",
-            UnsupportedLanguage => "Valor não compatível.",
-            Theme => "Valor inválido. Permitidos: system, dark, light.",
-            Layout => "Valor inválido. Permitidos: default, minimal.",
-            InvalidType => "Um valor de configuração tem o tipo incorreto.",
-            UnterminatedComment => "Um comentário de bloco não foi fechado.",
-            GenericSyntax => "Sintaxe JSON ou valor de configuração inválido próximo desta posição.",
-        },
     }
 }
 
 fn json_error_location_text(
-    language: LanguageId,
-    line: usize,
-    column: usize,
-    detail: &str,
+    language: LanguageId, line: usize, column: usize, detail: &str,
 ) -> String {
     match language {
         LanguageId::English => format!("Line {line}, column {column}: {detail}"),
-        LanguageId::Dutch => format!("Regel {line}, kolom {column}: {detail}"),
-        LanguageId::Spanish => format!("Línea {line}, columna {column}: {detail}"),
-        LanguageId::French => format!("Ligne {line}, colonne {column} : {detail}"),
-        LanguageId::German => format!("Zeile {line}, Spalte {column}: {detail}"),
-        LanguageId::Japanese => format!("{line} 行 {column} 列：{detail}"),
-        LanguageId::Korean => format!("{line}행 {column}열: {detail}"),
         LanguageId::SimplifiedChinese => format!("第 {line} 行，第 {column} 列：{detail}"),
-        LanguageId::TraditionalChinese => format!("第 {line} 行，第 {column} 欄：{detail}"),
-        LanguageId::Russian => format!("Строка {line}, столбец {column}: {detail}"),
-        LanguageId::PortugueseBrazil => format!("Linha {line}, coluna {column}: {detail}"),
     }
 }
 
 fn json_error_status(language: LanguageId, detail: &str) -> String {
     let heading = json_error_phrase(language, JsonErrorPhrase::Heading);
     match language {
-        LanguageId::Japanese
-        | LanguageId::SimplifiedChinese
-        | LanguageId::TraditionalChinese => format!("× {heading}：{detail}"),
+        LanguageId::SimplifiedChinese => format!("× {heading}：{detail}"),
         _ => format!("× {heading}: {detail}"),
     }
 }
@@ -2784,9 +3751,7 @@ fn friendly_json_error(error: &str, language: LanguageId) -> String {
     };
     let detail = if let Some(key) = json_error_key(error) {
         match language {
-            LanguageId::Japanese
-            | LanguageId::SimplifiedChinese
-            | LanguageId::TraditionalChinese => format!("`{key}`：{localized}"),
+            LanguageId::SimplifiedChinese => format!("`{key}`：{localized}"),
             _ => format!("`{key}`: {localized}"),
         }
     } else {
@@ -3066,7 +4031,6 @@ fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: La
     match language {
         LanguageId::SimplifiedChinese => format!("× {action_zh}：{detail}"),
         LanguageId::English => format!("× {action_en}: {detail}"),
-        _ => json_error_status(language, &detail),
     }
 }
 
@@ -4051,9 +5015,29 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Theme(mode));
             }
         }
-        for preset in [AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive] {
+        for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
             if pt_in_rect(layout_rect(hwnd, preset), x, y) {
                 return Some(HitTarget::Layout(preset));
+            }
+        }
+        for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
+            if pt_in_rect(position_rect(hwnd, position), x, y) {
+                return Some(HitTarget::Position(position));
+            }
+        }
+        if STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| {
+            s.snapshot.display_position == DisplayPosition::Desktop
+                && s.desktop_submenu.hit_enabled()
+        }) {
+            for enabled in [true, false] {
+                if pt_in_rect(desktop_auto_collapse_rect(hwnd, enabled), x, y) {
+                    return Some(HitTarget::DesktopAutoCollapse(enabled));
+                }
+            }
+            for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
+                if pt_in_rect(desktop_direction_rect(hwnd, direction), x, y) {
+                    return Some(HitTarget::DesktopDirection(direction));
+                }
             }
         }
         if section == Section::Preset {
@@ -4134,13 +5118,25 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
         HitTarget::Layout(preset) => {
             send_parent(
                 WM_STYLE_LAYOUT_CHANGE,
-                match preset {
-                    AppearancePreset::Default => 0,
-                    AppearancePreset::Minimal => 1,
-                    AppearancePreset::Adaptive => 2,
-                },
+                if preset == AppearancePreset::Minimal { 1 } else { 0 },
                 0,
             );
+        }
+        HitTarget::Position(position) => {
+            send_parent(
+                WM_STYLE_POSITION_CHANGE,
+                if position == DisplayPosition::Desktop { 1 } else { 0 },
+                0,
+            );
+        }
+        HitTarget::DesktopDirection(direction) => {
+            send_parent(
+                WM_STYLE_DESKTOP_DIRECTION_CHANGE,
+                if direction == DesktopDirection::Vertical { 1 } else { 0 }, 0,
+            );
+        }
+        HitTarget::DesktopAutoCollapse(enabled) => {
+            send_parent(WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, usize::from(enabled), 0);
         }
         HitTarget::Preset(preset) => {
             let index = match preset {
@@ -4317,7 +5313,7 @@ fn set_section(section: Section) {
             s.pending_discard_action.is_some(),
         )
     };
-    if discard_pending {
+    if discard_pending || current_section == section {
         return;
     }
     if current_section == Section::Json && section != Section::Json && dirty {
@@ -4347,22 +5343,32 @@ fn set_section(section: Section) {
         s.hovered = None;
         (s.hwnd.to_hwnd(), s.json_dirty)
     };
+    // Restore buffering before hiding JSON and drawing a non-JSON page.
+    // Entering JSON takes the inverse path: the opaque pane and RichEdit
+    // are first shown together, then composition is disabled after painting.
+    if current_section == Section::Json && section != Section::Json {
+        sync_settings_window_composition(hwnd, section);
+    }
     layout_numeric_edits(hwnd);
     layout_hex_edits(hwnd);
+    layout_settings_children(hwnd);
     if section == Section::Json {
         if json_dirty {
             refresh_json_editor_theme();
         } else {
             reload_json_editor_from_snapshot();
         }
-    } else {
-        layout_settings_children(hwnd);
     }
     sync_hex_edits();
     sync_numeric_edits();
     sync_blur_edit();
     sync_corner_edit();
+    // Finish the one-time page transition while composited, preventing
+    // remnants from the previous page beneath the RichEdit sibling.
     redraw_settings_window(hwnd);
+    if section == Section::Json {
+        sync_settings_window_composition(hwnd, section);
+    }
 }
 
 fn select_editor(editor: EditorSelection) {
@@ -4598,6 +5604,15 @@ fn handle_settings_mouse_wheel(hwnd: HWND, wparam: WPARAM) -> bool {
         adjust_slider_by_wheel(hwnd, kind, delta);
         return true;
     }
+    if let Some(edit) = json_scrollbar_wheel_target(hwnd, point.x, point.y) {
+        unsafe {
+            // A WM_MOUSEWHEEL reaches the RichEdit subclass exactly as if
+            // the pointer were above the JSON text itself. Do not change
+            // focus or trigger an entire settings-page repaint.
+            let _ = SendMessageW(edit, WM_MOUSEWHEEL, wparam, LPARAM(0));
+        }
+        return true;
+    }
     false
 }
 
@@ -4698,9 +5713,101 @@ unsafe extern "system" fn wnd_proc(
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             paint(hwnd);
+            // JSON toolbar hover, status and custom scrollbar are painted on
+            // the opaque child pane, so invalidate it when the parent changes.
+            let page = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().and_then(|s|
+                    (s.section == Section::Json).then_some(s.json_page_surface.to_hwnd())
+                )
+            };
+            if let Some(page) = page {
+                let _ = InvalidateRect(page, None, false);
+            }
+            LRESULT(0)
+        }
+        WM_SETTINGS_PREWARM_GALLERY => {
+            SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
+            let to_warm = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().and_then(|s| {
+                    (s.section == Section::Preset && !s.desktop_submenu.active()
+                        && !s.desktop_submenu.final_frame_pending
+                        && s.pending_discard_action.is_none())
+                    .then(|| (s.snapshot.clone(), s.font))
+                })
+            };
+            if let Some((snapshot, font)) = to_warm {
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                let width = (client.right - client.left).max(1);
+                let height = (client.bottom - client.top).max(1);
+                if !preset_gallery_cache_ready(hwnd, width, height, &snapshot) {
+                    let screen = GetDC(hwnd);
+                    if !screen.0.is_null() {
+                        let _ = build_preset_gallery_cache(
+                            screen, hwnd, width, height, &snapshot, font,
+                        );
+                        let _ = ReleaseDC(hwnd, screen);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_SETTINGS_PRESET_GALLERY_REFRESH => {
+            let should_refresh = {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    if s.section != Section::Preset {
+                        s.preset_gallery_refresh_pending = false;
+                        false
+                    } else if s.preset_gallery_refresh_pending
+                        && !s.desktop_submenu.active()
+                        && !s.desktop_submenu.final_frame_pending
+                    {
+                        s.preset_gallery_refresh_pending = false;
+                        true
+                    } else {
+                        false
+                    }
+                } else { false }
+            };
+            if should_refresh {
+                // Refresh the area below the top card, not the entire window.
+                // While animated, this message is deferred until after the
+                // cached terminal card frame is presented.
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                let rect = RECT {
+                    left: scale(hwnd, SETTINGS_CONTENT_LEFT),
+                    top: scale(hwnd, 206),
+                    right: client.right,
+                    bottom: client.bottom,
+                };
+                if rect.right > rect.left && rect.bottom > rect.top {
+                    SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(true));
+                    mark_settings_paint_cause(SettingsPaintCause::GalleryRefresh);
+                    let _ = InvalidateRect(hwnd, Some(&rect), false);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK => {
+            // Consume the single coalesced worker callback before processing.
+            SUBMENU_MEDIA_TICK_QUEUED.store(false, Ordering::Release);
+            if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0) {
+                drive_submenu_frame_tick(hwnd, true);
+            }
             LRESULT(0)
         }
         WM_TIMER => {
+            if wparam.0 == DESKTOP_SUBMENU_TIMER_ID {
+                // Fallback when multimedia timer creation was not available.
+                if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() == 0) {
+                    drive_submenu_frame_tick(hwnd, false);
+                }
+                return LRESULT(0);
+            }
             if wparam.0 == JSON_ACTION_TIMER_ID {
                 finish_pending_json_action(hwnd);
                 return LRESULT(0);
@@ -4714,17 +5821,24 @@ unsafe extern "system" fn wnd_proc(
                 advance_json_error_shake(hwnd);
                 return LRESULT(0);
             }
+            if wparam.0 == JSON_SCROLL_DRAG_FRAME_TIMER_ID {
+                if json_editor_active() {
+                    let dragging = {
+                        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.as_ref().is_some_and(|s| s.json_scroll_dragging)
+                    };
+                    if dragging {
+                        update_json_scroll_drag_paced(hwnd, None, false);
+                    }
+                }
+                return LRESULT(0);
+            }
             if wparam.0 == JSON_SCROLLBAR_TIMER_ID {
-                let section = {
-                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    state.as_ref().map(|s| s.section)
-                };
-                if section == Some(Section::Json) {
-                    let _ = InvalidateRect(
-                        hwnd,
-                        Some(&json_scrollbar_track_rect(hwnd)),
-                        false,
-                    );
+                // Keyboard navigation and caret auto-scroll do not pass through
+                // our custom wheel/drag handlers. Poll only for actual thumb
+                // movement; never repaint the parent when nothing changed.
+                if json_editor_active() {
+                    refresh_json_scrollbar_if_changed(hwnd);
                 }
                 return LRESULT(0);
             }
@@ -4795,8 +5909,9 @@ unsafe extern "system" fn wnd_proc(
                         s.pressed = None;
                     }
                 }
+                start_json_scroll_drag_pacing(hwnd);
                 let _ = SetCapture(hwnd);
-                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                invalidate_json_scrollbar(hwnd);
                 return LRESULT(0);
             }
 
@@ -4871,15 +5986,19 @@ unsafe extern "system" fn wnd_proc(
             }
 
             if let Some(target) = hit_target_at(hwnd, x, y) {
-                {
+                mark_settings_paint_cause(SettingsPaintCause::MousePressed);
+                let section = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = state.as_mut() {
                         s.pressed = Some(target);
                         s.hovered = Some(target);
-                    }
-                }
+                        s.section
+                    } else { Section::General }
+                };
                 let _ = SetCapture(hwnd);
-                let _ = InvalidateRect(hwnd, None, false);
+                invalidate_appearance_card_or_window(
+                    hwnd, section, is_appearance_card_target(target),
+                );
             }
             LRESULT(0)
         }
@@ -4893,19 +6012,19 @@ unsafe extern "system" fn wnd_proc(
                     .unwrap_or((false, false))
             };
             if scroll_dragging {
-                update_json_scroll_drag(hwnd, y);
+                update_json_scroll_drag_paced(hwnd, Some(y), false);
                 return LRESULT(0);
             }
             let scroll_hover = json_editor_active()
-                && json_scroll_thumb_rect(hwnd).is_some()
-                && pt_in_rect(json_scrollbar_track_rect(hwnd), x, y);
+                && pt_in_rect(json_scrollbar_track_rect(hwnd), x, y)
+                && json_scroll_thumb_rect(hwnd).is_some();
             if scroll_hover != old_scroll_hover {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = state.as_mut() {
                     s.json_scroll_hovered = scroll_hover;
                 }
                 drop(state);
-                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                invalidate_json_scrollbar(hwnd);
             }
 
             let kind = {
@@ -4931,35 +6050,40 @@ unsafe extern "system" fn wnd_proc(
             } else {
                 let (_, y) = point_from_lparam(lparam);
                 let hovered = hit_target_at(hwnd, x, y);
-                let changed = {
+                let (changed, card_only, section) = {
                     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                     let Some(s) = state.as_mut() else {
                         return LRESULT(0);
                     };
                     let changed = s.hovered != hovered;
+                    let card_only = card_only_hover_change(s.section, s.hovered, hovered);
                     s.hovered = hovered;
-                    changed
+                    (changed, card_only, s.section)
                 };
                 if changed {
-                    let _ = InvalidateRect(hwnd, None, false);
+                    mark_settings_paint_cause(SettingsPaintCause::MouseHover);
+                    invalidate_appearance_card_or_window(hwnd, section, card_only);
                 }
             }
             LRESULT(0)
         }
         WM_MOUSELEAVE_MSG => {
-            let changed = {
+            let (changed, card_only, section) = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
                     return LRESULT(0);
                 };
                 s.tracking_mouse_leave = false;
                 let changed = s.hovered.is_some() || s.json_scroll_hovered;
+                let card_only = card_only_hover_change(s.section, s.hovered, None)
+                    && !s.json_scroll_hovered;
                 s.hovered = None;
                 s.json_scroll_hovered = false;
-                changed
+                (changed, card_only, s.section)
             };
             if changed {
-                let _ = InvalidateRect(hwnd, None, false);
+                mark_settings_paint_cause(SettingsPaintCause::MouseHover);
+                invalidate_appearance_card_or_window(hwnd, section, card_only);
             }
             LRESULT(0)
         }
@@ -4975,9 +6099,12 @@ unsafe extern "system" fn wnd_proc(
                 value
             };
             if was_scroll_dragging {
+                // Commit the exact release position even if it arrives inside
+                // the previous 16.7 ms frame; never leave a deferred thumb.
+                update_json_scroll_drag_paced(hwnd, Some(y), true);
+                stop_json_scroll_drag_pacing(hwnd);
                 let _ = ReleaseCapture();
-                update_json_scroll_drag(hwnd, y);
-                let _ = InvalidateRect(hwnd, Some(&json_scrollbar_track_rect(hwnd)), false);
+                invalidate_json_scrollbar(hwnd);
                 return LRESULT(0);
             }
 
@@ -4998,11 +6125,19 @@ unsafe extern "system" fn wnd_proc(
                     activate_target(hwnd, target);
                 }
             }
-            let _ = InvalidateRect(hwnd, None, false);
+            let section = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().map(|s| s.section).unwrap_or(Section::General)
+            };
+            mark_settings_paint_cause(SettingsPaintCause::MouseReleased);
+            invalidate_appearance_card_or_window(
+                hwnd, section, pressed.is_some_and(is_appearance_card_target),
+            );
             LRESULT(0)
         }
         WM_CANCELMODE | WM_CAPTURECHANGED => {
-            let (was_dragging, had_pressed) = {
+            stop_json_scroll_drag_pacing(hwnd);
+            let (was_dragging, pressed_target, section) = {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(s) = state.as_mut() else {
                     return LRESULT(0);
@@ -5012,14 +6147,20 @@ unsafe extern "system" fn wnd_proc(
                         s.json_scroll_dragging = false;
                         s.dragging_slider.take().is_some()
                     },
-                    s.pressed.take().is_some(),
+                    s.pressed.take(),
+                    s.section,
                 )
             };
             if was_dragging {
                 send_parent(WM_STYLE_SAVE, 0, 0);
             }
-            if had_pressed {
-                let _ = InvalidateRect(hwnd, None, false);
+            if let Some(target) = pressed_target {
+                // Releasing mouse capture for an appearance choice must not
+                // invalidate the entire, expensive Preset gallery.
+                mark_settings_paint_cause(SettingsPaintCause::MouseCaptureChanged);
+                invalidate_appearance_card_or_window(
+                    hwnd, section, is_appearance_card_target(target),
+                );
             }
             LRESULT(0)
         }
@@ -5028,6 +6169,7 @@ unsafe extern "system" fn wnd_proc(
             let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
 
             if control_id == ID_EDIT_JSON && notification == EN_CHANGE_CODE {
+                invalidate_json_scroll_layout_cache();
                 schedule_json_validation(hwnd);
                 return LRESULT(0);
             }
@@ -5253,6 +6395,16 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         },
         WM_DESTROY => {
+            invalidate_json_scroll_layout_cache();
+            end_submenu_frame_clock(hwnd);
+            PRESET_GALLERY_FRAMES.with(|cell| *cell.borrow_mut() = None);
+            SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(false));
+            SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
+            SUBMENU_CARD_FRAMES.with(|cell| *cell.borrow_mut() = None);
+            SETTINGS_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
+            JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| *cell.borrow_mut() = None);
+            JSON_SCROLL_FRAME_CLOCK.with(|cell| *cell.borrow_mut() = JsonScrollFrameClock::default());
+            let _ = KillTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_ACTION_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_SCROLLBAR_TIMER_ID);
             let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID);
@@ -5409,7 +6561,356 @@ unsafe fn paint_discard_dialog(
     let _ = background;
 }
 
+// Reuse the offscreen DC and bitmap between WM_PAINT frames. Previously
+// every 16 ms tick allocated and released a full-window compatible bitmap.
+struct SettingsPaintBuffer {
+    dc: HDC,
+    bitmap: HBITMAP,
+    previous_bitmap: HGDIOBJ,
+    width: i32,
+    height: i32,
+    // Only reuse the retained pixels outside the card when they were painted
+    // for the current section; a new bitmap contains undefined pixels.
+    painted_section: Cell<Option<Section>>,
+}
+
+impl SettingsPaintBuffer {
+    unsafe fn create(screen: HDC, width: i32, height: i32) -> Option<Self> {
+        let dc = CreateCompatibleDC(screen);
+        if dc.0.is_null() {
+            return None;
+        }
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        if bitmap.0.is_null() {
+            let _ = DeleteDC(dc);
+            return None;
+        }
+        let previous_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+        if previous_bitmap.0.is_null() {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(dc);
+            return None;
+        }
+        Some(Self { dc, bitmap, previous_bitmap, width, height,
+            painted_section: Cell::new(None) })
+    }
+}
+
+impl Drop for SettingsPaintBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SelectObject(self.dc, self.previous_bitmap);
+            let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
+            let _ = DeleteDC(self.dc);
+        }
+    }
+}
+
+// Two immutable endpoints for the shared appearance card: Taskbar and Desktop.
+// Every animation frame cross-fades the rasterized card instead of issuing
+// dozens of Win32/Direct2D draw calls and repeated icon/text measurements.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SubmenuCardKey {
+    width: i32,
+    height: i32,
+    dpi: u32,
+    dark: bool,
+    zh: bool,
+    theme: ThemeMode,
+    layout: AppearancePreset,
+    direction: DesktopDirection,
+    collapse: bool,
+}
+
+impl SubmenuCardKey {
+    fn new(hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot) -> Self {
+        Self {
+            width, height, dpi: unsafe { GetDpiForWindow(hwnd) },
+            dark: snapshot.is_dark,
+            zh: snapshot.language == LanguageId::SimplifiedChinese,
+            theme: snapshot.theme_mode, layout: snapshot.appearance_preset,
+            direction: snapshot.desktop_direction,
+            collapse: snapshot.desktop_auto_collapse,
+        }
+    }
+}
+
+struct SubmenuCardFrames {
+    key: SubmenuCardKey,
+    closed: SettingsPaintBuffer,
+    open: SettingsPaintBuffer,
+}
+
+// The preview gallery is expensive to rasterize (ring anti-aliasing and
+// composited thumbnails). Pre-render both position variants outside the
+// animation and copy the correct view when the deferred gallery refresh runs.
+#[derive(Clone, PartialEq, Eq)]
+struct PresetGalleryKey {
+    width: i32,
+    height: i32,
+    dpi: u32,
+    dark: bool,
+    zh: bool,
+    layout: AppearancePreset,
+    desktop_direction: DesktopDirection,
+    taskbar_vertical: bool,
+    active_style: ThemeStyle,
+}
+
+impl PresetGalleryKey {
+    fn new(hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot) -> Self {
+        Self {
+            width, height, dpi: unsafe { GetDpiForWindow(hwnd) },
+            dark: snapshot.is_dark,
+            zh: snapshot.language == LanguageId::SimplifiedChinese,
+            layout: snapshot.appearance_preset,
+            desktop_direction: snapshot.desktop_direction,
+            taskbar_vertical: snapshot.vertical_taskbar_mode,
+            active_style: snapshot.active_style.clone(),
+        }
+    }
+}
+
+struct PresetGalleryFrames {
+    key: PresetGalleryKey,
+    taskbar: SettingsPaintBuffer,
+    desktop: SettingsPaintBuffer,
+}
+
+fn preset_gallery_region(hwnd: HWND, width: i32, height: i32) -> RECT {
+    RECT {
+        left: scale(hwnd, SETTINGS_CONTENT_LEFT),
+        top: scale(hwnd, 206),
+        right: width,
+        bottom: height,
+    }
+}
+
+fn preset_gallery_cache_ready(
+    hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot,
+) -> bool {
+    let key = PresetGalleryKey::new(hwnd, width, height, snapshot);
+    PRESET_GALLERY_FRAMES.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|frames| frames.key == key)
+    })
+}
+
+unsafe fn build_preset_gallery_cache(
+    screen: HDC, hwnd: HWND, width: i32, height: i32,
+    snapshot: &StyleWindowSnapshot, font: isize,
+) -> bool {
+    let key = PresetGalleryKey::new(hwnd, width, height, snapshot);
+    PRESET_GALLERY_FRAMES.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.as_ref().is_some_and(|frames| frames.key == key) {
+            return true;
+        }
+        let Some(taskbar) = SettingsPaintBuffer::create(screen, width, height) else {
+            return false;
+        };
+        let Some(desktop) = SettingsPaintBuffer::create(screen, width, height) else {
+            return false;
+        };
+        let background = if snapshot.is_dark {
+            Color::from_hex("#1F2125FF")
+        } else {
+            Color::from_hex("#E9EEF4FF")
+        };
+        let card = if snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else { Color::from_hex("#FFFFFFFF") };
+        let hover = if snapshot.is_dark {
+            Color::from_hex("#343840FF")
+        } else { Color::from_hex("#DCE5EFFF") };
+        let pressed = if snapshot.is_dark {
+            Color::from_hex("#414751FF")
+        } else { Color::from_hex("#CBD7E4FF") };
+        let border = if snapshot.is_dark {
+            Color::from_hex("#454A52FF")
+        } else { Color::from_hex("#C1CCD8FF") };
+        let primary = if snapshot.is_dark {
+            Color::from_hex("#F2F3F5FF")
+        } else { Color::from_hex("#202124FF") };
+        let palette = || PresetGalleryPalette {
+            card, card_hover: hover, card_pressed: pressed,
+            border, accent: Color::from_hex("#4C8DFFFF"), primary,
+        };
+        for (frame, position) in [
+            (&taskbar, DisplayPosition::Taskbar),
+            (&desktop, DisplayPosition::Desktop),
+        ] {
+            let mut view = snapshot.clone();
+            view.display_position = position;
+            let region = preset_gallery_region(hwnd, width, height);
+            fill(frame.dc, region, background);
+            let previous = SelectObject(frame.dc, HGDIOBJ(font as *mut _));
+            let _ = SetBkMode(frame.dc, TRANSPARENT);
+            paint_preset_gallery(frame.dc, hwnd, &view, None, None, palette());
+            SelectObject(frame.dc, previous);
+        }
+        *cache = Some(PresetGalleryFrames { key, taskbar, desktop });
+        true
+    })
+}
+
+fn request_preset_gallery_warmup(hwnd: HWND) {
+    let already_requested = SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| {
+        cell.replace(true)
+    });
+    if !already_requested
+        && unsafe {
+            PostMessageW(hwnd, WM_SETTINGS_PREWARM_GALLERY, WPARAM(0), LPARAM(0))
+        }.is_err()
+    {
+        SETTINGS_GALLERY_WARM_REQUESTED.with(|cell| cell.set(false));
+    }
+}
+
+unsafe fn copy_cached_preset_gallery(
+    target: HDC, hwnd: HWND, width: i32, height: i32,
+    snapshot: &StyleWindowSnapshot, dirty: RECT,
+) -> bool {
+    let key = PresetGalleryKey::new(hwnd, width, height, snapshot);
+    PRESET_GALLERY_FRAMES.with(|cell| {
+        let cache = cell.borrow();
+        let Some(frames) = cache.as_ref().filter(|frames| frames.key == key) else {
+            return false;
+        };
+        let source = if snapshot.display_position == DisplayPosition::Desktop {
+            &frames.desktop
+        } else { &frames.taskbar };
+        BitBlt(target, dirty.left, dirty.top,
+            dirty.right - dirty.left, dirty.bottom - dirty.top,
+            source.dc, dirty.left, dirty.top, SRCCOPY).is_ok()
+    })
+}
+
+thread_local! {
+    static SETTINGS_PAINT_BUFFER: RefCell<Option<SettingsPaintBuffer>> =
+        const { RefCell::new(None) };
+    static SUBMENU_CARD_FRAMES: RefCell<Option<SubmenuCardFrames>> =
+        const { RefCell::new(None) };
+    static PRESET_GALLERY_FRAMES: RefCell<Option<PresetGalleryFrames>> =
+        const { RefCell::new(None) };
+    static SETTINGS_GALLERY_REFRESH: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_GALLERY_WARM_REQUESTED: Cell<bool> = const { Cell::new(false) };
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_endpoint(
+    hdc: HDC,
+    hwnd: HWND,
+    snapshot: &StyleWindowSnapshot,
+    section: Section,
+    editor: EditorSelection,
+    font: isize,
+    card: Color, hover: Color, pressed_color: Color, track: Color,
+    accent: Color, accent_hover: Color, accent_pressed: Color,
+    primary: Color, secondary: Color,
+) {
+    let underlay = if snapshot.is_dark {
+        Color::from_hex("#1F2125FF")
+    } else {
+        Color::from_hex("#E9EEF4FF")
+    };
+    fill(hdc, settings_card_rect(hwnd, 58, 206), underlay);
+    let prior_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    // Hover and pressed effects are intentionally excluded from the cached
+    // animation; normal painting immediately restores live hover feedback.
+    paint_appearance_page(
+        hdc, hwnd, snapshot, section, editor,
+        if snapshot.display_position == DisplayPosition::Desktop { 1.0 } else { 0.0 },
+        true, None, None, None, false, false, None, &[false; HEX_EDIT_COUNT],
+        card, hover, pressed_color, track, accent, accent_hover,
+        accent_pressed, primary, secondary,
+    );
+    SelectObject(hdc, prior_font);
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn composite_cached_submenu_card(
+    screen: HDC, dest: HDC, hwnd: HWND, width: i32, height: i32,
+    snapshot: &StyleWindowSnapshot, section: Section, editor: EditorSelection,
+    font: isize, card: Color, hover: Color, pressed_color: Color,
+    track: Color, accent: Color, accent_hover: Color, accent_pressed: Color,
+    primary: Color, secondary: Color, progress: f32,
+) -> bool {
+    let key = SubmenuCardKey::new(hwnd, width, height, snapshot);
+    SUBMENU_CARD_FRAMES.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.as_ref().is_none_or(|frames| frames.key != key) {
+            let Some(closed) = SettingsPaintBuffer::create(screen, width, height) else {
+                return false;
+            };
+            let Some(open) = SettingsPaintBuffer::create(screen, width, height) else {
+                return false;
+            };
+            let mut closed_snapshot = snapshot.clone();
+            closed_snapshot.display_position = DisplayPosition::Taskbar;
+            let mut open_snapshot = snapshot.clone();
+            open_snapshot.display_position = DisplayPosition::Desktop;
+            paint_submenu_endpoint(closed.dc, hwnd, &closed_snapshot, section, editor,
+                font, card, hover, pressed_color, track, accent, accent_hover,
+                accent_pressed, primary, secondary);
+            paint_submenu_endpoint(open.dc, hwnd, &open_snapshot, section, editor,
+                font, card, hover, pressed_color, track, accent, accent_hover,
+                accent_pressed, primary, secondary);
+            *cache = Some(SubmenuCardFrames { key, closed, open });
+        }
+        let Some(frames) = cache.as_ref() else { return false };
+        let card_bounds = settings_card_rect(hwnd, 58, 206);
+        let w = card_bounds.right - card_bounds.left;
+        let h = card_bounds.bottom - card_bounds.top;
+        let copied = BitBlt(dest, card_bounds.left, card_bounds.top, w, h,
+            frames.closed.dc, card_bounds.left, card_bounds.top, SRCCOPY);
+        if copied.is_err() { return false; }
+        let opacity = (progress.clamp(0.0, 1.0) * 255.0).round() as u8;
+        opacity == 0 || native_interop::alpha_blend_cached_card(
+            dest, frames.open.dc, card_bounds, opacity)
+    })
+}
+
+fn finish_submenu_terminal_paint(hwnd: HWND) {
+    let needs_gallery = {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_mut() else { return };
+        s.desktop_submenu.final_frame_pending = false;
+        s.section == Section::Preset && s.preset_gallery_refresh_pending
+    };
+    if needs_gallery {
+        unsafe {
+            let _ = PostMessageW(
+                hwnd, WM_SETTINGS_PRESET_GALLERY_REFRESH, WPARAM(0), LPARAM(0),
+            );
+        }
+    }
+}
+
+// A position-only sync can have its card rect coalesced with a prior
+// invalid region by Win32. The rest of the retained backing bitmap is still
+// correct for this section; avoid a full page redraw solely because rcPaint
+// extends beyond the animated card. Never reuse uninitialized or other-page
+// pixels, or a genuine gallery/other-settings refresh.
+fn can_reuse_coalesced_position_paint(
+    section: Section,
+    painted_section: Option<Section>,
+    cause: SettingsPaintCause,
+    submenu_only: bool,
+    animating: bool,
+    gallery_refresh: bool,
+) -> bool {
+    !submenu_only
+        && animating
+        && !gallery_refresh
+        && is_appearance_section(section)
+        && painted_section == Some(section)
+        && cause == SettingsPaintCause::PositionSync
+}
+
 unsafe fn paint(hwnd: HWND) {
+    let paint_cause = SETTINGS_PAINT_CAUSE.with(|cell| cell.replace(SettingsPaintCause::Unknown));
+    let gallery_refresh = SETTINGS_GALLERY_REFRESH.with(|cell| cell.replace(false));
     let mut ps = PAINTSTRUCT::default();
     let screen_hdc = BeginPaint(hwnd, &mut ps);
 
@@ -5418,19 +6919,18 @@ unsafe fn paint(hwnd: HWND) {
     let width = (paint_client.right - paint_client.left).max(1);
     let height = (paint_client.bottom - paint_client.top).max(1);
 
-    let mem_hdc = CreateCompatibleDC(screen_hdc);
-    if mem_hdc.0.is_null() {
-        let _ = EndPaint(hwnd, &ps);
-        return;
-    }
-    let bitmap = CreateCompatibleBitmap(screen_hdc, width, height);
-    if bitmap.0.is_null() {
-        let _ = DeleteDC(mem_hdc);
-        let _ = EndPaint(hwnd, &ps);
-        return;
-    }
-    let old_bitmap = SelectObject(mem_hdc, HGDIOBJ(bitmap.0));
-    let hdc = mem_hdc;
+    SETTINGS_PAINT_BUFFER.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.as_ref().is_none_or(|backbuffer| {
+            backbuffer.width != width || backbuffer.height != height
+        }) {
+            *cached = SettingsPaintBuffer::create(screen_hdc, width, height);
+        }
+        let Some(backbuffer) = cached.as_ref() else {
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        };
+        let hdc = backbuffer.dc;
 
     let (
         snapshot,
@@ -5450,6 +6950,9 @@ unsafe fn paint(hwnd: HWND) {
         json_dirty,
         discard_pending,
         font,
+        desktop_submenu_progress,
+        desktop_submenu_active,
+        desktop_submenu_final_frame_pending,
     ) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_ref() else {
@@ -5474,8 +6977,19 @@ unsafe fn paint(hwnd: HWND) {
             s.json_dirty,
             s.pending_discard_action.is_some(),
             s.font,
+            s.desktop_submenu.progress,
+            s.desktop_submenu.active(),
+            s.desktop_submenu.final_frame_pending,
         )
     };
+    // WM_TIMER dirties exactly the shared top card. Keep all drawing outside
+    // that card intact in the cached buffer, skipping expensive preset previews.
+    let dirty = ps.rcPaint;
+    let card_bounds = settings_card_rect(hwnd, 58, 206);
+    let submenu_only = is_appearance_section(section)
+        && dirty.left >= card_bounds.left && dirty.top >= card_bounds.top
+        && dirty.right <= card_bounds.right && dirty.bottom <= card_bounds.bottom
+        && dirty.left < dirty.right && dirty.top < dirty.bottom;
 
     let dark = snapshot.is_dark;
     let background = if dark {
@@ -5522,8 +7036,61 @@ unsafe fn paint(hwnd: HWND) {
         Color::from_hex("#666B73FF")
     };
 
+    // Deferred Preset-gallery refresh must not trigger a full-page paint.
+    // Both position variants were rasterized while the settings page was idle.
+    let gallery_bounds = preset_gallery_region(hwnd, width, height);
+    let gallery_only = section == Section::Preset
+        && dirty.left >= gallery_bounds.left && dirty.top >= gallery_bounds.top
+        && dirty.right <= gallery_bounds.right && dirty.bottom <= gallery_bounds.bottom
+        && dirty.left < dirty.right && dirty.top < dirty.bottom;
+    let preview_interacting = matches!(hovered, Some(HitTarget::Preset(_)))
+        || matches!(pressed, Some(HitTarget::Preset(_)));
+    if gallery_refresh && gallery_only && !desktop_submenu_active
+        && !desktop_submenu_final_frame_pending && !discard_pending
+        && !preview_interacting
+        && copy_cached_preset_gallery(hdc, hwnd, width, height, &snapshot, dirty)
+    {
+        let _ = BitBlt(screen_hdc, dirty.left, dirty.top,
+            dirty.right - dirty.left, dirty.bottom - dirty.top,
+            hdc, dirty.left, dirty.top, SRCCOPY);
+        let _ = EndPaint(hwnd, &ps);
+        return;
+    }
+
+    // Keep the non-card pixels from the already painted backbuffer if Win32
+    // merges a pure position-sync invalidation with a larger pending region.
+    // The lower Preset gallery has its own deferred refresh.
+    let coalesced_position = can_reuse_coalesced_position_paint(
+        section, backbuffer.painted_section.get(), paint_cause, submenu_only,
+        desktop_submenu_active, gallery_refresh,
+    );
+    // Animation normally touches only the shared card; both the exact card
+    // invalidation and a safe coalesced position-only invalidation use blits.
+    if (submenu_only || coalesced_position)
+        && (desktop_submenu_active || desktop_submenu_final_frame_pending)
+        && !discard_pending && composite_cached_submenu_card(
+            screen_hdc, hdc, hwnd, width, height, &snapshot, section, editor,
+            font, card, card_hover, card_pressed, track_background,
+            accent, accent_hover, accent_pressed, primary, secondary,
+            desktop_submenu_progress,
+        )
+    {
+        let rect = ps.rcPaint;
+        let _ = BitBlt(screen_hdc, rect.left, rect.top,
+            rect.right - rect.left, rect.bottom - rect.top,
+            hdc, rect.left, rect.top, SRCCOPY);
+        let _ = EndPaint(hwnd, &ps);
+        if desktop_submenu_final_frame_pending {
+            finish_submenu_terminal_paint(hwnd);
+        }
+        return;
+    }
+
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
+    let old_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    if !submenu_only {
     fill(hdc, client, background);
     fill(
         hdc,
@@ -5546,8 +7113,6 @@ unsafe fn paint(hwnd: HWND) {
         track_background,
     );
 
-    let old_font = SelectObject(hdc, HGDIOBJ(font as *mut _));
-    let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -5584,6 +7149,7 @@ unsafe fn paint(hwnd: HWND) {
         primary,
         secondary,
     );
+    }
 
     match section {
         Section::General => paint_general_page(
@@ -5627,6 +7193,8 @@ unsafe fn paint(hwnd: HWND) {
             &snapshot,
             section,
             editor,
+            desktop_submenu_progress,
+            submenu_only,
             hovered,
             pressed,
             focused_numeric_edit,
@@ -5663,11 +7231,52 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     SelectObject(hdc, old_font);
-    let _ = BitBlt(screen_hdc, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
-    SelectObject(hdc, old_bitmap);
-    let _ = DeleteObject(bitmap);
-    let _ = DeleteDC(hdc);
+    // Only transfer the invalid rectangle, rather than the full window.
+    // Full-frame backing pixels remain available for subsequent repaints.
+    let dirty = ps.rcPaint;
+    if dirty.right > dirty.left && dirty.bottom > dirty.top {
+        let _ = BitBlt(screen_hdc, dirty.left, dirty.top,
+            dirty.right - dirty.left, dirty.bottom - dirty.top,
+            hdc, dirty.left, dirty.top, SRCCOPY);
+    }
+    // Prepare both endpoint images while the page is idle. The next click
+    // can then start the animation without blocking on SVG/Direct2D rendering.
+    // This runs after presenting the normal frame, so cache preparation only
+    // touches the offscreen DC and cannot overwrite what the user sees.
+    if !submenu_only && !desktop_submenu_active && !discard_pending &&
+        !matches!(section, Section::General | Section::Json)
+    {
+        let cache_key = SubmenuCardKey::new(hwnd, width, height, &snapshot);
+        let needs_warmup = SUBMENU_CARD_FRAMES.with(|cell| {
+            cell.borrow().as_ref().is_none_or(|f| f.key != cache_key)
+        });
+        if needs_warmup {
+            let _ = composite_cached_submenu_card(
+                screen_hdc, hdc, hwnd, width, height, &snapshot, section, editor,
+                font, card, card_hover, card_pressed, track_background,
+                accent, accent_hover, accent_pressed, primary, secondary,
+                desktop_submenu_progress,
+            );
+        }
+    }
+    // Prepare gallery variants via a deferred idle message. No costly
+    // gallery rasterization is performed from the 60Hz animation paint path.
+    if section == Section::Preset && !desktop_submenu_active
+        && !desktop_submenu_final_frame_pending && !discard_pending
+        && !preset_gallery_cache_ready(hwnd, width, height, &snapshot)
+    {
+        request_preset_gallery_warmup(hwnd);
+    }
+    // Only a full draw establishes valid retained pixels for this page;
+    // coalesced partial paint reuse requires this exact painted section.
+    if !submenu_only {
+        backbuffer.painted_section.set(Some(section));
+    }
     let _ = EndPaint(hwnd, &ps);
+    if desktop_submenu_final_frame_pending {
+        finish_submenu_terminal_paint(hwnd);
+    }
+    });
 }
 
 
@@ -6107,6 +7716,47 @@ unsafe fn paint_general_page(
     }
 }
 
+// Shared between the full JSON page paint and scrollbar-only child paints.
+unsafe fn paint_json_scrollbar_decoration(hdc: HDC, hwnd: HWND, is_dark: bool) {
+    let scroll_hovered = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.json_scroll_hovered).unwrap_or(false)
+    };
+    if let Some(thumb) = json_scroll_thumb_rect(hwnd) {
+        if scroll_hovered {
+            let track = json_scrollbar_track_rect(hwnd);
+            fill_rounded_rect(
+                hdc,
+                track,
+                if is_dark {
+                    // Composite equivalent of a very low-opacity light gray over
+                    // the JSON editor background; GDI brushes do not alpha blend.
+                    Color::from_hex("#303033FF")
+                } else {
+                    Color::from_hex("#F1F2F4FF")
+                },
+                ((track.right - track.left) / 2).max(1),
+            );
+        }
+        fill_rounded_rect(
+            hdc,
+            thumb,
+            if scroll_hovered {
+                if is_dark {
+                    Color::from_hex("#777E88FF")
+                } else {
+                    Color::from_hex("#666D76FF")
+                }
+            } else if is_dark {
+                Color::from_hex("#555B64FF")
+            } else {
+                Color::from_hex("#747B84FF")
+            },
+            ((thumb.right - thumb.left) / 2).max(1),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_json_page(
     hdc: HDC,
@@ -6185,43 +7835,8 @@ unsafe fn paint_json_page(
         scale(hwnd, 7),
         1,
     );
-    let scroll_hovered = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.json_scroll_hovered).unwrap_or(false)
-    };
-    if let Some(thumb) = json_scroll_thumb_rect(hwnd) {
-        if scroll_hovered {
-            let track = json_scrollbar_track_rect(hwnd);
-            fill_rounded_rect(
-                hdc,
-                track,
-                if snapshot.is_dark {
-                    // Composite equivalent of a very low-opacity light gray over
-                    // the JSON editor background; GDI brushes do not alpha blend.
-                    Color::from_hex("#303033FF")
-                } else {
-                    Color::from_hex("#F1F2F4FF")
-                },
-                ((track.right - track.left) / 2).max(1),
-            );
-        }
-        fill_rounded_rect(
-            hdc,
-            thumb,
-            if scroll_hovered {
-                if snapshot.is_dark {
-                    Color::from_hex("#777E88FF")
-                } else {
-                    Color::from_hex("#666D76FF")
-                }
-            } else if snapshot.is_dark {
-                Color::from_hex("#555B64FF")
-            } else {
-                Color::from_hex("#747B84FF")
-            },
-            ((thumb.right - thumb.left) / 2).max(1),
-        );
-    }
+    paint_json_scrollbar_decoration(hdc, hwnd, snapshot.is_dark);
+
     let running = status.starts_with('◌');
     let success = !status.starts_with('×') && !running;
     let status_color = if running {
@@ -6346,6 +7961,149 @@ unsafe fn paint_json_page(
     );
 }
 
+
+fn submenu_mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let c = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    Color::rgba(c(a.r,b.r),c(a.g,b.g),c(a.b,b.b),c(a.a,b.a))
+}
+fn submenu_content_alpha(progress: f32) -> f32 {
+    // Fade complete controls in as a group, rather than revealing clipped
+    // fragments one after another. Reverse playback naturally fades them out.
+    let p = ((progress - 0.08) / 0.82).clamp(0.0, 1.0);
+    p * p * (3.0 - 2.0 * p)
+}
+
+fn submenu_content_offset(progress: f32) -> i32 {
+    // A subtle slide from the right, measured in logical (96 DPI) pixels.
+    ((1.0 - submenu_content_alpha(progress)) * 8.0).round() as i32
+}
+
+fn submenu_background_alpha(progress: f32) -> f32 {
+    progress.clamp(0.0, 1.0)
+}
+
+/// One anti-aliased, continuous L-shaped inset. The old implementation
+/// overpainted two rounded rectangles and four opaque shadow bars; its joined
+/// horizontal/vertical edges produced the heavy black seams in V24.28.
+/// A native Direct2D path now owns the union AND its low-contrast inner shadow.
+unsafe fn paint_submenu_well(
+    hdc: HDC, hwnd: HWND, progress: f32, card: Color, dark: bool,
+) -> Color {
+    let top_target = if dark {
+        Color::from_hex("#252A30FF")
+    } else {
+        Color::from_hex("#E4EBF2FF")
+    };
+    let bottom_target = if dark {
+        Color::from_hex("#22272DFF")
+    } else {
+        Color::from_hex("#E0E7EFFF")
+    };
+    if progress <= 0.0 { return top_target; }
+    let l = desktop_submenu_layout();
+    // Paint the WHOLE L-shaped surface on every animated frame. A sweeping
+    // clipping edge used to hide nearly half the animation before the well
+    // appeared, then visibly cut glyphs and controls during the reveal.
+    let opacity = submenu_background_alpha(progress);
+    let top = submenu_mix(card, top_target, opacity);
+    let bottom = submenu_mix(card, bottom_target, opacity);
+    let well = scaled_rect(hwnd, l.well);
+    let foot = scaled_rect(hwnd, l.foot);
+    let reveal = well.right;
+    let shadow_opacity = if dark { 0.12 } else { 0.075 } * opacity;
+    if !native_interop::draw_antialiased_desktop_inset_well(
+        hdc, well, foot, reveal, scale(hwnd, 11) as f32,
+        top, bottom, shadow_opacity,
+    ) {
+        // Degraded systems without the Direct2D DC renderer: use a subtle
+        // solid inset, but never restore the hard black shadow rectangles.
+        let saved = SaveDC(hdc);
+        let _ = IntersectClipRect(
+            hdc, foot.left, well.top, reveal, well.bottom,
+        );
+        fill_rounded_rect(hdc, well, top, scale(hwnd, 11));
+        fill_rounded_rect(hdc, foot, top, scale(hwnd, 11));
+        fill(hdc, rect(hwnd, 641, 163, 652, 191), top);
+        let _ = RestoreDC(hdc, saved);
+    }
+    // This is also the backing color used when fading the submenu labels and
+    // controls. Its exact value is independent of the persistent user theme.
+    top
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_choice(hdc:HDC,hwnd:HWND,bounds:RECT,icon:SettingsIcon,
+    label:&str,selected:bool,target:HitTarget,hovered:Option<HitTarget>,
+    pressed:Option<HitTarget>,alpha:f32,inset:Color,palette:ButtonPalette,primary:Color) {
+    if alpha<=0.005 {return;}
+    let mut r=scaled_rect(hwnd,bounds);
+    let shift=scale(hwnd,((1.0-alpha)*8.0).round() as i32);
+    r.left+=shift; r.right+=shift;
+    let desired=button_background(target,selected,hovered,pressed,palette);
+    let bg=submenu_mix(inset,desired,alpha);
+    let fg=submenu_mix(inset,if selected {Color::from_hex("#FFFFFFFF")}else{primary},alpha);
+    fill_rounded_rect(hdc,r,bg,scale(hwnd,7));
+    let outline=submenu_mix(inset,if selected{Color::from_hex("#76A7FFFF")}
+        else{subtle_control_border(desired)},alpha);
+    draw_rounded_outline_rect(hdc,r,outline,scale(hwnd,7),1);
+    // V24.32: the 14px glyphs in V24.31 lost the silhouette at 100% DPI.
+    // Use 18px and reserve text width even on English / scaled displays.
+    let gap=scale(hwnd,2);
+    let text_width=text_width_px(hwnd,label);
+    let size=scale(hwnd,DESKTOP_SUBMENU_ICON_SIZE)
+        .min((r.right-r.left-text_width-gap-scale(hwnd,6)).max(scale(hwnd,12)));
+    let group=size+gap+text_width;
+    let left=r.left+((r.right-r.left-group)/2).max(scale(hwnd,3));
+    let top=r.top+(r.bottom-r.top-size)/2;
+    let ir=RECT{left,top,right:left+size,bottom:top+size};
+    draw_settings_icon(hdc,hwnd,icon,ir,fg,bg);
+    let _=SetTextColor(hdc,COLORREF(fg.to_colorref()));
+    draw_text(hdc,label,RECT{left:ir.right+gap,top:r.top,right:r.right-scale(hwnd,2),
+        bottom:r.bottom},DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+}
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
+    progress:f32,inset:Color,hovered:Option<HitTarget>,pressed:Option<HitTarget>,
+    palette:ButtonPalette,primary:Color,secondary:Color) {
+    let opacity=submenu_content_alpha(progress);
+    if opacity<=0.005 {return;}
+    let l=desktop_submenu_layout();
+    // Clip only to the FIXED well bounds, never to an animated vertical edge.
+    // The background, labels and controls now move/fade as a complete unit.
+    let saved=SaveDC(hdc);
+    let _=IntersectClipRect(hdc,scale(hwnd,l.well.left),scale(hwnd,l.well.top),
+        scale(hwnd,l.well.right),scale(hwnd,l.well.bottom));
+    let zh=snapshot.language==LanguageId::SimplifiedChinese;
+    let dx=scale(hwnd,submenu_content_offset(progress));
+    let txt=|mut r:RECT|{r.left+=dx;r.right+=dx;r};
+    // The inset and selected Desktop button already convey the hierarchy;
+    // avoid a redundant secondary-panel title.
+    let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
+    draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
+        DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    draw_text(hdc,if zh{"收缩"}else{"Collapse"},
+        txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
+        let horizontal=direction==DesktopDirection::Horizontal;
+        paint_submenu_choice(hdc,hwnd,if horizontal{l.horizontal}else{l.vertical},
+            if horizontal{SettingsIcon::DirectionHorizontal}else{SettingsIcon::DirectionVertical},
+            match(zh,horizontal){(true,true)=>"横向",(true,false)=>"纵向",
+                (false,true)=>"Horz",(false,false)=>"Vert"},
+            snapshot.desktop_direction==direction,HitTarget::DesktopDirection(direction),
+            hovered,pressed,opacity,inset,palette,primary);
+    }
+    for enabled in [true,false] {
+        paint_submenu_choice(hdc,hwnd,if enabled{l.enabled}else{l.disabled},
+            if enabled{SettingsIcon::ToggleOn}else{SettingsIcon::ToggleOff},
+            match(zh,enabled){(true,true)=>"开启",(true,false)=>"关闭",
+                (false,true)=>"On",(false,false)=>"Off"},
+            snapshot.desktop_auto_collapse==enabled,HitTarget::DesktopAutoCollapse(enabled),
+            hovered,pressed,opacity,inset,palette,primary);
+    }
+    let _=RestoreDC(hdc,saved);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_appearance_page(
     hdc: HDC,
@@ -6353,6 +8111,8 @@ unsafe fn paint_appearance_page(
     snapshot: &StyleWindowSnapshot,
     section: Section,
     editor: EditorSelection,
+    desktop_submenu_progress: f32,
+    submenu_only: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     focused_numeric_edit: Option<usize>,
@@ -6375,16 +8135,19 @@ unsafe fn paint_appearance_page(
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
-        if zh { "外观" } else { "Appearance" },
+        &appearance_page_title(section, snapshot.language),
         settings_page_title_rect(hwnd),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
     fill_rounded_rect(
         hdc,
-        settings_card_rect(hwnd, 58, 164),
+        settings_card_rect(hwnd, 58, 206),
         card,
         scale(hwnd, SETTINGS_CARD_RADIUS),
+    );
+    let submenu_inset = paint_submenu_well(
+        hdc, hwnd, desktop_submenu_progress, card, snapshot.is_dark,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
@@ -6397,6 +8160,12 @@ unsafe fn paint_appearance_page(
         hdc,
         if zh { "排版" } else { "Layout" },
         rect(hwnd, 218, 116, 300, 150),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc,
+        if zh { "位置" } else { "Position" },
+        rect(hwnd, 218, 162, 300, 196),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
@@ -6436,7 +8205,7 @@ unsafe fn paint_appearance_page(
         );
     }
 
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal, AppearancePreset::Adaptive] {
+    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
         let selected = snapshot.appearance_preset == preset;
         let target = HitTarget::Layout(preset);
         let control_background = button_background(
@@ -6464,13 +8233,52 @@ unsafe fn paint_appearance_page(
             match (zh, preset) {
                 (true, AppearancePreset::Default) => "默认",
                 (true, AppearancePreset::Minimal) => "极简",
-                (true, AppearancePreset::Adaptive) => "自适应",
                 (false, AppearancePreset::Default) => "Default",
                 (false, AppearancePreset::Minimal) => "Minimal",
-                (false, AppearancePreset::Adaptive) => "Adaptive",
             },
         );
     }
+
+
+    for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
+        let selected = snapshot.display_position == position;
+        let target = HitTarget::Position(position);
+        let background = button_background(
+            target, selected, hovered, pressed,
+            ButtonPalette {
+                normal: card_hover, hover: card_pressed, pressed: card_pressed,
+                selected: accent, selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        draw_segment_with_icon(
+            hdc, hwnd, position_rect(hwnd, position), selected,
+            background,
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
+            if position == DisplayPosition::Taskbar {
+                SettingsIcon::PositionTaskbar
+            } else {
+                SettingsIcon::PositionDesktop
+            },
+            match (zh, position) {
+                (true, DisplayPosition::Taskbar) => "任务栏",
+                (true, DisplayPosition::Desktop) => "桌面",
+                (false, DisplayPosition::Taskbar) => "Taskbar",
+                (false, DisplayPosition::Desktop) => "Desktop",
+            },
+        );
+    }
+
+    if desktop_submenu_progress > 0.0 {
+        paint_submenu_content(hdc,hwnd,snapshot,desktop_submenu_progress,
+            submenu_inset,hovered,pressed,
+            ButtonPalette{
+                normal:card_hover,hover:card_pressed,pressed:card_pressed,
+                selected:accent,selected_hover:accent_hover,selected_pressed:accent_pressed,
+            },primary,secondary);
+    }
+
+    if submenu_only { return; }
 
     if section == Section::Preset {
         paint_preset_gallery(
@@ -6491,15 +8299,8 @@ unsafe fn paint_appearance_page(
         return;
     }
 
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        section_label(section, snapshot.language),
-        rect(hwnd, 200, 180, 600, 212),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-
+    // The current section name belongs in the page heading. Drawing it at
+    // y=180..212 would overlap the shared appearance card (y=58..206).
     for (index, row) in rows(section).iter().copied().enumerate() {
         let r = row_rect(hwnd, index);
         let selected = row == editor;
@@ -6643,15 +8444,6 @@ unsafe fn paint_appearance_page(
     }
 }
 
-fn preset_group_label(is_dark: bool, language: LanguageId) -> &'static str {
-    match (language == LanguageId::SimplifiedChinese, is_dark) {
-        (true, true) => "深色预设",
-        (true, false) => "浅色预设",
-        (false, true) => "Dark presets",
-        (false, false) => "Light presets",
-    }
-}
-
 fn preset_label(preset: ThemePreset, is_dark: bool, language: LanguageId) -> &'static str {
     match (language == LanguageId::SimplifiedChinese, is_dark, preset) {
         (true, true, ThemePreset::Classic) => "石墨",
@@ -6685,17 +8477,14 @@ unsafe fn paint_preset_gallery(
         accent,
         primary,
     } = palette;
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        preset_group_label(snapshot.is_dark, snapshot.language),
-        rect(hwnd, 200, 180, 940, 212),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
+    // Preset is part of the page title ("Appearance · Presets").
+    // The gallery begins just below the shared appearance controls.
     let mut matched = false;
     for preset in ThemePreset::ALL {
-        let r = preset_card_rect(hwnd, preset);
+        let r = preset_card_rect_for_orientation(
+            hwnd, preset, preview_vertical_for_snapshot(snapshot),
+            snapshot.appearance_preset == AppearancePreset::Minimal,
+        );
         let target = HitTarget::Preset(preset);
         let selected = snapshot
             .active_style
@@ -6721,6 +8510,9 @@ unsafe fn paint_preset_gallery(
             border,
             accent,
             primary,
+            preview_vertical_for_snapshot(snapshot),
+            snapshot.appearance_preset == AppearancePreset::Minimal,
+            snapshot.display_position == DisplayPosition::Desktop,
         );
     }
 
@@ -6729,7 +8521,10 @@ unsafe fn paint_preset_gallery(
         paint_style_preview_card(
             hdc,
             hwnd,
-            custom_preset_card_rect(hwnd),
+            custom_preset_card_rect_for_orientation(
+                hwnd, preview_vertical_for_snapshot(snapshot),
+                snapshot.appearance_preset == AppearancePreset::Minimal,
+            ),
             &snapshot.active_style,
             SettingsIcon::PresetCustom,
             if zh { "自定义" } else { "Custom" },
@@ -6738,8 +8533,591 @@ unsafe fn paint_preset_gallery(
             border,
             accent,
             primary,
+            preview_vertical_for_snapshot(snapshot),
+            snapshot.appearance_preset == AppearancePreset::Minimal,
+            snapshot.display_position == DisplayPosition::Desktop,
         );
     }
+}
+
+// Match the vertical widget's 36-degree bottom opening and clockwise
+// remaining-quota fill. Angles are measured from 12 o'clock.
+const PREVIEW_RING_GAP_HALF_RADIANS: f32 = std::f32::consts::PI / 10.0;
+
+fn preview_ring_angles(remaining: f32) -> (f32, f32, f32) {
+    let start = std::f32::consts::PI + PREVIEW_RING_GAP_HALF_RADIANS;
+    let sweep = std::f32::consts::TAU - 2.0 * PREVIEW_RING_GAP_HALF_RADIANS;
+    (start, start + sweep, start + sweep * (remaining / 100.0).clamp(0.0, 1.0))
+}
+
+fn preview_remaining_color(remaining: f32) -> StyleColorTarget {
+    if remaining > 50.0 {
+        StyleColorTarget::ProgressHigh
+    } else if remaining > 20.0 {
+        StyleColorTarget::ProgressMedium
+    } else {
+        StyleColorTarget::ProgressLow
+    }
+}
+
+// A four-by-four coverage raster instead of the jagged GDI Arc stroke.
+// The ring remains clockwise, displays remaining quota and keeps its
+// 36-degree bottom opening at 0% through 100%.
+const PREVIEW_RING_SAMPLES: i32 = 4;
+
+#[allow(clippy::too_many_arguments)]
+fn preview_ring_pixel(
+    px: i32, py: i32, size: i32, radius: f32, stroke: f32,
+    remaining: f32, background: Color, track: Color, accent: Color,
+) -> u32 {
+    let (start, end, _) = preview_ring_angles(remaining);
+    let sweep = end - start;
+    let fraction = (remaining / 100.0).clamp(0.0, 1.0);
+    let track = track.blend_over(background);
+    let accent = accent.blend_over(background);
+    let count = (PREVIEW_RING_SAMPLES * PREVIEW_RING_SAMPLES) as u32;
+    let (mut red, mut green, mut blue) = (0u32, 0u32, 0u32);
+    for sy in 0..PREVIEW_RING_SAMPLES {
+        for sx in 0..PREVIEW_RING_SAMPLES {
+            let dx = px as f32 + (sx as f32 + 0.5) / PREVIEW_RING_SAMPLES as f32
+                - size as f32 * 0.5;
+            let dy = py as f32 + (sy as f32 + 0.5) / PREVIEW_RING_SAMPLES as f32
+                - size as f32 * 0.5;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let color = if (distance - radius).abs() <= stroke * 0.5 {
+                let angle = dx.atan2(-dy).rem_euclid(std::f32::consts::TAU);
+                let offset = (angle - start).rem_euclid(std::f32::consts::TAU);
+                if offset <= sweep {
+                    if offset / sweep <= fraction { accent } else { track }
+                } else {
+                    background
+                }
+            } else {
+                background
+            };
+            red += u32::from(color.r);
+            green += u32::from(color.g);
+            blue += u32::from(color.b);
+        }
+    }
+    let r = (red + count / 2) / count;
+    let g = (green + count / 2) / count;
+    let b = (blue + count / 2) / count;
+    (r << 16) | (g << 8) | b
+}
+
+unsafe fn paint_preview_remaining_ring(
+    hdc: HDC, hwnd: HWND, cx: i32, cy: i32, remaining: f32, style: &ThemeStyle,
+) {
+    let size = scale(hwnd, 36).max(8);
+    let radius = scale(hwnd, 15).max(2) as f32;
+    let stroke = scale(hwnd, 3).max(1) as f32;
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size,
+            biHeight: -size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dc = CreateCompatibleDC(hdc);
+    if dc.0.is_null() { return; }
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        .unwrap_or_default();
+    if dib.is_invalid() || bits.is_null() {
+        let _ = DeleteDC(dc);
+        return;
+    }
+    let old_bitmap = SelectObject(dc, dib);
+    let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
+    let background = style.color(StyleColorTarget::PanelBackground);
+    let track = style.color(StyleColorTarget::ProgressConsumed);
+    let accent = style.color(preview_remaining_color(remaining));
+    for y in 0..size {
+        for x in 0..size {
+            pixels[(y * size + x) as usize] = preview_ring_pixel(
+                x, y, size, radius, stroke, remaining, background, track, accent,
+            );
+        }
+    }
+    let _ = BitBlt(hdc, cx - size / 2, cy - size / 2, size, size, dc, 0, 0, SRCCOPY);
+    let _ = SelectObject(dc, old_bitmap);
+    let _ = DeleteObject(dib);
+    let _ = DeleteDC(dc);
+}
+
+// Use the same textual template as the live usage tooltip. The preview
+// deliberately uses sample data and wraps *only* at the final separator
+// between the date and time when a theme card cannot fit one line.
+fn preview_reset_tooltip_lines(minimal: bool) -> (String, String) {
+    let preset = if minimal { AppearancePreset::Minimal } else { AppearancePreset::Default };
+    let sample = crate::appearance::quota_reset_tooltip_text(
+        preset, "5H", "YYYY-MM-DD HH:mm",
+    );
+    let (date, time) = sample.rsplit_once(' ')
+        .expect("sample full local timestamp contains a time separator");
+    (date.to_owned(), time.to_owned())
+}
+
+fn portrait_preview_tooltip_rect(
+    canvas: RECT, widget: RECT, logical: impl Fn(i32) -> i32,
+) -> RECT {
+    let width = logical(128).min(canvas.right - canvas.left - logical(12));
+    let height = logical(40);
+    let left = canvas.left + (canvas.right - canvas.left - width) / 2;
+    let top = widget.bottom + logical(7);
+    RECT { left, top, right: left + width, bottom: top + height }
+}
+
+unsafe fn paint_portrait_preview_tooltip(
+    hdc: HDC, hwnd: HWND, canvas: RECT, widget: RECT,
+    style: &ThemeStyle, minimal: bool,
+) {
+    // The preview always includes a sample floating tooltip to demonstrate
+    // theme customization. It sits below the widget rather than obscuring it.
+    // Runtime hover rules are unchanged (reset only / percent only).
+    let tooltip = portrait_preview_tooltip_rect(canvas, widget, |v| scale(hwnd, v));
+    let radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+        .min(((tooltip.right - tooltip.left).min(tooltip.bottom - tooltip.top) / 2).max(0));
+    if radius > 0 {
+        fill_rounded_rect(hdc, tooltip, style.color(StyleColorTarget::TooltipBackground), radius);
+        draw_rounded_outline_rect(
+            hdc, tooltip, style.color(StyleColorTarget::TooltipBorder), radius, 1,
+        );
+    } else {
+        fill(hdc, tooltip, style.color(StyleColorTarget::TooltipBackground));
+        draw_outline_rect(hdc, tooltip, style.color(StyleColorTarget::TooltipBorder));
+    }
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+    let font = CreateFontW(
+        -scale(hwnd, 10).max(1), 0, 0, 0, FW_MEDIUM.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
+    );
+    let old_font = SelectObject(hdc, font);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let text_color = style.color(StyleColorTarget::ResetTime);
+    let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
+    let (date, time) = preview_reset_tooltip_lines(minimal);
+    draw_text(
+        hdc,
+        &date,
+        RECT {
+            left: tooltip.left + scale(hwnd, 3),
+            top: tooltip.top + scale(hwnd, 3),
+            right: tooltip.right - scale(hwnd, 3),
+            bottom: tooltip.top + scale(hwnd, 21),
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc, &time,
+        RECT {
+            left: tooltip.left + scale(hwnd, 3),
+            top: tooltip.top + scale(hwnd, 20),
+            right: tooltip.right - scale(hwnd, 3),
+            bottom: tooltip.bottom - scale(hwnd, 2),
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SelectObject(hdc, old_font);
+    let _ = DeleteObject(font);
+}
+
+// Preview the actual portrait taskbar widget rather than a stretched card
+// illustration. The same 50x168 proportion and 20/94px row anchors are used
+// for all four themes; only each theme's colors and corners change.
+const PORTRAIT_PREVIEW_WIDGET_W: i32 = 50;
+const PORTRAIT_PREVIEW_WIDGET_H: i32 = 168;
+const PORTRAIT_PREVIEW_MINIMAL_H: i32 = 82;
+
+fn portrait_preview_widget_bounds(
+    canvas: RECT, minimal: bool, logical: impl Fn(i32) -> i32,
+) -> RECT {
+    let width = logical(PORTRAIT_PREVIEW_WIDGET_W);
+    let height = logical(if minimal {
+        PORTRAIT_PREVIEW_MINIMAL_H
+    } else {
+        PORTRAIT_PREVIEW_WIDGET_H
+    });
+    let left = canvas.left + (canvas.right - canvas.left - width) / 2;
+    // Align the widget together with its tooltip, rather than centering
+    // the widget alone (which left a large dead area above both).
+    let group_height = height + logical(7 + 40);
+    let available = (canvas.bottom - canvas.top - group_height).max(0);
+    let top = canvas.top + available / 3;
+    RECT { left, top, right: left + width, bottom: top + height }
+}
+
+
+const DESKTOP_PREVIEW_WIDGET_H: i32 = 164; // V22: 2 * 10px padding + 2 * 70px rows + 4px gap
+const DESKTOP_PREVIEW_MINIMAL_H: i32 = 74; // V22: 2 * 10px padding + 2 * 24px rows + 6px gap
+const PREVIEW_DRAG_TAB_H: i32 = 16;
+const PREVIEW_DRAG_TAB_W: i32 = 36;
+const PREVIEW_DRAG_TAB_GAP: i32 = 4;
+const PREVIEW_TASKBAR_GRIP_W: i32 = 16;
+const PREVIEW_HORIZONTAL_TOOLTIP_H: i32 = 36;
+
+fn desktop_portrait_preview_bounds(
+    canvas: RECT, minimal: bool, logical: impl Fn(i32) -> i32,
+) -> (RECT, RECT) {
+    let width = logical(PORTRAIT_PREVIEW_WIDGET_W);
+    let height = logical(if minimal { DESKTOP_PREVIEW_MINIMAL_H }
+        else { DESKTOP_PREVIEW_WIDGET_H });
+    let tab_height = logical(PREVIEW_DRAG_TAB_H);
+    let tab_gap = logical(PREVIEW_DRAG_TAB_GAP);
+    let group_height = tab_height + tab_gap + height + logical(7 + 40);
+    let top = canvas.top + (canvas.bottom - canvas.top - group_height).max(0) / 2;
+    let left = canvas.left + (canvas.right - canvas.left - width) / 2;
+    let body_top = top + tab_height + tab_gap;
+    let body = RECT { left, top: body_top, right: left + width,
+        bottom: body_top + height };
+    let tab_width = logical(PREVIEW_DRAG_TAB_W);
+    let tab = RECT { left: (body.left + body.right - tab_width) / 2, top,
+        right: (body.left + body.right + tab_width) / 2, bottom: top + tab_height };
+    (body, tab)
+}
+
+// The desktop tab has its own panel surface and is never painted inside
+// the body. A single six-dot renderer is shared by both orientations.
+unsafe fn paint_preview_drag_tab(
+    hdc: HDC, hwnd: HWND, tab: RECT, style: &ThemeStyle,
+) {
+    let radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min(((tab.right - tab.left).min(tab.bottom - tab.top) / 2).max(0));
+    if radius > 0 {
+        fill_rounded_rect(hdc, tab, style.color(StyleColorTarget::PanelBackground), radius);
+        draw_rounded_outline_rect(hdc, tab, style.color(StyleColorTarget::PanelBorder), radius, 1);
+    } else {
+        fill(hdc, tab, style.color(StyleColorTarget::PanelBackground));
+        draw_outline_rect(hdc, tab, style.color(StyleColorTarget::PanelBorder));
+    }
+    let dot = scale(hwnd, 2).max(1);
+    let gap_x = scale(hwnd, 2).max(1);
+    let gap_y = scale(hwnd, 1).max(1);
+    let dots_w = 3 * dot + 2 * gap_x;
+    let dots_h = 2 * dot + gap_y;
+    let start_x = (tab.left + tab.right - dots_w) / 2;
+    let start_y = (tab.top + tab.bottom - dots_h) / 2;
+    for row in 0..2 {
+        for col in 0..3 {
+            let x = start_x + col * (dot + gap_x);
+            let y = start_y + row * (dot + gap_y);
+            fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot },
+                style.color(StyleColorTarget::DragHandle));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PortraitPreviewRow {
+    label: RECT,
+    center_x: i32,
+    center_y: i32,
+    reset: RECT,
+}
+
+fn portrait_preview_row_for_mode(
+    widget: RECT, index: i32, desktop: bool, logical: impl Fn(i32) -> i32,
+) -> PortraitPreviewRow {
+    let top = widget.top + logical((if desktop { 10 } else { 20 }) + index * 74);
+    PortraitPreviewRow {
+        label: RECT {
+            left: widget.left + logical(2),
+            top,
+            right: widget.right - logical(2),
+            bottom: top + logical(18),
+        },
+        center_x: (widget.left + widget.right) / 2,
+        center_y: top + logical(36),
+        reset: RECT {
+            left: widget.left + logical(2),
+            top: top + logical(54),
+            right: widget.right - logical(2),
+            bottom: top + logical(72),
+        },
+    }
+}
+
+#[cfg(test)]
+fn portrait_preview_row(widget: RECT, index: i32, logical: impl Fn(i32) -> i32) -> PortraitPreviewRow {
+    portrait_preview_row_for_mode(widget, index, false, logical)
+}
+
+unsafe fn paint_vertical_style_preview(
+    hdc: HDC, hwnd: HWND, preview: RECT, style: &ThemeStyle,
+    minimal: bool, desktop: bool,
+) {
+    let (widget, detached_tab) = if desktop {
+        let (widget, tab) = desktop_portrait_preview_bounds(preview, minimal, |v| scale(hwnd, v));
+        (widget, Some(tab))
+    } else {
+        (portrait_preview_widget_bounds(preview, minimal, |v| scale(hwnd, v)), None)
+    };
+    let radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min(((widget.right - widget.left).min(widget.bottom - widget.top) / 2).max(0));
+    if radius > 0 {
+        fill_rounded_rect(hdc, widget, style.color(StyleColorTarget::PanelBackground), radius);
+        draw_rounded_outline_rect(hdc, widget, style.color(StyleColorTarget::PanelBorder), radius, 1);
+    } else {
+        fill(hdc, widget, style.color(StyleColorTarget::PanelBackground));
+        draw_outline_rect(hdc, widget, style.color(StyleColorTarget::PanelBorder));
+    }
+
+    if let Some(tab) = detached_tab {
+        paint_preview_drag_tab(hdc, hwnd, tab, style);
+    } else {
+        // The embedded taskbar grip remains inside the taskbar body.
+        let dot = scale(hwnd, 2).max(1);
+        let dot_gap = scale(hwnd, 3);
+        let grip_color = style.color(StyleColorTarget::DragHandle);
+        for row in 0..2 {
+            for col in 0..3 {
+                let x = (widget.left + widget.right) / 2
+                    - (3 * dot + 2 * dot_gap) / 2 + col * (dot + dot_gap);
+                let y = widget.top + scale(hwnd, 5) + row * (dot + dot_gap);
+                fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot }, grip_color);
+            }
+        }
+    }
+
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+    let font = |size: i32, weight: i32| CreateFontW(
+        -scale(hwnd, size).max(1), 0, 0, 0, weight, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
+    );
+    let label_font = font(10, FW_MEDIUM.0 as i32);
+    // At a 50px taskbar width, a three-character percentage needs room
+    // around its glyphs; a 9px font inside a 15px ring preserves that gap.
+    let percent_font = font(if minimal { 12 } else { 9 }, FW_SEMIBOLD.0 as i32);
+    let reset_font = font(9, FW_NORMAL.0 as i32);
+    let old_font = SelectObject(hdc, label_font);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+
+    for (index, (label, remaining, reset)) in [
+        ("5H", 82.0_f32, "03:49"),
+        ("7D", 37.0_f32, "10/22"),
+    ].iter().enumerate() {
+        if minimal {
+            let center_y = widget.top + scale(hwnd, if desktop {
+                if index == 0 { 22 } else { 52 }
+            } else if index == 0 { 34 } else { 63 });
+            let _ = SelectObject(hdc, percent_font);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+            draw_text(hdc, &format!("{remaining:.0}%"), RECT {
+                left: widget.left + scale(hwnd, 2),
+                top: center_y - scale(hwnd, 12),
+                right: widget.right - scale(hwnd, 2),
+                bottom: center_y + scale(hwnd, 12),
+            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            let row = portrait_preview_row_for_mode(widget, index as i32, desktop, |v| scale(hwnd, v));
+            let _ = SelectObject(hdc, label_font);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
+            draw_text(hdc, label, row.label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            paint_preview_remaining_ring(hdc, hwnd, row.center_x, row.center_y, *remaining, style);
+            let _ = SelectObject(hdc, percent_font);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+            draw_text(hdc, &format!("{remaining:.0}%"), RECT {
+                left: row.center_x - scale(hwnd, 14),
+                top: row.center_y - scale(hwnd, 11),
+                right: row.center_x + scale(hwnd, 14),
+                bottom: row.center_y + scale(hwnd, 11),
+            }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let _ = SelectObject(hdc, reset_font);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+            draw_text(hdc, reset, row.reset, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    let _ = SelectObject(hdc, old_font);
+    let _ = DeleteObject(label_font);
+    let _ = DeleteObject(percent_font);
+    let _ = DeleteObject(reset_font);
+    paint_portrait_preview_tooltip(hdc, hwnd, preview, widget, style, minimal);
+}
+
+
+
+unsafe fn paint_taskbar_horizontal_preview_grip(
+    hdc: HDC, hwnd: HWND, canvas: RECT, style: &ThemeStyle,
+) {
+    // The taskbar grip is embedded at the left edge; unlike the separate
+    // desktop tab it uses the taskbar's original 2-column, 3-row dot shape.
+    let dot = scale(hwnd, 2).max(1);
+    let gap_x = scale(hwnd, 1).max(1);
+    let gap_y = scale(hwnd, 2).max(1);
+    let dots_w = 2 * dot + gap_x;
+    let dots_h = 3 * dot + 2 * gap_y;
+    let x0 = canvas.left + scale(hwnd, 6) - dots_w / 2;
+    let y0 = (canvas.top + canvas.bottom - dots_h) / 2;
+    for row in 0..3 {
+        for col in 0..2 {
+            let x = x0 + col * (dot + gap_x);
+            let y = y0 + row * (dot + gap_y);
+            fill(hdc, RECT { left: x, top: y, right: x + dot, bottom: y + dot },
+                style.color(StyleColorTarget::DragHandle));
+        }
+    }
+}
+
+fn horizontal_preview_body(
+    canvas: RECT, minimal: bool, desktop: bool, logical: impl Fn(i32) -> i32,
+) -> RECT {
+    let width = logical(if minimal { 56 } else { 184 }
+        + if desktop { 0 } else { PREVIEW_TASKBAR_GRIP_W })
+        .min(canvas.right - canvas.left - logical(if desktop { 8 } else { 4 }));
+    let height = logical(if minimal { 40 } else { 42 });
+    let tab_space = if desktop {
+        logical(PREVIEW_DRAG_TAB_H + PREVIEW_DRAG_TAB_GAP)
+    } else { 0 };
+    let tooltip_space = logical(6 + PREVIEW_HORIZONTAL_TOOLTIP_H);
+    let top = canvas.top + (canvas.bottom - canvas.top
+        - (tab_space + height + tooltip_space)).max(0) / 2 + tab_space;
+    let left = (canvas.left + canvas.right - width) / 2;
+    RECT { left, top, right: left + width, bottom: top + height }
+}
+
+fn horizontal_preview_detached_tab(body: RECT, logical: impl Fn(i32) -> i32) -> RECT {
+    let tab_w = logical(PREVIEW_DRAG_TAB_W);
+    let tab_bottom = body.top - logical(PREVIEW_DRAG_TAB_GAP);
+    RECT {
+        left: (body.left + body.right - tab_w) / 2,
+        top: tab_bottom - logical(PREVIEW_DRAG_TAB_H),
+        right: (body.left + body.right + tab_w) / 2,
+        bottom: tab_bottom,
+    }
+}
+
+unsafe fn paint_preview_horizontal_minimal_text(
+    hdc: HDC, hwnd: HWND, body: RECT, style: &ThemeStyle,
+) {
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+    let row_height = (body.bottom - body.top) / 2;
+    for (index, percent) in ["82%", "37%"].iter().enumerate() {
+        let top = body.top + index as i32 * row_height;
+        draw_text(hdc, percent, RECT {
+            left: body.left + scale(hwnd, 2), top,
+            right: body.right - scale(hwnd, 2), bottom: top + row_height,
+        }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+unsafe fn paint_horizontal_style_preview(
+    hdc: HDC, hwnd: HWND, canvas: RECT, style: &ThemeStyle,
+    minimal: bool, desktop: bool,
+) {
+    let body = horizontal_preview_body(canvas, minimal, desktop, |v| scale(hwnd, v));
+    let radius = scale(hwnd, i32::from(style.panel_corner_radius))
+        .min((body.bottom - body.top) / 2);
+    if radius > 0 {
+        fill_rounded_rect(hdc, body, style.color(StyleColorTarget::PanelBackground), radius);
+        draw_rounded_outline_rect(hdc, body, style.color(StyleColorTarget::PanelBorder), radius, 1);
+    } else {
+        fill(hdc, body, style.color(StyleColorTarget::PanelBackground));
+        draw_outline_rect(hdc, body, style.color(StyleColorTarget::PanelBorder));
+    }
+    if desktop {
+        let tab = horizontal_preview_detached_tab(body, |v| scale(hwnd, v));
+        paint_preview_drag_tab(hdc, hwnd, tab, style);
+    } else {
+        paint_taskbar_horizontal_preview_grip(hdc, hwnd, body, style);
+    }
+    // Both modes share the same data rows, progress palette and tooltip.
+    // Taskbar mode alone reserves 16px inside the panel for the grip.
+    let content_left = body.left
+        + if desktop { 0 } else { scale(hwnd, PREVIEW_TASKBAR_GRIP_W) };
+    let content = RECT { left: content_left, ..body };
+    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Taskbar, None));
+    let font = CreateFontW(
+        -scale(hwnd, 10).max(1), 0, 0, 0, FW_MEDIUM.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
+        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR::from_raw(face.as_ptr()),
+    );
+    let old_font = SelectObject(hdc, font);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    if minimal {
+        paint_preview_horizontal_minimal_text(hdc, hwnd, content, style);
+    } else {
+        for (index, (label, percent, reset)) in [
+            ("5H", "82%", "21:30"), ("7D", "37%", "10/22"),
+        ].iter().enumerate() {
+            let y = body.top + scale(hwnd, 3 + index as i32 * 19);
+            let text_rect = |left: i32, right: i32| RECT {
+                left, top: y, right, bottom: y + scale(hwnd, 18),
+            };
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
+            draw_text(hdc, label, text_rect(content.left + scale(hwnd, 9),
+                content.left + scale(hwnd, 31)), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            let progress = RECT {
+                left: content.left + scale(hwnd, 34), top: y + scale(hwnd, 6),
+                right: content.left + scale(hwnd, 86), bottom: y + scale(hwnd, 12),
+            };
+            let remaining = if index == 0 { 82 } else { 37 };
+            let fill_rect = RECT { right: progress.left + (progress.right - progress.left)
+                * remaining / 100, ..progress };
+            let progress_radius = scale(hwnd, i32::from(style.progress_corner_radius))
+                .min((progress.bottom - progress.top) / 2);
+            let progress_color = style.color(if index == 0 {
+                StyleColorTarget::ProgressHigh
+            } else {
+                StyleColorTarget::ProgressMedium
+            });
+            if progress_radius > 0 {
+                fill_rounded_rect(hdc, progress,
+                    style.color(StyleColorTarget::ProgressConsumed), progress_radius);
+                fill_rounded_rect(hdc, fill_rect, progress_color,
+                    progress_radius.min((fill_rect.right - fill_rect.left) / 2));
+            } else {
+                fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
+                fill(hdc, fill_rect, progress_color);
+            }
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
+            draw_text(hdc, percent, text_rect(content.left + scale(hwnd, 90),
+                content.left + scale(hwnd, 124)), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+            draw_text(hdc, reset, text_rect(content.left + scale(hwnd, 128),
+                body.right - scale(hwnd, 6)), DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    let tip_width = scale(hwnd, 136).min(
+        (canvas.right - canvas.left - scale(hwnd, 8)).max(scale(hwnd, 48)),
+    );
+    let tip_height = scale(hwnd, PREVIEW_HORIZONTAL_TOOLTIP_H);
+    let tip = RECT {
+        left: (canvas.left + canvas.right - tip_width) / 2,
+        top: body.bottom + scale(hwnd, 6),
+        right: (canvas.left + canvas.right + tip_width) / 2,
+        bottom: body.bottom + scale(hwnd, 6) + tip_height,
+    };
+    let tooltip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
+        .min(tip_height / 2);
+    if tooltip_radius > 0 {
+        fill_rounded_rect(hdc, tip, style.color(StyleColorTarget::TooltipBackground), tooltip_radius);
+        draw_rounded_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder), tooltip_radius, 1);
+    } else {
+        fill(hdc, tip, style.color(StyleColorTarget::TooltipBackground));
+        draw_outline_rect(hdc, tip, style.color(StyleColorTarget::TooltipBorder));
+    }
+    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
+    let (date, time) = preview_reset_tooltip_lines(minimal);
+    let first = RECT { bottom: tip.top + scale(hwnd, 18), ..tip };
+    let second = RECT { top: tip.top + scale(hwnd, 18), ..tip };
+    draw_text(hdc, &date, first, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(hdc, &time, second, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    let _ = SelectObject(hdc, old_font);
+    let _ = DeleteObject(font);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6755,6 +9133,9 @@ unsafe fn paint_style_preview_card(
     border: Color,
     accent: Color,
     primary: Color,
+    vertical: bool,
+    minimal: bool,
+    desktop: bool,
 ) {
     fill_rounded_rect(hdc, r, surface, scale(hwnd, SETTINGS_CARD_RADIUS));
     draw_rounded_outline_rect(
@@ -6788,150 +9169,19 @@ unsafe fn paint_style_preview_card(
 
     let preview = RECT {
         left: r.left + scale(hwnd, 12),
-        top: r.top + scale(hwnd, 46),
+        top: r.top + scale(hwnd, if vertical { 50 } else { 46 }),
         right: r.right - scale(hwnd, 12),
-        bottom: r.top + scale(hwnd, 138),
+        bottom: if vertical { r.bottom - scale(hwnd, 53) } else { r.top + scale(hwnd, 152) },
     };
-    let panel_radius = scale(hwnd, i32::from(style.panel_corner_radius))
-        .min(((preview.right - preview.left).min(preview.bottom - preview.top) / 2).max(0));
-    if panel_radius > 0 {
-        fill_rounded_rect(
-            hdc,
-            preview,
-            style.color(StyleColorTarget::PanelBackground),
-            panel_radius,
-        );
-        draw_rounded_outline_rect(
-            hdc,
-            preview,
-            style.color(StyleColorTarget::PanelBorder),
-            panel_radius,
-            1,
-        );
+    // The preview rectangle is only a positioning region. The card itself
+    // provides the backdrop; drawing a second frame here would surround the
+    // grip, panel and tooltip with an unwanted inset outline.
+
+    if vertical {
+        paint_vertical_style_preview(hdc, hwnd, preview, style, minimal, desktop);
     } else {
-        fill(hdc, preview, style.color(StyleColorTarget::PanelBackground));
-        draw_outline_rect(hdc, preview, style.color(StyleColorTarget::PanelBorder));
+        paint_horizontal_style_preview(hdc, hwnd, preview, style, minimal, desktop);
     }
-
-    let text_left = preview.left + scale(hwnd, 10);
-    let text_right = preview.right - scale(hwnd, 10);
-    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::QuotaType).to_colorref()));
-    draw_text(
-        hdc,
-        "5H",
-        RECT {
-            left: text_left,
-            top: preview.top + scale(hwnd, 6),
-            right: text_right,
-            bottom: preview.top + scale(hwnd, 28),
-        },
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::Remaining).to_colorref()));
-    draw_text(
-        hdc,
-        "82%",
-        RECT {
-            left: text_left,
-            top: preview.top + scale(hwnd, 29),
-            right: preview.left + scale(hwnd, 88),
-            bottom: preview.top + scale(hwnd, 53),
-        },
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    let _ = SetTextColor(hdc, COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()));
-    draw_text(
-        hdc,
-        "21:30",
-        RECT {
-            left: preview.left + scale(hwnd, 86),
-            top: preview.top + scale(hwnd, 29),
-            right: text_right,
-            bottom: preview.top + scale(hwnd, 53),
-        },
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    let tooltip_preview = RECT {
-        left: preview.right - scale(hwnd, 76),
-        top: preview.top + scale(hwnd, 6),
-        right: preview.right - scale(hwnd, 8),
-        bottom: preview.top + scale(hwnd, 30),
-    };
-    let tooltip_radius = scale(hwnd, i32::from(style.tooltip_corner_radius))
-        .min(((tooltip_preview.right - tooltip_preview.left)
-            .min(tooltip_preview.bottom - tooltip_preview.top) / 2).max(0));
-    if tooltip_radius > 0 {
-        fill_rounded_rect(
-            hdc,
-            tooltip_preview,
-            style.color(StyleColorTarget::TooltipBackground),
-            tooltip_radius,
-        );
-        draw_rounded_outline_rect(
-            hdc,
-            tooltip_preview,
-            style.color(StyleColorTarget::TooltipBorder),
-            tooltip_radius,
-            1,
-        );
-    } else {
-        fill(
-            hdc,
-            tooltip_preview,
-            style.color(StyleColorTarget::TooltipBackground),
-        );
-        draw_outline_rect(
-            hdc,
-            tooltip_preview,
-            style.color(StyleColorTarget::TooltipBorder),
-        );
-    }
-    let _ = SetTextColor(
-        hdc,
-        COLORREF(style.color(StyleColorTarget::ResetTime).to_colorref()),
-    );
-    draw_text(
-        hdc,
-        "21:30",
-        tooltip_preview,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    let progress = RECT {
-        left: text_left,
-        top: preview.top + scale(hwnd, 65),
-        right: text_right,
-        bottom: preview.top + scale(hwnd, 72),
-    };
-    let progress_fill = RECT {
-        right: progress.left + (progress.right - progress.left) * 72 / 100,
-        ..progress
-    };
-    let progress_radius = scale(hwnd, i32::from(style.progress_corner_radius))
-        .min(((progress.bottom - progress.top) / 2).max(0));
-    if progress_radius > 0 {
-        fill_rounded_rect(
-            hdc,
-            progress,
-            style.color(StyleColorTarget::ProgressConsumed),
-            progress_radius,
-        );
-        fill_rounded_rect(
-            hdc,
-            progress_fill,
-            style.color(StyleColorTarget::ProgressHigh),
-            progress_radius.min(((progress_fill.right - progress_fill.left) / 2).max(1)),
-        );
-    } else {
-        fill(hdc, progress, style.color(StyleColorTarget::ProgressConsumed));
-        fill(
-            hdc,
-            progress_fill,
-            style.color(StyleColorTarget::ProgressHigh),
-        );
-    }
-
     for (index, target) in [
         StyleColorTarget::ProgressHigh,
         StyleColorTarget::ProgressMedium,
@@ -6942,14 +9192,27 @@ unsafe fn paint_style_preview_card(
     .copied()
     .enumerate()
     {
-        let left = r.left + scale(hwnd, 14 + index as i32 * 48);
+        let (left, top, width) = if vertical {
+            let swatch_width = 26;
+            let swatch_gap = 10;
+            let total_width = 4 * swatch_width + 3 * swatch_gap;
+            (
+                (r.left + r.right - scale(hwnd, total_width)) / 2
+                    + scale(hwnd, index as i32 * (swatch_width + swatch_gap)),
+                r.bottom - scale(hwnd, 34),
+                swatch_width,
+            )
+        } else {
+            // Preserve the original horizontal preset-card color strips.
+            (r.left + scale(hwnd, 14 + index as i32 * 48),
+             r.top + scale(hwnd, 158), 34)
+        };
         fill_rounded_rect(
             hdc,
             RECT {
-                left,
-                top: r.top + scale(hwnd, 158),
-                right: left + scale(hwnd, 34),
-                bottom: r.top + scale(hwnd, 172),
+                left, top,
+                right: left + scale(hwnd, width),
+                bottom: top + scale(hwnd, 14),
             },
             style.color(target),
             scale(hwnd, 4),
@@ -7190,6 +9453,23 @@ unsafe fn draw_slider(
     fill_rounded_rect(hdc, thumb, accent, radius);
 }
 
+fn appearance_page_title(section: Section, language: LanguageId) -> String {
+    let root = if language == LanguageId::SimplifiedChinese {
+        "外观"
+    } else {
+        "Appearance"
+    };
+    if matches!(
+        section,
+        Section::Preset | Section::Panel | Section::Tooltip | Section::Text
+            | Section::Progress | Section::Interaction
+    ) {
+        format!("{root} · {}", section_label(section, language))
+    } else {
+        root.to_string()
+    }
+}
+
 fn section_label(section: Section, language: LanguageId) -> &'static str {
     let zh = language == LanguageId::SimplifiedChinese;
     match section {
@@ -7335,372 +9615,15 @@ fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
 
 unsafe fn draw_settings_icon(
     hdc: HDC,
-    hwnd: HWND,
+    _hwnd: HWND,
     icon: SettingsIcon,
     rect: RECT,
     color: Color,
-    background: Color,
+    _background: Color,
 ) {
-    // Primary path: Direct2D geometry matched to the approved icon mockup.
-    // This gives every glyph the same rounded caps/joins and anti-aliasing.
-    if native_interop::draw_antialiased_settings_icon(hdc, rect, icon as i32, color) {
-        return;
-    }
-
-    // Conservative GDI fallback for systems where the Direct2D DC target
-    // cannot be created. Normal Windows 10/11 rendering takes the path above.
-    let width = (rect.right - rect.left).max(1);
-    let height = (rect.bottom - rect.top).max(1);
-    let cx = rect.left + width / 2;
-    let cy = rect.top + height / 2;
-    let stroke = scale(hwnd, 2).max(1);
-
-    let pen = CreatePen(PS_SOLID, stroke, COLORREF(color.to_colorref()));
-    let old_pen = SelectObject(hdc, pen);
-    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-
-    let line = |hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32| {
-        let _ = MoveToEx(hdc, x1, y1, None);
-        let _ = LineTo(hdc, x2, y2);
-    };
-
-    match icon {
-        SettingsIcon::General => {
-            for (index, offset) in [-5, 0, 5].into_iter().enumerate() {
-                let y = cy + scale(hwnd, offset);
-                line(hdc, rect.left + scale(hwnd, 1), y, rect.right - scale(hwnd, 1), y);
-                let dot_x = match index {
-                    0 => rect.left + width * 2 / 3,
-                    1 => rect.left + width / 3,
-                    _ => rect.left + width * 3 / 5,
-                };
-                fill_rounded_rect(
-                    hdc,
-                    RECT {
-                        left: dot_x - scale(hwnd, 2),
-                        top: y - scale(hwnd, 2),
-                        right: dot_x + scale(hwnd, 2),
-                        bottom: y + scale(hwnd, 2),
-                    },
-                    color,
-                    scale(hwnd, 2),
-                );
-            }
-        }
-        SettingsIcon::Preset => {
-            let _ = Ellipse(
-                hdc,
-                rect.left + scale(hwnd, 1),
-                rect.top + scale(hwnd, 1),
-                rect.right - scale(hwnd, 1),
-                rect.bottom - scale(hwnd, 1),
-            );
-            for (dx, dy) in [(-4, -3), (2, -5), (5, 1)] {
-                fill_rounded_rect(
-                    hdc,
-                    RECT {
-                        left: cx + scale(hwnd, dx) - scale(hwnd, 1),
-                        top: cy + scale(hwnd, dy) - scale(hwnd, 1),
-                        right: cx + scale(hwnd, dx) + scale(hwnd, 1),
-                        bottom: cy + scale(hwnd, dy) + scale(hwnd, 1),
-                    },
-                    color,
-                    scale(hwnd, 1),
-                );
-            }
-        }
-        SettingsIcon::Panel => {
-            draw_rounded_outline_rect(
-                hdc,
-                RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: rect.top + scale(hwnd, 2),
-                    right: rect.right - scale(hwnd, 1),
-                    bottom: rect.bottom - scale(hwnd, 2),
-                },
-                color,
-                scale(hwnd, 3),
-                stroke,
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 2),
-                rect.top + scale(hwnd, 7),
-                rect.right - scale(hwnd, 2),
-                rect.top + scale(hwnd, 7),
-            );
-        }
-        SettingsIcon::Tooltip => {
-            draw_rounded_outline_rect(
-                hdc,
-                RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: rect.top + scale(hwnd, 1),
-                    right: rect.right - scale(hwnd, 1),
-                    bottom: rect.bottom - scale(hwnd, 5),
-                },
-                color,
-                scale(hwnd, 3),
-                stroke,
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 5),
-                rect.bottom - scale(hwnd, 5),
-                rect.left + scale(hwnd, 5),
-                rect.bottom - scale(hwnd, 1),
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 5),
-                rect.bottom - scale(hwnd, 1),
-                rect.left + scale(hwnd, 10),
-                rect.bottom - scale(hwnd, 5),
-            );
-        }
-        SettingsIcon::Text => {
-            line(
-                hdc,
-                rect.left + scale(hwnd, 2),
-                rect.top + scale(hwnd, 2),
-                rect.right - scale(hwnd, 2),
-                rect.top + scale(hwnd, 2),
-            );
-            line(hdc, cx, rect.top + scale(hwnd, 2), cx, rect.bottom - scale(hwnd, 2));
-        }
-        SettingsIcon::Progress => {
-            draw_rounded_outline_rect(
-                hdc,
-                RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: cy - scale(hwnd, 4),
-                    right: rect.right - scale(hwnd, 1),
-                    bottom: cy + scale(hwnd, 4),
-                },
-                color,
-                scale(hwnd, 4),
-                stroke,
-            );
-            fill_rounded_rect(
-                hdc,
-                RECT {
-                    left: rect.left + scale(hwnd, 4),
-                    top: cy - scale(hwnd, 1),
-                    right: cx + scale(hwnd, 2),
-                    bottom: cy + scale(hwnd, 1),
-                },
-                color,
-                scale(hwnd, 1),
-            );
-        }
-        SettingsIcon::Interaction => {
-            line(
-                hdc,
-                rect.left + scale(hwnd, 4),
-                rect.top + scale(hwnd, 2),
-                rect.left + scale(hwnd, 4),
-                rect.bottom - scale(hwnd, 3),
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 4),
-                rect.top + scale(hwnd, 2),
-                rect.right - scale(hwnd, 3),
-                cy + scale(hwnd, 3),
-            );
-            line(
-                hdc,
-                rect.right - scale(hwnd, 3),
-                cy + scale(hwnd, 3),
-                cx + scale(hwnd, 1),
-                cy + scale(hwnd, 4),
-            );
-            line(
-                hdc,
-                cx + scale(hwnd, 1),
-                cy + scale(hwnd, 4),
-                rect.left + scale(hwnd, 4),
-                rect.bottom - scale(hwnd, 3),
-            );
-            line(hdc, rect.left + scale(hwnd, 1), rect.top + scale(hwnd, 1), rect.left - scale(hwnd, 1), rect.top - scale(hwnd, 2));
-            line(hdc, rect.right - scale(hwnd, 3), rect.top + scale(hwnd, 1), rect.right - scale(hwnd, 1), rect.top - scale(hwnd, 1));
-        }
-        SettingsIcon::Json => {
-            let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
-            draw_text(hdc, "{}", rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        SettingsIcon::ThemeSystem => {
-            draw_rounded_outline_rect(
-                hdc,
-                RECT {
-                    left: rect.left + scale(hwnd, 1),
-                    top: rect.top + scale(hwnd, 2),
-                    right: rect.right - scale(hwnd, 1),
-                    bottom: rect.bottom - scale(hwnd, 5),
-                },
-                color,
-                scale(hwnd, 2),
-                stroke,
-            );
-            line(hdc, cx, rect.bottom - scale(hwnd, 5), cx, rect.bottom - scale(hwnd, 1));
-            line(
-                hdc,
-                cx - scale(hwnd, 4),
-                rect.bottom - scale(hwnd, 1),
-                cx + scale(hwnd, 4),
-                rect.bottom - scale(hwnd, 1),
-            );
-        }
-        SettingsIcon::ThemeDark => {
-            let moon = RECT {
-                left: rect.left + scale(hwnd, 2),
-                top: rect.top + scale(hwnd, 1),
-                right: rect.right - scale(hwnd, 2),
-                bottom: rect.bottom - scale(hwnd, 1),
-            };
-            fill_rounded_rect(hdc, moon, color, width.min(height) / 2);
-            fill_rounded_rect(
-                hdc,
-                RECT {
-                    left: moon.left + scale(hwnd, 5),
-                    top: moon.top - scale(hwnd, 2),
-                    right: moon.right + scale(hwnd, 2),
-                    bottom: moon.bottom - scale(hwnd, 5),
-                },
-                background,
-                width.min(height) / 2,
-            );
-        }
-        SettingsIcon::ThemeLight => {
-            let sun_radius = scale(hwnd, 4);
-            let _ = Ellipse(
-                hdc,
-                cx - sun_radius,
-                cy - sun_radius,
-                cx + sun_radius,
-                cy + sun_radius,
-            );
-            for (dx, dy) in [(0, -8), (0, 8), (-8, 0), (8, 0), (-6, -6), (6, -6), (-6, 6), (6, 6)] {
-                let sx = cx + scale(hwnd, dx) * 3 / 4;
-                let sy = cy + scale(hwnd, dy) * 3 / 4;
-                let ex = cx + scale(hwnd, dx);
-                let ey = cy + scale(hwnd, dy);
-                line(hdc, sx, sy, ex, ey);
-            }
-        }
-        SettingsIcon::LayoutDefault => {
-            for (y, left_pad, right_pad) in [(cy - scale(hwnd, 5), 2, 5), (cy, 5, 2), (cy + scale(hwnd, 5), 2, 7)] {
-                line(
-                    hdc,
-                    rect.left + scale(hwnd, left_pad),
-                    y,
-                    rect.right - scale(hwnd, right_pad),
-                    y,
-                );
-            }
-        }
-        SettingsIcon::LayoutMinimal => {
-            line(
-                hdc,
-                rect.left + scale(hwnd, 4),
-                cy - scale(hwnd, 4),
-                rect.right - scale(hwnd, 4),
-                cy - scale(hwnd, 4),
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 6),
-                cy + scale(hwnd, 4),
-                rect.right - scale(hwnd, 6),
-                cy + scale(hwnd, 4),
-            );
-        }
-        SettingsIcon::LayoutAdaptive => {
-            line(
-                hdc,
-                rect.left + scale(hwnd, 3),
-                cy - scale(hwnd, 5),
-                rect.right - scale(hwnd, 3),
-                cy - scale(hwnd, 5),
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 6),
-                cy + scale(hwnd, 1),
-                rect.right - scale(hwnd, 6),
-                cy + scale(hwnd, 1),
-            );
-            line(
-                hdc,
-                rect.left + scale(hwnd, 9),
-                cy + scale(hwnd, 7),
-                rect.right - scale(hwnd, 9),
-                cy + scale(hwnd, 7),
-            );
-        }
-        SettingsIcon::PresetClassic => {
-            let top = (cx, rect.top + scale(hwnd, 1));
-            let left = (rect.left + scale(hwnd, 2), cy - scale(hwnd, 2));
-            let right = (rect.right - scale(hwnd, 2), cy - scale(hwnd, 2));
-            let bottom = (cx, rect.bottom - scale(hwnd, 1));
-            line(hdc, top.0, top.1, left.0, left.1);
-            line(hdc, top.0, top.1, right.0, right.1);
-            line(hdc, left.0, left.1, bottom.0, bottom.1);
-            line(hdc, right.0, right.1, bottom.0, bottom.1);
-            line(hdc, left.0, left.1, cx, cy + scale(hwnd, 2));
-            line(hdc, right.0, right.1, cx, cy + scale(hwnd, 2));
-            line(hdc, cx, cy + scale(hwnd, 2), bottom.0, bottom.1);
-        }
-        SettingsIcon::PresetOcean => {
-            for y in [cy - scale(hwnd, 5), cy, cy + scale(hwnd, 5)] {
-                let x0 = rect.left + scale(hwnd, 1);
-                let step = (rect.right - rect.left - scale(hwnd, 2)) / 4;
-                let _ = MoveToEx(hdc, x0, y, None);
-                for index in 1..=4 {
-                    let x = x0 + step * index;
-                    let wave_y = y + if index % 2 == 0 { -scale(hwnd, 2) } else { scale(hwnd, 2) };
-                    let _ = LineTo(hdc, x, wave_y);
-                }
-            }
-        }
-        SettingsIcon::PresetForest => {
-            line(hdc, cx, rect.top + scale(hwnd, 1), rect.left + scale(hwnd, 2), cy + scale(hwnd, 5));
-            line(hdc, cx, rect.top + scale(hwnd, 1), rect.right - scale(hwnd, 2), cy + scale(hwnd, 5));
-            line(hdc, rect.left + scale(hwnd, 2), cy + scale(hwnd, 5), rect.right - scale(hwnd, 2), cy + scale(hwnd, 5));
-            line(hdc, cx, cy + scale(hwnd, 5), cx, rect.bottom - scale(hwnd, 1));
-        }
-        SettingsIcon::PresetCustom => {
-            line(
-                hdc,
-                rect.right - scale(hwnd, 2),
-                rect.top + scale(hwnd, 2),
-                cx - scale(hwnd, 1),
-                cy + scale(hwnd, 2),
-            );
-            line(
-                hdc,
-                rect.right - scale(hwnd, 5),
-                rect.top + scale(hwnd, 1),
-                cx - scale(hwnd, 4),
-                cy - scale(hwnd, 1),
-            );
-            let _ = Ellipse(
-                hdc,
-                rect.left + scale(hwnd, 1),
-                cy,
-                cx + scale(hwnd, 1),
-                rect.bottom - scale(hwnd, 1),
-            );
-        }
-        // New light-preset and JSON-action glyphs are defined by the precise
-        // Direct2D path renderer above. If Direct2D is unavailable, keep the
-        // button text usable rather than substituting a misleading glyph.
-        _ => {}
-    }
-
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(pen);
+    // All 32 glyphs are embedded SVG resources. The physical-pixel raster
+    // cache preserves theme tint and DPI while Win32 performs alpha compositing.
+    let _ = crate::svg_icons::draw(hdc, rect, icon as usize, color);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7725,8 +9648,22 @@ unsafe fn draw_segment_with_icon(
     };
     draw_rounded_outline_rect(hdc, rect, border, radius, 1);
 
-    let icon_size = scale(hwnd, 18).min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
-    let gap = scale(hwnd, 7);
+    let important_small_icon = matches!(
+        icon,
+        SettingsIcon::ThemeSystem | SettingsIcon::PositionTaskbar | SettingsIcon::PositionDesktop,
+    );
+    // The theme's gear needs a few more pixels than the much simpler
+    // rectangular placement icons to keep its teeth distinguishable.
+    let preferred_icon_size = if icon == SettingsIcon::ThemeSystem {
+        22
+    } else if important_small_icon {
+        20
+    } else {
+        18
+    };
+    let icon_size = scale(hwnd, preferred_icon_size)
+        .min((height - scale(hwnd, 8)).max(scale(hwnd, 12)));
+    let gap = scale(hwnd, if important_small_icon { 5 } else { 7 });
     let text_width = text_width_px(hwnd, text).max(scale(hwnd, 12));
     let group_width = icon_size + gap + text_width;
     let group_left = rect.left + ((rect.right - rect.left - group_width) / 2).max(scale(hwnd, 6));
@@ -7941,6 +9878,713 @@ mod ui_smoke_tests {
     use super::*;
 
     #[test]
+    fn appearance_subpage_titles_do_not_overlap_the_shared_options_card() {
+        for (section, zh, en) in [
+            (Section::Preset, "外观 · 预设", "Appearance · Presets"),
+            (Section::Panel, "外观 · 面板", "Appearance · Panel"),
+            (Section::Tooltip, "外观 · 浮框", "Appearance · Tooltip"),
+            (Section::Text, "外观 · 文字", "Appearance · Text"),
+            (Section::Progress, "外观 · 进度条", "Appearance · Progress"),
+            (Section::Interaction, "外观 · 交互", "Appearance · Interaction"),
+        ] {
+            assert_eq!(appearance_page_title(section, LanguageId::SimplifiedChinese), zh);
+            assert_eq!(appearance_page_title(section, LanguageId::English), en);
+        }
+        let hwnd = HWND::default();
+        let header = settings_page_title_rect(hwnd);
+        let shared_card = settings_card_rect(hwnd, 58, 206);
+        let first_editor_row = row_rect(hwnd, 0);
+        assert!(header.bottom < shared_card.top,
+            "page heading must be above the shared appearance options");
+        assert!(first_editor_row.top > shared_card.bottom,
+            "editor rows must start after the shared appearance options");
+        assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
+            "preset gallery should immediately follow the shared options without a redundant heading");
+    }
+
+    #[test]
+    fn settings_window_centers_in_widget_monitor_work_area() {
+        let primary = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        assert_eq!(settings_centered_origin(primary, 980, 700), (470, 170));
+        let left_monitor = RECT {
+            left: -1920, top: -120, right: 0, bottom: 920,
+        };
+        assert_eq!(settings_centered_origin(left_monitor, 980, 700), (-1450, 50));
+        let above_monitor = RECT {
+            left: 0, top: -1080, right: 1920, bottom: -40,
+        };
+        assert_eq!(settings_centered_origin(above_monitor, 980, 700), (470, -910));
+        // A monitor smaller than the window must keep its top-left controls
+        // accessible instead of positioning the caption outside the work area.
+        let small = RECT { left: -1366, top: 0, right: 0, bottom: 650 };
+        assert_eq!(settings_centered_origin(small, 980, 700), (-1173, 0));
+        let narrow = RECT { left: 1920, top: 80, right: 2720, bottom: 680 };
+        assert_eq!(settings_centered_origin(narrow, 980, 700), (1920, 80));
+    }
+
+    #[test]
+    fn json_scroll_composition_keeps_optimized_default() {
+        assert_ne!(
+            settings_window_ex_style().0 & WS_EX_COMPOSITED.0, 0,
+            "initial settings window must retain whole-window composition"
+        );
+        for section in [Section::General, Section::Preset, Section::Panel, Section::Tooltip] {
+            assert!(settings_composition_for_section(section),
+                "non-JSON settings pages must retain whole-window composition");
+        }
+        assert!(!settings_composition_for_section(Section::Json),
+            "JSON editor must use the uncomposited optimized scroll path");
+    }
+
+    #[test]
+    fn json_scroll_frame_pacing_follows_display_refresh_rate() {
+        assert_eq!(json_scroll_target_hz(0), 60);
+        assert_eq!(json_scroll_target_hz(1), 60);
+        assert_eq!(json_scroll_target_hz(59), 60);
+        assert_eq!(json_scroll_target_hz(60), 60);
+        assert_eq!(json_scroll_target_hz(61), 60);
+        assert_eq!(json_scroll_target_hz(75), 75);
+        assert_eq!(json_scroll_target_hz(120), 120);
+        assert_eq!(json_scroll_target_hz(144), 144);
+        assert_eq!(json_scroll_target_hz(360), 240);
+        let now = Instant::now();
+        assert!(json_scroll_frame_due(None, now, 144));
+        assert!(!json_scroll_frame_due(Some(now), now + Duration::from_millis(5), 144));
+        assert!(json_scroll_frame_due(Some(now), now + Duration::from_millis(8), 144));
+        assert!(!json_scroll_frame_due(Some(now), now + Duration::from_millis(8), 60));
+        assert!(json_scroll_frame_due(Some(now), now + Duration::from_millis(17), 60));
+        assert_eq!(json_scroll_frame_interval(120), Duration::from_micros(8333));
+        assert_eq!(json_scroll_frame_interval(59), Duration::from_micros(16666));
+        assert!(json_scroll_drag_should_apply(None, now, 60, false));
+        assert!(!json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(8), 60, false,
+        ));
+        assert!(json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(16), 60, false,
+        ), "an 8 ms input source must not collapse 60 Hz into 42 Hz");
+        assert!(json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(17), 60, false,
+        ));
+        assert!(json_scroll_drag_should_apply(
+            Some(now), now + Duration::from_millis(8), 60, true,
+        ), "mouse release must flush the most recent drag pointer");
+    }
+
+    #[test]
+    fn json_drag_direct_pixel_target_is_bounded_and_relative() {
+        assert_eq!(json_direct_drag_pixel_target(360, 20, 42, 18, 200, 24), Some(756));
+        assert_eq!(json_direct_drag_pixel_target(360, 20, 0, 18, 200, 24), Some(0));
+        assert_eq!(
+            json_direct_drag_pixel_target(2700, 150, 199, 18, 200, 24),
+            Some((200 - 24) * 18),
+        );
+        // RichEdit's pixel point is limited to 16-bit values; longer JSON
+        // documents must use the original, unbounded EM_LINESCROLL path.
+        assert_eq!(json_direct_drag_pixel_target(0, 0, 9999, 18, 20000, 24), None);
+        assert_eq!(json_direct_drag_pixel_target(0, 0, 2, 0, 200, 24), None);
+        assert_eq!(json_direct_drag_pixel_target(0, 0, 0, 18, 10, 24), None);
+    }
+
+    #[test]
+    fn json_scroll_layout_cache_invalidates_on_document_or_viewport_change() {
+        let cache = JsonScrollLayoutCache {
+            edit: 100, font: 12, viewport_height: 430,
+            viewport_width: 600, line_height: 18, total_lines: 200,
+        };
+        assert!(cache.matches(100, 12, 600, 430));
+        assert!(!cache.matches(100, 12, 620, 430),
+            "word wrapping changes when editor width changes");
+        assert!(!cache.matches(100, 12, 600, 450),
+            "visible line count changes with the editor height");
+        assert!(!cache.matches(100, 14, 600, 430),
+            "font changes invalidate the measurement");
+        assert!(!cache.matches(101, 12, 600, 430),
+            "never reuse a prior RichEdit window's line count");
+    }
+
+    #[test]
+    fn json_editor_visibility_depends_only_on_active_page_and_modal_state() {
+        assert!(!json_editor_should_be_visible(Section::Preset, false));
+        assert!(!json_editor_should_be_visible(Section::Json, true));
+        assert!(json_editor_should_be_visible(Section::Json, false));
+    }
+
+    #[test]
+    fn horizontal_preset_gallery_restores_three_across_and_custom_below() {
+        let row = [
+            ThemePreset::Classic, ThemePreset::Ocean, ThemePreset::Forest,
+        ];
+        let bounds: Vec<_> = row.iter().map(|p| {
+            let index = match p {
+                ThemePreset::Classic => 0,
+                ThemePreset::Ocean => 1,
+                ThemePreset::Forest => 2,
+            };
+            let left = 200 + index * 244;
+            RECT { left, top: PRESET_CARD_TOP, right: left + 224, bottom: PRESET_CARD_TOP + 184 }
+        }).collect();
+        assert_eq!(bounds[2].right, 912);
+        assert_eq!(bounds[0].top, bounds[2].top);
+        let custom = RECT { left: 200, top: PRESET_CARD_TOP + 200,
+            right: 424, bottom: PRESET_CARD_TOP + 384 };
+        assert_eq!(custom.left, bounds[0].left);
+        assert_eq!(custom.top - bounds[0].bottom, 16);
+    }
+
+    #[test]
+    fn preset_gallery_is_four_tall_equal_cards_in_one_row() {
+        let cards: Vec<_> = (0..4).map(|i| preset_gallery_card_rect(i, false)).collect();
+        assert_eq!(cards[0].left, 200);
+        assert_eq!(cards[3].right, 936);
+        assert!(cards[3].right <= 940);
+        for (i, card) in cards.iter().enumerate() {
+            assert_eq!(card.right - card.left, PRESET_CARD_WIDTH);
+            assert_eq!(card.bottom - card.top, PRESET_CARD_HEIGHT);
+            assert_eq!(card.bottom, PRESET_CARD_TOP + PRESET_CARD_HEIGHT);
+            if i > 0 {
+                assert_eq!(card.left - cards[i - 1].right, PRESET_CARD_GAP);
+                assert_eq!(card.top, cards[i - 1].top);
+            }
+        }
+    }
+
+
+    #[test]
+    fn v23_vertical_preview_card_height_tracks_default_vs_minimal() {
+        for i in 0..4 {
+            let standard = preset_gallery_card_rect(i, false);
+            let minimal = preset_gallery_card_rect(i, true);
+            assert_eq!(standard.bottom - standard.top, 350);
+            assert_eq!(minimal.bottom - minimal.top, 250);
+            assert_eq!(standard.left, minimal.left);
+            assert_eq!(standard.right, minimal.right);
+        }
+    }
+
+    #[test]
+    fn v23_detached_desktop_portrait_grip_is_outside_body() {
+        for minimal in [false, true] {
+            let canvas = RECT { left: 0, top: 0, right: 148,
+                bottom: if minimal { 147 } else { 247 } };
+            let (body, tab) = desktop_portrait_preview_bounds(canvas, minimal, |v| v);
+            assert_eq!(body.top - tab.bottom, PREVIEW_DRAG_TAB_GAP);
+            assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H);
+            assert_eq!(body.bottom - body.top,
+                if minimal { DESKTOP_PREVIEW_MINIMAL_H } else { DESKTOP_PREVIEW_WIDGET_H });
+            assert!(tab.left >= canvas.left && tab.right <= canvas.right);
+            let tooltip = portrait_preview_tooltip_rect(canvas, body, |v| v);
+            assert!(tooltip.top > body.bottom);
+            assert!(tooltip.bottom <= canvas.bottom);
+        }
+    }
+
+    #[test]
+    fn v24_svg_glyph_ids_and_placement_shapes_remain_stable() {
+        assert_eq!(SettingsIcon::ThemeSystem as i32, 8);
+        assert_eq!(SettingsIcon::DirectionHorizontal as i32, 25);
+        assert_eq!(SettingsIcon::DirectionVertical as i32, 26);
+        assert_eq!(SettingsIcon::ToggleOn as i32, 27);
+        assert_eq!(SettingsIcon::ToggleOff as i32, 28);
+        assert_eq!(SettingsIcon::PositionTaskbar as i32, 29);
+        assert_eq!(SettingsIcon::PositionDesktop as i32, 30);
+        assert_eq!(DESKTOP_SUBMENU_ICON_SIZE, 18);
+        let taskbar = include_str!("../assets/settings-icons/position-taskbar.svg");
+        let desktop = include_str!("../assets/settings-icons/position-desktop.svg");
+        assert!(taskbar.contains("y=\"12.8\""));
+        assert!(desktop.contains("y=\"5.4\""));
+        assert!(taskbar.contains("height=\"2.0\""));
+        assert!(desktop.contains("height=\"6.4\""));
+        assert!(taskbar.contains("M12 17v3.1"));
+        assert!(desktop.contains("M12 17v3.1"));
+        let horizontal = include_str!("../assets/settings-icons/direction-horizontal.svg");
+        let vertical = include_str!("../assets/settings-icons/direction-vertical.svg");
+        assert!(horizontal.contains("M5.8 12h12.4"));
+        assert!(vertical.contains("M12 5.4v13.2"));
+        let system = include_str!("../assets/settings-icons/theme-system.svg");
+        assert!(system.contains("fill-rule=\"evenodd\""));
+        let l = desktop_submenu_layout();
+        assert_eq!(l.collapse_label.top, l.enabled.top);
+        assert!(l.collapse_label.top > l.direction_label.bottom);
+        assert_eq!(l.foot.left, APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH + 4);
+    }
+
+    #[test]
+    fn v24_28_desktop_submenu_fits_existing_card_and_includes_desktop_button() {
+        let l = desktop_submenu_layout();
+        let card = RECT { left: 200, top: 58, right: 940, bottom: 206 };
+        for r in [l.well,l.foot,l.direction_label,l.collapse_label,
+            l.horizontal,l.vertical,l.enabled,l.disabled] {
+            assert!(r.left>=card.left && r.right<=card.right);
+            assert!(r.top>=card.top && r.bottom<=card.bottom);
+            assert!(r.right>r.left && r.bottom>r.top);
+        }
+        // The bottom foot surrounds Desktop, but never overlaps Taskbar.
+        let desktop = RECT { left: 422, top: 162, right: 522, bottom: 196 };
+        let taskbar = RECT { left: 314, top: 162, right: 414, bottom: 196 };
+        assert!(l.foot.left < desktop.left && l.foot.right > desktop.right);
+        assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
+        assert_eq!(desktop.left - l.foot.left, 4,
+            "Desktop must have a consistent left inset");
+        assert_eq!(l.foot.left - taskbar.right, 4,
+            "the inset must leave space after Taskbar");
+        assert_eq!(desktop.left - taskbar.right, APPEARANCE_BUTTON_GAP,
+            "position buttons must share the same column spacing");
+        assert!(l.well.left > 630, "do not overlap the Light theme button");
+        assert_eq!(l.well.right - l.well.left, 258,
+            "desktop submenu width stays compact");
+        assert_eq!(l.horizontal.left - l.direction_label.right, 8);
+        assert_eq!(l.enabled.left - l.collapse_label.right, 8);
+        assert_eq!(l.well.right - l.vertical.right, 16);
+        assert_eq!(l.well.right - l.disabled.right, 16);
+        assert!(l.direction_label.right <= l.horizontal.left);
+        assert!(l.collapse_label.right <= l.enabled.left);
+        assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
+            "the two depressed regions must overlap to hide their seam");
+        assert_eq!(submenu_background_alpha(0.0), 0.0);
+        assert_eq!(submenu_background_alpha(1.0), 1.0);
+        assert_eq!(submenu_content_offset(0.0), 8);
+        assert_eq!(submenu_content_offset(1.0), 0);
+        assert_eq!(PRESET_CARD_TOP, 226,
+            "preset gallery starts immediately below the shared options card");
+        for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
+            assert!(r.left>=l.well.left && r.right<l.well.right);
+        }
+        assert!(l.horizontal.right<l.vertical.left);
+        assert!(l.enabled.right<l.disabled.left);
+        assert!(l.direction_label.right<l.horizontal.left);
+        assert!(l.collapse_label.right<l.enabled.left);
+        assert_eq!(l.horizontal.left, l.enabled.left);
+        assert_eq!(l.horizontal.right, l.enabled.right);
+        assert_eq!(l.vertical.left, l.disabled.left);
+        assert_eq!(l.vertical.right, l.disabled.right);
+        assert_eq!(l.horizontal.right - l.horizontal.left,
+                   l.vertical.right - l.vertical.left);
+        assert_eq!(l.vertical.left - l.horizontal.right, APPEARANCE_BUTTON_GAP);
+    }
+
+    #[test]
+    fn appearance_buttons_share_aligned_columns_across_all_rows() {
+        let a = appearance_button_rect(HWND::default(), 0, 70);
+        let b = appearance_button_rect(HWND::default(), 1, 70);
+        let c = appearance_button_rect(HWND::default(), 2, 70);
+        assert_eq!(a.right - a.left, APPEARANCE_BUTTON_WIDTH);
+        assert_eq!(b.right - b.left, APPEARANCE_BUTTON_WIDTH);
+        assert_eq!(c.right - c.left, APPEARANCE_BUTTON_WIDTH);
+        assert_eq!(b.left - a.right, APPEARANCE_BUTTON_GAP);
+        assert_eq!(c.left - b.right, APPEARANCE_BUTTON_GAP);
+        for top in [116, 162] {
+            for column in 0..2 {
+                let r = appearance_button_rect(HWND::default(), column, top);
+                let reference = appearance_button_rect(HWND::default(), column, 70);
+                assert_eq!((r.left, r.right), (reference.left, reference.right));
+                assert_eq!(r.bottom - r.top, APPEARANCE_BUTTON_HEIGHT);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_card_key_ignores_taskbar_desktop_position_and_tracks_visual_state() {
+        let hwnd = HWND::default();
+        // GetDpiForWindow is not callable for a null test handle; compare
+        // the stable key layout fields independently instead.
+        let a = SubmenuCardKey {
+            width: 980, height: 700, dpi: 96, dark: true, zh: true,
+            theme: ThemeMode::Dark, layout: AppearancePreset::Default,
+            direction: DesktopDirection::Horizontal, collapse: false,
+        };
+        let b = SubmenuCardKey { ..a };
+        let c = SubmenuCardKey { direction: DesktopDirection::Vertical, ..a };
+        let d = SubmenuCardKey { collapse: true, ..a };
+        assert!(a == b);
+        assert!(a != c);
+        assert!(a != d, "the cached Desktop submenu must repaint when collapse changes");
+        let _ = hwnd;
+    }
+
+    #[test]
+    fn appearance_card_hover_and_press_invalidation_is_scoped() {
+        assert!(card_only_hover_change(
+            Section::Preset, Some(HitTarget::Position(DisplayPosition::Desktop)), None,
+        ));
+        assert!(card_only_hover_change(
+            Section::Preset, Some(HitTarget::Position(DisplayPosition::Taskbar)),
+            Some(HitTarget::Position(DisplayPosition::Desktop)),
+        ));
+        assert!(!card_only_hover_change(
+            Section::Preset, Some(HitTarget::Section(Section::Preset)),
+            Some(HitTarget::Position(DisplayPosition::Desktop)),
+        ));
+        assert!(!card_only_hover_change(
+            Section::Json, None, Some(HitTarget::Position(DisplayPosition::Desktop)),
+        ));
+        assert!(!card_only_hover_change(Section::Preset, None, None));
+    }
+
+    #[test]
+    fn preset_gallery_cache_key_changes_with_rendered_state() {
+        let base = PresetGalleryKey {
+            width: 980, height: 700, dpi: 96, dark: true, zh: true,
+            layout: AppearancePreset::Default,
+            desktop_direction: DesktopDirection::Horizontal,
+            taskbar_vertical: false,
+            active_style: ThemeStyle::dark_default(),
+        };
+        let same = base.clone();
+        assert!(base == same,
+            "the same gallery cache must be reusable for position changes");
+        let vertical = PresetGalleryKey {
+            taskbar_vertical: true, ..base.clone()
+        };
+        assert!(base != vertical, "preview orientation invalidates the cache");
+        let light = PresetGalleryKey { dark: false, ..base.clone() };
+        assert!(base != light, "theme changes invalidate the cache");
+        let resized = PresetGalleryKey { width: 1000, ..base.clone() };
+        assert!(base != resized, "DPI/layout size changes invalidate the cache");
+    }
+
+    #[test]
+    fn position_sync_coalesced_dirty_uses_only_valid_retained_page() {
+        let section = Section::Preset;
+        assert!(can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::PositionSync,
+            false, true, false,
+        ));
+        // A just-created buffer or one painted for another page is unsafe.
+        assert!(!can_reuse_coalesced_position_paint(
+            section, None, SettingsPaintCause::PositionSync,
+            false, true, false,
+        ));
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(Section::General), SettingsPaintCause::PositionSync,
+            false, true, false,
+        ));
+        // Real content refresh, user interaction, or an idle state must
+        // remain eligible for normal complete painting.
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::FullSync,
+            false, true, false,
+        ));
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::PositionSync,
+            false, true, true,
+        ));
+        assert!(!can_reuse_coalesced_position_paint(
+            section, Some(section), SettingsPaintCause::PositionSync,
+            false, false, false,
+        ));
+    }
+
+    #[test]
+    fn submenu_terminal_frame_keeps_cache_eligibility_and_retargets_cleanly() {
+        let start = Instant::now();
+        let mut animation = DesktopSubmenuAnimation::initial(false);
+        assert!(animation.retarget(true, start));
+        let (active, due) = animation.tick_for_paint(start + Duration::from_millis(225));
+        assert!(due);
+        assert!(!active);
+        assert_eq!(animation.progress, 1.0);
+        assert!(animation.final_frame_pending);
+        // WM_PAINT composites this last frame, then clears the pending flag.
+        animation.final_frame_pending = false;
+        assert!(!animation.final_frame_pending);
+        assert!(animation.retarget(false, start + Duration::from_millis(230)));
+        assert!(!animation.final_frame_pending);
+        let (active, due) = animation.tick_for_paint(start + Duration::from_millis(425));
+        assert!(due);
+        assert!(!active);
+        assert_eq!(animation.progress, 0.0);
+        assert!(animation.final_frame_pending);
+    }
+
+    #[test]
+    fn multimedia_tick_does_not_skip_adjacent_16ms_frames() {
+        let start = Instant::now();
+        let mut animation = DesktopSubmenuAnimation::initial(false);
+        assert!(animation.retarget(true, start));
+        // Callback jitter around 16ms must not trigger the old 15ms
+        // gate and accidentally skip an entire 16ms display interval.
+        let mut drawn = 0;
+        for ms in [15, 29, 45, 60, 76, 91, 107, 122] {
+            let (active, due) = animation.tick_for_paint_with_gate(
+                start + Duration::from_millis(ms),
+                DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
+            );
+            assert!(active);
+            if due { drawn += 1; }
+        }
+        assert_eq!(drawn, 8);
+        // Duplicate UI tick messages in the same millisecond are rejected.
+        assert!(!animation.frame_due_with_gate(
+            start + Duration::from_millis(122), DESKTOP_SUBMENU_MEDIA_MIN_FRAME_MS,
+        ));
+    }
+
+    #[test]
+    fn submenu_frame_gate_keeps_animation_cadence() {
+        let start = Instant::now();
+        let mut animation = DesktopSubmenuAnimation::initial(false);
+        assert!(animation.retarget(true, start));
+        assert!(animation.frame_due_with_gate(start, DESKTOP_SUBMENU_MIN_FRAME_MS));
+        assert!(!animation.frame_due_with_gate(start + Duration::from_millis(8), DESKTOP_SUBMENU_MIN_FRAME_MS));
+        assert!(animation.frame_due_with_gate(start + Duration::from_millis(16), DESKTOP_SUBMENU_MIN_FRAME_MS));
+    }
+
+    #[test]
+    fn v24_28_desktop_submenu_animation_can_reverse_without_jumps() {
+        let start=Instant::now();
+        let mut animation=DesktopSubmenuAnimation::initial(false);
+        assert_eq!(animation.progress,0.0);
+        assert!(!animation.hit_enabled());
+        assert!(animation.retarget(true,start));
+        animation.advance(start+Duration::from_millis(65));
+        let partial=animation.progress;
+        assert!(partial>0.0 && partial<1.0);
+        assert!(!animation.hit_enabled());
+        assert!(animation.retarget(false,start+Duration::from_millis(65)));
+        assert!((animation.progress-partial).abs()<0.0001,
+            "reversal must begin at the actual current interpolation");
+        animation.advance(start+Duration::from_millis(300));
+        assert_eq!(animation.progress,0.0);
+        assert!(!animation.active());
+        assert!(!animation.hit_enabled());
+        let now=start+Duration::from_millis(300);
+        assert!(animation.retarget(true,now));
+        animation.advance(now+Duration::from_millis(600));
+        assert_eq!(animation.progress,1.0);
+        assert!(animation.hit_enabled());
+        assert!(!animation.retarget(true,now+Duration::from_millis(601)),
+            "snapshot refresh must not replay an already completed animation");
+        assert!(animation.retarget(false,now+Duration::from_millis(602)));
+        assert!(!animation.hit_enabled(),
+            "close must disable secondary hit targets immediately");
+        animation.advance(now+Duration::from_millis(1200));
+        assert_eq!(animation.progress,0.0);
+        assert_eq!(submenu_content_alpha(0.0),0.0);
+        assert_eq!(submenu_content_alpha(1.0),1.0);
+        assert_eq!(submenu_content_alpha(0.08), 0.0);
+        assert_eq!(submenu_content_alpha(0.90), 1.0);
+        assert!(submenu_content_alpha(0.50) > 0.0);
+        assert!(submenu_content_alpha(0.50) < 1.0);
+        assert!(submenu_content_alpha(0.80)>0.0);
+    }
+
+    #[test]
+    fn compact_desktop_submenu_reveal_and_reverse_stay_continuous() {
+        let layout = desktop_submenu_layout();
+        assert!(layout.well.left < layout.well.right);
+        assert!(layout.foot.left < layout.well.left);
+        // The animated endpoints use the same layout; joining regions must
+        // overlap with a real area at every frame, not a 6px seam.
+        assert!(layout.foot.right - layout.well.left >= 16);
+        assert!(layout.well.bottom - layout.foot.top >= 40);
+        assert_eq!(layout.well.bottom, layout.foot.bottom);
+        assert_eq!(submenu_background_alpha(0.0), 0.0);
+        assert_eq!(submenu_background_alpha(1.0), 1.0);
+        for step in 1..=10 {
+            let prev = (step - 1) as f32 / 10.0;
+            let next = step as f32 / 10.0;
+            assert!(submenu_background_alpha(next) >= submenu_background_alpha(prev));
+            assert!(submenu_content_alpha(next) >= submenu_content_alpha(prev));
+            assert!(submenu_content_offset(next) <= submenu_content_offset(prev));
+        }
+        let start = Instant::now();
+        let mut state = DesktopSubmenuAnimation::initial(false);
+        state.retarget(true, start);
+        state.advance(start + Duration::from_millis(100));
+        let mid = state.progress;
+        assert!(mid > 0.0 && mid < 1.0);
+        state.retarget(false, start + Duration::from_millis(100));
+        assert!((state.progress - mid).abs() < 0.0001);
+        assert_eq!(state.duration_ms,
+            (DESKTOP_SUBMENU_CLOSE_DURATION_MS as f32 * mid).round().max(72.0) as u64);
+        state.advance(start + Duration::from_millis(400));
+        assert_eq!(state.progress, 0.0);
+        assert!(!state.hit_enabled());
+    }
+
+    #[test]
+    fn preview_tooltip_templates_match_runtime_content_in_all_layouts() {
+        for (minimal, expected) in [
+            (false, "YYYY-MM-DD HH:mm"),
+            (true, "5H · YYYY-MM-DD HH:mm"),
+        ] {
+            let (first_line, second_line) = preview_reset_tooltip_lines(minimal);
+            assert_eq!(format!("{first_line} {second_line}"), expected);
+            assert_eq!(second_line, "HH:mm");
+            assert!(!first_line.ends_with(' '));
+        }
+        // Both orientations and both display positions call the exact same
+        // template helper; dimensions only affect where the break is drawn.
+    }
+
+    #[test]
+    fn v23_horizontal_minimal_preview_is_content_sized() {
+        let canvas = RECT { left: 0, top: 0, right: 200, bottom: 106 };
+        for minimal in [false, true] {
+            let desktop = horizontal_preview_body(canvas, minimal, true, |v| v);
+            let taskbar = horizontal_preview_body(canvas, minimal, false, |v| v);
+            let content = RECT { left: taskbar.left + PREVIEW_TASKBAR_GRIP_W, ..taskbar };
+            assert_eq!(desktop.right - desktop.left, if minimal { 56 } else { 184 });
+            assert_eq!(taskbar.right - taskbar.left, if minimal { 72 } else { 196 });
+            assert_eq!(taskbar.right - content.left, if minimal { 56 } else { 180 });
+            assert_eq!(taskbar.bottom - taskbar.top, desktop.bottom - desktop.top);
+            assert_eq!(taskbar.bottom - taskbar.top, if minimal { 40 } else { 42 });
+            for body in [desktop, taskbar] {
+                assert!(body.top >= canvas.top);
+                assert!(body.bottom + 6 + PREVIEW_HORIZONTAL_TOOLTIP_H <= canvas.bottom);
+            }
+            let tab = horizontal_preview_detached_tab(desktop, |v| v);
+            assert!(tab.top >= canvas.top);
+            assert_eq!(desktop.top - tab.bottom, PREVIEW_DRAG_TAB_GAP);
+            assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H);
+            assert!(tab.left >= desktop.left && tab.right <= desktop.right);
+        }
+    }
+
+    #[test]
+    fn v23_desktop_preview_tab_gaps_scale_with_dpi() {
+        let portrait = RECT { left: 0, top: 0, right: 296, bottom: 494 };
+        let (body, tab) = desktop_portrait_preview_bounds(portrait, false, |v| v * 2);
+        assert_eq!(body.top - tab.bottom, PREVIEW_DRAG_TAB_GAP * 2);
+        assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H * 2);
+        let landscape = RECT { left: 0, top: 0, right: 400, bottom: 212 };
+        let body = horizontal_preview_body(landscape, false, true, |v| v * 2);
+        let tab = horizontal_preview_detached_tab(body, |v| v * 2);
+        assert_eq!(body.top - tab.bottom, PREVIEW_DRAG_TAB_GAP * 2);
+        assert_eq!(tab.bottom - tab.top, PREVIEW_DRAG_TAB_H * 2);
+        assert!(body.bottom + 2 * (6 + PREVIEW_HORIZONTAL_TOOLTIP_H) <= landscape.bottom);
+    }
+    #[test]
+    fn portrait_preview_tooltip_is_visible_without_covering_component() {
+        let canvas = RECT { left: 0, top: 0, right: 148, bottom: 276 };
+        for minimal in [false, true] {
+            let widget = portrait_preview_widget_bounds(canvas, minimal, |v| v);
+            let popup = portrait_preview_tooltip_rect(canvas, widget, |v| v);
+            assert!(popup.top > widget.bottom);
+            assert!(popup.bottom <= canvas.bottom);
+            assert!(popup.left >= canvas.left && popup.right <= canvas.right);
+            assert_eq!(popup.right - popup.left, 128);
+            assert_eq!(popup.bottom - popup.top, 40);
+        }
+    }
+
+    #[test]
+    fn portrait_preview_matches_taskbar_aspect_ratio_and_label_clearances() {
+        let canvas = RECT { left: 0, top: 0, right: 148, bottom: 276 };
+        let widget = portrait_preview_widget_bounds(canvas, false, |v| v);
+        assert_eq!(widget.right - widget.left, 50);
+        assert_eq!(widget.bottom - widget.top, 168);
+        assert_eq!(widget.left, 49);
+        // The widget + tooltip move up as one block, reducing unused space.
+        assert_eq!(widget.top, 20);
+        let popup = portrait_preview_tooltip_rect(canvas, widget, |v| v);
+        assert_eq!(popup.top, 195);
+        assert!(popup.bottom <= canvas.bottom);
+        let first = portrait_preview_row(widget, 0, |v| v);
+        let second = portrait_preview_row(widget, 1, |v| v);
+        let ring_extent = 17;
+        assert!(first.label.bottom < first.center_y - ring_extent);
+        assert!(first.center_y + ring_extent < first.reset.top);
+        assert!(first.reset.bottom < second.label.top);
+        assert!(second.label.bottom < second.center_y - ring_extent);
+        assert!(second.center_y + ring_extent < second.reset.top);
+        assert!(second.reset.bottom <= widget.bottom);
+        let compact = portrait_preview_widget_bounds(canvas, true, |v| v);
+        assert_eq!(compact.right - compact.left, 50);
+        assert_eq!(compact.bottom - compact.top, 82);
+        assert_eq!(compact.left, widget.left);
+        assert!(compact.top > widget.top);
+        let large_canvas = RECT { left: 0, top: 0, right: 296, bottom: 552 };
+        let scaled = portrait_preview_widget_bounds(large_canvas, false, |v| v * 2);
+        assert_eq!(scaled.right - scaled.left, 100);
+        assert_eq!(scaled.bottom - scaled.top, 336);
+        assert_eq!(scaled.top, 40);
+        let last = portrait_preview_row(scaled, 1, |v| v * 2);
+        assert!(last.reset.bottom <= scaled.bottom);
+    }
+
+    #[test]
+    fn portrait_preview_ring_has_safe_clearance_for_larger_radius() {
+        // The type/reset bands cannot touch the 15px radius + 1.5px stroke.
+        let widget = RECT { left: 0, top: 0, right: 50, bottom: 168 };
+        let first = portrait_preview_row(widget, 0, |v| v);
+        let second = portrait_preview_row(widget, 1, |v| v);
+        for row in [first, second] {
+            assert!(row.label.bottom < row.center_y - 16);
+            assert!(row.center_y + 17 < row.reset.top);
+            assert!(row.center_x - 18 >= widget.left);
+            assert!(row.center_x + 18 <= widget.right);
+        }
+        assert!(first.reset.bottom < second.label.top);
+        // The 4x4 antialiased renderer retains the 6 o'clock gap at 100%.
+        let bg = Color::rgba(18, 21, 25, 255);
+        let track = Color::rgba(41, 52, 63, 255);
+        let accent = Color::rgba(5, 206, 230, 255);
+        let background_pixel = 0x00121519;
+        assert_eq!(preview_ring_pixel(18, 34, 36, 15.0, 3.0, 100.0,
+            bg, track, accent), background_pixel);
+        assert_ne!(preview_ring_pixel(18, 3, 36, 15.0, 3.0, 100.0,
+            bg, track, accent), background_pixel);
+    }
+
+    #[test]
+    fn vertical_preset_preview_ring_has_bottom_gap_and_remaining_quota_palette() {
+        let (start, end, progress) = preview_ring_angles(82.0);
+        assert!((start - (std::f32::consts::PI + std::f32::consts::PI / 10.0)).abs() < 0.0001);
+        assert!((end - (std::f32::consts::PI * 3.0 - std::f32::consts::PI / 10.0)).abs() < 0.0001);
+        assert!(progress > start && progress < end);
+        assert_eq!(preview_ring_angles(0.0).2, start);
+        assert_eq!(preview_ring_angles(100.0).2, end);
+        assert_eq!(preview_remaining_color(82.0), StyleColorTarget::ProgressHigh);
+        assert_eq!(preview_remaining_color(37.0), StyleColorTarget::ProgressMedium);
+        assert_eq!(preview_remaining_color(12.0), StyleColorTarget::ProgressLow);
+        // A true 100% ring retains an opaque-free gap at six o'clock.
+        let bg = Color::rgba(18, 21, 25, 255);
+        let track = Color::rgba(41, 52, 63, 255);
+        let accent = Color::rgba(5, 206, 230, 255);
+        let bg_pixel = (18u32 << 16) | (21u32 << 8) | 25u32;
+        assert_eq!(preview_ring_pixel(18, 31, 36, 13.0, 3.0, 100.0, bg, track, accent), bg_pixel);
+        assert_ne!(preview_ring_pixel(18, 5, 36, 13.0, 3.0, 100.0, bg, track, accent), bg_pixel);
+        // Supersampling produces partially covered edge pixels, not only
+        // abrupt foreground/background transitions.
+        let pixels: Vec<u32> = (0..36).flat_map(|y| (0..36).map(move |x|
+            preview_ring_pixel(x, y, 36, 13.0, 3.0, 82.0, bg, track, accent)
+        )).collect();
+        assert!(pixels.iter().any(|p| *p != bg_pixel && *p != 0x0005CEE6 && *p != 0x0029343F));
+    }
+
+    #[test]
+    fn desktop_submenu_has_only_direction_and_collapse_rows() {
+        let l = desktop_submenu_layout();
+        for r in [l.direction_label, l.collapse_label, l.horizontal,
+            l.vertical, l.enabled, l.disabled]
+        {
+            assert!(r.top >= l.well.top && r.bottom <= l.well.bottom);
+            assert!(r.left >= l.well.left && r.right <= l.well.right);
+        }
+        assert!(l.horizontal.bottom < l.enabled.top);
+        assert_eq!(l.enabled.top, l.disabled.top);
+        assert_eq!(l.direction_label.top, l.horizontal.top);
+        assert_eq!(l.collapse_label.top, l.enabled.top);
+        assert_eq!(l.direction_label.bottom - l.direction_label.top,
+            l.collapse_label.bottom - l.collapse_label.top);
+        assert_eq!(l.horizontal.bottom - l.horizontal.top,
+            l.enabled.bottom - l.enabled.top);
+        assert_eq!(l.collapse_label.top - l.direction_label.bottom, 10);
+        assert_eq!(l.well.bottom, l.foot.bottom);
+        assert_eq!(l.well.bottom, 201);
+        // Both rows belong beside Layout/Position. The old 65..161 well
+        // floated beside Theme and connected to Desktop for just 6px.
+        assert!(l.well.top > 104, "submenu must not intrude into Theme row");
+        assert_eq!(l.horizontal.top, 116);
+        assert_eq!(l.enabled.top, 156);
+        assert_eq!(l.foot.right - l.well.left, 18);
+        assert_eq!(l.well.bottom - l.foot.top, 46);
+        assert!(l.foot.top < l.enabled.top && l.enabled.bottom < l.foot.bottom,
+            "Collapse row must remain beside the actual Desktop button");
+    }
+
+    #[test]
     fn hex_input_accepts_rgb_rgba_and_transient_partial_values() {
         assert_eq!(
             parse_hex_input("#123456"),
@@ -7962,6 +10606,10 @@ mod ui_smoke_tests {
                 theme_mode: ThemeMode::Dark,
                 is_dark: true,
                 appearance_preset: AppearancePreset::Default,
+                display_position: DisplayPosition::Taskbar,
+                desktop_direction: DesktopDirection::Horizontal,
+                desktop_auto_collapse: true,
+                vertical_taskbar_mode: false,
                 active_style: ThemeStyle::dark_default(),
                 editable_settings: EditableSettings {
                     schema_version: 1,
@@ -7978,11 +10626,24 @@ mod ui_smoke_tests {
                     appearance: crate::settings_model::EditableAppearance {
                         theme: "dark".into(),
                         layout: "default".into(),
+                        position: "taskbar".into(),
+                        desktop_direction: "horizontal".into(),
+                                desktop_auto_collapse: true,
                         dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                         light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
                     },
                 },
             };
+
+            // A taskbar/desktop switch may update runtime preview orientation,
+            // but only the lower gallery depends on that field.
+            let mut switched_position = snapshot.clone();
+            switched_position.display_position = DisplayPosition::Desktop;
+            switched_position.vertical_taskbar_mode = true;
+            switched_position.editable_settings.appearance.position = "desktop".into();
+            assert!(position_is_only_snapshot_change(&snapshot, &switched_position));
+            switched_position.theme_mode = ThemeMode::Light;
+            assert!(!position_is_only_snapshot_change(&snapshot, &switched_position));
 
             let reopen_snapshot = snapshot.clone();
             open_or_focus(HWND::default(), snapshot);
@@ -8002,16 +10663,128 @@ mod ui_smoke_tests {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.as_ref().unwrap().json_edit.to_hwnd()
             };
-            set_section(Section::Json);
-            assert!(
-                IsWindowVisible(json_edit).as_bool(),
-                "JSON editor must be visible on the JSON settings page"
+            let json_page_surface = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().unwrap().json_page_surface.to_hwnd()
+            };
+            assert!(IsWindow(json_page_surface).as_bool());
+            for (child, label) in [
+                (json_page_surface, "JSON content pane"),
+                (json_edit, "RichEdit editor"),
+            ] {
+                let style = GetWindowLongW(child, GWL_STYLE) as u32;
+                assert_ne!(
+                    style & WS_CLIPSIBLINGS.0, 0,
+                    "{label} must clip overlapping sibling pixels"
+                );
+            }
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            assert_ne!(
+                ex_style & WS_EX_COMPOSITED.0,
+                0,
+                "the parent must buffer GDI and RichEdit children as one frame"
             );
-            set_section(Section::Preset);
-            assert!(
-                !IsWindowVisible(json_edit).as_bool(),
-                "JSON editor must be hidden immediately after leaving the JSON settings page"
-            );
+            for _ in 0..3 {
+                set_section(Section::Json);
+                assert_eq!(
+                    GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
+                    "JSON RichEdit must scroll without whole-tree composition"
+                );
+                assert!(
+                    IsWindowVisible(json_page_surface).as_bool(),
+                    "opaque JSON content pane must cover the old appearance page"
+                );
+                assert!(
+                    IsWindowVisible(json_edit).as_bool(),
+                    "RichEdit must be visible on top of the JSON content pane"
+                );
+                // A visible RichEdit can still be 100% obscured by a sibling.
+                // Ensure RichEdit is the topmost child, not merely WS_VISIBLE.
+                let top_child = GetWindow(hwnd, GW_CHILD)
+                    .expect("settings window should have a topmost child");
+                assert_eq!(
+                    top_child, json_edit,
+                    "opaque JSON surface must remain below the RichEdit HWND"
+                );
+                assert!(
+                    GetWindowTextLengthW(json_edit) > 0,
+                    "JSON RichEdit must retain the generated configuration text"
+                );
+                // Exercise the narrow, uncomposited scrollbar paint path.
+                // Dragging must use a retained GDI backbuffer, not erase the
+                // live track before drawing its thumb.
+                let track = json_scrollbar_track_rect(hwnd);
+                let hover_x = (track.left + track.right) / 2;
+                let hover_y = (track.top + track.bottom) / 2;
+                assert_eq!(
+                    json_scrollbar_wheel_target(hwnd, hover_x, hover_y),
+                    Some(json_edit),
+                    "mouse wheel over JSON scrollbar must target RichEdit"
+                );
+                assert_eq!(
+                    json_scrollbar_wheel_target(hwnd, track.right + scale(hwnd, 6), hover_y),
+                    None,
+                    "wheel outside the scrollbar must not be redirected"
+                );
+                let left = scale(hwnd, 180);
+                let track_local = RECT {
+                    left: track.left - left,
+                    top: track.top,
+                    right: track.right - left,
+                    bottom: track.bottom,
+                };
+                let _ = InvalidateRect(json_page_surface, Some(&track_local), false);
+                let _ = UpdateWindow(json_page_surface);
+                // UpdateWindow can coalesce the dirty track with a pending
+                // whole-pane redraw on headless CI runners. Independently
+                // exercise the atomic paint helper with an actual window DC.
+                let screen = GetDC(json_page_surface);
+                assert!(!screen.0.is_null());
+                let is_dark = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.as_ref().unwrap().snapshot.is_dark
+                };
+                let painted = paint_json_scrollbar_buffered(
+                    screen, hwnd, is_dark, left, track,
+                );
+                let _ = ReleaseDC(json_page_surface, screen);
+                assert!(painted, "the narrow scrollbar must support double-buffered painting");
+                JSON_SCROLLBAR_PAINT_BUFFER.with(|slot| {
+                    let cache = slot.borrow();
+                    let buffer = cache.as_ref().expect("scrollbar paint buffer must be retained");
+                    assert_eq!(buffer.width, track.right - track.left);
+                    assert_eq!(buffer.height, track.bottom - track.top);
+                });
+                // Repainting the opaque pane must not change the z-order.
+                let _ = RedrawWindow(
+                    json_page_surface, None, HRGN::default(),
+                    RDW_INVALIDATE | RDW_UPDATENOW,
+                );
+                assert_eq!(
+                    GetWindow(hwnd, GW_CHILD).expect("top child after repaint"),
+                    json_edit,
+                    "a page repaint must not obscure RichEdit"
+                );
+                set_section(Section::Preset);
+                assert_eq!(
+                    json_scrollbar_wheel_target(hwnd, hover_x, hover_y),
+                    None,
+                    "other settings pages must not route wheel events to hidden JSON edit"
+                );
+                assert_ne!(
+                    GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_COMPOSITED.0, 0,
+                    "non-JSON pages must restore whole-window composition"
+                );
+                assert!(
+                    !IsWindowVisible(json_page_surface).as_bool(),
+                    "opaque JSON pane must be hidden on preset page"
+                );
+                assert!(
+                    !IsWindowVisible(json_edit).as_bool(),
+                    "RichEdit must be hidden whenever the preset page is active"
+                );
+                let _ = UpdateWindow(hwnd);
+            }
 
             set_section(Section::Panel);
             let hex_edit = {

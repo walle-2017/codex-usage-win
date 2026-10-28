@@ -40,8 +40,10 @@ if (-not $Readme.Contains('https://github.com/walle-2017/codex-usage-win/release
 if (-not $ReadmeZh.Contains('https://github.com/walle-2017/codex-usage-win/releases/latest')) {
     throw 'README.zh-CN.md must point to the renamed repository release page.'
 }
-if (-not $Maintenance.Contains('v1.0.4') -or -not $Maintenance.Contains('v1.0.3')) {
-    throw 'Maintenance docs must describe both migration releases.'
+if (-not $Maintenance.Contains('## Settings schema') -or
+    -not $Maintenance.Contains('current schema') -or
+    -not $Maintenance.Contains('remove unknown fields')) {
+    throw 'Maintenance docs must describe current-schema settings repair without per-version migrations.'
 }
 if (-not $Maintenance.Contains('github-update') -or -not $Maintenance.Contains('--features store')) {
     throw 'Maintenance docs must describe standalone and Store update channels.'

@@ -116,7 +116,8 @@ if ($styleWindow -notmatch 'HitTarget' -or
     $styleWindow -notmatch 'TrackMouseEvent') {
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
-if ($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -or
+if (($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -and
+     $styleWindow -notmatch 'CreateWindowExW\(\s*settings_window_ex_style\(\)') -or
     $styleWindow -match 'WS_MAXIMIZEBOX' -or
     $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU\s*\|\s*WS_MINIMIZEBOX' -or
     $styleWindow -notmatch 'WINDOW_HEIGHT,\s*HWND::default\(\)' -or
@@ -124,6 +125,26 @@ if ($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must be an ownerless taskbar window with minimize support and a standard caption close button.'
+}
+if ($styleWindow -notmatch 'fn settings_window_ex_style\(\)' -or
+    $styleWindow -notmatch 'WS_EX_APPWINDOW\s*\|\s*WS_EX_COMPOSITED' -or
+    $styleWindow -notmatch 'fn settings_composition_for_section\(section: Section\)' -or
+    $styleWindow -notmatch 'section != Section::Json' -or
+    $styleWindow -notmatch 'fn json_scroll_drag_should_apply\(' -or
+    $styleWindow -notmatch 'fn present_json_scroll_frame_if_due\(') {
+    throw 'JSON must use the default uncomposited scrolling optimization and preserve non-JSON composition.'
+}
+foreach ($debugFlag in @(
+    'CODEX_USAGE_ANIMATION_METRICS',
+    'CODEX_USAGE_JSON_SCROLL_METRICS',
+    'CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED',
+    'CODEX_USAGE_JSON_SCROLL_KEEP_COMPOSITED',
+    'CODEX_USAGE_JSON_SCROLL_DRAG_COALESCE_DISABLED',
+    'CODEX_USAGE_JSON_SCROLL_FAST_FRAMES_DISABLED'
+)) {
+    if ($styleWindow.Contains($debugFlag)) {
+        throw "Retired settings diagnostics environment switch must not return: $debugFlag"
+    }
 }
 if ($styleWindow -notmatch 'json_save_mask' -or
     $styleWindow -notmatch 'WS_EX_LAYERED\s*\|\s*WS_EX_TOOLWINDOW\s*\|\s*WS_EX_NOACTIVATE' -or
@@ -344,37 +365,33 @@ if ($composition -notmatch 'CreateDesktopWindowTarget' -or
     throw 'Native helper must use DesktopWindowTarget + BackdropBrush + real GaussianBlurEffect.'
 }
 if ($composition -notmatch 'codex_composition_blur_set_bounds' -or
+    $composition -notmatch 'codex_composition_blur_set_desktop_bounds' -or
     $composition -notmatch 'CreateRoundedRectangleGeometry' -or
     $composition -notmatch 'CreateGeometricClip' -or
-    $composition -notmatch 'clip_geometry\.CornerRadius' -or
+    $composition -notmatch 'panel_geometry' -or
+    $composition -notmatch 'grip_geometry' -or
+    $composition -notmatch 'geometry\.CornerRadius' -or
     $composition -notmatch 'root\.Size\(size\)' -or
     $composition -notmatch 'blur_visual\.Size\(size\)' -or
+    $composition -notmatch 'grip_blur_visual\.Size\(grip_size\)' -or
+    $composition -notmatch 'grip_visual\.Opacity\(alpha\)' -or
     $composition -notmatch 'tint_visual\.Size\(size\)') {
-    throw 'Composition backdrop must use explicit size and rounded hard clipping to match the panel and prevent stale-DPI blur tails.'
+    throw 'Composition backdrop must hard-clip the taskbar panel and independently clip, fade and blur the desktop grip without stale-DPI tails.'
 }
-if ($native -notmatch 'codex_draw_settings_icon') {
-    throw 'Rust native interop must expose the Direct2D settings-icon renderer.'
-}
-if ($controlPrimitives -notmatch 'codex_draw_settings_icon' -or
-    $controlPrimitives -notmatch 'D2D1_CAP_STYLE_ROUND' -or
-    $controlPrimitives -notmatch 'D2D1_LINE_JOIN_ROUND' -or
-    $controlPrimitives -notmatch 'Painter palette|painter palette' -or
-    $controlPrimitives -notmatch 'crescent moon' -or
-    $controlPrimitives -notmatch 'Default layout - full two-row usage panel' -or
-    $controlPrimitives -notmatch 'Minimal layout - one compact usage row' -or
-    $controlPrimitives -notmatch 'graphite cube' -or
-    $controlPrimitives -notmatch 'smooth waves' -or
-    $controlPrimitives -notmatch 'pine tree' -or
-    $controlPrimitives -notmatch 'Cloud Porcelain - cloud' -or
-    $controlPrimitives -notmatch 'Clear Bay - sun over calm bay' -or
-    $controlPrimitives -notmatch 'Wheat Glow - wheat ear' -or
-    $controlPrimitives -notmatch 'JSON Reload - circular arrow' -or
-    $controlPrimitives -notmatch 'JSON Format - braces with formatted lines' -or
-    $controlPrimitives -notmatch 'JSON Import - arrow into tray' -or
-    $controlPrimitives -notmatch 'JSON Export - arrow out of tray' -or
-    $controlPrimitives -notmatch 'JSON Apply - check in circle' -or
-    $controlPrimitives -notmatch 'paintbrush') {
-    throw 'Settings icons must use rounded Direct2D vector paths with distinct layout, light-preset, and JSON-action glyphs.'
+# All settings buttons use the same embedded SVG assets, including GDI-only hosts.
+$svgIcons = Get-ChildItem (Join-Path $PSScriptRoot '..\assets\settings-icons') -Filter '*.svg'
+$svgRaster = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\svg_icons.rs')
+if ($svgIcons.Count -ne 31 -or
+    $native -notmatch 'codex_blend_settings_icon' -or
+    $controlPrimitives -notmatch 'codex_blend_settings_icon' -or
+    $controlPrimitives -notmatch 'AlphaBlend\(' -or
+    $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
+    $svgRaster -notmatch 'resvg::render\(' -or
+    $svgRaster -notmatch 'CACHE_CAPACITY' -or
+    $svgRaster -notmatch 'premultiply_alpha' -or
+    $controlPrimitives -match 'codex_draw_settings_icon' -or
+    $native -match 'codex_draw_settings_icon') {
+    throw 'All 31 settings glyphs must be embedded SVG files, theme/DPI raster-cached and alpha-composited.'
 }
 
 if ($native -notmatch 'set_composition_blur_bounds' -or
@@ -399,10 +416,9 @@ if ($native -match 'SetWindowCompositionAttribute' -or
     $native -match 'set_native_acrylic') {
     throw 'Legacy WCA Acrylic backend must not remain in the production blur path.'
 }
-if ($styleProduction -notmatch 'skip_serializing' -or
-    $styleProduction -notmatch 'LEGACY_FROSTED_STRENGTH_SENTINEL' -or
-    $styleProduction -notmatch 'panel_blur_radius') {
-    throw 'Legacy boolean frosted settings must migrate without being written back.'
+if ($styleProduction -match 'LEGACY_FROSTED_STRENGTH_SENTINEL|panel_blur_radius|alias = "panel_rounded"' -or
+    $settingsModel -match 'LegacyRounded|alias = "tooltip_rounded"') {
+    throw 'Deprecated frost and corner aliases must not remain.'
 }
 if ($windowProduction -notmatch 'BLUR_BACKDROP_HWND' -or
     $windowProduction -notmatch 'BLUR_BACKDROP_CONTEXT' -or
@@ -436,8 +452,8 @@ if ($native -notmatch 'monitor_device_name\(' -or
     $native -notmatch 'monitor_device:\s*Option<String>' -or
     $windowProduction -notmatch 'taskbar_left_offset:\s*i32' -or
     $windowProduction -notmatch 'taskbar_monitor:\s*Option<String>' -or
-    $windowProduction -notmatch 'legacy_tray_offset:\s*Option<i32>') {
-    throw 'Taskbar placement must use a stable monitor identity and a left-edge offset, while retaining one-time legacy offset migration.'
+    $windowProduction -match 'legacy_tray_offset|legacy_left_offset') {
+    throw 'Taskbar placement must use a stable monitor identity and a left-edge offset without legacy migration.'
 }
 $positionBlock = [regex]::Match(
     $windowProduction,
@@ -545,8 +561,33 @@ if ($styleWindow -match '"当前自定义"' -or
     $styleWindow -match '"Current custom"' -or
     $styleWindow -notmatch 'paint_style_preview_card\(' -or
     $styleWindow -notmatch 'if\s+!matched' -or
-    $styleWindow -notmatch 'rect\(hwnd, 200, 420, 424, 604\)') {
-    throw 'Preset page must show the custom preview below the preset row without a redundant Current custom heading.'
+    $styleWindow -notmatch 'const\s+PRESET_CARD_WIDTH:\s*i32\s*=\s*172' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_HEIGHT:\s*i32\s*=\s*350' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_MINIMAL_HEIGHT:\s*i32\s*=\s*250' -or
+    $styleWindow -notmatch 'const\s+PRESET_CARD_GAP:\s*i32\s*=\s*16' -or
+    $styleWindow -notmatch 'preset_gallery_card_rect\(3, minimal\)' -or
+    $styleWindow -notmatch 'portrait_preview_widget_bounds\(' -or
+    $styleWindow -notmatch 'desktop_portrait_preview_bounds\(' -or
+    $styleWindow -notmatch 'paint_horizontal_style_preview\(' -or
+    $styleWindow -notmatch 'paint_preview_horizontal_minimal_text\(' -or
+    $styleWindow -notmatch 'paint_preview_drag_tab\(' -or
+    $styleWindow -notmatch 'preview_vertical_for_snapshot\(') {
+    throw 'Preset gallery must support V23 compact heights, direction-aware previews, detached desktop drag tabs, and true horizontal minimal content.'
+}
+# Both thumbnail orientations must use the same sample text template
+# as the production tooltip, with no time-only legacy preview strings.
+$appearanceSource = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\appearance.rs')
+if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
+    $windowProduction -notmatch 'appearance::quota_reset_tooltip_text\(' -or
+    $styleWindow -notmatch 'fn preview_reset_tooltip_lines\(' -or
+    $styleWindow -notmatch 'quota_reset_tooltip_text\(' -or
+    $styleWindow -notmatch 'let \(date, time\) = preview_reset_tooltip_lines\(minimal\)' -or
+    $styleWindow -notmatch 'preset, "5H", "YYYY-MM-DD HH:mm"' -or
+    $styleWindow -match 'preset, "5H", "20[0-9]{2}-[0-9]{2}-[0-9]{2}' -or
+    $windowProduction -notmatch 'fn tooltip_width_with_render_slack\(' -or
+    $windowProduction -notmatch 'TOOLTIP_TEXT_MEASUREMENT_SLACK' -or
+    $styleWindow -match 'draw_text\(hdc, "21:30", tip,') {
+    throw 'Every preview tooltip must use the real default/minimal reset-time text template, not a time-only placeholder.'
 }
 if ($settingsModel -notmatch 'serde\(deny_unknown_fields\)' -or
     $settingsModel -notmatch 'strip_jsonc_comments' -or
@@ -697,7 +738,7 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::JsonExport' -or
     $styleWindow -notmatch 'SettingsIcon::JsonApply' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
-    $styleWindow -notmatch 'draw_antialiased_settings_icon\(' -or
+    $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
     $styleWindow -notmatch 'theme_icon\(mode\)' -or
     $styleWindow -notmatch 'layout_icon\(preset\)' -or
     $styleWindow -notmatch 'preset_icon\(preset,\s*snapshot\.is_dark\)' -or
@@ -833,11 +874,24 @@ if ($styleWindow -notmatch 'redraw_settings_window\(' -or
 if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.tooltip_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.progress_corner_radius\)' -or
-    $styleWindow -notmatch 'if panel_radius > 0' -or
     $styleWindow -notmatch 'if tooltip_radius > 0' -or
     $styleWindow -notmatch 'if progress_radius > 0' -or
-    $styleWindow -notmatch 'fill\(hdc, preview, style\.color\(StyleColorTarget::PanelBackground\)\)') {
-    throw 'Preset component previews must render the exact configured numeric component radii, including 0 as square.'
+    $styleWindow -notmatch 'fill\(hdc, body, style\.color\(StyleColorTarget::PanelBackground\)\)' -or
+    $styleWindow -notmatch 'fill\(hdc, widget, style\.color\(StyleColorTarget::PanelBackground\)\)' -or
+    $styleWindow -notmatch 'draw_outline_rect\(hdc, widget, style\.color\(StyleColorTarget::PanelBorder\)\)') {
+    throw 'Preset component previews must preserve their themed body, tooltip, progress radii and square-corner fallbacks.'
+}
+# The card outline is required, but the preview-positioning rectangle must
+# never draw an additional frame around the grip, panel and tooltip.
+$previewCardStart = $styleWindow.IndexOf('unsafe fn paint_style_preview_card(')
+$previewCardEnd = $styleWindow.IndexOf('unsafe fn paint_hex_edit_frames(', $previewCardStart)
+if ($previewCardStart -lt 0 -or $previewCardEnd -le $previewCardStart) {
+    throw 'Unable to isolate preset preview card painting for border regression verification.'
+}
+$previewCardPainter = $styleWindow.Substring($previewCardStart, $previewCardEnd - $previewCardStart)
+if ($previewCardPainter -notmatch 'draw_rounded_outline_rect\(\s*hdc,\s*r,' -or
+    $previewCardPainter -match '(?:draw_rounded_outline_rect|draw_outline_rect|fill_rounded_rect|fill)\(\s*hdc,\s*preview\s*,') {
+    throw 'Preset cards must keep their outer selection border but never paint a secondary enclosing preview frame.'
 }
 if ($settingsModel -notmatch 'panel_corner_radius:\s*u8' -or
     $settingsModel -notmatch 'tooltip_corner_radius:\s*u8' -or
@@ -878,6 +932,91 @@ if ($styleWindow -notmatch 'SETTINGS_EDIT_SUBCLASS_ID' -or
     $styleWindow -notmatch 'Some\(LanguageId::SimplifiedChinese\).*"中文"' -or
     $styleWindow -notmatch 'Some\(LanguageId::English\).*"English"') {
     throw 'Settings must support wheel adjustment, compact JSON-error shake, 5H/7D labels, and Chinese/English-only language selection.'
+}
+
+# Explicit desktop orientation must not make a synchronous Explorer shell
+# query while processing the style-window message on the widget UI thread.
+# SHAppBarMessage(ABM_GETTASKBARPOS) can synchronously wait for Explorer;
+# Explorer can simultaneously be waiting for one of our parked taskbar-child
+# HWNDs, freezing both the desktop widget and Windows taskbar.
+$desktopBranch = [regex]::Match(
+    $window, '(?s)fn\s+position_at_taskbar\(\)\s*\{(.*?)\n    let\s*\('
+).Groups[1].Value
+if ([string]::IsNullOrWhiteSpace($desktopBranch) -or
+    $desktopBranch -notmatch 'display_position\s*==\s*DisplayPosition::Desktop' -or
+    $desktopBranch -notmatch 'enable_floating_widget\("explicit desktop preference"' -or
+    $desktopBranch -match '(?m)^\s*[^/\n]*get_taskbar_rect\s*\(') {
+    throw 'Desktop orientation must return before any synchronous Explorer taskbar geometry query.'
+}
+
+# V24 keeps the grip dots fixed, moves the feedback to the entire
+# themed widget perimeter, and highlights the separate desktop tab as well.
+if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*top:\s*sc\(2\)' -or
+    $windowProduction -notmatch 'fn\s+drag_handle_dot_style\(' -or
+    $windowProduction -notmatch 'drag_handle_dot_style\(drag_color, hovered, false\)' -or
+    $windowProduction -notmatch 'drag_handle_dot_style\(\*color, hovered, true\)' -or
+    $windowProduction -notmatch 'let\s+\(dot, gap_x, gap_y, dots\)\s*=\s*drag_handle_dot_style' -or
+    $windowProduction -notmatch 'fn\s+drag_hover_outline_color\(' -or
+    $windowProduction -notmatch 'StyleColorTarget::ProgressHigh' -or
+    $windowProduction -notmatch 'fn\s+draw_drag_hover_outline\(' -or
+    $windowProduction -notmatch 'fn\s+drag_hover_glow_coverage\(' -or
+    $windowProduction -notmatch 'fn\s+drag_hover_signed_edge_distance\(' -or
+    $windowProduction -notmatch 'drag_hover_glow_coverage\(distance\)' -or
+    $windowProduction -notmatch 'if !floating && drag_hovered' -or
+    $windowProduction -notmatch 'if hovered && !hidden' -or
+    $windowProduction -notmatch 'floating_grip_rect\(' -or
+    $windowProduction -notmatch 'draw_drag_hover_outer_glow\(\s*canvas, canvas_w, canvas_h, body, grip, &style, accent' -or
+    $windowProduction -notmatch 'fn\s+panel_outer_shape_contains\(' -or
+    $windowProduction -notmatch 'fn\s+draw_drag_hover_outer_glow\(' -or
+    $windowProduction -notmatch 'drag_hover_outline_color\(&style\)') {
+    throw 'V24 must retain stable six-dot grips and provide theme-adaptive perimeter hover on both the panel and desktop tab.'
+}
+
+# V24.6: halo pixels must never widen actual drag targets. The
+# alpha-1 probe makes otherwise invisible gutter positions observable by
+# WM_NCHITTEST; a deferred notification clears stale highlight safely.
+if ($windowProduction -notmatch 'fn floating_hover_probe_rect\(' -or
+    $windowProduction -notmatch 'fn paint_floating_hover_hit_probe\(' -or
+    $windowProduction -notmatch 'pixels\[index\] = 0x01000000' -or
+    $windowProduction -notmatch 'fn floating_drag_tab_hit_code\(' -or
+    $windowProduction -notmatch 'WM_APP_DESKTOP_HOVER_EXIT' -or
+    $windowProduction -notmatch 'PostMessageW\(' -or
+    $windowProduction -notmatch 'if hovered == Some\(false\)' -or
+    $window -notmatch 'v24_6_hit_probe_has_no_extra_drag_targets_in_any_orientation') {
+    throw 'V24.6 must watch the real draggable rectangle via a transparent hit-test probe and deferred hover cleanup.'
+}
+
+# V24.19: glow starts beneath the REAL rounded border (not the inner
+# content), with premultiplied source-over. An alpha-zero corner pixel must
+# never punch out the backing glow.
+if ($windowProduction -notmatch 'fn composite_premultiplied_pixel\(' -or
+    $windowProduction -notmatch 'fn panel_inner_shape_contains\(' -or
+    $windowProduction -notmatch 'glow\[index\] = glow\[index\]\.max\(drag_hover_glow_coverage\(0\.75\)\)' -or
+    $windowProduction -notmatch 'canvas\[index\] = composite_premultiplied_pixel\(' -or
+    $windowProduction -notmatch 'pixels\[index\] = composite_premultiplied_pixel\(' -or
+    $window -notmatch 'v24_19_transparent_round_corners_do_not_erase_underlying_halo' -or
+    $window -notmatch 'v24_19_border_underside_continuity_without_inner_tint' -or
+    $window -notmatch 'v24_19_premultiplied_foreground_source_over_preserves_color_rules') {
+    throw 'V24.19 must underpaint real rounded border, alpha-compose foreground and preserve content.'
+}
+
+# V24.7 retains the formerly clipped glow gutter on undocking.
+# V24.18 renders a perimeter halo BEHIND the real rounded body and tab,
+# sharing their exact exterior mask and never coloring transparent interiors.
+if ($windowProduction -notmatch 'floating_drag_glow_detached' -or
+    $windowProduction -notmatch 'fn floating_drag_canvas_geometry\(' -or
+    $windowProduction -notmatch 'fn floating_drag_has_cleared_edge\(' -or
+    $windowProduction -notmatch 'if should_unlock' -or
+    $windowProduction -notmatch 'render_layered_at\(Some\(POINT \{ x: new_x, y: new_y \}\)\)' -or
+    $windowProduction -notmatch 'fn draw_drag_hover_outer_glow\(' -or
+    $windowProduction -notmatch 'fn panel_outer_shape_contains\(' -or
+    $windowProduction -notmatch 'if occupied\[other\] \{ continue; \}' -or
+    $windowProduction -notmatch 'if !hidden \{' -or
+    $window -notmatch 'v24_7_drag_clears_physical_edge_and_restores_all_outer_gutters' -or
+    $window -notmatch 'v24_18_outer_glow_leaves_all_panel_and_tab_pixels_untinted' -or
+    $window -notmatch 'v24_18_outer_glow_contacts_actual_rounded_contour_without_any_gap' -or
+    $window -notmatch 'v24_18_nearby_panel_and_tab_glows_do_not_tint_each_other') {
+    throw 'V24.18 must retain undocking halo recovery while sharing the real rounded silhouette and avoiding interior tint.'
 }
 
 Write-Host 'PASS: v1.0.5 theme/style customization contract is satisfied.'
