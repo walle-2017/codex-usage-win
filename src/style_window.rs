@@ -43,7 +43,6 @@ pub const WM_STYLE_LAYOUT_CHANGE: u32 = WM_APP + 124;
 pub const WM_STYLE_POSITION_CHANGE: u32 = WM_APP + 125;
 pub const WM_STYLE_DESKTOP_DIRECTION_CHANGE: u32 = WM_APP + 139;
 pub const WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE: u32 = WM_APP + 145;
-pub const WM_STYLE_DESKTOP_SNAP_CHANGE: u32 = WM_APP + 146;
 pub const WM_STYLE_PRESET_CHANGE: u32 = WM_APP + 126;
 pub const WM_SETTINGS_REFRESH_CHANGE: u32 = WM_APP + 127;
 pub const WM_SETTINGS_USAGE_CHANGE: u32 = WM_APP + 128;
@@ -174,7 +173,6 @@ pub struct StyleWindowSnapshot {
     pub appearance_preset: AppearancePreset,
     pub display_position: DisplayPosition,
     pub desktop_direction: DesktopDirection,
-    pub desktop_snap: bool,
     pub desktop_auto_collapse: bool,
     // Runtime orientation, not a persisted appearance setting.
     pub vertical_taskbar_mode: bool,
@@ -281,7 +279,6 @@ enum HitTarget {
     Layout(AppearancePreset),
     Position(DisplayPosition),
     DesktopDirection(DesktopDirection),
-    DesktopSnap(bool),
     DesktopAutoCollapse(bool),
     Preset(ThemePreset),
     Section(Section),
@@ -717,12 +714,9 @@ struct DesktopSubmenuLayout {
     well: RECT,
     foot: RECT,
     direction_label: RECT,
-    snap_label: RECT,
     collapse_label: RECT,
     horizontal: RECT,
     vertical: RECT,
-    snap_enabled: RECT,
-    snap_disabled: RECT,
     enabled: RECT,
     disabled: RECT,
 }
@@ -730,18 +724,15 @@ fn desktop_submenu_layout() -> DesktopSubmenuLayout {
     DesktopSubmenuLayout {
         // Keep the L-shaped join anchored to the Desktop button, but narrow
         // the right well and its label column to remove unused horizontal space.
-        well: RECT { left: 636, top: 65, right: 894, bottom: 201 },
+        well: RECT { left: 636, top: 65, right: 894, bottom: 161 },
         // Keep the 4px inset around Desktop without touching Taskbar.
         foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
         direction_label: RECT { left: 650, top: 76, right: 728, bottom: 106 },
-        snap_label: RECT { left: 650, top: 116, right: 728, bottom: 146 },
-        collapse_label: RECT { left: 650, top: 156, right: 728, bottom: 186 },
+        collapse_label: RECT { left: 650, top: 116, right: 728, bottom: 146 },
         horizontal: RECT { left: 736, top: 76, right: 803, bottom: 106 },
         vertical: RECT { left: 811, top: 76, right: 878, bottom: 106 },
-        snap_enabled: RECT { left: 736, top: 116, right: 803, bottom: 146 },
-        snap_disabled: RECT { left: 811, top: 116, right: 878, bottom: 146 },
-        enabled: RECT { left: 736, top: 156, right: 803, bottom: 186 },
-        disabled: RECT { left: 811, top: 156, right: 878, bottom: 186 },
+        enabled: RECT { left: 736, top: 116, right: 803, bottom: 146 },
+        disabled: RECT { left: 811, top: 116, right: 878, bottom: 146 },
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -1530,7 +1521,6 @@ fn position_is_only_snapshot_change(
         && old.is_dark == new.is_dark
         && old.appearance_preset == new.appearance_preset
         && old.desktop_direction == new.desktop_direction
-        && old.desktop_snap == new.desktop_snap
         && old.desktop_auto_collapse == new.desktop_auto_collapse
         // Vertical taskbar preview orientation only affects the lower Preset
         // gallery, which is refreshed separately after the card animation.
@@ -1882,11 +1872,6 @@ fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
 
 // The controls are stable throughout animation; painted displacement is
 // disabled for hit testing until the subpanel has almost fully expanded.
-fn desktop_snap_rect(hwnd: HWND, enabled: bool) -> RECT {
-    let layout = desktop_submenu_layout();
-    scaled_rect(hwnd, if enabled { layout.snap_enabled } else { layout.snap_disabled })
-}
-
 fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
     let layout = desktop_submenu_layout();
     scaled_rect(hwnd, if enabled { layout.enabled } else { layout.disabled })
@@ -3031,7 +3016,7 @@ fn is_appearance_card_target(target: HitTarget) -> bool {
         target,
         HitTarget::Theme(_) | HitTarget::Layout(_)
             | HitTarget::Position(_) | HitTarget::DesktopDirection(_)
-            | HitTarget::DesktopSnap(_) | HitTarget::DesktopAutoCollapse(_)
+            | HitTarget::DesktopAutoCollapse(_)
     )
 }
 
@@ -5384,9 +5369,6 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 && s.desktop_submenu.hit_enabled()
         }) {
             for enabled in [true, false] {
-                if pt_in_rect(desktop_snap_rect(hwnd, enabled), x, y) {
-                    return Some(HitTarget::DesktopSnap(enabled));
-                }
                 if pt_in_rect(desktop_auto_collapse_rect(hwnd, enabled), x, y) {
                     return Some(HitTarget::DesktopAutoCollapse(enabled));
                 }
@@ -5491,9 +5473,6 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 WM_STYLE_DESKTOP_DIRECTION_CHANGE,
                 if direction == DesktopDirection::Vertical { 1 } else { 0 }, 0,
             );
-        }
-        HitTarget::DesktopSnap(enabled) => {
-            send_parent(WM_STYLE_DESKTOP_SNAP_CHANGE, usize::from(enabled), 0);
         }
         HitTarget::DesktopAutoCollapse(enabled) => {
             send_parent(WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, usize::from(enabled), 0);
@@ -6982,7 +6961,6 @@ struct SubmenuCardKey {
     theme: ThemeMode,
     layout: AppearancePreset,
     direction: DesktopDirection,
-    snap: bool,
     collapse: bool,
 }
 
@@ -6993,7 +6971,7 @@ impl SubmenuCardKey {
             dark: snapshot.is_dark,
             zh: snapshot.language == LanguageId::SimplifiedChinese,
             theme: snapshot.theme_mode, layout: snapshot.appearance_preset,
-            direction: snapshot.desktop_direction, snap: snapshot.desktop_snap,
+            direction: snapshot.desktop_direction,
             collapse: snapshot.desktop_auto_collapse,
         }
     }
@@ -8455,8 +8433,6 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
     let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
     draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
         DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    draw_text(hdc,if zh{"贴靠"}else{"Docking"},
-        txt(scaled_rect(hwnd,l.snap_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
     draw_text(hdc,if zh{"收缩"}else{"Collapse"},
         txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
     for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
@@ -8466,14 +8442,6 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
             match(zh,horizontal){(true,true)=>"横向",(true,false)=>"纵向",
                 (false,true)=>"Horz",(false,false)=>"Vert"},
             snapshot.desktop_direction==direction,HitTarget::DesktopDirection(direction),
-            hovered,pressed,opacity,inset,palette,primary);
-    }
-    for enabled in [true,false] {
-        paint_submenu_choice(hdc,hwnd,if enabled{l.snap_enabled}else{l.snap_disabled},
-            if enabled{SettingsIcon::ToggleOn}else{SettingsIcon::ToggleOff},
-            match(zh,enabled){(true,true)=>"开启",(true,false)=>"关闭",
-                (false,true)=>"On",(false,false)=>"Off"},
-            snapshot.desktop_snap==enabled,HitTarget::DesktopSnap(enabled),
             hovered,pressed,opacity,inset,palette,primary);
     }
     for enabled in [true,false] {
@@ -10577,14 +10545,14 @@ mod ui_smoke_tests {
         let a = SubmenuCardKey {
             width: 980, height: 700, dpi: 96, dark: true, zh: true,
             theme: ThemeMode::Dark, layout: AppearancePreset::Default,
-            direction: DesktopDirection::Horizontal, snap: true, collapse: false,
+            direction: DesktopDirection::Horizontal, collapse: false,
         };
         let b = SubmenuCardKey { ..a };
         let c = SubmenuCardKey { direction: DesktopDirection::Vertical, ..a };
-        let d = SubmenuCardKey { snap: false, ..a };
+        let d = SubmenuCardKey { collapse: true, ..a };
         assert!(a == b);
         assert!(a != c);
-        assert!(a != d, "the cached Desktop submenu must repaint when docking changes");
+        assert!(a != d, "the cached Desktop submenu must repaint when collapse changes");
         let _ = hwnd;
     }
 
@@ -10964,22 +10932,19 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn desktop_submenu_docking_row_fits_between_direction_and_collapse() {
+    fn desktop_submenu_has_only_direction_and_collapse_rows() {
         let l = desktop_submenu_layout();
-        for r in [l.direction_label, l.snap_label, l.collapse_label,
-            l.horizontal, l.vertical, l.snap_enabled, l.snap_disabled,
-            l.enabled, l.disabled]
+        for r in [l.direction_label, l.collapse_label, l.horizontal,
+            l.vertical, l.enabled, l.disabled]
         {
             assert!(r.top >= l.well.top && r.bottom <= l.well.bottom);
             assert!(r.left >= l.well.left && r.right <= l.well.right);
         }
-        assert!(l.horizontal.bottom < l.snap_enabled.top);
-        assert!(l.snap_enabled.bottom < l.enabled.top);
-        assert_eq!(l.snap_enabled.top, l.snap_disabled.top);
+        assert!(l.horizontal.bottom < l.enabled.top);
         assert_eq!(l.enabled.top, l.disabled.top);
         assert_eq!(l.direction_label.top, l.horizontal.top);
-        assert_eq!(l.snap_label.top, l.snap_enabled.top);
         assert_eq!(l.collapse_label.top, l.enabled.top);
+        assert_eq!(l.well.bottom, 161);
     }
 
     #[test]
@@ -11006,7 +10971,6 @@ mod ui_smoke_tests {
                 appearance_preset: AppearancePreset::Default,
                 display_position: DisplayPosition::Taskbar,
                 desktop_direction: DesktopDirection::Horizontal,
-                desktop_snap: true,
                 desktop_auto_collapse: true,
                 vertical_taskbar_mode: false,
                 active_style: ThemeStyle::dark_default(),
@@ -11027,8 +10991,7 @@ mod ui_smoke_tests {
                         layout: "default".into(),
                         position: "taskbar".into(),
                         desktop_direction: "horizontal".into(),
-                        desktop_snap: true,
-                        desktop_auto_collapse: true,
+                                desktop_auto_collapse: true,
                         dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                         light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
                     },
