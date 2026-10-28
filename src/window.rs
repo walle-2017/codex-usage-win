@@ -5351,6 +5351,25 @@ fn floating_desktop_contact_edge(
         .map(|(edge, _, _)| edge)
 }
 
+// The visible free tab must have priority over choosing a new tab side:
+// when the TOP tab already touches the top edge, flipping it BELOW the body
+// would erase a legitimate docking contact. Same rule for a BELOW-body tab
+// reaching the taskbar. Only actual visible contact counts; no snap radius.
+fn floating_existing_free_tab_contact(
+    bounds: RECT, width: i32, height: i32, body: RECT,
+    free_below: bool, origin: POINT, pointer: POINT,
+) -> Option<FloatingEdge> {
+    let (x, y) = floating_clamp_drag_visible_position(
+        bounds, width, height, body, None, free_below, origin.x, origin.y,
+    );
+    floating_desktop_contact_edge(
+        bounds, width, height, body, None, free_below, POINT { x, y }, pointer,
+    ).filter(|edge| matches!(
+        (free_below, edge),
+        (false, FloatingEdge::Top) | (true, FloatingEdge::Bottom)
+    ))
+}
+
 /// The desktop reset target is the horizontal center of the selected
 /// monitor's usable desktop, snapped against its top work-area boundary.
 /// Keep virtual-desktop coordinates signed for screens left/above primary.
@@ -6258,25 +6277,17 @@ fn finish_floating_drag(hwnd: HWND) {
     let body_top = y.saturating_add(old_body.top);
     let prefer_below = explicit_desktop
         && floating_choose_free_grip_below(bounds, body_top, body_h);
-    // Keep the actual dragged tab orientation for a previously docked widget.
-    // For a free widget, test its prospective tab location: when near the top
-    // the tab moves below before we test contact, avoiding a false top dock.
+    // For a free widget, resolve contact on the ACTUAL dragged tab before
+    // choosing the prospective side. Otherwise touching the top with an
+    // above-body tab would flip the tab down and silently lose the contact.
+    // A previously below-body tab retains its bottom-taskbar priority.
     let edge = if explicit_desktop {
         if old_edge.is_none() {
-            // If a previously below-body tab actually meets the taskbar,
-            // preserve that BOTTOM contact before flipping to a top tab.
-            // Conversely, a near-top top tab may flip below without forcing
-            // a premature top dock just because its old location touched.
-            let bottom_contact = if old_free_below {
-                let (cx, cy) = floating_clamp_drag_visible_position(
-                    bounds, old_w, old_h, old_body, None, true, x, y,
-                );
-                floating_desktop_contact_edge(
-                    bounds, old_w, old_h, old_body, None, true,
-                    POINT { x: cx, y: cy }, pointer,
-                ).filter(|edge| *edge == FloatingEdge::Bottom)
-            } else { None };
-            bottom_contact.or_else(|| {
+            let existing_contact = floating_existing_free_tab_contact(
+                bounds, old_w, old_h, old_body, old_free_below,
+                POINT { x, y }, pointer,
+            );
+            existing_contact.or_else(|| {
                 let (w, h, body) =
                     floating_free_canvas_geometry(body_w, body_h, prefer_below);
                 let desired_x = x + old_body.left - body.left;
@@ -13336,8 +13347,9 @@ mod tests {
             let body_x = bounds.left + 400;
             let body_y = bounds.top + 5;
             assert!(floating_choose_free_grip_below(bounds, body_y, body_height));
-            // A free top-tab drag would exceed the top by 11px here. The
-            // bottom tab instead fits, and the real panel stays at +5px.
+            // A previously below-body tab can sit 5px below the top
+            // without moving the real panel or producing a false dock.
+            // A top tab actually crossing this edge is tested BEFORE flipping.
             let (x, y) = floating_clamp_drag_visible_position(
                 bounds, w, h, bottom_body, None, true,
                 body_x - bottom_body.left, body_y - bottom_body.top,
@@ -13393,6 +13405,54 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
         assert!(restored.floating_free_grip_below,
             "a free tab below the panel must survive restart");
+    }
+
+    #[test]
+    fn free_top_grip_contact_docks_before_adaptive_flip() {
+        // Reproduction: a free widget dragged upward from the desktop
+        // center shows its six-dot tab ABOVE the panel. Once that tab hits
+        // the top boundary, it must dock instead of silently flipping below.
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (bw, bh) in [(240, 42), (48, 168)] {
+            let (w, h, body) = floating_free_canvas_geometry(bw, bh, false);
+            let grip = floating_layout_grip_rect(w, h, None, false);
+            let origin_x = bounds.left + 400;
+            let pointer = POINT { x: origin_x + w / 2, y: bounds.top + 20 };
+            let test_release = |grip_top: i32| {
+                floating_existing_free_tab_contact(
+                    bounds, w, h, body, false,
+                    POINT { x: origin_x, y: grip_top - grip.top }, pointer,
+                )
+            };
+            // Even the last pixel before contact must remain free.
+            for gap in [1, 5, 12, 23] {
+                assert_eq!(test_release(bounds.top + gap), None,
+                    "near-top drag tabs must never magnetically dock");
+            }
+            assert_eq!(test_release(bounds.top), Some(FloatingEdge::Top));
+            assert_eq!(test_release(bounds.top - 1), Some(FloatingEdge::Top),
+                "a tab crossing the top is clamped to an actual contact");
+
+            let body_top_at_contact = bounds.top + body.top - grip.top;
+            assert!(floating_choose_free_grip_below(bounds, body_top_at_contact - 1, bh),
+                "the prospective layout would flip, but existing contact wins");
+
+            // If the tab was ALREADY below the body, proximity to the top
+            // does not create a top contact; body position is preserved.
+            let (_, _, below_body) = floating_free_canvas_geometry(bw, bh, true);
+            let below_y = bounds.top + 5 - below_body.top;
+            assert_eq!(floating_existing_free_tab_contact(
+                bounds, w, h, below_body, true,
+                POINT { x: origin_x, y: below_y }, pointer,
+            ), None);
+            // Prior bottom-taskbar behavior remains intact.
+            let bottom_grip = floating_layout_grip_rect(w, h, None, true);
+            let bottom_y = bounds.bottom - bottom_grip.bottom;
+            assert_eq!(floating_existing_free_tab_contact(
+                bounds, w, h, below_body, true,
+                POINT { x: origin_x, y: bottom_y }, pointer,
+            ), Some(FloatingEdge::Bottom));
+        }
     }
 
     #[test]
