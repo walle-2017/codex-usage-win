@@ -349,6 +349,13 @@ fn gdi_text_quality() -> u32 {
 /// Uses GetDpiForWindow which returns the live DPI (unlike GetDpiForSystem
 /// which is cached at process startup and never changes).
 fn refresh_dpi() {
+    // While the desktop HWND is being dragged, its rectangular bounds may
+    // straddle two monitors and GetDpiForWindow can switch before the pointer
+    // does. The drag handler owns DPI selection/rebasing from GetCursorPos.
+    // Never replace that value midway through a layered-frame render.
+    if lock_state().as_ref().is_some_and(|s| s.floating_mode && s.dragging) {
+        return;
+    }
     let source = {
         let state = lock_state();
         state.as_ref().map(|s| {
@@ -5991,11 +5998,47 @@ fn eased_value_at(from: u8, to: u8, elapsed: Duration, duration_ms: u64) -> u8 {
         .round().clamp(0.0, 100.0) as u8
 }
 
+// Preserve the cursor's position *within the same part of the drag tab*
+// across per-monitor DPI transitions. The anchor is in physical canvas pixels;
+// after a scale change keeping it unchanged shifts the grip away from the
+// cursor. Negative signed offsets (e.g. an initially clipped edge tab) are
+// supported as well.
+fn floating_drag_anchor_for_dpi(anchor: i32, from_dpi: u32, to_dpi: u32) -> i32 {
+    let numerator = i64::from(anchor) * i64::from(to_dpi.max(1));
+    let denominator = i64::from(from_dpi.max(1));
+    let scaled = if numerator >= 0 {
+        (numerator + denominator / 2) / denominator
+    } else {
+        -((-numerator + denominator / 2) / denominator)
+    };
+    scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
 fn update_floating_drag(hwnd: HWND, pointer: POINT) {
+    // The *pointer* chooses the next screen, not the layered HWND center:
+    // when a wide component straddles a seam, those can disagree for many
+    // frames. Never send a dragging popup through position_at_taskbar().
+    let previous_dpi = CURRENT_DPI.load(Ordering::Relaxed).max(1);
+    let target_dpi = floating_monitor_dpi(pointer).unwrap_or(previous_dpi);
+    let dpi_changed = target_dpi != previous_dpi;
+    if dpi_changed {
+        CURRENT_DPI.store(target_dpi, Ordering::Relaxed);
+    }
     let (anchor_x, anchor_y, edge, body_w, body_h, unlocked, reserved, drag_reveal) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else { return };
-        if !s.floating_mode { return; }
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else { return };
+        if !s.floating_mode || !s.dragging || s.hwnd.to_hwnd() != hwnd { return; }
+        if dpi_changed {
+            s.floating_drag_anchor_x = floating_drag_anchor_for_dpi(
+                s.floating_drag_anchor_x, previous_dpi, target_dpi,
+            );
+            s.floating_drag_anchor_y = floating_drag_anchor_for_dpi(
+                s.floating_drag_anchor_y, previous_dpi, target_dpi,
+            );
+            if s.vertical_taskbar_mode {
+                s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
+            }
+        }
         (
             s.floating_drag_anchor_x, s.floating_drag_anchor_y, s.floating_edge,
             total_widget_width_for_state(s), widget_height_for_state(s),
@@ -6051,12 +6094,14 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
     // The first reserved-edge drag frame rebases the bitmap's virtual slide
     // to real coordinates. Commit the new position with the new bitmap so
     // the drag tab doesn't jump, just like V24.7 halo restoration.
-    if should_unlock || slide_x != 0 || slide_y != 0 {
-        // Update canvas dimensions and HWND origin atomically to avoid a
-        // stale bitmap or a one-frame jump when restoring external glow.
+    if dpi_changed || should_unlock || slide_x != 0 || slide_y != 0 {
+        // DPI changes alter the canvas and grip sizes. Repaint and position
+        // atomically, without exposing an old-size bitmap for one frame.
+        // A disconnected old monitor cannot influence the new cursor anchor.
         render_layered_at(Some(POINT { x: new_x, y: new_y }));
         diagnose::log_lazy(|| format!(
-            "desktop drag: restored formerly clipped glow edge={edge:?} taskbar={reserved} prior=({old_w},{old_h})"
+            "desktop drag: rebase edge={edge:?} taskbar={reserved} prior=({old_w},{old_h}) dpi={previous_dpi}->{target_dpi} pointer=({}, {}) anchor=({}, {})",
+            pointer.x, pointer.y, new_anchor_x, new_anchor_y,
         ));
     } else {
         move_floating_widget(hwnd);
@@ -7740,8 +7785,16 @@ unsafe extern "system" fn wnd_proc(
         WM_ERASEBKGND => LRESULT(1),
         WM_DISPLAYCHANGE | WM_DPICHANGED_MSG | WM_SETTINGCHANGE => {
             if msg == WM_DPICHANGED_MSG
-                && FLOATING_INITIAL_PLACEMENT.with(|flag| flag.get())
+                && (FLOATING_INITIAL_PLACEMENT.with(|flag| flag.get())
+                    || lock_state().as_ref().is_some_and(|s|
+                        s.floating_mode && s.dragging && s.hwnd.to_hwnd() == hwnd
+                    ))
             {
+                // SetWindowPos can synchronously deliver WM_DPICHANGED as a
+                // popup crosses a monitor seam. Restarting desktop placement
+                // here resets its canvas and steals the mouse drag anchor.
+                // The next sampled pointer move updates DPI and layered
+                // geometry together instead.
                 return LRESULT(0);
             }
             if msg == WM_DPICHANGED_MSG {
@@ -13037,6 +13090,39 @@ mod tests {
         assert!(floating_auto_collapse_allowed(DisplayPosition::Desktop, true));
         assert!(floating_auto_collapse_allowed(DisplayPosition::Taskbar, false),
             "taskbar-space fallback keeps its existing automatic collapse behavior");
+    }
+
+    #[test]
+    fn desktop_cross_monitor_drag_keeps_pointer_anchor_at_each_dpi() {
+        // Same logical grip point at 100%, 150% and 200% scaling. Cursor
+        // coordinates are absolute virtual-desktop pixels, including a
+        // monitor to the left of the primary.
+        for pointer in [
+            POINT { x: -8, y: 530 },
+            POINT { x: 0, y: 530 },
+            POINT { x: 1920, y: 530 },
+            POINT { x: 3700, y: -120 },
+        ] {
+            for (from_dpi, to_dpi) in [
+                (96, 144), (144, 96), (96, 192), (192, 144),
+            ] {
+                for anchor in [0, 8, 25, 110, -16] {
+                    let new_anchor = floating_drag_anchor_for_dpi(
+                        anchor, from_dpi, to_dpi,
+                    );
+                    let new_origin = pointer.x - new_anchor;
+                    assert_eq!(new_origin + new_anchor, pointer.x,
+                        "drag must stay attached across the seam");
+                    let expected = (f64::from(anchor) * f64::from(to_dpi)
+                        / f64::from(from_dpi)).round() as i32;
+                    assert_eq!(new_anchor, expected,
+                        "drag-grip location must scale to the target monitor");
+                }
+            }
+        }
+        assert_eq!(floating_drag_anchor_for_dpi(25, 96, 144), 38);
+        assert_eq!(floating_drag_anchor_for_dpi(-25, 96, 144), -38);
+        assert_eq!(floating_drag_anchor_for_dpi(30, 144, 96), 20);
     }
 
     #[test]
