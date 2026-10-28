@@ -45,8 +45,6 @@ pub struct EditableAppearance {
     pub layout: String,
     pub position: String,
     pub desktop_direction: String,
-    #[serde(default = "default_desktop_snap")]
-    pub desktop_snap: bool,
     pub desktop_auto_collapse: bool,
     pub dark: EditableThemeStyle,
     pub light: EditableThemeStyle,
@@ -204,7 +202,6 @@ impl EditableThemeStyle {
 }
 
 pub(crate) fn default_desktop_auto_collapse() -> bool { true }
-pub(crate) fn default_desktop_snap() -> bool { true }
 
 impl EditableSettings {
     pub fn validate_and_normalize(&self) -> Result<Self, String> {
@@ -346,10 +343,6 @@ r#"{{
     // {direction_options}
     "desktop_direction": {desktop_direction},
 
-    // {desktop_snap_desc}
-    // {bool_options}
-    "desktop_snap": {desktop_snap},
-
     // {auto_collapse_desc}
     // {bool_options}
     "desktop_auto_collapse": {desktop_auto_collapse},
@@ -415,8 +408,6 @@ r#"{{
             direction_desc = localized(zh, "桌面模式的横向或纵向布局；任务栏模式下忽略", "Horizontal/vertical layout for Desktop, ignored in Taskbar mode"),
             direction_options = localized(zh, "可选：horizontal | vertical", "Options: horizontal | vertical"),
             desktop_direction = q(&a.desktop_direction),
-            desktop_snap_desc = localized(zh, "桌面组件拖动到屏幕边缘时是否自动吸附贴靠；关闭后始终保持完整显示", "Automatically dock Desktop widgets near display edges; when disabled keep the full widget visible"),
-            desktop_snap = a.desktop_snap,
             auto_collapse_desc = localized(zh, "桌面贴靠边缘后是否自动收缩；任务栏模式下忽略", "Auto-collapse after Desktop edge docking; ignored in Taskbar mode"),
             desktop_auto_collapse = a.desktop_auto_collapse,
             dark_desc = localized(zh, "深色主题可编辑样式", "Editable dark-theme style"),
@@ -596,14 +587,17 @@ fn normalize_hex(value: &str, path: &str) -> Result<String, String> {
 
 pub fn parse_jsonc(text: &str) -> Result<EditableSettings, String> {
     let stripped = strip_jsonc_comments(text)?;
-    let parsed: EditableSettings = serde_json::from_str(&stripped).map_err(|error| {
-        format!(
-            "line {}, column {}: {}",
-            error.line(),
-            error.column(),
-            error
-        )
+    // Accept the retired Desktop docking option in old JSONC imports without
+    // carrying it forward into the editable schema or exported settings.
+    // Other unknown properties still fail strict schema validation.
+    let mut value: serde_json::Value = serde_json::from_str(&stripped).map_err(|error| {
+        format!("line {}, column {}: {}", error.line(), error.column(), error)
     })?;
+    if let Some(appearance) = value.get_mut("appearance").and_then(|v| v.as_object_mut()) {
+        appearance.remove("desktop_snap");
+    }
+    let parsed: EditableSettings = serde_json::from_value(value)
+        .map_err(|error| error.to_string())?;
     parsed.validate_and_normalize()
 }
 
@@ -703,7 +697,6 @@ mod tests {
                 layout: "default".into(),
                 position: "taskbar".into(),
                 desktop_direction: "horizontal".into(),
-                desktop_snap: true,
                 desktop_auto_collapse: true,
                 dark: EditableThemeStyle::from_theme_style(&ThemeStyle::dark_default()),
                 light: EditableThemeStyle::from_theme_style(&ThemeStyle::light_default()),
@@ -727,16 +720,17 @@ mod tests {
 
 
     #[test]
-    fn desktop_snap_defaults_on_for_legacy_json_and_round_trips() {
+    fn retired_desktop_snap_option_is_accepted_only_on_input() {
         let settings = sample();
-        let mut legacy = serde_json::to_value(settings.clone()).unwrap();
-        legacy["appearance"].as_object_mut().unwrap().remove("desktop_snap");
-        let restored: EditableSettings = serde_json::from_value(legacy).unwrap();
-        assert!(restored.appearance.desktop_snap);
-        let mut disabled = settings;
-        disabled.appearance.desktop_snap = false;
-        assert!(!parse_jsonc(&disabled.to_jsonc(LanguageId::SimplifiedChinese))
-            .unwrap().appearance.desktop_snap);
+        let original = settings.to_pretty_json().unwrap();
+        for enabled in [true, false] {
+            let mut legacy: serde_json::Value = serde_json::from_str(&original).unwrap();
+            legacy["appearance"]["desktop_snap"] = enabled.into();
+            let migrated = parse_jsonc(&serde_json::to_string(&legacy).unwrap()).unwrap();
+            assert_eq!(migrated, settings);
+            assert!(!migrated.to_pretty_json().unwrap().contains("desktop_snap"));
+            assert!(!migrated.to_jsonc(LanguageId::SimplifiedChinese).contains("desktop_snap"));
+        }
     }
 
     #[test]
