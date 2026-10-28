@@ -5260,12 +5260,31 @@ fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32
     )
 }
 
+// The free desktop canvas has transparent glow gutters on every side.
+// Clamping the whole HWND makes the visible panel stop one glow margin away
+// from each screen edge. Only the real panel and drag tab must stay within
+// the selected monitor's usable desktop; transparent pixels may be offscreen.
+fn floating_clamp_free_visible_position(
+    bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
+) -> (i32, i32) {
+    let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+    let visible_left = body.left.min(grip.left);
+    let visible_top = body.top.min(grip.top);
+    let visible_right = body.right.max(grip.right);
+    let visible_bottom = body.bottom.max(grip.bottom);
+    let min_x = bounds.left.saturating_sub(visible_left);
+    let max_x = bounds.right.saturating_sub(visible_right).max(min_x);
+    let min_y = bounds.top.saturating_sub(visible_top);
+    let max_y = bounds.bottom.saturating_sub(visible_bottom).max(min_y);
+    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
 // Disabling docking must also release an *already snapped* desktop widget.
 // Its saved x/y are the expanded-canvas origin, not the currently retracted
 // HWND coordinates. Preserve the body on the same display and clamp the
 // whole new, undocked canvas inside that display's work area.
 fn undock_floating_widget_if_snap_disabled() -> Option<(HWND, POINT)> {
-    let (hwnd, bounds_point, desired_x, desired_y, width, height) = {
+    let (hwnd, bounds_point, desired_x, desired_y, width, height, body) = {
         let state = lock_state();
         let s = state.as_ref()?;
         if !s.floating_mode || s.dragging
@@ -5288,12 +5307,12 @@ fn undock_floating_widget_if_snap_disabled() -> Option<(HWND, POINT)> {
             s.hwnd.to_hwnd(), anchor,
             s.floating_x.saturating_add(old_body.left - new_body.left),
             s.floating_y.saturating_add(old_body.top - new_body.top),
-            new_width, new_height,
+            new_width, new_height, new_body,
         )
     };
     let bounds = floating_monitor_geometry(bounds_point)?.1;
-    let (x, y) = floating_clamp_position(
-        bounds, width, height, desired_x, desired_y,
+    let (x, y) = floating_clamp_free_visible_position(
+        bounds, width, height, body, desired_x, desired_y,
     );
     {
         let mut state = lock_state();
@@ -5655,15 +5674,23 @@ fn reset_floating_widget_position() -> bool {
             } else {
                 floating_canvas_size_for_free_body(body_w, body_h)
             };
-            Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height,
+            let free_body = (!snap).then(|| floating_canvas_geometry(body_w, body_h, None).2);
+            Some((s.hwnd.to_hwnd(), anchor, reset_width, reset_height, free_body,
                 s.display_position, snap, s.desktop_auto_collapse))
         })
     };
-    let Some((hwnd, anchor, width, height, position, snap, auto_collapse)) = snapshot
+    let Some((hwnd, anchor, width, height, free_body, position, snap, auto_collapse)) = snapshot
     else { return false; };
     let Some((monitor, bounds)) = floating_monitor_geometry(anchor)
     else { return false; };
-    let (x, y) = floating_reset_top_origin(bounds, width, height);
+    let (centered_x, top) = floating_reset_top_origin(bounds, width, height);
+    let (x, y) = if let Some(body) = free_body {
+        let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+        floating_clamp_free_visible_position(
+            bounds, width, height, body, centered_x,
+            bounds.top.saturating_sub(body.top.min(grip.top)),
+        )
+    } else { (centered_x, top) };
     let edge = snap.then_some(FloatingEdge::Top);
     let (collapsed, reveal) = initial_floating_visibility(edge, position, auto_collapse);
     let pointer = POINT {
@@ -6259,9 +6286,15 @@ fn finish_floating_drag(hwnd: HWND) {
     let desired_y = y + old_body.top - new_body.top;
     // Keep undocked popups on the mouse's monitor too: there is no longer a
     // special cross-seam placement path.
-    let (x, y) = floating_edge_position(
-        bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
-    );
+    let (x, y) = if !snap_enabled && edge.is_none() {
+        floating_clamp_free_visible_position(
+            bounds, new_w, new_h, new_body, desired_x, desired_y,
+        )
+    } else {
+        floating_edge_position(
+            bounds, desired_x, desired_y, new_w, new_h, edge, false, sc(FLOAT_EDGE_PEEK),
+        )
+    };
     // On expanded edge-docked desktops the body stays visible, and the
     // six-dot tab must follow the same hover fade as a free desktop tab.
     let grip_hovered = floating_drag_grip_contains_screen_point(
@@ -6474,7 +6507,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         let Some(s) = state.as_ref() else { return };
         floating_content_size_for_state(s, vertical)
     };
-    let (window_width, window_height, _) =
+    let (window_width, window_height, body) =
         floating_canvas_geometry(width, height, edge);
     diagnose::log_lazy(|| format!(
         "desktop restore saved=({x},{y}) saved_monitor_valid={saved_monitor_valid} target_dpi={target_dpi} previous_dpi={old_dpi} target_bounds=({}, {}, {}, {}) taskbar_bounds=({}, {}, {}, {})",
@@ -6485,9 +6518,17 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
     let start_y = if y == i32::MIN {
         bounds.top + (bounds.bottom - bounds.top - window_height) / 2
     } else { y };
-    let (x, y) = floating_clamp_position(
-        bounds, window_width, window_height, start_x, start_y,
+    let free_desktop = lock_state().as_ref().is_some_and(|s|
+        !desktop_snap_allowed(s.display_position, s.desktop_snap)
+            && edge.is_none()
     );
+    let (x, y) = if free_desktop {
+        floating_clamp_free_visible_position(
+            bounds, window_width, window_height, body, start_x, start_y,
+        )
+    } else {
+        floating_clamp_position(bounds, window_width, window_height, start_x, start_y)
+    };
     hide_minimal_usage_tooltip();
     {
         let mut state = lock_state();
@@ -13308,8 +13349,8 @@ mod tests {
             )),
             None, "disabling docking must not snap even next to an edge",
         );
-        // The whole transparent canvas (including the tab) must remain on
-        // the pointer's chosen screen; neither the body nor the tab gets cut.
+        // Legacy full-canvas clamping is retained for docked/fallback mode.
+        // Free Desktop positioning instead clamps only the visible geometry.
         for (x, y, w, h) in [
             (-2000, 70, 320, 130),
             (-1660, -280, 320, 130),
@@ -13332,6 +13373,49 @@ mod tests {
         assert!(!restored.desktop_snap);
         assert_eq!(restored.floating_edge, None,
             "a saved disabled-docking widget must not start collapsed/offscreen");
+    }
+
+    #[test]
+    fn desktop_snap_off_can_put_visible_body_and_grip_flush_against_all_edges() {
+        // The panel's halo gutter is transparent and must not become a
+        // permanent gap. Keep both body and drag tab inside the usable area,
+        // including a secondary monitor with negative coordinates.
+        let work = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            let (width, height, body) =
+                floating_canvas_geometry(body_width, body_height, None);
+            let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+            let clamp = |x, y| floating_clamp_free_visible_position(
+                work, width, height, body, x, y,
+            );
+
+            let (left, _) = clamp(-5000, 100);
+            assert_eq!(left + body.left, work.left, "panel can touch left edge");
+            assert!(left < work.left, "transparent left gutter may be offscreen");
+
+            let (right, _) = clamp(2000, 100);
+            assert_eq!(right + body.right, work.right, "panel can touch right edge");
+
+            let (_, top) = clamp(-1000, -5000);
+            assert_eq!(top + grip.top, work.top, "drag tab can touch top edge");
+
+            let (_, bottom) = clamp(-1000, 5000);
+            assert_eq!(bottom + body.bottom, work.bottom, "panel can touch bottom edge");
+
+            let unchanged = (work.left + 200, work.top + 200);
+            assert_eq!(clamp(unchanged.0, unchanged.1), unchanged,
+                "interior drop must keep the mouse-relative position");
+
+            for (requested_x, requested_y) in [
+                (-5000, -5000), (2000, -5000), (-5000, 5000), (2000, 5000),
+            ] {
+                let (x, y) = clamp(requested_x, requested_y);
+                assert!(x + body.left >= work.left && x + body.right <= work.right);
+                assert!(y + body.top >= work.top && y + body.bottom <= work.bottom);
+                assert!(x + grip.left >= work.left && x + grip.right <= work.right);
+                assert!(y + grip.top >= work.top && y + grip.bottom <= work.bottom);
+            }
+        }
     }
 
     #[test]
