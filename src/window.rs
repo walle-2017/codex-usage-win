@@ -3059,7 +3059,7 @@ fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
 
 /// Rounded-rectangle signed distance. Negative is inside the actual panel,
 /// positive is outside; returns zero at its edge.
-#[cfg(test)]
+#[allow(dead_code)]
 fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
     let inset = sc(1).max(1) as f32;
     let half_w = (width as f32 / 2.0 - inset).max(0.5);
@@ -3243,7 +3243,7 @@ fn draw_taskbar_hover_inner_glow_gdi(
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
@@ -3276,7 +3276,7 @@ fn draw_drag_hover_outline(
 /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
 /// When collapsed, every pixel outside the tab is fully transparent and cannot
 /// obstruct other desktop windows or leave a visible panel edge.
-#[cfg(test)]
+#[allow(dead_code)]
 fn render_floating_handle_bitmap(
     pixels: &mut [u32], width: i32, height: i32,
     edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
@@ -4818,7 +4818,7 @@ fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
     else { -1 } // HTCLIENT or HTTRANSPARENT
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn floating_drag_handle_hit(
     x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
 ) -> bool {
@@ -4828,7 +4828,7 @@ fn floating_drag_handle_hit(
 // The desktop tab lives OUTSIDE the panel body. Hover must be checked against
 // its final screen-space rectangle, especially after the canvas origin changes
 // on drop from a docked edge to the free-floating top tab.
-#[cfg(test)]
+#[allow(dead_code)]
 fn floating_drag_grip_contains_screen_point(
     origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
     edge: Option<FloatingEdge>, pointer: POINT,
@@ -5333,7 +5333,7 @@ fn floating_clamp_drag_visible_position(
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn floating_clamp_free_visible_position(
     bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
 ) -> (i32, i32) {
