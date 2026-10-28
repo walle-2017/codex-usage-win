@@ -5282,7 +5282,7 @@ fn floating_clamp_free_visible_position(
 // Disabling docking must also release an *already snapped* desktop widget.
 // Its saved x/y are the expanded-canvas origin, not the currently retracted
 // HWND coordinates. Preserve the body on the same display and clamp the
-// whole new, undocked canvas inside that display's work area.
+// visible panel and drag tab inside its work area (not the transparent halo).
 fn undock_floating_widget_if_snap_disabled() -> Option<(HWND, POINT)> {
     let (hwnd, bounds_point, desired_x, desired_y, width, height, body) = {
         let state = lock_state();
