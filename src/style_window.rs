@@ -10962,6 +10962,25 @@ mod ui_smoke_tests {
     }
 
     #[test]
+    fn desktop_submenu_docking_row_fits_between_direction_and_collapse() {
+        let l = desktop_submenu_layout();
+        for r in [l.direction_label, l.snap_label, l.collapse_label,
+            l.horizontal, l.vertical, l.snap_enabled, l.snap_disabled,
+            l.enabled, l.disabled]
+        {
+            assert!(r.top >= l.well.top && r.bottom <= l.well.bottom);
+            assert!(r.left >= l.well.left && r.right <= l.well.right);
+        }
+        assert!(l.horizontal.bottom < l.snap_enabled.top);
+        assert!(l.snap_enabled.bottom < l.enabled.top);
+        assert_eq!(l.snap_enabled.top, l.snap_disabled.top);
+        assert_eq!(l.enabled.top, l.disabled.top);
+        assert_eq!(l.direction_label.top, l.horizontal.top);
+        assert_eq!(l.snap_label.top, l.snap_enabled.top);
+        assert_eq!(l.collapse_label.top, l.enabled.top);
+    }
+
+    #[test]
     fn hex_input_accepts_rgb_rgba_and_transient_partial_values() {
         assert_eq!(
             parse_hex_input("#123456"),
