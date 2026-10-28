@@ -5241,16 +5241,9 @@ fn floating_edge_requires_clip(
 }
 
 fn desktop_drop_edge_with_snap(
-    enabled: bool, monitor: RECT, bounds: RECT, rect: RECT,
-    pointer: POINT, threshold: i32,
+    enabled: bool, detected: Option<FloatingEdge>,
 ) -> Option<FloatingEdge> {
-    if enabled {
-        floating_drop_edge_at_pointer(
-            monitor, bounds, rect, pointer, threshold, [true; 4],
-        )
-    } else {
-        None
-    }
+    if enabled { detected } else { None }
 }
 
 fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
@@ -6233,9 +6226,12 @@ fn finish_floating_drag(hwnd: HWND) {
     // MonitorFromPoint(pointer) above chooses the target monitor. ALL of its
     // four sides are dockable, including seams connected to another display.
     // This also preserves V24.15's nearest-cursor corner selection.
-    let edge = desktop_drop_edge_with_snap(
-        snap_enabled, monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP),
+    // Detect using the unchanged monitor/taskbar/seam algorithm, then
+    // optionally discard that result when the user disabled auto docking.
+    let edge = floating_drop_edge_at_pointer(
+        monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
     );
+    let edge = desktop_drop_edge_with_snap(snap_enabled, edge);
     let reserved_dock = edge.is_some_and(|edge|
         floating_edge_requires_clip(monitor, bounds, edge, pointer));
     diagnose::log_lazy(|| format!(
@@ -13266,12 +13262,16 @@ mod tests {
         let near_edge = RECT { left: -1908, top: 120, right: -1608, bottom: 220 };
         let pointer = POINT { x: -1899, y: 159 };
         assert_eq!(
-            desktop_drop_edge_with_snap(true, monitor, work, near_edge, pointer, 24),
+            desktop_drop_edge_with_snap(true, floating_drop_edge_at_pointer(
+                monitor, work, near_edge, pointer, 24, [true; 4],
+            )),
             Some(FloatingEdge::Left),
             "the default-on setting must preserve automatic docking",
         );
         assert_eq!(
-            desktop_drop_edge_with_snap(false, monitor, work, near_edge, pointer, 24),
+            desktop_drop_edge_with_snap(false, floating_drop_edge_at_pointer(
+                monitor, work, near_edge, pointer, 24, [true; 4],
+            )),
             None, "disabling docking must not snap even next to an edge",
         );
         // The whole transparent canvas (including the tab) must remain on
