@@ -5247,6 +5247,73 @@ fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32
     )
 }
 
+// Disabling docking must also release an *already snapped* desktop widget.
+// Its saved x/y are the expanded-canvas origin, not the currently retracted
+// HWND coordinates. Preserve the body on the same display and clamp the
+// whole new, undocked canvas inside that display's work area.
+fn undock_floating_widget_if_snap_disabled() -> Option<(HWND, POINT)> {
+    let (hwnd, bounds_point, desired_x, desired_y, width, height) = {
+        let state = lock_state();
+        let s = state.as_ref()?;
+        if !s.floating_mode || s.dragging || s.desktop_snap || s.floating_edge.is_none() {
+            return None;
+        }
+        let (_, _, old_body) = floating_canvas_geometry_for_state(s);
+        let (new_width, new_height, new_body) = floating_canvas_geometry(
+            total_widget_width_for_state(s), widget_height_for_state(s), None,
+        );
+        let anchor = floating_docked_monitor_anchor(
+            s.floating_edge, s.floating_x, s.floating_y,
+            POINT {
+                x: s.floating_x.saturating_add(new_width / 2),
+                y: s.floating_y.saturating_add(new_height / 2),
+            },
+        );
+        (
+            s.hwnd.to_hwnd(), anchor,
+            s.floating_x.saturating_add(old_body.left - new_body.left),
+            s.floating_y.saturating_add(old_body.top - new_body.top),
+            new_width, new_height,
+        )
+    };
+    let bounds = floating_monitor_geometry(bounds_point)?.1;
+    let (x, y) = floating_clamp_position(
+        bounds, width, height, desired_x, desired_y,
+    );
+    {
+        let mut state = lock_state();
+        let s = state.as_mut()?;
+        if !s.floating_mode || s.dragging || s.desktop_snap
+            || s.floating_edge.is_none() || s.hwnd.to_hwnd() != hwnd
+        {
+            return None;
+        }
+        s.floating_x = x;
+        s.floating_y = y;
+        s.floating_edge = None;
+        s.floating_reserved_dock = false;
+        s.floating_drag_glow_detached = false;
+        s.floating_reserved_drag_reveal = 100;
+        s.floating_collapsed = false;
+        s.floating_reveal = 100;
+        s.floating_slide_from = 100;
+        s.floating_slide_target = 100;
+        s.floating_slide_started = Instant::now();
+        s.floating_first_collapse_guard = false;
+        s.floating_grip_hover = false;
+        s.drag_handle_hovered = false;
+        s.floating_grip_alpha = 0;
+        s.floating_fade_from = 0;
+        s.floating_fade_target = 0;
+        s.floating_fade_started = Instant::now();
+    }
+    floating_cancel_hover_recheck(hwnd);
+    unsafe {
+        let _ = KillTimer(taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION);
+    }
+    Some((hwnd, POINT { x, y }))
+}
+
 /// The desktop reset target is the horizontal center of the selected
 /// monitor's usable desktop, snapped against its top work-area boundary.
 /// Keep virtual-desktop coordinates signed for screens left/above primary.
@@ -9192,6 +9259,31 @@ unsafe extern "system" fn wnd_proc(
             style_window::sync(style_settings_snapshot());
             LRESULT(0)
         }
+        _ if msg == style_window::WM_STYLE_DESKTOP_SNAP_CHANGE => {
+            let enabled = wparam.0 != 0;
+            let changed = {
+                let mut state = lock_state();
+                match state.as_mut() {
+                    Some(s) if s.display_position == DisplayPosition::Desktop
+                        && s.desktop_snap != enabled => {
+                        s.desktop_snap = enabled;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                if let Some((_hwnd, origin)) = undock_floating_widget_if_snap_disabled() {
+                    // Publish the new full canvas and unclipped window location
+                    // together. Do not briefly expose the old collapsed tab.
+                    let _placement_guard = FloatingInitialPlacementGuard::begin();
+                    render_layered_at(Some(origin));
+                }
+                save_state_settings();
+                style_window::sync(style_settings_snapshot());
+            }
+            LRESULT(0)
+        }
         _ if msg == style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE => {
             let enabled = wparam.0 != 0;
             let changed = {
@@ -10062,6 +10154,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
     };
 
     set_startup_enabled(startup_enabled);
+    let _ = undock_floating_widget_if_snap_disabled();
     save_state_settings();
     unsafe {
         SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, poll_interval_ms, None);
