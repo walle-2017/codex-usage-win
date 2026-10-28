@@ -10577,12 +10577,14 @@ mod ui_smoke_tests {
         let a = SubmenuCardKey {
             width: 980, height: 700, dpi: 96, dark: true, zh: true,
             theme: ThemeMode::Dark, layout: AppearancePreset::Default,
-            direction: DesktopDirection::Horizontal, collapse: false,
+            direction: DesktopDirection::Horizontal, snap: true, collapse: false,
         };
         let b = SubmenuCardKey { ..a };
         let c = SubmenuCardKey { direction: DesktopDirection::Vertical, ..a };
+        let d = SubmenuCardKey { snap: false, ..a };
         assert!(a == b);
         assert!(a != c);
+        assert!(a != d, "the cached Desktop submenu must repaint when docking changes");
         let _ = hwnd;
     }
 
