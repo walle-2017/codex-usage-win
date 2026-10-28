@@ -722,17 +722,18 @@ struct DesktopSubmenuLayout {
 }
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
     DesktopSubmenuLayout {
-        // Keep the L-shaped join anchored to the Desktop button, but narrow
-        // the right well and its label column to remove unused horizontal space.
-        well: RECT { left: 636, top: 65, right: 894, bottom: 161 },
+        // With the obsolete docking row removed, anchor this two-row well
+        // beside Layout/Position, not Theme/Layout. It must share the
+        // Desktop button's bottom edge so the L-shaped join is continuous.
+        well: RECT { left: 636, top: 106, right: 894, bottom: 201 },
         // Keep the 4px inset around Desktop without touching Taskbar.
         foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
-        direction_label: RECT { left: 650, top: 76, right: 728, bottom: 106 },
-        collapse_label: RECT { left: 650, top: 116, right: 728, bottom: 146 },
-        horizontal: RECT { left: 736, top: 76, right: 803, bottom: 106 },
-        vertical: RECT { left: 811, top: 76, right: 878, bottom: 106 },
-        enabled: RECT { left: 736, top: 116, right: 803, bottom: 146 },
-        disabled: RECT { left: 811, top: 116, right: 878, bottom: 146 },
+        direction_label: RECT { left: 650, top: 116, right: 728, bottom: 146 },
+        collapse_label: RECT { left: 650, top: 156, right: 728, bottom: 186 },
+        horizontal: RECT { left: 736, top: 116, right: 803, bottom: 146 },
+        vertical: RECT { left: 811, top: 116, right: 878, bottom: 146 },
+        enabled: RECT { left: 736, top: 156, right: 803, bottom: 186 },
+        disabled: RECT { left: 811, top: 156, right: 878, bottom: 186 },
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -10756,6 +10757,11 @@ mod ui_smoke_tests {
         let layout = desktop_submenu_layout();
         assert!(layout.well.left < layout.well.right);
         assert!(layout.foot.left < layout.well.left);
+        // The animated endpoints use the same layout; joining regions must
+        // overlap with a real area at every frame, not a 6px seam.
+        assert!(layout.foot.right - layout.well.left >= 16);
+        assert!(layout.well.bottom - layout.foot.top >= 40);
+        assert_eq!(layout.well.bottom, layout.foot.bottom);
         assert_eq!(submenu_background_alpha(0.0), 0.0);
         assert_eq!(submenu_background_alpha(1.0), 1.0);
         for step in 1..=10 {
@@ -10944,7 +10950,17 @@ mod ui_smoke_tests {
         assert_eq!(l.enabled.top, l.disabled.top);
         assert_eq!(l.direction_label.top, l.horizontal.top);
         assert_eq!(l.collapse_label.top, l.enabled.top);
-        assert_eq!(l.well.bottom, 161);
+        assert_eq!(l.well.bottom, l.foot.bottom);
+        assert_eq!(l.well.bottom, 201);
+        // Both rows belong beside Layout/Position. The old 65..161 well
+        // floated beside Theme and connected to Desktop for just 6px.
+        assert!(l.well.top > 104, "submenu must not intrude into Theme row");
+        assert_eq!(l.horizontal.top, 116);
+        assert_eq!(l.enabled.top, 156);
+        assert_eq!(l.foot.right - l.well.left, 18);
+        assert_eq!(l.well.bottom - l.foot.top, 46);
+        assert!(l.foot.top < l.enabled.top && l.enabled.bottom < l.foot.bottom,
+            "Collapse row must remain beside the actual Desktop button");
     }
 
     #[test]
