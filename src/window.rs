@@ -5245,10 +5245,15 @@ fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32
 // Clamping the whole HWND makes the visible panel stop one glow margin away
 // from each screen edge. Only the real panel and drag tab must stay within
 // the selected monitor's usable desktop; transparent pixels may be offscreen.
-fn floating_clamp_free_visible_position(
-    bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
+// The currently dragged canvas retains its previous dock orientation until
+// mouse release. Its actual tab can therefore be BELOW or BESIDE the panel,
+// whereas the future free canvas would put the tab ABOVE it. Visibility and
+// contact decisions must use that current orientation, not the future one.
+fn floating_clamp_drag_visible_position(
+    bounds: RECT, width: i32, height: i32, body: RECT,
+    edge: Option<FloatingEdge>, x: i32, y: i32,
 ) -> (i32, i32) {
-    let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
     let visible_left = body.left.min(grip.left);
     let visible_top = body.top.min(grip.top);
     let visible_right = body.right.max(grip.right);
@@ -5260,13 +5265,20 @@ fn floating_clamp_free_visible_position(
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
 }
 
-// Explicit Desktop docking requires contact between visible content and a
-// screen boundary. Neither transparent glow nor cursor proximity qualifies.
+fn floating_clamp_free_visible_position(
+    bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
+) -> (i32, i32) {
+    floating_clamp_drag_visible_position(bounds, width, height, body, None, x, y)
+}
+
+// Explicit Desktop docking requires contact between the body/drag tab that
+// were ACTUALLY displayed at mouse release and the work-area boundary.
+// Never substitute the future free-floating canvas before this check.
 fn floating_desktop_contact_edge(
     bounds: RECT, width: i32, height: i32, body: RECT,
-    x: i32, y: i32, pointer: POINT,
+    edge: Option<FloatingEdge>, x: i32, y: i32, pointer: POINT,
 ) -> Option<FloatingEdge> {
-    let grip = floating_grip_rect(width, height, None, sc(FLOAT_EDGE_PEEK));
+    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
     let left = x + body.left.min(grip.left);
     let top = y + body.top.min(grip.top);
     let right = x + body.right.max(grip.right);
@@ -6178,18 +6190,17 @@ fn finish_floating_drag(hwnd: HWND) {
         return;
     };
     let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
-    // Explicit Desktop never magnetically snaps near an edge. Only the real
-    // panel and drag tab qualify; fallback mode retains proximity docking.
+    // The drag canvas may still use a TOP-docked orientation, whose tab is
+    // BELOW the panel. Do not first swap it to the free (tab-above) canvas:
+    // that falsely detects a top contact and misses a real bottom-taskbar
+    // contact. Clamp the ACTUAL dragged pixels before checking for contact.
+    // The fallback taskbar mode retains its legacy proximity docking.
     let edge = if explicit_desktop {
-        let (free_w, free_h, free_body) =
-            floating_canvas_geometry(body_w, body_h, None);
-        let free_x = x + old_body.left - free_body.left;
-        let free_y = y + old_body.top - free_body.top;
-        let (free_x, free_y) = floating_clamp_free_visible_position(
-            bounds, free_w, free_h, free_body, free_x, free_y,
+        let (drag_x, drag_y) = floating_clamp_drag_visible_position(
+            bounds, old_w, old_h, old_body, old_edge, x, y,
         );
         floating_desktop_contact_edge(
-            bounds, free_w, free_h, free_body, free_x, free_y, pointer,
+            bounds, old_w, old_h, old_body, old_edge, drag_x, drag_y, pointer,
         )
     } else {
         floating_drop_edge_at_pointer(
@@ -13216,7 +13227,7 @@ mod tests {
                 let (x, y) = floating_clamp_free_visible_position(
                     bounds, w, h, body, requested_x, requested_y,
                 );
-                floating_desktop_contact_edge(bounds, w, h, body, x, y, pointer)
+                floating_desktop_contact_edge(bounds, w, h, body, None, x, y, pointer)
             };
             assert_eq!(drop_edge(inside_x, inside_y), None);
             for gap in [1, 5, 12, 23] {
@@ -13231,6 +13242,52 @@ mod tests {
             assert_eq!(drop_edge(inside_x, bounds.bottom - bottom), Some(FloatingEdge::Bottom));
             // A genuinely overhanging drop is corrected to the boundary.
             assert_eq!(drop_edge(bounds.left - left - 50, inside_y), Some(FloatingEdge::Left));
+        }
+    }
+
+    #[test]
+    fn desktop_drag_retains_actual_tab_side_when_testing_top_and_bottom_contact() {
+        // Regression for a TOP-docked widget being dragged with its tab still
+        // below the panel. The free canvas would move that tab above the
+        // panel, introducing a false top contact and hiding bottom contact.
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        let body_w = 240;
+        let body_h = 42;
+        let edge = Some(FloatingEdge::Top);
+        for detached in [false, true] {
+            let (w, h, body) =
+                floating_drag_canvas_geometry(body_w, body_h, edge, detached);
+            let grip = floating_grip_rect(w, h, edge, sc(FLOAT_EDGE_PEEK));
+            let x = bounds.left + 400;
+            let pointer = POINT { x: x + w / 2, y: bounds.top + 40 };
+            let release = |requested_y: i32| {
+                let (cx, cy) = floating_clamp_drag_visible_position(
+                    bounds, w, h, body, edge, x, requested_y,
+                );
+                floating_desktop_contact_edge(
+                    bounds, w, h, body, edge, cx, cy, pointer,
+                )
+            };
+            // Screenshot 1: the actual panel is still 15px below the top.
+            // A hypothetical free tab would extend above it and fabricate
+            // a top collision. The real tab is BELOW the panel.
+            let above_gap = bounds.top + 15 - body.top;
+            assert_eq!(release(above_gap), None,
+                "top must not dock before the visible drag canvas reaches it");
+            assert_eq!(release(bounds.top - body.top), Some(FloatingEdge::Top));
+
+            // Screenshot 2: the actual bottom tab meets the taskbar's inner
+            // boundary, although the panel itself remains one tab away.
+            let at_taskbar = bounds.bottom - grip.bottom;
+            assert!(at_taskbar + body.bottom < bounds.bottom);
+            assert_eq!(release(at_taskbar), Some(FloatingEdge::Bottom),
+                "bottom tab contact must dock even though the panel is above it");
+            for gap in [1, 5, 12, 23] {
+                assert_eq!(release(at_taskbar - gap), None,
+                    "near the taskbar is not the same as touching it");
+            }
+            assert_eq!(release(at_taskbar + 10), Some(FloatingEdge::Bottom),
+                "an overlapping tab should clamp and register real contact");
         }
     }
 
