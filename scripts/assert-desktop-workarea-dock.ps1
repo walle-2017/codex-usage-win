@@ -1,4 +1,4 @@
-# Desktop docking follows Explorer's true edge and retracts without covering it.
+# Explicit Desktop uses exact visible-edge contact; fallback retains Explorer docking.
 $ErrorActionPreference = 'Stop'
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $blur = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs')
@@ -33,11 +33,17 @@ if ($window -match 'fn floating_reserved_visible_body\(' -or
     throw 'Obsolete taskbar-only contraction and grip geometry must not return.'
 }
 if ($window -notmatch 'fn floating_drop_edge_at_pointer\(' -or
-    $window -notmatch 'let edge = floating_drop_edge_at_pointer\(' -or
+    $window -notmatch '(?s)else \{\s*floating_drop_edge_at_pointer\(' -or
     $window -notmatch 'desktop_taskbar_drop_with_entire_canvas_beyond_work_area_still_snaps' -or
     $window -notmatch 'desktop_taskbar_drop_overshoot_detects_all_four_reserved_edges' -or
     $window -notmatch 'desktop_taskbar_drop_does_not_snap_when_cursor_not_in_reserved_band') {
     throw 'Taskbar drop must use the cursor reserved band even when the entire dragged HWND is beyond rcWork.'
+}
+if ($window -notmatch 'fn floating_desktop_contact_edge\(' -or
+    $window -notmatch 'fn floating_clamp_free_visible_position\(' -or
+    $window -notmatch '(?s)let edge = if explicit_desktop \{.*?floating_desktop_contact_edge\(.*?\} else \{\s*floating_drop_edge_at_pointer\(' -or
+    $window -notmatch 'explicit_desktop_only_docks_on_actual_visible_contact') {
+    throw 'Explicit Desktop must dock only on visible edge contact; only taskbar fallback may keep proximity docking.'
 }
 if ($window -notmatch 'fn floating_drag_has_crossed_taskbar_edge\(' -or
     $window -notmatch '(?s)let should_unlock = !unlocked.*?floating_drag_has_cleared_edge\(.*?\|\| \(reserved && floating_drag_has_crossed_taskbar_edge\(' -or
