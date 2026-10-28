@@ -863,17 +863,11 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
         let _ = RegisterClassExW(&wc);
 
         let title = native_interop::wide_str("Codex Usage Win");
-        // The non-JSON settings pages retain whole-window composition.
-        // A/B testing showed that WS_EX_COMPOSITED adds ~30 ms to each
-        // synchronous RichEdit scroll and defeats narrow scrollbar painting.
-        // The JSON page has an opaque child background and can safely turn
-        // composition off after its initial buffered page transition.
-        // CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED remains an opt-in experiment
-        // to disable composition even on non-JSON settings pages.
-        let no_composition = std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some();
+        // Other settings pages use whole-window composition; the JSON page
+        // disables it after its buffered transition to avoid RichEdit latency.
         let widget_work_area = settings_work_area_for_widget(widget);
         let hwnd = match CreateWindowExW(
-            settings_window_ex_style(no_composition),
+            settings_window_ex_style(),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_THICKFRAME,
@@ -2060,28 +2054,18 @@ fn json_save_mask_rect(hwnd: HWND) -> RECT {
     }
 }
 
-fn settings_window_ex_style(no_composition: bool) -> WINDOW_EX_STYLE {
-    if no_composition {
-        WS_EX_APPWINDOW
-    } else {
-        WS_EX_APPWINDOW | WS_EX_COMPOSITED
-    }
+fn settings_window_ex_style() -> WINDOW_EX_STYLE {
+    WS_EX_APPWINDOW | WS_EX_COMPOSITED
 }
 
 // Keep other settings pages buffered. JSON has its own opaque child surface,
 // so compositing its RichEdit subtree adds latency without visual benefit.
-fn settings_composition_for_section(
-    section: Section, force_uncomposited: bool, keep_json_composited: bool,
-) -> bool {
-    !force_uncomposited && (section != Section::Json || keep_json_composited)
+fn settings_composition_for_section(section: Section) -> bool {
+    section != Section::Json
 }
 
 fn sync_settings_window_composition(hwnd: HWND, section: Section) {
-    let enabled = settings_composition_for_section(
-        section,
-        std::env::var_os("CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED").is_some(),
-        std::env::var_os("CODEX_USAGE_JSON_SCROLL_KEEP_COMPOSITED").is_some(),
-    );
+    let enabled = settings_composition_for_section(section);
     unsafe {
         let current = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let desired = if enabled {
@@ -2110,141 +2094,6 @@ fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
         right: outer.right - scale(hwnd, 4),
         bottom: outer.bottom - scale(hwnd, 8),
     }
-}
-
-// Opt-in JSON scroll diagnostics. The editor can scroll without repainting
-// the whole settings page; measure RichEdit's work separately from the narrow
-// custom scrollbar paint path, and write a summary only after the gesture.
-#[derive(Default)]
-struct JsonScrollPerf {
-    wheel_events: usize,
-    drag_events: usize,
-    drag_motion_events: usize,
-    drag_deferred_moves: usize,
-    direct_drag_events: usize,
-    total_rich_ms: f64,
-    max_rich_ms: f64,
-    fast_scrollbar_paints: usize,
-    buffered_scrollbar_paints: usize,
-    full_page_paints: usize,
-    sync_frame_requests: usize,
-    rich_edit_paint_frames: usize,
-    rich_edit_paint_gap_total_ms: f64,
-    rich_edit_paint_gap_samples: usize,
-    rich_edit_paint_gap_max_ms: f64,
-    last_rich_edit_paint: Option<Instant>,
-    target_scroll_refresh_hz: i32,
-    last: Option<Instant>,
-}
-
-static JSON_SCROLL_METRICS_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| std::env::var_os("CODEX_USAGE_JSON_SCROLL_METRICS").is_some());
-
-thread_local! {
-    static JSON_SCROLL_PERF: RefCell<JsonScrollPerf> =
-        RefCell::new(JsonScrollPerf::default());
-}
-
-fn record_json_scroll_drag_motion(deferred: bool) {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        let mut perf = slot.borrow_mut();
-        perf.drag_motion_events += 1;
-        if deferred { perf.drag_deferred_moves += 1; }
-    });
-}
-
-fn record_json_scroll_event(wheel: bool, direct_drag: bool, elapsed: Duration) {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        let mut perf = slot.borrow_mut();
-        if wheel { perf.wheel_events += 1; } else { perf.drag_events += 1; }
-        if direct_drag { perf.direct_drag_events += 1; }
-        let ms = elapsed.as_secs_f64() * 1000.0;
-        perf.total_rich_ms += ms;
-        perf.max_rich_ms = perf.max_rich_ms.max(ms);
-        perf.last = Some(Instant::now());
-    });
-}
-
-fn record_json_scrollbar_fast_paint(buffered: bool) {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        let mut perf = slot.borrow_mut();
-        perf.fast_scrollbar_paints += 1;
-        if buffered { perf.buffered_scrollbar_paints += 1; }
-    });
-}
-
-fn record_json_full_page_paint() {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        slot.borrow_mut().full_page_paints += 1;
-    });
-}
-
-// WM_PAINT is not guaranteed for every scroll event: the UI message queue
-// normally merges invalid regions. Track actual RichEdit paint dispatches,
-// rather than treating fast EM_LINESCROLL completion as a rendered frame.
-fn record_json_richedit_paint_frame() {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        let mut perf = slot.borrow_mut();
-        let now = Instant::now();
-        if !perf.last.is_some_and(|at| now.duration_since(at) < Duration::from_millis(150)) {
-            return;
-        }
-        perf.rich_edit_paint_frames += 1;
-        if let Some(previous) = perf.last_rich_edit_paint {
-            let gap = now.duration_since(previous);
-            if gap < Duration::from_millis(150) {
-                let ms = gap.as_secs_f64() * 1000.0;
-                perf.rich_edit_paint_gap_total_ms += ms;
-                perf.rich_edit_paint_gap_max_ms =
-                    perf.rich_edit_paint_gap_max_ms.max(ms);
-                perf.rich_edit_paint_gap_samples += 1;
-            }
-        }
-        perf.last_rich_edit_paint = Some(now);
-    });
-}
-
-fn record_json_scroll_frame_sync(refresh_hz: i32) {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        let mut perf = slot.borrow_mut();
-        perf.sync_frame_requests += 1;
-        perf.target_scroll_refresh_hz = refresh_hz;
-    });
-}
-
-fn flush_idle_json_scroll_metrics() {
-    if !*JSON_SCROLL_METRICS_ENABLED { return; }
-    JSON_SCROLL_PERF.with(|slot| {
-        let mut perf = slot.borrow_mut();
-        let Some(last) = perf.last else { return };
-        if last.elapsed() < Duration::from_millis(350) { return; }
-        let events = perf.wheel_events + perf.drag_events;
-        if events > 0 {
-            let line = format!(
-                "wheel_events={},drag_events={},direct_drag_events={},mean_richedit_ms={:.2},max_richedit_ms={:.2},scrollbar_fast_paints={},scrollbar_buffered_paints={},json_full_page_paints={},scroll_target_hz={},scroll_sync_frames={},richedit_paint_frames={},richedit_paint_gap_mean_ms={:.2},richedit_paint_gap_max_ms={:.2},drag_motion_events={},drag_deferred_moves={}\n",
-                perf.wheel_events, perf.drag_events, perf.direct_drag_events,
-                perf.total_rich_ms / events as f64,
-                perf.max_rich_ms, perf.fast_scrollbar_paints,
-                perf.buffered_scrollbar_paints, perf.full_page_paints,
-                perf.target_scroll_refresh_hz, perf.sync_frame_requests,
-                perf.rich_edit_paint_frames,
-                perf.rich_edit_paint_gap_total_ms / perf.rich_edit_paint_gap_samples.max(1) as f64,
-                perf.rich_edit_paint_gap_max_ms,
-                perf.drag_motion_events, perf.drag_deferred_moves,
-            );
-            let path = std::env::temp_dir().join("codex-usage-json-scroll-metrics.log");
-            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-                let _ = file.write_all(line.as_bytes());
-            }
-        }
-        *perf = JsonScrollPerf::default();
-    });
 }
 
 // Line count and font height are stable while the JSON text and viewport
@@ -2331,13 +2180,11 @@ fn start_json_scroll_drag_pacing(hwnd: HWND) {
         clock.last_drag_update = None;
         clock.pending_drag_y = None;
     });
-    if std::env::var_os("CODEX_USAGE_JSON_SCROLL_DRAG_COALESCE_DISABLED").is_none() {
-        unsafe {
-            // Timer messages are a fallback for the final pending pointer
-            // when the mouse stops between display frames. Native timers have
-            // coarse resolution; active input itself drives most frames.
-            let _ = SetTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID, 10, None);
-        }
+    unsafe {
+        // Timer messages are a fallback for the final pending pointer
+        // when the mouse stops between display frames. Native timers have
+        // coarse resolution; active input itself drives most frames.
+        let _ = SetTimer(hwnd, JSON_SCROLL_DRAG_FRAME_TIMER_ID, 10, None);
     }
 }
 
@@ -2351,29 +2198,21 @@ fn stop_json_scroll_drag_pacing(hwnd: HWND) {
 }
 
 fn update_json_scroll_drag_paced(hwnd: HWND, y: Option<i32>, force: bool) {
-    if std::env::var_os("CODEX_USAGE_JSON_SCROLL_DRAG_COALESCE_DISABLED").is_some() {
-        if let Some(y) = y {
-            record_json_scroll_drag_motion(false);
-            update_json_scroll_drag(hwnd, y);
-        }
-        return;
-    }
     let now = Instant::now();
-    let (next, deferred) = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+    let next = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
         let mut frame = cell.borrow_mut();
         if let Some(y) = y { frame.pending_drag_y = Some(y); }
-        if frame.pending_drag_y.is_none() { return (None, false); }
+        if frame.pending_drag_y.is_none() { return None; }
         let due = json_scroll_drag_should_apply(
             frame.last_drag_update, now, frame.refresh_hz, force,
         );
         if due {
             frame.last_drag_update = Some(now);
-            (frame.pending_drag_y.take(), false)
+            frame.pending_drag_y.take()
         } else {
-            (None, y.is_some())
+            None
         }
     });
-    if y.is_some() { record_json_scroll_drag_motion(deferred); }
     if let Some(y) = next {
         update_json_scroll_drag(hwnd, y);
     }
@@ -2385,11 +2224,8 @@ fn update_json_scroll_drag_paced(hwnd: HWND, y: Option<i32>, force: bool) {
 // At most once per display period, flush *already invalidated* RichEdit and
 // narrow scrollbar regions without RDW_INVALIDATE / RDW_ALLCHILDREN.
 fn present_json_scroll_frame_if_due(edit: HWND, panel: HWND) {
-    if std::env::var_os("CODEX_USAGE_JSON_SCROLL_FAST_FRAMES_DISABLED").is_some() {
-        return;
-    }
     let now = Instant::now();
-    let (due, refresh_hz) = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
+    let due = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
         let mut frame = cell.borrow_mut();
         if frame.last_refresh_probe.is_none_or(|probe| {
             now.saturating_duration_since(probe) >= Duration::from_secs(2)
@@ -2411,7 +2247,7 @@ fn present_json_scroll_frame_if_due(edit: HWND, panel: HWND) {
         if due {
             frame.last_sync = Some(now);
         }
-        (due, frame.refresh_hz)
+        due
     });
     if !due { return; }
     let page = {
@@ -2427,7 +2263,6 @@ fn present_json_scroll_frame_if_due(edit: HWND, panel: HWND) {
         let _ = UpdateWindow(edit);
         let _ = UpdateWindow(page);
     }
-    record_json_scroll_frame_sync(refresh_hz);
 }
 
 fn invalidate_json_scroll_layout_cache() {
@@ -2589,14 +2424,12 @@ fn json_scrollbar_wheel_target(hwnd: HWND, x: i32, y: i32) -> Option<HWND> {
 
 fn scroll_json_editor_lines(edit: HWND, panel: HWND, lines: i32) {
     if lines == 0 { return; }
-    let begin = Instant::now();
     unsafe {
         // RichEdit invalidates its own changed text lines. Forcing
         // RDW_UPDATENOW also paints the entire WS_EX_COMPOSITED hierarchy
         // synchronously on every wheel message; let the message loop coalesce.
         let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(lines as isize));
     }
-    record_json_scroll_event(true, false, begin.elapsed());
     refresh_json_scrollbar_if_changed(panel);
     present_json_scroll_frame_if_due(edit, panel);
 }
@@ -2669,11 +2502,6 @@ unsafe extern "system" fn json_edit_subclass_proc(
     if msg == WM_NCDESTROY {
         let _ = RemoveWindowSubclass(hwnd, Some(json_edit_subclass_proc), JSON_EDIT_SUBCLASS_ID);
     }
-    if msg == WM_PAINT {
-        let result = DefSubclassProc(hwnd, msg, wparam, lparam);
-        record_json_richedit_paint_frame();
-        return result;
-    }
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
@@ -2726,7 +2554,6 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
         ((top - track.top) * max_first + available / 2) / available;
     let delta = target_first - first_visible;
     if delta != 0 {
-        let begin = Instant::now();
         let mut direct_drag = false;
         unsafe {
             // For long thumb jumps avoid RichEdit's relative per-line scroll
@@ -2753,7 +2580,6 @@ fn update_json_scroll_drag(hwnd: HWND, y: i32) {
                 let _ = SendMessageW(edit, EM_LINESCROLL_MSG, WPARAM(0), LPARAM(delta as isize));
             }
         }
-        record_json_scroll_event(false, direct_drag, begin.elapsed());
         refresh_json_scrollbar_if_changed(hwnd);
         present_json_scroll_frame_if_due(edit, hwnd);
     }
@@ -3089,11 +2915,9 @@ unsafe fn paint_json_page_surface(page: HWND) {
                 let _ = SetViewportOrgEx(screen, 0, 0, None);
             }
             let _ = EndPaint(page, &ps);
-            record_json_scrollbar_fast_paint(buffered);
             return;
         }
     }
-    record_json_full_page_paint();
     let mut client = RECT::default();
     let _ = GetClientRect(page, &mut client);
     let width = (client.right - client.left).max(1);
@@ -6016,7 +5840,6 @@ unsafe extern "system" fn wnd_proc(
                 if json_editor_active() {
                     refresh_json_scrollbar_if_changed(hwnd);
                 }
-                flush_idle_json_scroll_metrics();
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
