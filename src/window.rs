@@ -6220,13 +6220,14 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
 }
 
 fn finish_floating_drag(hwnd: HWND) {
-    let (x, y, body_w, body_h, old_edge, explicit_desktop) = {
+    let (x, y, body_w, body_h, old_edge, old_free_below, explicit_desktop) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         if !s.floating_mode { return };
         (s.floating_x, s.floating_y,
          total_widget_width_for_state(s), widget_height_for_state(s),
-         s.floating_edge, s.display_position == DisplayPosition::Desktop)
+         s.floating_edge, s.floating_free_grip_below,
+         s.display_position == DisplayPosition::Desktop)
     };
     let (old_w, old_h, old_body) = {
         let state = lock_state();
@@ -6242,18 +6243,36 @@ fn finish_floating_drag(hwnd: HWND) {
         return;
     };
     let rect = RECT { left: x, top: y, right: x + old_w, bottom: y + old_h };
-    // The drag canvas may still use a TOP-docked orientation, whose tab is
-    // BELOW the panel. Do not first swap it to the free (tab-above) canvas:
-    // that falsely detects a top contact and misses a real bottom-taskbar
-    // contact. Clamp the ACTUAL dragged pixels before checking for contact.
-    // The fallback taskbar mode retains its legacy proximity docking.
+    // Decide where the undocked tab fits using the BODY location, before
+    // clamping anything. Reversing the tab must not push the body downward.
+    let body_top = y.saturating_add(old_body.top);
+    let prefer_below = explicit_desktop
+        && floating_choose_free_grip_below(bounds, body_top, body_h);
+    // Keep the actual dragged tab orientation for a previously docked widget.
+    // For a free widget, test its prospective tab location: when near the top
+    // the tab moves below before we test contact, avoiding a false top dock.
     let edge = if explicit_desktop {
-        let (drag_x, drag_y) = floating_clamp_drag_visible_position(
-            bounds, old_w, old_h, old_body, old_edge, x, y,
-        );
-        floating_desktop_contact_edge(
-            bounds, old_w, old_h, old_body, old_edge, POINT { x: drag_x, y: drag_y }, pointer,
-        )
+        if old_edge.is_none() {
+            let (w, h, body) =
+                floating_free_canvas_geometry(body_w, body_h, prefer_below);
+            let desired_x = x + old_body.left - body.left;
+            let desired_y = y + old_body.top - body.top;
+            let (cx, cy) = floating_clamp_drag_visible_position(
+                bounds, w, h, body, None, prefer_below, desired_x, desired_y,
+            );
+            floating_desktop_contact_edge(
+                bounds, w, h, body, None, prefer_below, POINT { x: cx, y: cy }, pointer,
+            )
+        } else {
+            let (cx, cy) = floating_clamp_drag_visible_position(
+                bounds, old_w, old_h, old_body, old_edge,
+                old_free_below, x, y,
+            );
+            floating_desktop_contact_edge(
+                bounds, old_w, old_h, old_body, old_edge, old_free_below,
+                POINT { x: cx, y: cy }, pointer,
+            )
+        }
     } else {
         floating_drop_edge_at_pointer(
             monitor, bounds, rect, pointer, sc(FLOAT_EDGE_SNAP), [true; 4],
@@ -6270,14 +6289,18 @@ fn finish_floating_drag(hwnd: HWND) {
         rect.left, rect.top, rect.right, rect.bottom,
         bounds.left, bounds.top, bounds.right, bounds.bottom,
     ));
-    let (new_w, new_h, new_body) = floating_canvas_geometry(body_w, body_h, edge);
+    let free_below = edge.is_none() && prefer_below;
+    let (new_w, new_h, new_body) = if edge.is_none() && explicit_desktop {
+        floating_free_canvas_geometry(body_w, body_h, free_below)
+    } else {
+        floating_canvas_geometry(body_w, body_h, edge)
+    };
     let desired_x = x + old_body.left - new_body.left;
     let desired_y = y + old_body.top - new_body.top;
-    // Keep undocked popups on the mouse's monitor too: there is no longer a
-    // special cross-seam placement path.
+    // Rebase the HWND when flipping the free tab, preserving the body pixels.
     let (x, y) = if explicit_desktop && edge.is_none() {
-        floating_clamp_free_visible_position(
-            bounds, new_w, new_h, new_body, desired_x, desired_y,
+        floating_clamp_drag_visible_position(
+            bounds, new_w, new_h, new_body, None, free_below, desired_x, desired_y,
         )
     } else {
         floating_edge_position(
@@ -6286,9 +6309,8 @@ fn finish_floating_drag(hwnd: HWND) {
     };
     // On expanded edge-docked desktops the body stays visible, and the
     // six-dot tab must follow the same hover fade as a free desktop tab.
-    let grip_hovered = floating_drag_grip_contains_screen_point(
-        x, y, new_w, new_h, edge, pointer,
-    );
+    let grip = floating_layout_grip_rect(new_w, new_h, edge, free_below);
+    let grip_hovered = point_in_rect(grip, pointer.x - x, pointer.y - y);
     let body_hovered = point_in_rect(
         RECT {
             left: x + new_body.left, top: y + new_body.top,
@@ -6302,6 +6324,7 @@ fn finish_floating_drag(hwnd: HWND) {
             s.floating_y = y;
             s.dragging = false;
             s.floating_edge = edge;
+            s.floating_free_grip_below = free_below;
             s.floating_reserved_dock = reserved_dock;
             s.floating_drag_glow_detached = false;
             // Reserved edges retract by pixel clipping, not by moving the
@@ -6429,18 +6452,21 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         }
         return;
     }
-    let (existing, old, x, y, edge, language, width, height) = {
+    let (existing, old, x, y, edge, free_below, language, width, height) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         let (width, height) = floating_content_size_for_state(s, vertical);
         (
             s.floating_hwnd.map(|h| h.to_hwnd()), s.hwnd.to_hwnd(),
-            s.floating_x, s.floating_y, s.floating_edge, s.language, width, height,
+            s.floating_x, s.floating_y, s.floating_edge,
+            s.floating_free_grip_below, s.language, width, height,
         )
     };
-    let (window_width, window_height, _) = floating_canvas_geometry(
-        width, height, lock_state().as_ref().and_then(|s| s.floating_edge),
-    );
+    let (window_width, window_height, _) = if edge.is_none() {
+        floating_free_canvas_geometry(width, height, free_below)
+    } else {
+        floating_canvas_geometry(width, height, edge)
+    };
     let hwnd = match existing {
         Some(hwnd) if unsafe { IsWindow(hwnd).as_bool() } => hwnd,
         _ => unsafe {
@@ -6496,8 +6522,11 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         let Some(s) = state.as_ref() else { return };
         floating_content_size_for_state(s, vertical)
     };
-    let (window_width, window_height, body) =
-        floating_canvas_geometry(width, height, edge);
+    let (window_width, window_height, body) = if edge.is_none() {
+        floating_free_canvas_geometry(width, height, free_below)
+    } else {
+        floating_canvas_geometry(width, height, edge)
+    };
     diagnose::log_lazy(|| format!(
         "desktop restore saved=({x},{y}) saved_monitor_valid={saved_monitor_valid} target_dpi={target_dpi} previous_dpi={old_dpi} target_bounds=({}, {}, {}, {}) taskbar_bounds=({}, {}, {}, {})",
         bounds.left, bounds.top, bounds.right, bounds.bottom,
@@ -6511,8 +6540,9 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.display_position == DisplayPosition::Desktop && edge.is_none()
     );
     let (x, y) = if free_desktop {
-        floating_clamp_free_visible_position(
-            bounds, window_width, window_height, body, start_x, start_y,
+        floating_clamp_drag_visible_position(
+            bounds, window_width, window_height, body, None,
+            free_below, start_x, start_y,
         )
     } else {
         floating_clamp_position(bounds, window_width, window_height, start_x, start_y)
@@ -7821,16 +7851,15 @@ unsafe extern "system" fn wnd_proc(
                     let geometry = {
                         let state = lock_state();
                         state.as_ref().map(|s| {
-                            let (w, h) = floating_canvas_size_for_state(s);
-                            (w, h, s.floating_edge)
+                            floating_state_grip_rect(s)
                         })
                     };
-                    geometry.and_then(|(w, h, edge)| {
+                    geometry.and_then(|grip| {
                         let rect = native_interop::get_window_rect_safe(hwnd)?;
                         let mut cursor = POINT::default();
                         if GetCursorPos(&mut cursor).is_err() { return None; }
-                        Some(floating_drag_grip_contains_screen_point(
-                            rect.left, rect.top, w, h, edge, cursor,
+                        Some(point_in_rect(
+                            grip, cursor.x - rect.left, cursor.y - rect.top,
                         ))
                     })
                 };
@@ -13280,7 +13309,7 @@ mod tests {
                     bounds, w, h, body, requested_x, requested_y,
                 );
                 floating_desktop_contact_edge(
-                    bounds, w, h, body, None, POINT { x, y }, pointer,
+                    bounds, w, h, body, None, false, POINT { x, y }, pointer,
                 )
             };
             assert_eq!(drop_edge(inside_x, inside_y), None);
@@ -13316,10 +13345,10 @@ mod tests {
             let pointer = POINT { x: x + w / 2, y: bounds.top + 40 };
             let release = |requested_y: i32| {
                 let (cx, cy) = floating_clamp_drag_visible_position(
-                    bounds, w, h, body, edge, x, requested_y,
+                    bounds, w, h, body, edge, false, x, requested_y,
                 );
                 floating_desktop_contact_edge(
-                    bounds, w, h, body, edge, POINT { x: cx, y: cy }, pointer,
+                    bounds, w, h, body, edge, false, POINT { x: cx, y: cy }, pointer,
                 )
             };
             // Screenshot 1: the actual panel is still 15px below the top.
