@@ -117,7 +117,7 @@ if ($styleWindow -notmatch 'HitTarget' -or
     throw 'All style-panel buttons must expose hover and pressed feedback.'
 }
 if (($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -and
-     $styleWindow -notmatch 'CreateWindowExW\(\s*settings_window_ex_style\(no_composition\)') -or
+     $styleWindow -notmatch 'CreateWindowExW\(\s*settings_window_ex_style\(\)') -or
     $styleWindow -match 'WS_MAXIMIZEBOX' -or
     $styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU\s*\|\s*WS_MINIMIZEBOX' -or
     $styleWindow -notmatch 'WINDOW_HEIGHT,\s*HWND::default\(\)' -or
@@ -126,10 +126,25 @@ if (($styleWindow -notmatch 'CreateWindowExW\(\s*WS_EX_APPWINDOW' -and
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must be an ownerless taskbar window with minimize support and a standard caption close button.'
 }
-if ($styleWindow -notmatch 'fn settings_window_ex_style\(no_composition: bool\)' -or
+if ($styleWindow -notmatch 'fn settings_window_ex_style\(\)' -or
     $styleWindow -notmatch 'WS_EX_APPWINDOW\s*\|\s*WS_EX_COMPOSITED' -or
-    $styleWindow -notmatch 'CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED') {
-    throw 'Default composited settings rendering and opt-in JSON scroll diagnostics must remain separate.'
+    $styleWindow -notmatch 'fn settings_composition_for_section\(section: Section\)' -or
+    $styleWindow -notmatch 'section != Section::Json' -or
+    $styleWindow -notmatch 'fn json_scroll_drag_should_apply\(' -or
+    $styleWindow -notmatch 'fn present_json_scroll_frame_if_due\(') {
+    throw 'JSON must use the default uncomposited scrolling optimization and preserve non-JSON composition.'
+}
+foreach ($debugFlag in @(
+    'CODEX_USAGE_ANIMATION_METRICS',
+    'CODEX_USAGE_JSON_SCROLL_METRICS',
+    'CODEX_USAGE_JSON_SCROLL_NO_COMPOSITED',
+    'CODEX_USAGE_JSON_SCROLL_KEEP_COMPOSITED',
+    'CODEX_USAGE_JSON_SCROLL_DRAG_COALESCE_DISABLED',
+    'CODEX_USAGE_JSON_SCROLL_FAST_FRAMES_DISABLED'
+)) {
+    if ($styleWindow.Contains($debugFlag)) {
+        throw "Retired settings diagnostics environment switch must not return: $debugFlag"
+    }
 }
 if ($styleWindow -notmatch 'json_save_mask' -or
     $styleWindow -notmatch 'WS_EX_LAYERED\s*\|\s*WS_EX_TOOLWINDOW\s*\|\s*WS_EX_NOACTIVATE' -or
