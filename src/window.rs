@@ -2884,7 +2884,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 let state = lock_state();
                 state.as_ref().map(|s| (
                     s.floating_edge,
-                    s.floating_free_grip_below,
+                    floating_free_grip_below_for_state(s),
                     s.floating_collapsed && s.floating_reveal == 0,
                     s.drag_handle_hovered,
                     if s.dragging || !floating_grip_uses_hover_fade(s) { 100 }
@@ -3276,6 +3276,7 @@ fn draw_drag_hover_outline(
 /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
 /// When collapsed, every pixel outside the tab is fully transparent and cannot
 /// obstruct other desktop windows or leave a visible panel edge.
+#[cfg(test)]
 fn render_floating_handle_bitmap(
     pixels: &mut [u32], width: i32, height: i32,
     edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
@@ -4817,6 +4818,7 @@ fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
     else { -1 } // HTCLIENT or HTTRANSPARENT
 }
 
+#[cfg(test)]
 fn floating_drag_handle_hit(
     x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
 ) -> bool {
@@ -4826,6 +4828,7 @@ fn floating_drag_handle_hit(
 // The desktop tab lives OUTSIDE the panel body. Hover must be checked against
 // its final screen-space rectangle, especially after the canvas origin changes
 // on drop from a docked edge to the free-floating top tab.
+#[cfg(test)]
 fn floating_drag_grip_contains_screen_point(
     origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
     edge: Option<FloatingEdge>, pointer: POINT,
@@ -5021,10 +5024,15 @@ fn floating_slide_layered_bitmap(
     }
 }
 
+fn floating_free_grip_below_for_state(s: &AppState) -> bool {
+    s.display_position == DisplayPosition::Desktop
+        && s.floating_edge.is_none() && s.floating_free_grip_below
+}
+
 fn floating_state_grip_rect(s: &AppState) -> RECT {
     let (w, h, _) = floating_canvas_geometry_for_state(s);
     let grip = floating_layout_grip_rect(
-        w, h, s.floating_edge, s.floating_free_grip_below,
+        w, h, s.floating_edge, floating_free_grip_below_for_state(s),
     );
     if s.floating_reserved_dock {
         if let Some(edge) = s.floating_edge {
@@ -5040,7 +5048,7 @@ fn floating_canvas_geometry_for_state(s: &AppState) -> (i32, i32, RECT) {
     let body_w = total_widget_width_for_state(s);
     let body_h = widget_height_for_state(s);
     if s.floating_edge.is_none() {
-        floating_free_canvas_geometry(body_w, body_h, s.floating_free_grip_below)
+        floating_free_canvas_geometry(body_w, body_h, floating_free_grip_below_for_state(s))
     } else {
         floating_drag_canvas_geometry(
             body_w, body_h, s.floating_edge,
@@ -5312,6 +5320,7 @@ fn floating_clamp_drag_visible_position(
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
 }
 
+#[cfg(test)]
 fn floating_clamp_free_visible_position(
     bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
 ) -> (i32, i32) {
@@ -5696,6 +5705,7 @@ fn reset_floating_widget_position() -> bool {
         s.floating_x = x;
         s.floating_y = y;
         s.floating_edge = edge;
+        s.floating_free_grip_below = false;
         s.floating_reserved_dock = reserved;
         s.floating_drag_glow_detached = false;
         s.floating_reserved_drag_reveal = reveal;
@@ -6148,7 +6158,7 @@ fn update_floating_drag(hwnd: HWND, pointer: POINT) {
         }
         (
             s.floating_drag_anchor_x, s.floating_drag_anchor_y, s.floating_edge,
-            s.floating_free_grip_below,
+            floating_free_grip_below_for_state(s),
             total_widget_width_for_state(s), widget_height_for_state(s),
             s.floating_drag_glow_detached, s.floating_reserved_dock,
             s.floating_reserved_drag_reveal,
@@ -6226,7 +6236,7 @@ fn finish_floating_drag(hwnd: HWND) {
         if !s.floating_mode { return };
         (s.floating_x, s.floating_y,
          total_widget_width_for_state(s), widget_height_for_state(s),
-         s.floating_edge, s.floating_free_grip_below,
+         s.floating_edge, floating_free_grip_below_for_state(s),
          s.display_position == DisplayPosition::Desktop)
     };
     let (old_w, old_h, old_body) = {
@@ -6459,7 +6469,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         (
             s.floating_hwnd.map(|h| h.to_hwnd()), s.hwnd.to_hwnd(),
             s.floating_x, s.floating_y, s.floating_edge,
-            s.floating_free_grip_below, s.language, width, height,
+            floating_free_grip_below_for_state(s), s.language, width, height,
         )
     };
     let (window_width, window_height, _) = if edge.is_none() {
@@ -13291,6 +13301,69 @@ mod tests {
         assert_eq!(floating_drag_anchor_for_dpi(25, 96, 144), 38);
         assert_eq!(floating_drag_anchor_for_dpi(-25, 96, 144), -38);
         assert_eq!(floating_drag_anchor_for_dpi(30, 144, 96), 20);
+    }
+
+    #[test]
+    fn free_grip_moves_below_near_top_without_pushing_body_or_docking() {
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            let (w, h, top_body) =
+                floating_free_canvas_geometry(body_width, body_height, false);
+            let (bw, bh, bottom_body) =
+                floating_free_canvas_geometry(body_width, body_height, true);
+            assert_eq!((w, h), (bw, bh), "switch must not resize the HWND");
+            let top_grip = floating_layout_grip_rect(w, h, None, false);
+            let bottom_grip = floating_layout_grip_rect(w, h, None, true);
+            assert_eq!(top_grip.bottom, top_body.top);
+            assert_eq!(bottom_grip.top, bottom_body.bottom);
+
+            let body_x = bounds.left + 400;
+            let body_y = bounds.top + 5;
+            assert!(floating_choose_free_grip_below(bounds, body_y, body_height));
+            // A free top-tab drag would exceed the top by 11px here. The
+            // bottom tab instead fits, and the real panel stays at +5px.
+            let (x, y) = floating_clamp_drag_visible_position(
+                bounds, w, h, bottom_body, None, true,
+                body_x - bottom_body.left, body_y - bottom_body.top,
+            );
+            assert_eq!(y + bottom_body.top, body_y);
+            assert_eq!(x + bottom_body.left, body_x);
+            let pointer = POINT { x: body_x + body_width / 2, y: body_y + 2 };
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, bottom_body, None, true, POINT { x, y }, pointer,
+            ), None, "a free tab switch is not a top-edge dock");
+
+            // At the real top boundary, contact still docks normally.
+            let (x, y) = floating_clamp_drag_visible_position(
+                bounds, w, h, bottom_body, None, true,
+                body_x - bottom_body.left, bounds.top - bottom_body.top,
+            );
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, bottom_body, None, true, POINT { x, y }, pointer,
+            ), Some(FloatingEdge::Top));
+
+            // Moving near the lower taskbar keeps the standard top tab.
+            let near_bottom = bounds.bottom - body_height - 5;
+            assert!(!floating_choose_free_grip_below(bounds, near_bottom, body_height));
+            let (x, y) = floating_clamp_drag_visible_position(
+                bounds, w, h, top_body, None, false,
+                body_x - top_body.left, near_bottom - top_body.top,
+            );
+            assert_eq!(y + top_body.top, near_bottom);
+            assert_eq!(floating_desktop_contact_edge(
+                bounds, w, h, top_body, None, false, POINT { x, y }, pointer,
+            ), None);
+        }
+        let legacy: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.floating_free_grip_below);
+        let current = SettingsFile {
+            floating_edge: None, floating_free_grip_below: true,
+            ..SettingsFile::default()
+        };
+        let restored: SettingsFile =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert!(restored.floating_free_grip_below,
+            "a free tab below the panel must survive restart");
     }
 
     #[test]
