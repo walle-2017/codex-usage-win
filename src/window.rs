@@ -5276,13 +5276,13 @@ fn floating_clamp_free_visible_position(
 // Never substitute the future free-floating canvas before this check.
 fn floating_desktop_contact_edge(
     bounds: RECT, width: i32, height: i32, body: RECT,
-    edge: Option<FloatingEdge>, x: i32, y: i32, pointer: POINT,
+    edge: Option<FloatingEdge>, origin: POINT, pointer: POINT,
 ) -> Option<FloatingEdge> {
     let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
-    let left = x + body.left.min(grip.left);
-    let top = y + body.top.min(grip.top);
-    let right = x + body.right.max(grip.right);
-    let bottom = y + body.bottom.max(grip.bottom);
+    let left = origin.x + body.left.min(grip.left);
+    let top = origin.y + body.top.min(grip.top);
+    let right = origin.x + body.right.max(grip.right);
+    let bottom = origin.y + body.bottom.max(grip.bottom);
     [
         (FloatingEdge::Left, left == bounds.left, pointer.x.abs_diff(bounds.left)),
         (FloatingEdge::Right, right == bounds.right, pointer.x.abs_diff(bounds.right)),
@@ -6200,7 +6200,7 @@ fn finish_floating_drag(hwnd: HWND) {
             bounds, old_w, old_h, old_body, old_edge, x, y,
         );
         floating_desktop_contact_edge(
-            bounds, old_w, old_h, old_body, old_edge, drag_x, drag_y, pointer,
+            bounds, old_w, old_h, old_body, old_edge, POINT { x: drag_x, y: drag_y }, pointer,
         )
     } else {
         floating_drop_edge_at_pointer(
@@ -13227,7 +13227,9 @@ mod tests {
                 let (x, y) = floating_clamp_free_visible_position(
                     bounds, w, h, body, requested_x, requested_y,
                 );
-                floating_desktop_contact_edge(bounds, w, h, body, None, x, y, pointer)
+                floating_desktop_contact_edge(
+                    bounds, w, h, body, None, POINT { x, y }, pointer,
+                )
             };
             assert_eq!(drop_edge(inside_x, inside_y), None);
             for gap in [1, 5, 12, 23] {
@@ -13265,7 +13267,7 @@ mod tests {
                     bounds, w, h, body, edge, x, requested_y,
                 );
                 floating_desktop_contact_edge(
-                    bounds, w, h, body, edge, cx, cy, pointer,
+                    bounds, w, h, body, edge, POINT { x: cx, y: cy }, pointer,
                 )
             };
             // Screenshot 1: the actual panel is still 15px below the top.
