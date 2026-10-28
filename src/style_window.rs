@@ -2202,7 +2202,7 @@ fn update_json_scroll_drag_paced(hwnd: HWND, y: Option<i32>, force: bool) {
     let next = JSON_SCROLL_FRAME_CLOCK.with(|cell| {
         let mut frame = cell.borrow_mut();
         if let Some(y) = y { frame.pending_drag_y = Some(y); }
-        if frame.pending_drag_y.is_none() { return None; }
+        frame.pending_drag_y?;
         let due = json_scroll_drag_should_apply(
             frame.last_drag_update, now, frame.refresh_hz, force,
         );
