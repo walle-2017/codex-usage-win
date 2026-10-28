@@ -3059,7 +3059,7 @@ fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
 
 /// Rounded-rectangle signed distance. Negative is inside the actual panel,
 /// positive is outside; returns zero at its edge.
-#[allow(dead_code)]
+#[cfg(test)]
 fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
     let inset = sc(1).max(1) as f32;
     let half_w = (width as f32 / 2.0 - inset).max(0.5);
@@ -3243,7 +3243,7 @@ fn draw_taskbar_hover_inner_glow_gdi(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn draw_drag_hover_outline(
     pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
     bounds: RECT, corner_radius: u8, color: Color,
@@ -3276,7 +3276,7 @@ fn draw_drag_hover_outline(
 /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
 /// When collapsed, every pixel outside the tab is fully transparent and cannot
 /// obstruct other desktop windows or leave a visible panel edge.
-#[allow(dead_code)]
+#[cfg(test)]
 fn render_floating_handle_bitmap(
     pixels: &mut [u32], width: i32, height: i32,
     edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
@@ -4818,7 +4818,7 @@ fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
     else { -1 } // HTCLIENT or HTTRANSPARENT
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn floating_drag_handle_hit(
     x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
 ) -> bool {
@@ -4828,7 +4828,7 @@ fn floating_drag_handle_hit(
 // The desktop tab lives OUTSIDE the panel body. Hover must be checked against
 // its final screen-space rectangle, especially after the canvas origin changes
 // on drop from a docked edge to the free-floating top tab.
-#[allow(dead_code)]
+#[cfg(test)]
 fn floating_drag_grip_contains_screen_point(
     origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
     edge: Option<FloatingEdge>, pointer: POINT,
@@ -5295,6 +5295,23 @@ fn floating_clamp_position(bounds: RECT, width: i32, height: i32, x: i32, y: i32
     )
 }
 
+// A single geometric definition of the *painted* widget and drag tab.
+// Never include the transparent glow gutter in visibility or edge-contact
+// calculations. Reuse this rectangle in both positioning and docking so
+// changing the free tab side cannot create mismatched edge decisions.
+fn floating_visible_content_rect(
+    width: i32, height: i32, body: RECT,
+    edge: Option<FloatingEdge>, free_below: bool,
+) -> RECT {
+    let grip = floating_layout_grip_rect(width, height, edge, free_below);
+    RECT {
+        left: body.left.min(grip.left),
+        top: body.top.min(grip.top),
+        right: body.right.max(grip.right),
+        bottom: body.bottom.max(grip.bottom),
+    }
+}
+
 // The free desktop canvas has transparent glow gutters on every side.
 // Clamping the whole HWND makes the visible panel stop one glow margin away
 // from each screen edge. Only the real panel and drag tab must stay within
@@ -5308,19 +5325,15 @@ fn floating_clamp_drag_visible_position(
     bounds: RECT, width: i32, height: i32, body: RECT,
     edge: Option<FloatingEdge>, free_below: bool, x: i32, y: i32,
 ) -> (i32, i32) {
-    let grip = floating_layout_grip_rect(width, height, edge, free_below);
-    let visible_left = body.left.min(grip.left);
-    let visible_top = body.top.min(grip.top);
-    let visible_right = body.right.max(grip.right);
-    let visible_bottom = body.bottom.max(grip.bottom);
-    let min_x = bounds.left.saturating_sub(visible_left);
-    let max_x = bounds.right.saturating_sub(visible_right).max(min_x);
-    let min_y = bounds.top.saturating_sub(visible_top);
-    let max_y = bounds.bottom.saturating_sub(visible_bottom).max(min_y);
+    let visible = floating_visible_content_rect(width, height, body, edge, free_below);
+    let min_x = bounds.left.saturating_sub(visible.left);
+    let max_x = bounds.right.saturating_sub(visible.right).max(min_x);
+    let min_y = bounds.top.saturating_sub(visible.top);
+    let max_y = bounds.bottom.saturating_sub(visible.bottom).max(min_y);
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn floating_clamp_free_visible_position(
     bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
 ) -> (i32, i32) {
@@ -5335,16 +5348,16 @@ fn floating_desktop_contact_edge(
     bounds: RECT, width: i32, height: i32, body: RECT,
     edge: Option<FloatingEdge>, free_below: bool, origin: POINT, pointer: POINT,
 ) -> Option<FloatingEdge> {
-    let grip = floating_layout_grip_rect(width, height, edge, free_below);
-    let left = origin.x + body.left.min(grip.left);
-    let top = origin.y + body.top.min(grip.top);
-    let right = origin.x + body.right.max(grip.right);
-    let bottom = origin.y + body.bottom.max(grip.bottom);
+    let visible = floating_visible_content_rect(width, height, body, edge, free_below);
     [
-        (FloatingEdge::Left, left == bounds.left, pointer.x.abs_diff(bounds.left)),
-        (FloatingEdge::Right, right == bounds.right, pointer.x.abs_diff(bounds.right)),
-        (FloatingEdge::Top, top == bounds.top, pointer.y.abs_diff(bounds.top)),
-        (FloatingEdge::Bottom, bottom == bounds.bottom, pointer.y.abs_diff(bounds.bottom)),
+        (FloatingEdge::Left, origin.x + visible.left == bounds.left,
+            pointer.x.abs_diff(bounds.left)),
+        (FloatingEdge::Right, origin.x + visible.right == bounds.right,
+            pointer.x.abs_diff(bounds.right)),
+        (FloatingEdge::Top, origin.y + visible.top == bounds.top,
+            pointer.y.abs_diff(bounds.top)),
+        (FloatingEdge::Bottom, origin.y + visible.bottom == bounds.bottom,
+            pointer.y.abs_diff(bounds.bottom)),
     ].into_iter()
         .filter(|(_, touching, _)| *touching)
         .min_by_key(|(_, _, distance)| *distance)
@@ -13405,6 +13418,44 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
         assert!(restored.floating_free_grip_below,
             "a free tab below the panel must survive restart");
+    }
+
+    #[test]
+    fn visible_content_geometry_matches_clamp_and_contact_in_all_orientations() {
+        let bounds = RECT { left: -1920, top: -120, right: 0, bottom: 920 };
+        for (body_width, body_height) in [(240, 42), (48, 168)] {
+            for edge in [
+                None, Some(FloatingEdge::Left), Some(FloatingEdge::Right),
+                Some(FloatingEdge::Top), Some(FloatingEdge::Bottom),
+            ] {
+                for below in [false, true] {
+                    if edge.is_some() && below { continue; }
+                    let (w, h, body) = if edge.is_none() {
+                        floating_free_canvas_geometry(body_width, body_height, below)
+                    } else {
+                        floating_canvas_geometry(body_width, body_height, edge)
+                    };
+                    let grip = floating_layout_grip_rect(w, h, edge, below);
+                    let visible = floating_visible_content_rect(w, h, body, edge, below);
+                    assert_eq!(visible.left, body.left.min(grip.left));
+                    assert_eq!(visible.top, body.top.min(grip.top));
+                    assert_eq!(visible.right, body.right.max(grip.right));
+                    assert_eq!(visible.bottom, body.bottom.max(grip.bottom));
+                    let desired_x = bounds.left - visible.left;
+                    let desired_y = bounds.top - visible.top;
+                    let (x, y) = floating_clamp_drag_visible_position(
+                        bounds, w, h, body, edge, below, desired_x, desired_y,
+                    );
+                    assert_eq!((x, y), (desired_x, desired_y),
+                        "clamping must use the same visible bounds as contact");
+                    assert_eq!(floating_desktop_contact_edge(
+                        bounds, w, h, body, edge, below,
+                        POINT { x, y }, POINT { x: x + w / 2, y: bounds.top },
+                    ), Some(FloatingEdge::Top),
+                        "top contact remains exact in every orientation");
+                }
+            }
+        }
     }
 
     #[test]
