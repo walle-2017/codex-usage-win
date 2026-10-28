@@ -6200,7 +6200,10 @@ fn finish_floating_drag(hwnd: HWND) {
         }
     }
     // Publish the resized/reoriented tab and the final HWND coordinates in
-    // one layered-window update. No intermediate frame uses the old bitmap.
+    // one layered-window update. The drop may be on the next monitor, so
+    // WM_DPICHANGED must not invoke position_at_taskbar() halfway through
+    // committing the new edge and lose the pointer-based drop position.
+    let _placement_guard = FloatingInitialPlacementGuard::begin();
     render_layered_at(Some(POINT { x, y }));
     // The frosted pair keeps its existing Z order. The dock geometry now
     // avoids taskbar overlap instead of attempting taskbar ownership.
@@ -13104,7 +13107,7 @@ mod tests {
             POINT { x: 3700, y: -120 },
         ] {
             for (from_dpi, to_dpi) in [
-                (96, 144), (144, 96), (96, 192), (192, 144),
+                (96, 96), (96, 144), (144, 96), (96, 192), (192, 144),
             ] {
                 for anchor in [0, 8, 25, 110, -16] {
                     let new_anchor = floating_drag_anchor_for_dpi(
