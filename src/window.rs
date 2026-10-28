@@ -13277,7 +13277,13 @@ mod tests {
             floating_edge: Some("bottom".into()),
             ..Default::default()
         };
-        assert_eq!(normalize_settings(fallback.clone()).floating_edge.as_deref(), Some("bottom"));
+        let fallback_json = serde_json::to_string(&fallback).unwrap();
+        let restored_fallback: SettingsFile =
+            serde_json::from_str(&fallback_json).unwrap();
+        assert_eq!(
+            normalize_settings(restored_fallback).floating_edge.as_deref(),
+            Some("bottom"),
+        );
         fallback.display_position = DisplayPosition::Desktop;
         assert!(normalize_settings(fallback).floating_edge.is_none(),
             "desktop auto-docking off must not restore an offscreen collapsed tab");
