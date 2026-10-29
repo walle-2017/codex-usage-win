@@ -14,16 +14,16 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::native_interop::{self, Color};
 
 const WINDOW_CLASS: &str = "CodexUsagePopupMenuV1";
-const MENU_MIN_WIDTH: i32 = 168;
-const MENU_MAX_WIDTH: i32 = 360;
-const OUTER_PADDING: i32 = 8;
-const ITEM_HEIGHT: i32 = 40;
-const SEPARATOR_HEIGHT: i32 = 14;
-const ITEM_RADIUS: i32 = 6;
-const ITEM_TEXT_LEFT_INSET: i32 = 14;
-const RADIO_MARK_WIDTH: i32 = 22;
-const ITEM_TEXT_RIGHT_INSET: i32 = 14;
-const SUBMENU_TEXT_RIGHT_INSET: i32 = 40;
+const MENU_MIN_WIDTH: i32 = 152;
+const MENU_MAX_WIDTH: i32 = 320;
+const OUTER_PADDING: i32 = 6;
+const ITEM_HEIGHT: i32 = 34;
+const SEPARATOR_HEIGHT: i32 = 10;
+const ITEM_RADIUS: i32 = 5;
+const ITEM_TEXT_LEFT_INSET: i32 = 12;
+const RADIO_MARK_WIDTH: i32 = 18;
+const ITEM_TEXT_RIGHT_INSET: i32 = 12;
+const SUBMENU_TEXT_RIGHT_INSET: i32 = 34;
 const SUBMENU_GAP: i32 = 2;
 const SHADOW_CLEARANCE: i32 = 6;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
@@ -261,7 +261,7 @@ unsafe fn apply_rounded_corners(hwnd: HWND) {
 unsafe fn create_font_for_dpi(dpi: u32, face: &str) -> isize {
     let face = native_interop::wide_str(face);
     let font = CreateFontW(
-        -scale_for_dpi(14, dpi.max(96)),
+        -scale_for_dpi(13, dpi.max(96)),
         0,
         0,
         0,
@@ -1124,6 +1124,25 @@ mod positioning_tests {
             SUBMENU_TEXT_RIGHT_INSET
         );
         const { assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH) };
+    }
+
+    #[test]
+    fn compact_menu_dimensions_scale_consistently_with_dpi() {
+        let items = [
+            PopupItem::radio_command("Theme · System", 93, true),
+            PopupItem::radio_command("Theme · Dark", 94, false),
+            PopupItem::radio_command("Theme · Light", 95, false),
+            PopupItem::separator(),
+            PopupItem::radio_command("Layout · Default", 91, true),
+            PopupItem::radio_command("Layout · Minimal", 92, false),
+            PopupItem::separator(),
+            PopupItem::radio_command("Position · Taskbar", 113, true),
+            PopupItem::radio_command("Position · Desktop", 114, false),
+        ];
+        assert_eq!(menu_height(&items, 96), 270);
+        assert_eq!(menu_height(&items, 120), 343);
+        assert!(ITEM_HEIGHT >= 32);
+        assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH);
     }
 
     #[test]
