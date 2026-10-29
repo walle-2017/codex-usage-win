@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.0 (2026-10-29) — release baseline reset
+
+- Published the finalized main branch as the new v1.0.0 baseline.
+- Includes vertical and multi-monitor taskbar support, desktop widget interaction improvements, unified Settings, and JSON editor performance fixes.
+- Retains opt-in diagnostics, SHA256-verified standalone updates, and Store/MSIX packaging.
+
+## Archived development release notes
+
+The entries below document earlier development releases; their GitHub Release assets and tags were retired during the v1.0.0 reset.
+
 ## v1.0.5
 
 - Rebuilt the settings experience as a unified native panel with General, Presets, Panel, Tooltip, Text, Progress, Interaction, and JSON Configuration pages.
@@ -26,4 +36,3 @@
 - Preserved the legacy Codex Usage branding and `codex-usage.exe` filename.
 - Added updater safety and migration behavior used to guide users to the renamed v1.0.4 release.
 
-Earlier releases remain available in GitHub Releases.

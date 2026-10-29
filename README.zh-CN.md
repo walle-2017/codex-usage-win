@@ -9,7 +9,7 @@
 
 # Codex Usage Win
 
-一款轻量级 Windows 原生 **Codex 用量监控工具**。当前正式版本：**v1.0.6**。
+一款轻量级 Windows 原生 **Codex 用量监控工具**。当前正式版本：**v1.0.0**。
 
 ## 功能
 

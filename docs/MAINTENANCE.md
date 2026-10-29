@@ -4,7 +4,7 @@ This document records the maintained product constraints for **Codex Usage Win**
 
 ## Current baseline
 
-- Current release: `v1.0.6`
+- Current release: `v1.0.0`
 - Repository: `walle-2017/codex-usage-win`
 - Product name: `Codex Usage Win`
 - Standalone executable: `codex-usage-win.exe`
@@ -37,6 +37,8 @@ Store packages are built with:
 ```
 
 Store builds must not initiate GitHub executable self-updates. Package updates are managed by Microsoft Store.
+
+**Version reset note:** v1.0.0 is the GitHub release baseline. A Microsoft Store package version must increase above any version already submitted to Store; the v1.0.0.0 MSIX output must not be submitted as a downgrade over v1.0.6.0.
 
 ## Settings schema
 
