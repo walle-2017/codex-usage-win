@@ -1141,8 +1141,8 @@ mod positioning_tests {
         ];
         assert_eq!(menu_height(&items, 96), 270);
         assert_eq!(menu_height(&items, 120), 343);
-        assert!(ITEM_HEIGHT >= 32);
-        assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH);
+        const { assert!(ITEM_HEIGHT >= 32); }
+        const { assert!(MENU_MIN_WIDTH < MENU_MAX_WIDTH); }
     }
 
     #[test]
