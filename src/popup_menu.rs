@@ -21,6 +21,7 @@ const ITEM_HEIGHT: i32 = 40;
 const SEPARATOR_HEIGHT: i32 = 14;
 const ITEM_RADIUS: i32 = 6;
 const ITEM_TEXT_LEFT_INSET: i32 = 14;
+const RADIO_MARK_WIDTH: i32 = 22;
 const ITEM_TEXT_RIGHT_INSET: i32 = 14;
 const SUBMENU_TEXT_RIGHT_INSET: i32 = 40;
 const SUBMENU_GAP: i32 = 2;
@@ -49,6 +50,9 @@ pub enum PopupAction {
 pub struct PopupItem {
     pub text: String,
     pub enabled: bool,
+    /// Reserve a dedicated checkmark gutter only for quick-setting choices.
+    pub checkable: bool,
+    pub checked: bool,
     pub action: PopupAction,
 }
 
@@ -57,6 +61,8 @@ impl PopupItem {
         Self {
             text: text.into(),
             enabled: true,
+            checkable: false,
+            checked: false,
             action: PopupAction::Command(command),
         }
     }
@@ -65,6 +71,8 @@ impl PopupItem {
         Self {
             text: text.into(),
             enabled: false,
+            checkable: false,
+            checked: false,
             action: PopupAction::Command(command),
         }
     }
@@ -73,6 +81,8 @@ impl PopupItem {
         Self {
             text: String::new(),
             enabled: false,
+            checkable: false,
+            checked: false,
             action: PopupAction::Separator,
         }
     }
@@ -81,8 +91,25 @@ impl PopupItem {
         Self {
             text: text.into(),
             enabled: true,
+            checkable: false,
+            checked: false,
             action: PopupAction::Submenu(items),
         }
+    }
+
+    pub fn radio_command(text: impl Into<String>, command: u16, checked: bool) -> Self {
+        Self {
+            text: text.into(),
+            enabled: true,
+            checkable: true,
+            checked,
+            action: PopupAction::Command(command),
+        }
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 }
 
@@ -256,6 +283,10 @@ unsafe fn create_font(hwnd: HWND, face: &str) -> isize {
     create_font_for_dpi(GetDpiForWindow(hwnd).max(96), face)
 }
 
+fn item_text_left_inset(item: &PopupItem) -> i32 {
+    ITEM_TEXT_LEFT_INSET + if item.checkable { RADIO_MARK_WIDTH } else { 0 }
+}
+
 fn item_text_right_inset(item: &PopupItem) -> i32 {
     if matches!(item.action, PopupAction::Submenu(_)) {
         SUBMENU_TEXT_RIGHT_INSET
@@ -280,7 +311,6 @@ unsafe fn menu_width(items: &[PopupItem], font_face: &str, dpi: u32) -> i32 {
     };
 
     let outer = scale_for_dpi(OUTER_PADDING, dpi) * 2;
-    let left = scale_for_dpi(ITEM_TEXT_LEFT_INSET, dpi);
     let mut width = min_width;
 
     for item in items {
@@ -298,6 +328,7 @@ unsafe fn menu_width(items: &[PopupItem], font_face: &str, dpi: u32) -> i32 {
         );
         let text_width = (rect.right - rect.left).max(0);
         let right = scale_for_dpi(item_text_right_inset(item), dpi);
+        let left = scale_for_dpi(item_text_left_inset(item), dpi);
         width = width.max(outer + left + text_width + right);
     }
 
@@ -422,6 +453,10 @@ unsafe fn open_submenu(hwnd: HWND, index: usize) {
         return;
     }
     let state = &mut *ptr;
+    if !state.items[index].enabled {
+        close_submenu(state);
+        return;
+    }
     let PopupAction::Submenu(items) = state.items[index].action.clone() else {
         close_submenu(state);
         return;
@@ -764,10 +799,26 @@ unsafe fn paint(hwnd: HWND, state: &PopupState) {
             palette.disabled
         };
         let _ = SetTextColor(mem, COLORREF(foreground.to_colorref()));
+        if item.checkable && item.checked {
+            let mut checkmark = native_interop::wide_str("✓");
+            let checkmark_len = checkmark.len().saturating_sub(1);
+            let mut mark_rect = RECT {
+                left: row.left + scale_for_dpi(ITEM_TEXT_LEFT_INSET, dpi),
+                top: row.top,
+                right: row.left + scale_for_dpi(ITEM_TEXT_LEFT_INSET + RADIO_MARK_WIDTH, dpi),
+                bottom: row.bottom,
+            };
+            let _ = DrawTextW(
+                mem,
+                &mut checkmark[..checkmark_len],
+                &mut mark_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
         let mut text = native_interop::wide_str(&item.text);
         let text_len = text.len().saturating_sub(1);
         let mut text_rect = RECT {
-            left: row.left + scale_for_dpi(ITEM_TEXT_LEFT_INSET, dpi),
+            left: row.left + scale_for_dpi(item_text_left_inset(item), dpi),
             top: row.top,
             right: row.right - scale_for_dpi(item_text_right_inset(item), dpi),
             bottom: row.bottom,
@@ -888,7 +939,9 @@ unsafe extern "system" fn wnd_proc(
             if hover != state.hover {
                 state.hover = hover;
                 if let Some(index) = hover {
-                    if matches!(state.items[index].action, PopupAction::Submenu(_)) {
+                    if state.items[index].enabled
+                        && matches!(state.items[index].action, PopupAction::Submenu(_))
+                    {
                         open_submenu(hwnd, index);
                     } else {
                         close_submenu(state);
@@ -1037,6 +1090,28 @@ mod positioning_tests {
         ];
         assert!(matches!(items[0].action, PopupAction::Command(60)));
         assert!(matches!(items[1].action, PopupAction::Command(61)));
+    }
+
+    #[test]
+    fn radio_item_reserves_checkmark_space_without_affecting_normal_commands() {
+        let checked = PopupItem::radio_command("Theme · Dark", 94, true);
+        let unchecked = PopupItem::radio_command("Theme · Light", 95, false);
+        let normal = PopupItem::command("Settings", 96);
+        assert!(checked.checkable && checked.checked && checked.enabled);
+        assert!(unchecked.checkable && !unchecked.checked);
+        assert!(!normal.checkable && !normal.checked);
+        assert_eq!(item_text_left_inset(&checked), ITEM_TEXT_LEFT_INSET + RADIO_MARK_WIDTH);
+        assert_eq!(item_text_left_inset(&unchecked), item_text_left_inset(&checked));
+        assert_eq!(item_text_left_inset(&normal), ITEM_TEXT_LEFT_INSET);
+    }
+
+    #[test]
+    fn disabled_submenu_preserves_children_but_cannot_be_selected() {
+        let item = PopupItem::submenu("Desktop", vec![
+            PopupItem::radio_command("Horizontal", 115, true),
+        ]).with_enabled(false);
+        assert!(!item.enabled);
+        assert!(matches!(&item.action, PopupAction::Submenu(items) if items.len() == 1));
     }
 
     #[test]

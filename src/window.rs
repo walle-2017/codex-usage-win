@@ -243,6 +243,12 @@ const IDM_STYLE_PROGRESS_LOW: u16 = 109;
 const IDM_STYLE_PROGRESS_CONSUMED: u16 = 110;
 const IDM_STYLE_DRAG_HANDLE: u16 = 111;
 const IDM_STYLE_RESET_CURRENT: u16 = 112;
+const IDM_QUICK_POSITION_TASKBAR: u16 = 113;
+const IDM_QUICK_POSITION_DESKTOP: u16 = 114;
+const IDM_QUICK_DIRECTION_HORIZONTAL: u16 = 115;
+const IDM_QUICK_DIRECTION_VERTICAL: u16 = 116;
+const IDM_QUICK_COLLAPSE_ON: u16 = 117;
+const IDM_QUICK_COLLAPSE_OFF: u16 = 118;
 
 const TBM_GETPOS_MSG: u32 = WM_USER;
 const TBM_SETPOS_MSG: u32 = WM_USER + 5;
@@ -9132,46 +9138,28 @@ unsafe extern "system" fn wnd_proc(
                     notify_quota_alerts(hwnd, &alerts);
                     save_state_settings();
                 }
-                IDM_THEME_SYSTEM | IDM_THEME_DARK | IDM_THEME_LIGHT => {
-                    close_style_editors();
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.theme_mode = match id {
-                                IDM_THEME_DARK => ThemeMode::Dark,
-                                IDM_THEME_LIGHT => ThemeMode::Light,
-                                _ => ThemeMode::System,
-                            };
-                            s.is_dark = match s.theme_mode {
-                                ThemeMode::System => theme::is_dark_mode(),
-                                ThemeMode::Dark => true,
-                                ThemeMode::Light => false,
-                            };
-                        }
-                    }
-                    save_state_settings();
-                    render_layered();
-                    style_window::sync(style_settings_snapshot());
-                }
-                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL => {
-                    let preset = if id == IDM_LAYOUT_MINIMAL {
-                        AppearancePreset::Minimal
-                    } else {
-                        AppearancePreset::Default
+                IDM_THEME_SYSTEM | IDM_THEME_DARK | IDM_THEME_LIGHT
+                | IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL
+                | IDM_QUICK_POSITION_TASKBAR | IDM_QUICK_POSITION_DESKTOP
+                | IDM_QUICK_DIRECTION_HORIZONTAL | IDM_QUICK_DIRECTION_VERTICAL
+                | IDM_QUICK_COLLAPSE_ON | IDM_QUICK_COLLAPSE_OFF => {
+                    // Use the Settings window's established transition handlers
+                    // so all entry points share geometry, clamping, saving and sync.
+                    let change = {
+                        let state = lock_state();
+                        state.as_ref().and_then(|s| quick_appearance_change(s, id))
                     };
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.appearance_preset = preset;
-                            refresh_usage_texts(s);
-                        }
+                    if let Some((msg, value)) = change {
+                        // Submenu commands arrive after root dismissal is queued.
+                        // Posting the transition also avoids repositioning the
+                        // desktop widget while the popup is still being destroyed.
+                        let _ = PostMessageW(
+                            taskbar_replica_service_hwnd(hwnd),
+                            msg,
+                            WPARAM(value),
+                            LPARAM(0),
+                        );
                     }
-                    hide_minimal_usage_tooltip();
-                    save_state_settings();
-                    position_at_taskbar();
-                    render_layered();
-                    sync_tray_icons(hwnd);
-                    style_window::sync(style_settings_snapshot());
                 }
                 IDM_STYLE_SETTINGS => {
                     // Popup-menu root commands are dispatched synchronously
@@ -10265,19 +10253,103 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 }
 
 
+fn quick_appearance_change(state: &AppState, id: u16) -> Option<(u32, usize)> {
+    match id {
+        IDM_THEME_SYSTEM if state.theme_mode != ThemeMode::System =>
+            Some((style_window::WM_STYLE_THEME_CHANGE, 0)),
+        IDM_THEME_DARK if state.theme_mode != ThemeMode::Dark =>
+            Some((style_window::WM_STYLE_THEME_CHANGE, 1)),
+        IDM_THEME_LIGHT if state.theme_mode != ThemeMode::Light =>
+            Some((style_window::WM_STYLE_THEME_CHANGE, 2)),
+        IDM_LAYOUT_DEFAULT if state.appearance_preset != AppearancePreset::Default =>
+            Some((style_window::WM_STYLE_LAYOUT_CHANGE, 0)),
+        IDM_LAYOUT_MINIMAL if state.appearance_preset != AppearancePreset::Minimal =>
+            Some((style_window::WM_STYLE_LAYOUT_CHANGE, 1)),
+        IDM_QUICK_POSITION_TASKBAR if state.display_position != DisplayPosition::Taskbar =>
+            Some((style_window::WM_STYLE_POSITION_CHANGE, 0)),
+        IDM_QUICK_POSITION_DESKTOP if state.display_position != DisplayPosition::Desktop =>
+            Some((style_window::WM_STYLE_POSITION_CHANGE, 1)),
+        IDM_QUICK_DIRECTION_HORIZONTAL
+            if state.display_position == DisplayPosition::Desktop
+                && state.desktop_direction != DesktopDirection::Horizontal =>
+            Some((style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE, 0)),
+        IDM_QUICK_DIRECTION_VERTICAL
+            if state.display_position == DisplayPosition::Desktop
+                && state.desktop_direction != DesktopDirection::Vertical =>
+            Some((style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE, 1)),
+        IDM_QUICK_COLLAPSE_ON
+            if state.display_position == DisplayPosition::Desktop
+                && !state.desktop_auto_collapse =>
+            Some((style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, 1)),
+        IDM_QUICK_COLLAPSE_OFF
+            if state.display_position == DisplayPosition::Desktop
+                && state.desktop_auto_collapse =>
+            Some((style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, 0)),
+        _ => None,
+    }
+}
+
+fn quick_appearance_submenus(
+    zh: bool,
+    theme: ThemeMode,
+    layout: AppearancePreset,
+    position: DisplayPosition,
+    direction: DesktopDirection,
+    auto_collapse: bool,
+) -> [PopupItem; 2] {
+    let text = |zh_text: &'static str, en_text: &'static str| -> &'static str {
+        if zh { zh_text } else { en_text }
+    };
+    let appearance = PopupItem::submenu(
+        text("外观与布局", "Appearance & Layout"),
+        vec![
+            PopupItem::radio_command(text("主题 · 系统", "Theme · System"), IDM_THEME_SYSTEM, theme == ThemeMode::System),
+            PopupItem::radio_command(text("主题 · 深色", "Theme · Dark"), IDM_THEME_DARK, theme == ThemeMode::Dark),
+            PopupItem::radio_command(text("主题 · 浅色", "Theme · Light"), IDM_THEME_LIGHT, theme == ThemeMode::Light),
+            PopupItem::separator(),
+            PopupItem::radio_command(text("排版 · 默认", "Layout · Default"), IDM_LAYOUT_DEFAULT, layout == AppearancePreset::Default),
+            PopupItem::radio_command(text("排版 · 极简", "Layout · Minimal"), IDM_LAYOUT_MINIMAL, layout == AppearancePreset::Minimal),
+            PopupItem::separator(),
+            PopupItem::radio_command(text("位置 · 任务栏", "Position · Taskbar"), IDM_QUICK_POSITION_TASKBAR, position == DisplayPosition::Taskbar),
+            PopupItem::radio_command(text("位置 · 桌面", "Position · Desktop"), IDM_QUICK_POSITION_DESKTOP, position == DisplayPosition::Desktop),
+        ],
+    );
+    let desktop = PopupItem::submenu(
+        text("桌面模式", "Desktop Mode"),
+        vec![
+            PopupItem::radio_command(text("方向 · 横向", "Direction · Horizontal"), IDM_QUICK_DIRECTION_HORIZONTAL, direction == DesktopDirection::Horizontal),
+            PopupItem::radio_command(text("方向 · 纵向", "Direction · Vertical"), IDM_QUICK_DIRECTION_VERTICAL, direction == DesktopDirection::Vertical),
+            PopupItem::separator(),
+            PopupItem::radio_command(text("收缩 · 开启", "Auto-collapse · On"), IDM_QUICK_COLLAPSE_ON, auto_collapse),
+            PopupItem::radio_command(text("收缩 · 关闭", "Auto-collapse · Off"), IDM_QUICK_COLLAPSE_OFF, !auto_collapse),
+        ],
+    ).with_enabled(position == DisplayPosition::Desktop);
+    [appearance, desktop]
+}
+
 fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
-    let (strings, language, available_update_version) = {
+    let (strings, language, available_update_version, theme_mode, layout, position, direction, auto_collapse) = {
         let state = lock_state();
         match state.as_ref() {
             Some(s) => (
                 s.language.strings(),
                 s.language,
                 s.available_update_version.clone(),
+                s.theme_mode,
+                s.appearance_preset,
+                s.display_position,
+                s.desktop_direction,
+                s.desktop_auto_collapse,
             ),
             None => (
                 LanguageId::English.strings(),
                 LanguageId::English,
                 None,
+                ThemeMode::System,
+                AppearancePreset::Default,
+                DisplayPosition::Taskbar,
+                DesktopDirection::Horizontal,
+                default_desktop_auto_collapse(),
             ),
         }
     };
@@ -10305,9 +10377,15 @@ fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
         check_item,
         PopupItem::command(github_text, IDM_OPEN_RELEASES),
     ];
+    let [appearance_menu, desktop_menu] = quick_appearance_submenus(
+        zh, theme_mode, layout, position, direction, auto_collapse,
+    );
     let items = vec![
         PopupItem::command(strings.refresh, 1),
         PopupItem::command(strings.reset_position, IDM_RESET_POSITION),
+        PopupItem::separator(),
+        appearance_menu,
+        desktop_menu,
         PopupItem::separator(),
         PopupItem::command(settings_text, IDM_STYLE_SETTINGS),
         PopupItem::separator(),
@@ -10757,6 +10835,37 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 
 #[cfg(test)]
 mod tests {
+    use crate::popup_menu::PopupAction;
+    #[test]
+    fn quick_appearance_menu_tracks_explicit_user_choices() {
+        let [appearance, desktop] = quick_appearance_submenus(
+            true, ThemeMode::System, AppearancePreset::Minimal,
+            DisplayPosition::Taskbar, DesktopDirection::Vertical, false,
+        );
+        let PopupAction::Submenu(choices) = appearance.action else { panic!("appearance submenu expected") };
+        let checked: Vec<u16> = choices.iter().filter(|item| item.checked).filter_map(|item| {
+            if let PopupAction::Command(id) = &item.action { Some(*id) } else { None }
+        }).collect();
+        assert_eq!(checked, vec![IDM_THEME_SYSTEM, IDM_LAYOUT_MINIMAL, IDM_QUICK_POSITION_TASKBAR]);
+        assert!(!desktop.enabled);
+        let PopupAction::Submenu(desktop_choices) = desktop.action else { panic!("desktop submenu expected") };
+        assert!(desktop_choices[1].checked);
+        assert!(desktop_choices[4].checked);
+    }
+
+    #[test]
+    fn desktop_shortcuts_activate_only_for_explicit_desktop_position() {
+        let [_, desktop] = quick_appearance_submenus(
+            false, ThemeMode::Dark, AppearancePreset::Default,
+            DisplayPosition::Desktop, DesktopDirection::Horizontal, true,
+        );
+        assert!(desktop.enabled);
+        let PopupAction::Submenu(choices) = desktop.action else { panic!("desktop submenu expected") };
+        assert!(choices[0].checked);
+        assert!(choices[3].checked);
+        assert!(choices.iter().filter(|item| item.checked).count() == 2);
+    }
+
     use super::*;
 
     #[test]
