@@ -294,7 +294,6 @@ enum HitTarget {
     JsonStatusPath,
     DiscardChanges,
     KeepEditing,
-    LanguageToggle,
     LanguageOption(usize),
 }
 
@@ -658,7 +657,6 @@ struct PanelState {
     syncing_corner_edit: bool,
     syncing_hex_edits: bool,
     syncing_json_edit: bool,
-    language_popup_open: bool,
     json_dirty: bool,
     json_status: String,
     json_status_path: Option<PathBuf>,
@@ -1336,7 +1334,6 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
                 syncing_corner_edit: false,
                 syncing_hex_edits: false,
                 syncing_json_edit: false,
-                language_popup_open: false,
                 json_dirty: false,
                 json_status: String::new(),
                 json_status_path: None,
@@ -1594,9 +1591,6 @@ const SETTINGS_CONTENT_RIGHT: i32 = 940;
 const SETTINGS_CARD_RADIUS: i32 = 10;
 const SETTINGS_CARD_INSET_X: i32 = 18;
 const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
-const SETTINGS_CHOICE_LEFT: i32 = 360;
-const SETTINGS_CHOICE_WIDTH: i32 = 130;
-const SETTINGS_CHOICE_GAP: i32 = 10;
 const SETTINGS_EDITOR_HEIGHT: i32 = 164;
 const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
 
@@ -1630,16 +1624,34 @@ fn settings_card_label_rect(hwnd: HWND, top: i32, bottom: i32) -> RECT {
     )
 }
 
-fn settings_choice_rect(hwnd: HWND, top: i32, bottom: i32, index: i32) -> RECT {
-    let left = SETTINGS_CHOICE_LEFT
-        + index * (SETTINGS_CHOICE_WIDTH + SETTINGS_CHOICE_GAP);
-    rect(
-        hwnd,
-        left,
-        top,
-        left + SETTINGS_CHOICE_WIDTH,
-        bottom,
-    )
+// One shared segment formula for painting and hit tests.
+fn general_segment_rect(bounds: RECT, index: usize, count: usize) -> RECT {
+    let width = bounds.right - bounds.left;
+    RECT {
+        left: bounds.left + width * index as i32 / count as i32,
+        right: bounds.left + width * (index as i32 + 1) / count as i32,
+        ..bounds
+    }
+}
+
+fn general_refresh_group_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 360, 68, 920, 102)
+}
+
+fn general_alert_group_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 360, 138, 920, 172)
+}
+
+fn general_usage_card_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 200, 198, 562, 378)
+}
+
+fn general_application_card_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 578, 198, 940, 378)
+}
+
+fn general_language_group_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 708, 302, 922, 338)
 }
 
 fn section_rect(hwnd: HWND, section: Section) -> RECT {
@@ -2021,37 +2033,12 @@ fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: 
         rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
     }
 }
-fn language_button_rect(hwnd: HWND) -> RECT {
-    // Chinese / English only: keep the selector compact and right-aligned.
-    rect(hwnd, 760, 414, 920, 450)
-}
-
 fn language_option_count() -> usize {
     LanguageId::SELECTABLE.len()
 }
 
 fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
-    let button = language_button_rect(hwnd);
-    let row_h = scale(hwnd, 28);
-    let total_h = row_h * language_option_count() as i32;
-    let bottom = button.top - scale(hwnd, 6);
-    RECT {
-        left: button.left,
-        top: bottom - total_h + row_h * index as i32,
-        right: button.right,
-        bottom: bottom - total_h + row_h * (index as i32 + 1),
-    }
-}
-
-fn language_popup_rect(hwnd: HWND) -> RECT {
-    let first = language_option_rect(hwnd, 0);
-    let last = language_option_rect(hwnd, language_option_count() - 1);
-    RECT {
-        left: first.left,
-        top: first.top,
-        right: last.right,
-        bottom: last.bottom,
-    }
+    general_segment_rect(general_language_group_rect(hwnd), index, language_option_count())
 }
 
 fn language_code_for_index(index: usize) -> String {
@@ -2674,17 +2661,12 @@ fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
         900_000 => 2,
         _ => 3,
     };
-    settings_choice_rect(hwnd, 68, 102, index)
+    general_segment_rect(general_refresh_group_rect(hwnd), index, 4)
 }
 
 fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
-    rect(
-        hwnd,
-        812,
-        if weekly { 202 } else { 162 },
-        920,
-        if weekly { 234 } else { 194 },
-    )
+    rect(hwnd, 218, if weekly { 298 } else { 246 }, 544,
+        if weekly { 342 } else { 290 })
 }
 
 fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
@@ -2694,11 +2676,11 @@ fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
         20 => 2,
         _ => 3,
     };
-    settings_choice_rect(hwnd, 268, 302, index)
+    general_segment_rect(general_alert_group_rect(hwnd), index, 4)
 }
 
 fn general_startup_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 812, 370, 920, 402)
+    rect(hwnd, 860, 250, 922, 282)
 }
 
 fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
@@ -5019,29 +5001,12 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         return None;
     }
 
-    let (section, language_popup_open, json_dirty, json_status_path, language, json_action_pending) = {
+    let (section, json_dirty, json_status_path, language, json_action_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
-        (
-            s.section,
-            s.language_popup_open,
-            s.json_dirty,
-            s.json_status_path.is_some(),
-            s.snapshot.language,
-            s.pending_json_action.is_some(),
-        )
+        (s.section, s.json_dirty, s.json_status_path.is_some(),
+            s.snapshot.language, s.pending_json_action.is_some())
     };
-
-    if section == Section::General && language_popup_open {
-        for index in 0..language_option_count() {
-            if pt_in_rect(language_option_rect(hwnd, index), x, y) {
-                return Some(HitTarget::LanguageOption(index));
-            }
-        }
-        if pt_in_rect(language_button_rect(hwnd), x, y) {
-            return Some(HitTarget::LanguageToggle);
-        }
-    }
 
     for item in [
         Section::General,
@@ -5104,8 +5069,10 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
     }
 
     if section == Section::General {
-        if pt_in_rect(language_button_rect(hwnd), x, y) {
-            return Some(HitTarget::LanguageToggle);
+        for index in 0..language_option_count() {
+            if pt_in_rect(language_option_rect(hwnd, index), x, y) {
+                return Some(HitTarget::LanguageOption(index));
+            }
         }
         for interval in [60_000u32, 300_000, 900_000, 3_600_000] {
             if pt_in_rect(general_refresh_rect(hwnd, interval), x, y) {
@@ -5301,18 +5268,11 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 begin_json_action(hwnd, action);
             }
         },
-        HitTarget::LanguageToggle => {
-            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = state.as_mut() {
-                s.language_popup_open = !s.language_popup_open;
-            }
-        }
         HitTarget::LanguageOption(index) => {
             {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = state.as_mut() {
                     s.snapshot.editable_settings.general.language = language_code_for_index(index);
-                    s.language_popup_open = false;
                 }
             }
             send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
@@ -5376,9 +5336,6 @@ fn set_section(section: Section) {
             return;
         };
         s.section = section;
-        if section != Section::General {
-            s.language_popup_open = false;
-        }
         if let Some(editor) = rows(section).first().copied() {
             s.editor = editor;
         } else {
@@ -5997,32 +5954,6 @@ unsafe extern "system" fn wnd_proc(
                             return LRESULT(0);
                         }
                     }
-                }
-            }
-
-            let popup_open = {
-                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state
-                    .as_ref()
-                    .map(|s| s.section == Section::General && s.language_popup_open)
-                    .unwrap_or(false)
-            };
-            if popup_open {
-                let target = hit_target_at(hwnd, x, y);
-                if !matches!(
-                    target,
-                    Some(HitTarget::LanguageToggle | HitTarget::LanguageOption(_))
-                ) {
-                    {
-                        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(s) = state.as_mut() {
-                            s.language_popup_open = false;
-                            s.hovered = None;
-                            s.pressed = None;
-                        }
-                    }
-                    let _ = InvalidateRect(hwnd, None, false);
-                    return LRESULT(0);
                 }
             }
 
