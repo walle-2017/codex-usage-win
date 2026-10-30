@@ -8126,7 +8126,12 @@ unsafe extern "system" fn wnd_proc(
                                 };
                                 set_floating_grip_hover(true);
                                 if changed { render_layered(); }
-                            } else if !floating_pointer_in_expanded_docked_transition(active) {
+                            } else {
+                                // A transparent body-to-tab gap is only a
+                                // brief transition corridor, not a persistent
+                                // hover target. One timer tick is its grace
+                                // period; a stationary pointer there must
+                                // still let the grip fade out.
                                 floating_cancel_hover_recheck(active);
                                 if let Some(s) = lock_state().as_mut() {
                                     s.minimal_hover_target = None;
