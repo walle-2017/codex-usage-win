@@ -9,7 +9,7 @@ pub(super) const STRINGS: Strings = Strings {
     fifteen_minutes: "15 分钟",
     one_hour: "1 小时",
     codex_model: "Codex",
-    start_with_windows: "开机自动启动",
+    start_with_windows: "自启",
     reset_position: "重置位置",
     language: "语言",
     system_default: "跟随系统",
