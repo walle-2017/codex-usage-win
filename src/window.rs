@@ -243,6 +243,12 @@ const IDM_STYLE_PROGRESS_LOW: u16 = 109;
 const IDM_STYLE_PROGRESS_CONSUMED: u16 = 110;
 const IDM_STYLE_DRAG_HANDLE: u16 = 111;
 const IDM_STYLE_RESET_CURRENT: u16 = 112;
+const IDM_QUICK_POSITION_TASKBAR: u16 = 113;
+const IDM_QUICK_POSITION_DESKTOP: u16 = 114;
+const IDM_QUICK_DIRECTION_HORIZONTAL: u16 = 115;
+const IDM_QUICK_DIRECTION_VERTICAL: u16 = 116;
+const IDM_QUICK_COLLAPSE_ON: u16 = 117;
+const IDM_QUICK_COLLAPSE_OFF: u16 = 118;
 
 const TBM_GETPOS_MSG: u32 = WM_USER;
 const TBM_SETPOS_MSG: u32 = WM_USER + 5;
@@ -298,6 +304,9 @@ static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
+// Mousemove repaints the tooltip often; do not re-rasterize the same text
+// solely to measure its width on every cursor event.
+static MINIMAL_TOOLTIP_WIDTH_CACHE: Mutex<Option<(String, u32, i32)>> = Mutex::new(None);
 static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
@@ -1822,31 +1831,48 @@ fn set_window_title(hwnd: HWND, strings: Strings) {
     }
 }
 
+/// SetWindowTextW is synchronous and can re-enter window procedures, including
+/// an Explorer-hosted taskbar child. Do not invoke it with the AppState mutex
+/// held: re-entrant messages can need that same lock.
+fn refresh_window_title() {
+    let title = {
+        let state = lock_state();
+        state.as_ref().map(|s| (s.hwnd.to_hwnd(), s.language.strings()))
+    };
+    if let Some((hwnd, strings)) = title {
+        set_window_title(hwnd, strings);
+    }
+}
+
+/// Pure state update under the caller's lock. Perform synchronous Win32
+/// title updates separately, after the lock guard has been dropped.
 fn apply_language_to_state(state: &mut AppState, language_override: Option<LanguageId>) {
     let language_override = language_override.map(LanguageId::ui_supported);
     state.language_override = language_override;
     state.language = localization::resolve_language(language_override);
-    set_window_title(state.hwnd.to_hwnd(), state.language.strings());
     refresh_usage_texts(state);
 }
 
 fn update_language_change() -> bool {
-    let mut state = lock_state();
-    let Some(app_state) = state.as_mut() else {
-        return false;
+    let changed = {
+        let mut state = lock_state();
+        let Some(app_state) = state.as_mut() else {
+            return false;
+        };
+        if app_state.language_override.is_some() {
+            return false;
+        }
+        let new_language = localization::detect_system_language();
+        if new_language == app_state.language {
+            return false;
+        }
+        apply_language_to_state(app_state, None);
+        true
     };
-
-    if app_state.language_override.is_some() {
-        return false;
+    if changed {
+        refresh_window_title();
     }
-
-    let new_language = localization::detect_system_language();
-    if new_language == app_state.language {
-        return false;
-    }
-
-    apply_language_to_state(app_state, None);
-    true
+    changed
 }
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -2649,6 +2675,15 @@ fn drag_frame_due(force: bool) -> bool {
     preview_frame_due(&LAST_DRAG_FRAME, DRAG_FRAME_MS, force)
 }
 
+/// Keep the Composition backdrop prepared while frost intensity is enabled,
+/// even if the panel is temporarily fully opaque. Alpha=255 to alpha=254
+/// must not create a new HWND in the same frame that the foreground becomes
+/// transparent; the background composition visual is committed asynchronously.
+/// The normal "frosted visibly active" style predicate remains unchanged.
+fn panel_blur_backdrop_needed(style: &ThemeStyle) -> bool {
+    style.panel_frosted_strength > 0
+}
+
 /// Render the foreground widget through UpdateLayeredWindow. Frosted mode keeps
 /// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
@@ -2700,9 +2735,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
     let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
-    // Embedded and desktop panels use the same Gaussian-blur theme path.
+    // Prepare Gaussian blur as soon as its strength is nonzero. At alpha=255
+    // the foreground remains opaque, hiding this prebuilt visual. This avoids
+    // an empty frame when alpha drops to 254 and the background is first needed.
     // The desktop backdrop is clipped to the original body (never the tab).
-    let blur_requested = style.panel_frosted_active();
+    let blur_requested = panel_blur_backdrop_needed(&style);
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
@@ -2756,9 +2793,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     };
     let mut surface_style = style.clone();
     let background = style.color(StyleColorTarget::PanelBackground);
-    if composition_blur_active {
-        // Composition owns the visible background, so the layered foreground only
-        // needs a virtually invisible alpha to keep blank areas hit-testable.
+    if composition_blur_active && background.a < u8::MAX {
+        // Only let Composition own the *visible* fill once translucency is
+        // requested. At alpha=255 the original opaque foreground must cover
+        // the prewarmed blur, preventing a blink during alpha 255 -> 254.
+        // Alpha=1 preserves hit testing of the layered panel interior.
         surface_style.panel_background = Color::rgba(
             background.r,
             background.g,
@@ -2887,8 +2926,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     floating_free_grip_below_for_state(s),
                     s.floating_collapsed && s.floating_reveal == 0,
                     s.drag_handle_hovered,
-                    if s.dragging || !floating_grip_uses_hover_fade(s) { 100 }
-                    else { s.floating_grip_alpha },
+                    floating_grip_visual_alpha(
+                        floating_grip_uses_hover_fade(s),
+                        s.dragging,
+                        s.floating_grip_alpha,
+                    ),
                     s.floating_reserved_dock,
                     s.floating_reveal,
                     s.dragging,
@@ -5631,6 +5673,23 @@ fn floating_grip_should_show(
     dragging || (edge.is_some() && auto_collapse) || hovered
 }
 
+/// Both the foreground drag tab and its independent Composition blur
+/// background must use exactly the same visual opacity. In particular an
+/// expanded edge-docked desktop with auto-collapse disabled fades *both*
+/// layers out, rather than leaving a permanently visible frosted plate.
+fn floating_grip_visual_alpha(hover_fade: bool, dragging: bool, animated_alpha: u8) -> u8 {
+    if dragging || !hover_fade { 100 } else { animated_alpha.min(100) }
+}
+
+/// Layered desktop pixels may stop delivering WM_MOUSELEAVE after docking.
+/// While a non-collapsing docked tab is hovered, poll the actual cursor so
+/// a lost leave event cannot keep the detached grip visible indefinitely.
+fn docked_grip_needs_hover_watch(
+    edge: Option<FloatingEdge>, auto_collapse: bool, collapsed: bool, dragging: bool,
+) -> bool {
+    edge.is_some() && !auto_collapse && !collapsed && !dragging
+}
+
 fn set_floating_grip_hover(hovered: bool) {
     let hwnd = {
         let mut state = lock_state();
@@ -5783,13 +5842,29 @@ fn sync_desktop_auto_collapse() {
             s.display_position, s.desktop_auto_collapse,
         );
         if !collapse {
+            // An expanded, edge-docked widget must fade out its tab when
+            // auto-collapse is switched off, even if the body never moves.
+            // Otherwise set_floating_collapsed(false) can be a no-op and
+            // leave the previous fully opaque drag tab on screen.
             s.floating_grip_hover = false;
+            if !s.dragging {
+                s.drag_handle_hovered = false;
+            }
         }
         s.floating_first_collapse_guard = false;
         (s.hwnd.to_hwnd(), collapse)
     };
     floating_cancel_hover_recheck(hwnd);
     set_floating_collapsed(collapse);
+    if !collapse {
+        // The collapse state may already be false: explicitly drive the
+        // opacity transition independently of the slide animation.
+        unsafe {
+            let _ = SetTimer(
+                taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None,
+            );
+        }
+    }
 }
 
 // A nonmodal custom context menu is a separate HWND. Moving from the
@@ -7114,16 +7189,30 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
     }
 }
 
-// GDI's GetTextExtentPoint32W can measure slightly narrower than the
-// DirectWrite glyph mask used for painting. Reserve asymmetric-safe
-// horizontal inset plus extra width so trailing digits are never clipped.
+// Keep the reset-time tooltip content-sized. Its measured glyph bounds must
+// come from the same DirectWrite mask used for the actual layered rendering,
+// not the slightly different GDI font metrics. The final width needs only
+// normal padding and a small rasterization safety allowance.
 const TOOLTIP_TEXT_INSET: i32 = 12;
-const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 20;
+const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 3;
 
 fn tooltip_width_with_render_slack(measured_text_px: i32, logical: impl Fn(i32) -> i32) -> i32 {
     (measured_text_px.max(0)
         + logical(2 * TOOLTIP_TEXT_INSET + TOOLTIP_TEXT_MEASUREMENT_SLACK))
         .max(logical(48))
+}
+
+// Extract the last painted column, including antialiased edge pixels. Using
+// the rightmost pixel rather than the total nonzero pixel count also keeps
+// space between digits and glyph overhangs from being cropped.
+fn tooltip_mask_content_width(mask: &[u8], row_width: usize) -> Option<i32> {
+    if row_width == 0 || mask.len() % row_width != 0 {
+        return None;
+    }
+    mask.chunks_exact(row_width)
+        .filter_map(|row| row.iter().rposition(|&coverage| coverage != 0))
+        .max()
+        .and_then(|x| i32::try_from(x + 1).ok())
 }
 
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
@@ -7410,7 +7499,41 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
     let _ = ReleaseDC(HWND::default(), hdc);
-    tooltip_width_with_render_slack(size.cx, sc)
+
+    // Probe the real DirectWrite glyph mask with generous temporary room,
+    // but do not carry that probe width into the final popup size. GDI only
+    // provides a fallback and an approximate probe bound.
+    let probe_width = size.cx.max(0)
+        .saturating_add(sc(64))
+        .max(sc((text.chars().count().min(1024) as i32) * 20))
+        .clamp(sc(64), sc(4096));
+    let content_width = native_interop::directwrite_text_mask(
+        text,
+        fonts::face(fonts::FontRole::Ui, None),
+        12.0 * CURRENT_DPI.load(Ordering::Relaxed) as f32 / 96.0,
+        FW_NORMAL.0 as i32,
+        probe_width,
+        sc(28),
+    ).and_then(|mask| {
+        tooltip_mask_content_width(&mask, probe_width as usize)
+    });
+    tooltip_width_with_render_slack(content_width.unwrap_or(size.cx), sc)
+}
+
+fn cached_minimal_tooltip_width(text: &str) -> i32 {
+    let dpi = CURRENT_DPI.load(Ordering::Relaxed);
+    {
+        let cache = MINIMAL_TOOLTIP_WIDTH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((last_text, last_dpi, width)) = cache.as_ref() {
+            if last_text == text && *last_dpi == dpi {
+                return *width;
+            }
+        }
+    }
+    let width = unsafe { measure_minimal_tooltip_width(text) };
+    *MINIMAL_TOOLTIP_WIDTH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((text.to_owned(), dpi, width));
+    width
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
@@ -7423,7 +7546,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     };
     let taskbar_owner = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
     sync_minimal_tooltip_owner(tooltip, taskbar_owner);
-    let measured_width = unsafe { measure_minimal_tooltip_width(&text) };
+    let measured_width = cached_minimal_tooltip_width(&text);
 
     {
         let mut tooltip_text = MINIMAL_TOOLTIP_TEXT
@@ -7950,6 +8073,34 @@ unsafe extern "system" fn wnd_proc(
                         s.display_position, s.desktop_auto_collapse,
                     )
             );
+            let fade_grip = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                    && docked_grip_needs_hover_watch(
+                        s.floating_edge,
+                        floating_auto_collapse_allowed(
+                            s.display_position, s.desktop_auto_collapse,
+                        ),
+                        s.floating_collapsed, s.dragging,
+                    )
+            );
+            if fade_grip {
+                // Restore the hover state after menu focus consumed the last
+                // mouse-leave event. Never collapse an explicitly expanded dock.
+                let hovered = floating_pointer_over_expanded_docked_panel(hwnd);
+                let grip_hovered = hovered && floating_pointer_over_actual_grip(hwnd);
+                if let Some(s) = lock_state().as_mut() {
+                    s.drag_handle_hovered = grip_hovered;
+                    if !hovered { s.minimal_hover_target = None; }
+                }
+                if hovered {
+                    floating_arm_hover_recheck(hwnd);
+                } else {
+                    floating_cancel_hover_recheck(hwnd);
+                    hide_minimal_usage_tooltip();
+                }
+                set_floating_grip_hover(hovered);
+                render_layered();
+            }
             if eligible {
                 if floating_pointer_in_docked_hover_zone(hwnd) {
                     // WM_MOUSELEAVE tracking is consumed while hovering a
@@ -8052,10 +8203,9 @@ unsafe extern "system" fn wnd_proc(
                     );
                     if let Some((active, tab_fades)) = active {
                         if tab_fades {
-                            // V24.26: only the transient body-to-tab gutter
-                            // receives this grace period. On expiry, use the
-                            // actual cursor position, not a stale leave event.
-                            floating_cancel_hover_recheck(active);
+                            // Keep checking the actual cursor while hovering.
+                            // Transparent layered pixels can miss WM_MOUSELEAVE,
+                            // especially at a physical top-screen boundary.
                             if floating_pointer_over_expanded_docked_panel(active) {
                                 let over_grip = floating_pointer_over_actual_grip(active);
                                 let changed = {
@@ -8069,6 +8219,12 @@ unsafe extern "system" fn wnd_proc(
                                 set_floating_grip_hover(true);
                                 if changed { render_layered(); }
                             } else {
+                                // A transparent body-to-tab gap is only a
+                                // brief transition corridor, not a persistent
+                                // hover target. One timer tick is its grace
+                                // period; a stationary pointer there must
+                                // still let the grip fade out.
+                                floating_cancel_hover_recheck(active);
                                 if let Some(s) = lock_state().as_mut() {
                                     s.minimal_hover_target = None;
                                     s.drag_handle_hovered = false;
@@ -8272,9 +8428,22 @@ unsafe extern "system" fn wnd_proc(
             let in_docked_hover_zone = docked_hover
                 && floating_pointer_in_docked_hover_zone(hwnd);
             if in_docked_hover_zone {
-                // Real mouse movement resumed over the stable docked region.
-                // The leave-only fallback timer is no longer necessary.
-                floating_cancel_hover_recheck(hwnd);
+                // For auto-collapsing docks, mouse motion resolves a pending
+                // leave. For non-collapsing docks the timer remains a cursor
+                // watchdog: transparent layered pixels can lose the final
+                // WM_MOUSELEAVE even after ordinary movement has resumed.
+                let watch_grip = lock_state().as_ref().is_some_and(|s|
+                    docked_grip_needs_hover_watch(
+                        s.floating_edge,
+                        floating_auto_collapse_allowed(
+                            s.display_position, s.desktop_auto_collapse,
+                        ),
+                        s.floating_collapsed, s.dragging,
+                    )
+                );
+                if !watch_grip {
+                    floating_cancel_hover_recheck(hwnd);
+                }
             }
             if lock_state().as_ref().is_some_and(|s|
                 s.floating_mode && floating_hover_can_reveal(
@@ -8291,6 +8460,18 @@ unsafe extern "system" fn wnd_proc(
                 hide_minimal_usage_tooltip();
             } else {
                 set_floating_grip_hover(true);
+                if lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                        && docked_grip_needs_hover_watch(
+                            s.floating_edge,
+                            floating_auto_collapse_allowed(
+                                s.display_position, s.desktop_auto_collapse,
+                            ),
+                            s.floating_collapsed, s.dragging,
+                        )
+                ) {
+                    floating_arm_hover_recheck(hwnd);
+                }
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let drag_hovered = is_drag_handle_point(client_x, client_y);
@@ -8615,6 +8796,22 @@ unsafe extern "system" fn wnd_proc(
                     s.dragging = false;
                 }
                 let _ = ReleaseCapture();
+                // On a docked drop, WM_CAPTURECHANGED can consume the leave
+                // tracking before the user moves away. Keep the cursor watch
+                // armed after capture ends, even if no WM_MOUSEMOVE follows.
+                if lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                        && s.floating_grip_hover
+                        && docked_grip_needs_hover_watch(
+                            s.floating_edge,
+                            floating_auto_collapse_allowed(
+                                s.display_position, s.desktop_auto_collapse,
+                            ),
+                            s.floating_collapsed, s.dragging,
+                        )
+                ) {
+                    floating_arm_hover_recheck(hwnd);
+                }
                 if floating_pointer_still_over_free_grip(hwnd) {
                     // Capture ended but no mouse motion is required to
                     // maintain hover or re-arm leave tracking.
@@ -9132,46 +9329,28 @@ unsafe extern "system" fn wnd_proc(
                     notify_quota_alerts(hwnd, &alerts);
                     save_state_settings();
                 }
-                IDM_THEME_SYSTEM | IDM_THEME_DARK | IDM_THEME_LIGHT => {
-                    close_style_editors();
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.theme_mode = match id {
-                                IDM_THEME_DARK => ThemeMode::Dark,
-                                IDM_THEME_LIGHT => ThemeMode::Light,
-                                _ => ThemeMode::System,
-                            };
-                            s.is_dark = match s.theme_mode {
-                                ThemeMode::System => theme::is_dark_mode(),
-                                ThemeMode::Dark => true,
-                                ThemeMode::Light => false,
-                            };
-                        }
-                    }
-                    save_state_settings();
-                    render_layered();
-                    style_window::sync(style_settings_snapshot());
-                }
-                IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL => {
-                    let preset = if id == IDM_LAYOUT_MINIMAL {
-                        AppearancePreset::Minimal
-                    } else {
-                        AppearancePreset::Default
+                IDM_THEME_SYSTEM | IDM_THEME_DARK | IDM_THEME_LIGHT
+                | IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL
+                | IDM_QUICK_POSITION_TASKBAR | IDM_QUICK_POSITION_DESKTOP
+                | IDM_QUICK_DIRECTION_HORIZONTAL | IDM_QUICK_DIRECTION_VERTICAL
+                | IDM_QUICK_COLLAPSE_ON | IDM_QUICK_COLLAPSE_OFF => {
+                    // Use the Settings window's established transition handlers
+                    // so all entry points share geometry, clamping, saving and sync.
+                    let change = {
+                        let state = lock_state();
+                        state.as_ref().and_then(|s| quick_appearance_change(s, id))
                     };
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.appearance_preset = preset;
-                            refresh_usage_texts(s);
-                        }
+                    if let Some((msg, value)) = change {
+                        // Submenu commands arrive after root dismissal is queued.
+                        // Posting the transition also avoids repositioning the
+                        // desktop widget while the popup is still being destroyed.
+                        let _ = PostMessageW(
+                            taskbar_replica_service_hwnd(hwnd),
+                            msg,
+                            WPARAM(value),
+                            LPARAM(0),
+                        );
                     }
-                    hide_minimal_usage_tooltip();
-                    save_state_settings();
-                    position_at_taskbar();
-                    render_layered();
-                    sync_tray_icons(hwnd);
-                    style_window::sync(style_settings_snapshot());
                 }
                 IDM_STYLE_SETTINGS => {
                     // Popup-menu root commands are dispatched synchronously
@@ -9239,6 +9418,7 @@ unsafe extern "system" fn wnd_proc(
                             apply_language_to_state(s, language_override);
                         }
                     }
+                    refresh_window_title();
                     save_state_settings();
                     render_layered();
                 }
@@ -9247,6 +9427,10 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_APP_FOCUS_EXISTING_SETTINGS => {
+            hide_minimal_usage_tooltip();
+            if let Some(s) = lock_state().as_mut() {
+                s.minimal_hover_target = None;
+            }
             close_style_editors();
             style_window::open_or_focus(
                 taskbar_replica_service_hwnd(hwnd),
@@ -9541,6 +9725,7 @@ unsafe extern "system" fn wnd_proc(
                     apply_language_to_state(s, Some(language));
                 }
             }
+            refresh_window_title();
             save_state_settings();
             render_layered();
             style_window::sync(style_settings_snapshot());
@@ -10249,6 +10434,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         }
     };
 
+    refresh_window_title();
     set_startup_enabled(startup_enabled);
     save_state_settings();
     unsafe {
@@ -10265,19 +10451,110 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
 }
 
 
+fn quick_appearance_change(state: &AppState, id: u16) -> Option<(u32, usize)> {
+    match id {
+        IDM_THEME_SYSTEM if state.theme_mode != ThemeMode::System =>
+            Some((style_window::WM_STYLE_THEME_CHANGE, 0)),
+        IDM_THEME_DARK if state.theme_mode != ThemeMode::Dark =>
+            Some((style_window::WM_STYLE_THEME_CHANGE, 1)),
+        IDM_THEME_LIGHT if state.theme_mode != ThemeMode::Light =>
+            Some((style_window::WM_STYLE_THEME_CHANGE, 2)),
+        IDM_LAYOUT_DEFAULT if state.appearance_preset != AppearancePreset::Default =>
+            Some((style_window::WM_STYLE_LAYOUT_CHANGE, 0)),
+        IDM_LAYOUT_MINIMAL if state.appearance_preset != AppearancePreset::Minimal =>
+            Some((style_window::WM_STYLE_LAYOUT_CHANGE, 1)),
+        IDM_QUICK_POSITION_TASKBAR if state.display_position != DisplayPosition::Taskbar =>
+            Some((style_window::WM_STYLE_POSITION_CHANGE, 0)),
+        IDM_QUICK_POSITION_DESKTOP if state.display_position != DisplayPosition::Desktop =>
+            Some((style_window::WM_STYLE_POSITION_CHANGE, 1)),
+        IDM_QUICK_DIRECTION_HORIZONTAL
+            if state.display_position == DisplayPosition::Desktop
+                && state.desktop_direction != DesktopDirection::Horizontal =>
+            Some((style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE, 0)),
+        IDM_QUICK_DIRECTION_VERTICAL
+            if state.display_position == DisplayPosition::Desktop
+                && state.desktop_direction != DesktopDirection::Vertical =>
+            Some((style_window::WM_STYLE_DESKTOP_DIRECTION_CHANGE, 1)),
+        IDM_QUICK_COLLAPSE_ON
+            if state.display_position == DisplayPosition::Desktop
+                && !state.desktop_auto_collapse =>
+            Some((style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, 1)),
+        IDM_QUICK_COLLAPSE_OFF
+            if state.display_position == DisplayPosition::Desktop
+                && state.desktop_auto_collapse =>
+            Some((style_window::WM_STYLE_DESKTOP_AUTO_COLLAPSE_CHANGE, 0)),
+        _ => None,
+    }
+}
+
+fn quick_appearance_submenus(
+    zh: bool,
+    theme: ThemeMode,
+    layout: AppearancePreset,
+    position: DisplayPosition,
+    direction: DesktopDirection,
+    auto_collapse: bool,
+) -> [PopupItem; 2] {
+    let text = |zh_text: &'static str, en_text: &'static str| -> &'static str {
+        if zh { zh_text } else { en_text }
+    };
+    let appearance = PopupItem::submenu(
+        text("外观与布局", "Appearance & Layout"),
+        vec![
+            PopupItem::radio_command(text("主题 · 系统", "Theme · System"), IDM_THEME_SYSTEM, theme == ThemeMode::System),
+            PopupItem::radio_command(text("主题 · 深色", "Theme · Dark"), IDM_THEME_DARK, theme == ThemeMode::Dark),
+            PopupItem::radio_command(text("主题 · 浅色", "Theme · Light"), IDM_THEME_LIGHT, theme == ThemeMode::Light),
+            PopupItem::separator(),
+            PopupItem::radio_command(text("排版 · 默认", "Layout · Default"), IDM_LAYOUT_DEFAULT, layout == AppearancePreset::Default),
+            PopupItem::radio_command(text("排版 · 极简", "Layout · Minimal"), IDM_LAYOUT_MINIMAL, layout == AppearancePreset::Minimal),
+            PopupItem::separator(),
+            PopupItem::radio_command(text("位置 · 任务栏", "Position · Taskbar"), IDM_QUICK_POSITION_TASKBAR, position == DisplayPosition::Taskbar),
+            PopupItem::radio_command(text("位置 · 桌面", "Position · Desktop"), IDM_QUICK_POSITION_DESKTOP, position == DisplayPosition::Desktop),
+        ],
+    );
+    let desktop = PopupItem::submenu(
+        text("桌面模式", "Desktop Mode"),
+        vec![
+            PopupItem::radio_command(text("方向 · 横向", "Direction · Horizontal"), IDM_QUICK_DIRECTION_HORIZONTAL, direction == DesktopDirection::Horizontal),
+            PopupItem::radio_command(text("方向 · 纵向", "Direction · Vertical"), IDM_QUICK_DIRECTION_VERTICAL, direction == DesktopDirection::Vertical),
+            PopupItem::separator(),
+            PopupItem::radio_command(text("收缩 · 开启", "Auto-collapse · On"), IDM_QUICK_COLLAPSE_ON, auto_collapse),
+            PopupItem::radio_command(text("收缩 · 关闭", "Auto-collapse · Off"), IDM_QUICK_COLLAPSE_OFF, !auto_collapse),
+        ],
+    ).with_enabled(position == DisplayPosition::Desktop);
+    [appearance, desktop]
+}
+
 fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
-    let (strings, language, available_update_version) = {
+    // Opening a popup takes interaction away from the quota panel. Its
+    // independent topmost tooltip HWND will not necessarily receive a leave
+    // message, so dismiss both tooltip layers before opening the menu.
+    hide_minimal_usage_tooltip();
+    if let Some(s) = lock_state().as_mut() {
+        s.minimal_hover_target = None;
+    }
+    let (strings, language, available_update_version, theme_mode, layout, position, direction, auto_collapse) = {
         let state = lock_state();
         match state.as_ref() {
             Some(s) => (
                 s.language.strings(),
                 s.language,
                 s.available_update_version.clone(),
+                s.theme_mode,
+                s.appearance_preset,
+                s.display_position,
+                s.desktop_direction,
+                s.desktop_auto_collapse,
             ),
             None => (
                 LanguageId::English.strings(),
                 LanguageId::English,
                 None,
+                ThemeMode::System,
+                AppearancePreset::Default,
+                DisplayPosition::Taskbar,
+                DesktopDirection::Horizontal,
+                default_desktop_auto_collapse(),
             ),
         }
     };
@@ -10305,9 +10582,15 @@ fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
         check_item,
         PopupItem::command(github_text, IDM_OPEN_RELEASES),
     ];
+    let [appearance_menu, desktop_menu] = quick_appearance_submenus(
+        zh, theme_mode, layout, position, direction, auto_collapse,
+    );
     let items = vec![
         PopupItem::command(strings.refresh, 1),
         PopupItem::command(strings.reset_position, IDM_RESET_POSITION),
+        PopupItem::separator(),
+        appearance_menu,
+        desktop_menu,
         PopupItem::separator(),
         PopupItem::command(settings_text, IDM_STYLE_SETTINGS),
         PopupItem::separator(),
@@ -10757,6 +11040,37 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 
 #[cfg(test)]
 mod tests {
+    use crate::popup_menu::PopupAction;
+    #[test]
+    fn quick_appearance_menu_tracks_explicit_user_choices() {
+        let [appearance, desktop] = quick_appearance_submenus(
+            true, ThemeMode::System, AppearancePreset::Minimal,
+            DisplayPosition::Taskbar, DesktopDirection::Vertical, false,
+        );
+        let PopupAction::Submenu(choices) = appearance.action else { panic!("appearance submenu expected") };
+        let checked: Vec<u16> = choices.iter().filter(|item| item.checked).filter_map(|item| {
+            if let PopupAction::Command(id) = &item.action { Some(*id) } else { None }
+        }).collect();
+        assert_eq!(checked, vec![IDM_THEME_SYSTEM, IDM_LAYOUT_MINIMAL, IDM_QUICK_POSITION_TASKBAR]);
+        assert!(!desktop.enabled);
+        let PopupAction::Submenu(desktop_choices) = desktop.action else { panic!("desktop submenu expected") };
+        assert!(desktop_choices[1].checked);
+        assert!(desktop_choices[4].checked);
+    }
+
+    #[test]
+    fn desktop_shortcuts_activate_only_for_explicit_desktop_position() {
+        let [_, desktop] = quick_appearance_submenus(
+            false, ThemeMode::Dark, AppearancePreset::Default,
+            DisplayPosition::Desktop, DesktopDirection::Horizontal, true,
+        );
+        assert!(desktop.enabled);
+        let PopupAction::Submenu(choices) = desktop.action else { panic!("desktop submenu expected") };
+        assert!(choices[0].checked);
+        assert!(choices[3].checked);
+        assert!(choices.iter().filter(|item| item.checked).count() == 2);
+    }
+
     use super::*;
 
     #[test]
@@ -13224,6 +13538,63 @@ mod tests {
     }
 
     #[test]
+    fn frosted_backdrop_is_prepared_before_panel_alpha_becomes_translucent() {
+        let mut style = ThemeStyle::dark_default();
+        assert!(!panel_blur_backdrop_needed(&style));
+        style.panel_frosted_strength = 40;
+        let original = style.color(StyleColorTarget::PanelBackground);
+        let opaque = Color::rgba(original.r, original.g, original.b, 255);
+        style.set_color(StyleColorTarget::PanelBackground, opaque);
+        assert!(!style.panel_frosted_active());
+        assert!(panel_blur_backdrop_needed(&style));
+        style.set_color(
+            StyleColorTarget::PanelBackground,
+            Color::rgba(original.r, original.g, original.b, 254),
+        );
+        assert!(style.panel_frosted_active());
+        assert!(panel_blur_backdrop_needed(&style));
+        style.panel_frosted_strength = 0;
+        assert!(!panel_blur_backdrop_needed(&style));
+    }
+
+    #[test]
+    fn expanded_non_collapsing_dock_keeps_cursor_watch_for_every_edge() {
+        for edge in [
+            FloatingEdge::Top, FloatingEdge::Bottom,
+            FloatingEdge::Left, FloatingEdge::Right,
+        ] {
+            assert!(docked_grip_needs_hover_watch(Some(edge), false, false, false));
+            assert!(!docked_grip_needs_hover_watch(Some(edge), true, false, false));
+            assert!(!docked_grip_needs_hover_watch(Some(edge), false, true, false));
+            assert!(!docked_grip_needs_hover_watch(Some(edge), false, false, true));
+        }
+        assert!(!docked_grip_needs_hover_watch(None, false, false, false));
+        assert!(!floating_grip_should_show(Some(FloatingEdge::Top), false, false, false));
+    }
+
+    #[test]
+    fn frosted_grip_backdrop_and_foreground_share_the_same_fade_alpha() {
+        for animated_alpha in [0, 1, 25, 50, 99, 100] {
+            assert_eq!(
+                floating_grip_visual_alpha(true, false, animated_alpha),
+                animated_alpha,
+                "both visual layers must fade when docked auto-collapse is off",
+            );
+            assert_eq!(
+                floating_grip_visual_alpha(false, false, animated_alpha),
+                100,
+                "auto-collapsing dock retains an exposed drag tab",
+            );
+            assert_eq!(
+                floating_grip_visual_alpha(true, true, animated_alpha),
+                100,
+                "dragging keeps the grip and its backing visible",
+            );
+        }
+        assert_eq!(floating_grip_visual_alpha(true, false, 255), 100);
+    }
+
+    #[test]
     fn docked_expanded_grip_fades_like_free_desktop_without_changing_auto_hide() {
         assert!(floating_grip_should_show(None, false, true, false));
         assert!(!floating_grip_should_show(None, false, false, false));
@@ -14027,14 +14398,28 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_width_keeps_extra_directwrite_trailing_glyph_clearance() {
-        assert_eq!(tooltip_width_with_render_slack(100, |v| v), 144);
-        assert_eq!(tooltip_width_with_render_slack(100, |v| v * 2), 188);
+    fn tooltip_width_tracks_drawn_text_without_excess_reserve() {
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v), 127);
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v * 2), 154);
         assert_eq!(tooltip_width_with_render_slack(0, |v| v), 48);
         assert_eq!(tooltip_width_with_render_slack(0, |v| v * 2), 96);
-        let allocated = tooltip_width_with_render_slack(124, |v| v);
-        let drawable = allocated - 2 * TOOLTIP_TEXT_INSET;
-        assert!(drawable >= 124 + TOOLTIP_TEXT_MEASUREMENT_SLACK);
+        assert_eq!(tooltip_width_with_render_slack(124, |v| v), 151);
+        assert!(TOOLTIP_TEXT_MEASUREMENT_SLACK <= 4);
+    }
+
+    #[test]
+    fn tooltip_mask_measurement_preserves_rightmost_antialiased_pixel() {
+        // Three rows, ten columns; the last visible digit reaches column 7.
+        let mut mask = vec![0; 30];
+        mask[12] = 255;
+        mask[17] = 1;
+        mask[24] = 200;
+        assert_eq!(tooltip_mask_content_width(&mask, 10), Some(8));
+        assert_eq!(tooltip_mask_content_width(&mask, 0), None);
+        assert_eq!(tooltip_mask_content_width(&mask[..29], 10), None);
+        assert_eq!(tooltip_mask_content_width(&[0; 10], 10), None);
+        // Rendering the same content at higher DPI scales the width normally.
+        assert_eq!(tooltip_width_with_render_slack(160, |v| v * 2), 214);
     }
 
     #[test]

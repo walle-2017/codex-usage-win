@@ -9,7 +9,7 @@ pub(super) const STRINGS: Strings = Strings {
     fifteen_minutes: "15 Minutes",
     one_hour: "1 Hour",
     codex_model: "Codex",
-    start_with_windows: "Start with Windows",
+    start_with_windows: "Auto-start",
     reset_position: "Reset Position",
     language: "Language",
     system_default: "System Default",
