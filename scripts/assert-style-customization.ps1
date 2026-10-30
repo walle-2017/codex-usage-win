@@ -781,8 +781,14 @@ if ($styleWindow -notmatch 'fn draw_appearance_choice_group\(' -or
     $styleWindow -notmatch 'general_segment_rect\(bounds, index, choices\.len\(\)\)' -or
     $styleWindow -notmatch 'fn paint_submenu_collapse_switch\(' -or
     $styleWindow -notmatch 'fn desktop_auto_collapse_rect\(hwnd: HWND\)' -or
-    $styleWindow -notmatch 'if zh \{ "自启" \} else \{ "Auto-start" \}') {
+    $styleWindow -notmatch 'hdc, strings\.start_with_windows,') {
     throw 'Appearance controls must use joined icon choices, a single collapse switch and abbreviated Auto-start label.'
+}
+$localeZh = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\simplified_chinese.rs')
+$localeEn = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\english.rs')
+if ($localeZh -notmatch 'start_with_windows:\s*"自启"' -or
+    $localeEn -notmatch 'start_with_windows:\s*"Auto-start"') {
+    throw 'Localized startup labels must be shortened without bypassing the Strings resource.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
