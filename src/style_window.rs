@@ -7938,7 +7938,7 @@ unsafe fn draw_appearance_choice_group(
 /// colors; its Composition-style submenu reveal tints both track and knob.
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_submenu_collapse_switch(
-    hdc: HDC, hwnd: HWND, hit: RECT, enabled: bool,
+    hdc: HDC, hit: RECT, enabled: bool,
     hovered: Option<HitTarget>, pressed: Option<HitTarget>,
     alpha: f32, inset: Color, palette: ButtonPalette,
 ) {
@@ -8015,7 +8015,7 @@ unsafe fn paint_submenu_content(
         hovered, pressed, palette, primary, Some((inset, opacity)),
     );
     paint_submenu_collapse_switch(
-        hdc, hwnd, scaled_rect(hwnd, l.collapse_switch),
+        hdc, scaled_rect(hwnd, l.collapse_switch),
         snapshot.desktop_auto_collapse, hovered, pressed,
         opacity, inset, palette,
     );
