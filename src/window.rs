@@ -304,6 +304,9 @@ static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
+// Mousemove repaints the tooltip often; do not re-rasterize the same text
+// solely to measure its width on every cursor event.
+static MINIMAL_TOOLTIP_WIDTH_CACHE: Mutex<Option<(String, u32, i32)>> = Mutex::new(None);
 static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
@@ -7517,6 +7520,22 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     tooltip_width_with_render_slack(content_width.unwrap_or(size.cx), sc)
 }
 
+fn cached_minimal_tooltip_width(text: &str) -> i32 {
+    let dpi = CURRENT_DPI.load(Ordering::Relaxed);
+    {
+        let cache = MINIMAL_TOOLTIP_WIDTH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((last_text, last_dpi, width)) = cache.as_ref() {
+            if last_text == text && *last_dpi == dpi {
+                return *width;
+            }
+        }
+    }
+    let width = unsafe { measure_minimal_tooltip_width(text) };
+    *MINIMAL_TOOLTIP_WIDTH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((text.to_owned(), dpi, width));
+    width
+}
+
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     let Some(text) = minimal_hover_text(target) else {
         hide_minimal_usage_tooltip();
@@ -7527,7 +7546,7 @@ fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
     };
     let taskbar_owner = lock_state().as_ref().and_then(|s| s.taskbar_hwnd);
     sync_minimal_tooltip_owner(tooltip, taskbar_owner);
-    let measured_width = unsafe { measure_minimal_tooltip_width(&text) };
+    let measured_width = cached_minimal_tooltip_width(&text);
 
     {
         let mut tooltip_text = MINIMAL_TOOLTIP_TEXT
