@@ -2893,8 +2893,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     floating_free_grip_below_for_state(s),
                     s.floating_collapsed && s.floating_reveal == 0,
                     s.drag_handle_hovered,
-                    if s.dragging || !floating_grip_uses_hover_fade(s) { 100 }
-                    else { s.floating_grip_alpha },
+                    floating_grip_visual_alpha(
+                        floating_grip_uses_hover_fade(s),
+                        s.dragging,
+                        s.floating_grip_alpha,
+                    ),
                     s.floating_reserved_dock,
                     s.floating_reveal,
                     s.dragging,
@@ -5635,6 +5638,14 @@ fn floating_grip_should_show(
     edge: Option<FloatingEdge>, auto_collapse: bool, hovered: bool, dragging: bool,
 ) -> bool {
     dragging || (edge.is_some() && auto_collapse) || hovered
+}
+
+/// Both the foreground drag tab and its independent Composition blur
+/// background must use exactly the same visual opacity. In particular an
+/// expanded edge-docked desktop with auto-collapse disabled fades *both*
+/// layers out, rather than leaving a permanently visible frosted plate.
+fn floating_grip_visual_alpha(hover_fade: bool, dragging: bool, animated_alpha: u8) -> u8 {
+    if dragging || !hover_fade { 100 } else { animated_alpha.min(100) }
 }
 
 /// Layered desktop pixels may stop delivering WM_MOUSELEAVE after docking.
@@ -13455,6 +13466,28 @@ mod tests {
         }
         assert!(!docked_grip_needs_hover_watch(None, false, false, false));
         assert!(!floating_grip_should_show(Some(FloatingEdge::Top), false, false, false));
+    }
+
+    #[test]
+    fn frosted_grip_backdrop_and_foreground_share_the_same_fade_alpha() {
+        for animated_alpha in [0, 1, 25, 50, 99, 100] {
+            assert_eq!(
+                floating_grip_visual_alpha(true, false, animated_alpha),
+                animated_alpha,
+                "both visual layers must fade when docked auto-collapse is off",
+            );
+            assert_eq!(
+                floating_grip_visual_alpha(false, false, animated_alpha),
+                100,
+                "auto-collapsing dock retains an exposed drag tab",
+            );
+            assert_eq!(
+                floating_grip_visual_alpha(true, true, animated_alpha),
+                100,
+                "dragging keeps the grip and its backing visible",
+            );
+        }
+        assert_eq!(floating_grip_visual_alpha(true, false, 255), 100);
     }
 
     #[test]
