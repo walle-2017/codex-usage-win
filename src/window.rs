@@ -7186,16 +7186,30 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
     }
 }
 
-// GDI's GetTextExtentPoint32W can measure slightly narrower than the
-// DirectWrite glyph mask used for painting. Reserve asymmetric-safe
-// horizontal inset plus extra width so trailing digits are never clipped.
+// Keep the reset-time tooltip content-sized. Its measured glyph bounds must
+// come from the same DirectWrite mask used for the actual layered rendering,
+// not the slightly different GDI font metrics. The final width needs only
+// normal padding and a small rasterization safety allowance.
 const TOOLTIP_TEXT_INSET: i32 = 12;
-const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 20;
+const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 3;
 
 fn tooltip_width_with_render_slack(measured_text_px: i32, logical: impl Fn(i32) -> i32) -> i32 {
     (measured_text_px.max(0)
         + logical(2 * TOOLTIP_TEXT_INSET + TOOLTIP_TEXT_MEASUREMENT_SLACK))
         .max(logical(48))
+}
+
+// Extract the last painted column, including antialiased edge pixels. Using
+// the rightmost pixel rather than the total nonzero pixel count also keeps
+// space between digits and glyph overhangs from being cropped.
+fn tooltip_mask_content_width(mask: &[u8], row_width: usize) -> Option<i32> {
+    if row_width == 0 || mask.len() % row_width != 0 {
+        return None;
+    }
+    mask.chunks_exact(row_width)
+        .filter_map(|row| row.iter().rposition(|&coverage| coverage != 0))
+        .max()
+        .and_then(|x| i32::try_from(x + 1).ok())
 }
 
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
@@ -7482,7 +7496,25 @@ unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
     let _ = ReleaseDC(HWND::default(), hdc);
-    tooltip_width_with_render_slack(size.cx, sc)
+
+    // Probe the real DirectWrite glyph mask with generous temporary room,
+    // but do not carry that probe width into the final popup size. GDI only
+    // provides a fallback and an approximate probe bound.
+    let probe_width = size.cx.max(0)
+        .saturating_add(sc(64))
+        .max(sc((text.chars().count().min(1024) as i32) * 20))
+        .clamp(sc(64), sc(4096));
+    let content_width = native_interop::directwrite_text_mask(
+        text,
+        fonts::face(fonts::FontRole::Ui, None),
+        12.0 * CURRENT_DPI.load(Ordering::Relaxed) as f32 / 96.0,
+        FW_NORMAL.0 as i32,
+        probe_width,
+        sc(28),
+    ).and_then(|mask| {
+        tooltip_mask_content_width(&mask, probe_width as usize)
+    });
+    tooltip_width_with_render_slack(content_width.unwrap_or(size.cx), sc)
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
@@ -14347,14 +14379,28 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_width_keeps_extra_directwrite_trailing_glyph_clearance() {
-        assert_eq!(tooltip_width_with_render_slack(100, |v| v), 144);
-        assert_eq!(tooltip_width_with_render_slack(100, |v| v * 2), 188);
+    fn tooltip_width_tracks_drawn_text_without_excess_reserve() {
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v), 127);
+        assert_eq!(tooltip_width_with_render_slack(100, |v| v * 2), 154);
         assert_eq!(tooltip_width_with_render_slack(0, |v| v), 48);
         assert_eq!(tooltip_width_with_render_slack(0, |v| v * 2), 96);
-        let allocated = tooltip_width_with_render_slack(124, |v| v);
-        let drawable = allocated - 2 * TOOLTIP_TEXT_INSET;
-        assert!(drawable >= 124 + TOOLTIP_TEXT_MEASUREMENT_SLACK);
+        assert_eq!(tooltip_width_with_render_slack(124, |v| v), 151);
+        assert!(TOOLTIP_TEXT_MEASUREMENT_SLACK <= 4);
+    }
+
+    #[test]
+    fn tooltip_mask_measurement_preserves_rightmost_antialiased_pixel() {
+        // Three rows, ten columns; the last visible digit reaches column 7.
+        let mut mask = vec![0; 30];
+        mask[12] = 255;
+        mask[17] = 1;
+        mask[24] = 200;
+        assert_eq!(tooltip_mask_content_width(&mask, 10), Some(8));
+        assert_eq!(tooltip_mask_content_width(&mask, 0), None);
+        assert_eq!(tooltip_mask_content_width(&mask[..29], 10), None);
+        assert_eq!(tooltip_mask_content_width(&[0; 10], 10), None);
+        // Rendering the same content at higher DPI scales the width normally.
+        assert_eq!(tooltip_width_with_render_slack(160, |v| v * 2), 214);
     }
 
     #[test]
