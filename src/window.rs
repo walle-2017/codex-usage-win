@@ -2655,6 +2655,15 @@ fn drag_frame_due(force: bool) -> bool {
     preview_frame_due(&LAST_DRAG_FRAME, DRAG_FRAME_MS, force)
 }
 
+/// Keep the Composition backdrop prepared while frost intensity is enabled,
+/// even if the panel is temporarily fully opaque. Alpha=255 to alpha=254
+/// must not create a new HWND in the same frame that the foreground becomes
+/// transparent; the background composition visual is committed asynchronously.
+/// The normal "frosted visibly active" style predicate remains unchanged.
+fn panel_blur_backdrop_needed(style: &ThemeStyle) -> bool {
+    style.panel_frosted_strength > 0
+}
+
 /// Render the foreground widget through UpdateLayeredWindow. Frosted mode keeps
 /// the foreground layered and uses a separate Windows Composition Gaussian backdrop.
 fn render_layered() {
@@ -2706,9 +2715,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     let hwnd = hwnd_val.to_hwnd();
     let frosted_strength = style.panel_frosted_strength.min(FROSTED_STRENGTH_MAX);
     let floating = lock_state().as_ref().is_some_and(|s| s.floating_mode);
-    // Embedded and desktop panels use the same Gaussian-blur theme path.
+    // Prepare Gaussian blur as soon as its strength is nonzero. At alpha=255
+    // the foreground remains opaque, hiding this prebuilt visual. This avoids
+    // an empty frame when alpha drops to 254 and the background is first needed.
     // The desktop backdrop is clipped to the original body (never the tab).
-    let blur_requested = style.panel_frosted_active();
+    let blur_requested = panel_blur_backdrop_needed(&style);
     let blur_amount = blur_amount_for_strength(frosted_strength);
     let blur_tint = style.color(StyleColorTarget::PanelBackground);
     let mut composition_blur_active = {
@@ -2762,9 +2773,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     };
     let mut surface_style = style.clone();
     let background = style.color(StyleColorTarget::PanelBackground);
-    if composition_blur_active {
-        // Composition owns the visible background, so the layered foreground only
-        // needs a virtually invisible alpha to keep blank areas hit-testable.
+    if composition_blur_active && background.a < u8::MAX {
+        // Only let Composition own the *visible* fill once translucency is
+        // requested. At alpha=255 the original opaque foreground must cover
+        // the prewarmed blur, preventing a blink during alpha 255 -> 254.
+        // Alpha=1 preserves hit testing of the layered panel interior.
         surface_style.panel_background = Color::rgba(
             background.r,
             background.g,
@@ -13451,6 +13464,26 @@ mod tests {
                 assert!(floating_grip_hit_allowed(Some(edge), false, false, 1));
             }
         }
+    }
+
+    #[test]
+    fn frosted_backdrop_is_prepared_before_panel_alpha_becomes_translucent() {
+        let mut style = ThemeStyle::dark_default();
+        assert!(!panel_blur_backdrop_needed(&style));
+        style.panel_frosted_strength = 40;
+        let original = style.color(StyleColorTarget::PanelBackground);
+        let opaque = Color::rgba(original.r, original.g, original.b, 255);
+        style.set_color(StyleColorTarget::PanelBackground, opaque);
+        assert!(!style.panel_frosted_active());
+        assert!(panel_blur_backdrop_needed(&style));
+        style.set_color(
+            StyleColorTarget::PanelBackground,
+            Color::rgba(original.r, original.g, original.b, 254),
+        );
+        assert!(style.panel_frosted_active());
+        assert!(panel_blur_backdrop_needed(&style));
+        style.panel_frosted_strength = 0;
+        assert!(!panel_blur_backdrop_needed(&style));
     }
 
     #[test]
