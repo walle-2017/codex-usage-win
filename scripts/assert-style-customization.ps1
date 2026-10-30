@@ -617,6 +617,9 @@ if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
     $styleWindow -match 'preset, "5H", "20[0-9]{2}-[0-9]{2}-[0-9]{2}' -or
     $windowProduction -notmatch 'fn tooltip_width_with_render_slack\(' -or
     $windowProduction -notmatch 'TOOLTIP_TEXT_MEASUREMENT_SLACK' -or
+    $windowProduction -notmatch 'fn tooltip_mask_content_width\(' -or
+    $windowProduction -notmatch 'native_interop::directwrite_text_mask\(' -or
+    $windowProduction -notmatch 'const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 3;' -or
     $styleWindow -match 'draw_text\(hdc, "21:30", tip,') {
     throw 'Every preview tooltip must use the real default/minimal reset-time text template, not a time-only placeholder.'
 }
