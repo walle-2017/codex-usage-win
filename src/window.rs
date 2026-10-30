@@ -1828,31 +1828,48 @@ fn set_window_title(hwnd: HWND, strings: Strings) {
     }
 }
 
+/// SetWindowTextW is synchronous and can re-enter window procedures, including
+/// an Explorer-hosted taskbar child. Do not invoke it with the AppState mutex
+/// held: re-entrant messages can need that same lock.
+fn refresh_window_title() {
+    let title = {
+        let state = lock_state();
+        state.as_ref().map(|s| (s.hwnd.to_hwnd(), s.language.strings()))
+    };
+    if let Some((hwnd, strings)) = title {
+        set_window_title(hwnd, strings);
+    }
+}
+
+/// Pure state update under the caller's lock. Perform synchronous Win32
+/// title updates separately, after the lock guard has been dropped.
 fn apply_language_to_state(state: &mut AppState, language_override: Option<LanguageId>) {
     let language_override = language_override.map(LanguageId::ui_supported);
     state.language_override = language_override;
     state.language = localization::resolve_language(language_override);
-    set_window_title(state.hwnd.to_hwnd(), state.language.strings());
     refresh_usage_texts(state);
 }
 
 fn update_language_change() -> bool {
-    let mut state = lock_state();
-    let Some(app_state) = state.as_mut() else {
-        return false;
+    let changed = {
+        let mut state = lock_state();
+        let Some(app_state) = state.as_mut() else {
+            return false;
+        };
+        if app_state.language_override.is_some() {
+            return false;
+        }
+        let new_language = localization::detect_system_language();
+        if new_language == app_state.language {
+            return false;
+        }
+        apply_language_to_state(app_state, None);
+        true
     };
-
-    if app_state.language_override.is_some() {
-        return false;
+    if changed {
+        refresh_window_title();
     }
-
-    let new_language = localization::detect_system_language();
-    if new_language == app_state.language {
-        return false;
-    }
-
-    apply_language_to_state(app_state, None);
-    true
+    changed
 }
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -9350,6 +9367,7 @@ unsafe extern "system" fn wnd_proc(
                             apply_language_to_state(s, language_override);
                         }
                     }
+                    refresh_window_title();
                     save_state_settings();
                     render_layered();
                 }
@@ -9656,6 +9674,7 @@ unsafe extern "system" fn wnd_proc(
                     apply_language_to_state(s, Some(language));
                 }
             }
+            refresh_window_title();
             save_state_settings();
             render_layered();
             style_window::sync(style_settings_snapshot());
@@ -10364,6 +10383,7 @@ fn apply_editable_settings(hwnd: HWND, settings: EditableSettings) -> Result<(),
         }
     };
 
+    refresh_window_title();
     set_startup_enabled(startup_enabled);
     save_state_settings();
     unsafe {
