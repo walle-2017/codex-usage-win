@@ -546,6 +546,36 @@ if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
     $styleWindow -notmatch 'ID_EDIT_JSON') {
     throw 'Unified settings window must provide General, Appearance, JSON pages and inline two-choice language selection.'
 }
+# Title changes are synchronous Win32 messages. Explorer-hosted taskbar
+# children can re-enter the app, so language state must be unlocked first.
+$languageStateBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn apply_language_to_state\(.*?\n\}'
+).Value
+$titleRefreshBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn refresh_window_title\(\) \{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($languageStateBlock) -or
+    $languageStateBlock -match 'set_window_title\(' -or
+    $languageStateBlock -match 'SetWindowTextW\(' -or
+    [string]::IsNullOrWhiteSpace($titleRefreshBlock) -or
+    $titleRefreshBlock -notmatch '(?s)let title = \{.*?lock_state\(\).*?\};\s*if let Some\(\(hwnd, strings\)\) = title \{\s*set_window_title\(') {
+    throw 'Language state updates must release AppState lock before synchronous SetWindowTextW.'
+}
+foreach ($fragment in @(
+    'apply_language_to_state(s, Some(language));',
+    'apply_language_to_state(s, language_override);',
+    'apply_language_to_state(app_state, None);'
+)) {
+    if (-not $windowProduction.Contains($fragment)) {
+        throw "Missing language update path: $fragment"
+    }
+}
+if ($windowProduction -notmatch '(?s)WM_SETTINGS_LANGUAGE_CHANGE\s*=>\s*\{.*?refresh_window_title\(\);.*?style_window::sync\(') {
+    throw 'Settings language command must refresh title outside the app state lock before syncing UI.'
+}
+
 foreach ($message in @(
     'WM_SETTINGS_REFRESH_CHANGE',
     'WM_SETTINGS_USAGE_CHANGE',
