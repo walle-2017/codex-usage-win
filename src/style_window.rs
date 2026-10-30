@@ -584,12 +584,12 @@ unsafe fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
     }
 }
 
-/// Logical 96-DPI bounds. The lower foot contains the existing Desktop
-/// button; the right well fits strictly within the original 740px card.
+/// Fixed 96-DPI geometry for an independent inset on the right of the
+/// appearance option groups. It never touches the Desktop position button.
 #[derive(Clone, Copy, Debug)]
 struct DesktopSubmenuLayout {
     well: RECT,
-    foot: RECT,
+    title: RECT,
     direction_label: RECT,
     collapse_label: RECT,
     horizontal: RECT,
@@ -597,29 +597,18 @@ struct DesktopSubmenuLayout {
     collapse_switch: RECT,
 }
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
-    // Both rows share one source of vertical geometry. When a menu option
-    // changes, the drawing and hit-test bounds must move together.
     let row_height = 30;
-    let row_gap = 10;
-    let direction_top = 116;
-    let collapse_top = direction_top + row_height + row_gap;
     let row = |left, right, top| RECT {
         left, top, right, bottom: top + row_height,
     };
     DesktopSubmenuLayout {
-        // Anchor the two-row well beside Layout/Position. The lower edge
-        // joins the Desktop button inset, not the Theme row above it.
-        well: RECT {
-            left: 636, top: direction_top - 10,
-            right: 894, bottom: collapse_top + row_height + 15,
-        },
-        // Keep the 4px inset around Desktop without touching Taskbar.
-        foot: RECT { left: 422, top: 155, right: 654, bottom: 201 },
-        direction_label: row(650, 728, direction_top),
-        collapse_label: row(650, 728, collapse_top),
-        horizontal: row(736, 807, direction_top),
-        vertical: row(807, 878, direction_top),
-        collapse_switch: row(824, 878, collapse_top),
+        well: RECT { left: 652, top: 66, right: 924, bottom: 198 },
+        title: RECT { left: 668, top: 76, right: 904, bottom: 96 },
+        direction_label: row(668, 736, 106),
+        collapse_label: row(668, 736, 152),
+        horizontal: row(742, 823, 106),
+        vertical: row(823, 904, 106),
+        collapse_switch: row(850, 904, 152),
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -7848,69 +7837,38 @@ fn submenu_content_alpha(progress: f32) -> f32 {
     p * p * (3.0 - 2.0 * p)
 }
 
-fn submenu_content_offset(progress: f32) -> i32 {
-    // A subtle slide from the right, measured in logical (96 DPI) pixels.
-    ((1.0 - submenu_content_alpha(progress)) * 8.0).round() as i32
-}
-
-fn submenu_background_alpha(progress: f32) -> f32 {
-    progress.clamp(0.0, 1.0)
-}
-
-/// One anti-aliased, continuous L-shaped inset. The old implementation
-/// overpainted two rounded rectangles and four opaque shadow bars; its joined
-/// horizontal/vertical edges produced the heavy black seams in V24.28.
-/// A native Direct2D path now owns the union AND its low-contrast inner shadow.
+/// The inset surface is independent of the selected display position.
+/// Only the opacity of the controls changes while switching positions.
 unsafe fn paint_submenu_well(
-    hdc: HDC, hwnd: HWND, progress: f32, card: Color, dark: bool,
+    hdc: HDC, hwnd: HWND, _card: Color, dark: bool,
 ) -> Color {
-    let top_target = if dark {
-        Color::from_hex("#252A30FF")
-    } else {
-        Color::from_hex("#E4EBF2FF")
-    };
-    let bottom_target = if dark {
+    let surface = if dark {
         Color::from_hex("#22272DFF")
     } else {
-        Color::from_hex("#E0E7EFFF")
+        Color::from_hex("#DFE7EFFF")
     };
-    if progress <= 0.0 { return top_target; }
-    let l = desktop_submenu_layout();
-    // Paint the WHOLE L-shaped surface on every animated frame. A sweeping
-    // clipping edge used to hide nearly half the animation before the well
-    // appeared, then visibly cut glyphs and controls during the reveal.
-    let opacity = submenu_background_alpha(progress);
-    let top = submenu_mix(card, top_target, opacity);
-    let bottom = submenu_mix(card, bottom_target, opacity);
-    let well = scaled_rect(hwnd, l.well);
-    let foot = scaled_rect(hwnd, l.foot);
-    let reveal = well.right;
-    let shadow_opacity = if dark { 0.12 } else { 0.075 } * opacity;
-    if !native_interop::draw_antialiased_desktop_inset_well(
-        hdc, well, foot, reveal, scale(hwnd, 11) as f32,
-        top, bottom, shadow_opacity,
+    let rim = if dark {
+        Color::from_hex("#15191EFF")
+    } else {
+        Color::from_hex("#BFCCD9FF")
+    };
+    let bounds = scaled_rect(hwnd, desktop_submenu_layout().well);
+    let radius = scale(hwnd, 11);
+    if !native_interop::draw_antialiased_rounded_rect(
+        hdc, bounds, radius as f32, Some(surface),
+        Some((rim, scale(hwnd, 1).max(1) as f32)),
     ) {
-        // Degraded systems without the Direct2D DC renderer: use a subtle
-        // solid inset, but never restore the hard black shadow rectangles.
-        let saved = SaveDC(hdc);
-        let _ = IntersectClipRect(
-            hdc, foot.left, well.top, reveal, well.bottom,
-        );
-        fill_rounded_rect(hdc, well, top, scale(hwnd, 11));
-        fill_rounded_rect(hdc, foot, top, scale(hwnd, 11));
-        fill(hdc, rect(hwnd, 641, 163, 652, 191), top);
-        let _ = RestoreDC(hdc, saved);
+        fill_rounded_rect(hdc, bounds, surface, radius);
+        draw_rounded_outline_rect(hdc, bounds, rim, radius, 1);
     }
-    // This is also the backing color used when fading the submenu labels and
-    // controls. Its exact value is independent of the persistent user theme.
-    top
+    surface
 }
 
 /// Connected single-choice group with optional submenu fade. All groups
 /// share general_segment_rect so the painted boundaries and hit areas agree.
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_appearance_choice_group(
-    hdc: HDC, hwnd: HWND, mut bounds: RECT,
+    hdc: HDC, hwnd: HWND, bounds: RECT,
     choices: &[(HitTarget, bool, SettingsIcon, &str)],
     hovered: Option<HitTarget>, pressed: Option<HitTarget>,
     palette: ButtonPalette, primary: Color, fade: Option<(Color, f32)>,
@@ -7918,11 +7876,7 @@ unsafe fn draw_appearance_choice_group(
     if choices.is_empty() { return; }
     let alpha = fade.map_or(1.0, |(_, a)| a.clamp(0.0, 1.0));
     if alpha <= 0.005 { return; }
-    if fade.is_some() {
-        let shift = scale(hwnd, ((1.0 - alpha) * 8.0).round() as i32);
-        bounds.left += shift;
-        bounds.right += shift;
-    }
+    // The painted controls stay aligned with their hit rectangles.
     let tint = |color: Color| match fade {
         Some((inset, _)) => submenu_mix(inset, color, alpha),
         None => color,
@@ -7984,14 +7938,11 @@ unsafe fn draw_appearance_choice_group(
 /// colors; its Composition-style submenu reveal tints both track and knob.
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_submenu_collapse_switch(
-    hdc: HDC, hwnd: HWND, mut hit: RECT, enabled: bool,
+    hdc: HDC, hwnd: HWND, hit: RECT, enabled: bool,
     hovered: Option<HitTarget>, pressed: Option<HitTarget>,
     alpha: f32, inset: Color, palette: ButtonPalette,
 ) {
     if alpha <= 0.005 { return; }
-    let shift = scale(hwnd, ((1.0 - alpha) * 8.0).round() as i32);
-    hit.left += shift;
-    hit.right += shift;
     let height = hit.bottom - hit.top;
     let track_height = (height * 11 / 16).max(12);
     let track_width = (track_height * 20 / 11).min(hit.right - hit.left);
@@ -8017,27 +7968,39 @@ unsafe fn paint_submenu_collapse_switch(
     );
 }
 #[allow(clippy::too_many_arguments)]
-unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
-    progress:f32,inset:Color,hovered:Option<HitTarget>,pressed:Option<HitTarget>,
-    palette:ButtonPalette,primary:Color,secondary:Color) {
-    let opacity=submenu_content_alpha(progress);
-    if opacity<=0.005 {return;}
-    let l=desktop_submenu_layout();
-    // Clip only to the FIXED well bounds, never to an animated vertical edge.
-    // The background, labels and controls now move/fade as a complete unit.
-    let saved=SaveDC(hdc);
-    let _=IntersectClipRect(hdc,scale(hwnd,l.well.left),scale(hwnd,l.well.top),
-        scale(hwnd,l.well.right),scale(hwnd,l.well.bottom));
-    let zh=snapshot.language==LanguageId::SimplifiedChinese;
-    let dx=scale(hwnd,submenu_content_offset(progress));
-    let txt=|mut r:RECT|{r.left+=dx;r.right+=dx;r};
-    // The inset and selected Desktop button already convey the hierarchy;
-    // avoid a redundant secondary-panel title.
-    let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
-    draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
-        DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    draw_text(hdc,if zh{"收缩"}else{"Collapse"},
-        txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+unsafe fn paint_submenu_content(
+    hdc: HDC, hwnd: HWND, snapshot: &StyleWindowSnapshot,
+    progress: f32, inset: Color,
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    palette: ButtonPalette, primary: Color, secondary: Color,
+) {
+    // The controls remain legible but disabled in taskbar mode; their tint
+    // transitions smoothly without moving the well or click targets.
+    let opacity = 0.45 + 0.55 * submenu_content_alpha(progress);
+    let l = desktop_submenu_layout();
+    let saved = SaveDC(hdc);
+    let well = scaled_rect(hwnd, l.well);
+    let _ = IntersectClipRect(hdc, well.left, well.top, well.right, well.bottom);
+    let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let title_color = if snapshot.is_dark {
+        Color::from_hex("#98A3AEFF")
+    } else {
+        Color::from_hex("#7D8996FF")
+    };
+    let _ = SetTextColor(hdc, COLORREF(title_color.to_colorref()));
+    draw_text(
+        hdc, if zh { "桌面模式" } else { "Desktop mode" },
+        scaled_rect(hwnd, l.title), DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SetTextColor(hdc, COLORREF(submenu_mix(inset, secondary, opacity).to_colorref()));
+    draw_text(
+        hdc, if zh { "方向" } else { "Direction" },
+        scaled_rect(hwnd, l.direction_label), DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc, if zh { "收缩" } else { "Collapse" },
+        scaled_rect(hwnd, l.collapse_label), DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
     draw_appearance_choice_group(
         hdc, hwnd,
         scaled_rect(hwnd, RECT { right: l.vertical.right, ..l.horizontal }),
@@ -8056,7 +8019,7 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
         snapshot.desktop_auto_collapse, hovered, pressed,
         opacity, inset, palette,
     );
-    let _=RestoreDC(hdc,saved);
+    let _ = RestoreDC(hdc, saved);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8101,9 +8064,7 @@ unsafe fn paint_appearance_page(
         card,
         scale(hwnd, SETTINGS_CARD_RADIUS),
     );
-    let submenu_inset = paint_submenu_well(
-        hdc, hwnd, desktop_submenu_progress, card, snapshot.is_dark,
-    );
+    let submenu_inset = paint_submenu_well(hdc, hwnd, card, snapshot.is_dark);
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -8169,14 +8130,14 @@ unsafe fn paint_appearance_page(
         hovered, pressed, choice_palette, primary, None,
     );
 
-    if desktop_submenu_progress > 0.0 {
-        paint_submenu_content(hdc,hwnd,snapshot,desktop_submenu_progress,
-            submenu_inset,hovered,pressed,
-            ButtonPalette{
-                normal:card_hover,hover:card_pressed,pressed:card_pressed,
-                selected:accent,selected_hover:accent_hover,selected_pressed:accent_pressed,
-            },primary,secondary);
-    }
+    paint_submenu_content(
+        hdc, hwnd, snapshot, desktop_submenu_progress,
+        submenu_inset, hovered, pressed,
+        ButtonPalette {
+            normal: card_hover, hover: card_pressed, pressed: card_pressed,
+            selected: accent, selected_hover: accent_hover, selected_pressed: accent_pressed,
+        }, primary, secondary,
+    );
 
     if submenu_only { return; }
 
@@ -10069,15 +10030,15 @@ mod ui_smoke_tests {
         let l = desktop_submenu_layout();
         assert_eq!(l.collapse_label.top, l.collapse_switch.top);
         assert!(l.collapse_label.top > l.direction_label.bottom);
-        assert_eq!(l.foot.left, APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH);
+        assert!(l.title.top >= l.well.top && l.title.bottom < l.direction_label.top);
     }
 
     #[test]
-    fn connected_appearance_groups_and_desktop_submenu_fit_existing_card() {
+    fn independent_desktop_submenu_fits_beside_all_appearance_groups() {
         let l = desktop_submenu_layout();
         let card = RECT { left: 200, top: 58, right: 940, bottom: 206 };
         for r in [
-            l.well, l.foot, l.direction_label, l.collapse_label,
+            l.well, l.title, l.direction_label, l.collapse_label,
             l.horizontal, l.vertical, l.collapse_switch,
         ] {
             assert!(r.left >= card.left && r.right <= card.right);
@@ -10087,18 +10048,18 @@ mod ui_smoke_tests {
         let taskbar = appearance_button_rect(HWND::default(), 0, 162);
         let desktop = appearance_button_rect(HWND::default(), 1, 162);
         assert_eq!(taskbar.right, desktop.left);
-        assert_eq!(l.foot.left, desktop.left);
-        assert!(l.foot.right > desktop.right);
-        assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
-        assert!(l.well.left > appearance_group_rect(HWND::default(), 70, 3).right - 8);
-        assert_eq!(l.well.right - l.well.left, 258);
-        assert_eq!(l.horizontal.left - l.direction_label.right, 8);
-        assert_eq!(l.well.right - l.vertical.right, 16);
-        assert_eq!(l.well.right - l.collapse_switch.right, 16);
+        assert!(l.well.left >= appearance_group_rect(HWND::default(), 70, 3).right + 14);
+        assert!(l.well.left > desktop.right);
+        assert_eq!(l.well.right, card.right - 16);
+        assert_eq!(l.well.bottom, card.bottom - 8);
+        assert!(l.title.bottom < l.horizontal.top);
+        assert!(l.title.left >= l.well.left && l.title.right <= l.well.right);
+        assert_eq!(l.horizontal.left - l.direction_label.right, 6);
+        assert_eq!(l.well.right - l.vertical.right, 20);
+        assert_eq!(l.well.right - l.collapse_switch.right, 20);
         assert!(l.collapse_label.right <= l.collapse_switch.left);
         assert_eq!(l.horizontal.right, l.vertical.left);
         assert_eq!(l.horizontal.right - l.horizontal.left, l.vertical.right - l.vertical.left);
-        assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom);
         assert_eq!(PRESET_CARD_TOP, 226);
     }
 
@@ -10316,23 +10277,17 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn compact_desktop_submenu_reveal_and_reverse_stay_continuous() {
+    fn independent_desktop_submenu_fade_and_reverse_stay_continuous() {
         let layout = desktop_submenu_layout();
         assert!(layout.well.left < layout.well.right);
-        assert!(layout.foot.left < layout.well.left);
-        // The animated endpoints use the same layout; joining regions must
-        // overlap with a real area at every frame, not a 6px seam.
-        assert!(layout.foot.right - layout.well.left >= 16);
-        assert!(layout.well.bottom - layout.foot.top >= 40);
-        assert_eq!(layout.well.bottom, layout.foot.bottom);
-        assert_eq!(submenu_background_alpha(0.0), 0.0);
-        assert_eq!(submenu_background_alpha(1.0), 1.0);
+        assert!(layout.title.bottom < layout.direction_label.top);
+        assert!(layout.well.left > APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH * 3);
+        assert_eq!(submenu_content_alpha(0.0), 0.0);
+        assert_eq!(submenu_content_alpha(1.0), 1.0);
         for step in 1..=10 {
             let prev = (step - 1) as f32 / 10.0;
             let next = step as f32 / 10.0;
-            assert!(submenu_background_alpha(next) >= submenu_background_alpha(prev));
             assert!(submenu_content_alpha(next) >= submenu_content_alpha(prev));
-            assert!(submenu_content_offset(next) <= submenu_content_offset(prev));
         }
         let start = Instant::now();
         let mut state = DesktopSubmenuAnimation::initial(false);
@@ -10501,10 +10456,10 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn desktop_submenu_has_connected_direction_and_single_collapse_switch() {
+    fn desktop_submenu_has_title_joined_direction_and_single_collapse_switch() {
         let l = desktop_submenu_layout();
         for r in [
-            l.direction_label, l.collapse_label, l.horizontal,
+            l.title, l.direction_label, l.collapse_label, l.horizontal,
             l.vertical, l.collapse_switch,
         ] {
             assert!(r.top >= l.well.top && r.bottom <= l.well.bottom);
@@ -10514,16 +10469,12 @@ mod ui_smoke_tests {
         assert!(l.horizontal.bottom < l.collapse_switch.top);
         assert_eq!(l.direction_label.top, l.horizontal.top);
         assert_eq!(l.collapse_label.top, l.collapse_switch.top);
-        assert_eq!(l.collapse_label.top - l.direction_label.bottom, 10);
-        assert_eq!(l.well.bottom, l.foot.bottom);
-        assert_eq!(l.well.bottom, 201);
-        assert!(l.well.top > 104);
-        assert_eq!(l.horizontal.top, 116);
-        assert_eq!(l.collapse_switch.top, 156);
-        assert_eq!(l.foot.right - l.well.left, 18);
-        assert_eq!(l.well.bottom - l.foot.top, 46);
-        assert!(l.foot.top < l.collapse_switch.top
-            && l.collapse_switch.bottom < l.foot.bottom);
+        assert!(l.title.bottom < l.direction_label.top);
+        assert_eq!(l.well, RECT { left: 652, top: 66, right: 924, bottom: 198 });
+        assert_eq!(l.horizontal.top, 106);
+        assert_eq!(l.collapse_switch.top, 152);
+        assert!(l.well.left > appearance_group_rect(HWND::default(), 70, 3).right);
+        assert!(l.well.top < l.title.top && l.collapse_switch.bottom < l.well.bottom);
     }
 
     #[test]
