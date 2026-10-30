@@ -5637,6 +5637,15 @@ fn floating_grip_should_show(
     dragging || (edge.is_some() && auto_collapse) || hovered
 }
 
+/// Layered desktop pixels may stop delivering WM_MOUSELEAVE after docking.
+/// While a non-collapsing docked tab is hovered, poll the actual cursor so
+/// a lost leave event cannot keep the detached grip visible indefinitely.
+fn docked_grip_needs_hover_watch(
+    edge: Option<FloatingEdge>, auto_collapse: bool, collapsed: bool, dragging: bool,
+) -> bool {
+    edge.is_some() && !auto_collapse && !collapsed && !dragging
+}
+
 fn set_floating_grip_hover(hovered: bool) {
     let hwnd = {
         let mut state = lock_state();
@@ -5789,13 +5798,29 @@ fn sync_desktop_auto_collapse() {
             s.display_position, s.desktop_auto_collapse,
         );
         if !collapse {
+            // An expanded, edge-docked widget must fade out its tab when
+            // auto-collapse is switched off, even if the body never moves.
+            // Otherwise set_floating_collapsed(false) can be a no-op and
+            // leave the previous fully opaque drag tab on screen.
             s.floating_grip_hover = false;
+            if !s.dragging {
+                s.drag_handle_hovered = false;
+            }
         }
         s.floating_first_collapse_guard = false;
         (s.hwnd.to_hwnd(), collapse)
     };
     floating_cancel_hover_recheck(hwnd);
     set_floating_collapsed(collapse);
+    if !collapse {
+        // The collapse state may already be false: explicitly drive the
+        // opacity transition independently of the slide animation.
+        unsafe {
+            let _ = SetTimer(
+                taskbar_replica_service_hwnd(hwnd), TIMER_FLOAT_ANIMATION, 16, None,
+            );
+        }
+    }
 }
 
 // A nonmodal custom context menu is a separate HWND. Moving from the
@@ -7956,6 +7981,34 @@ unsafe extern "system" fn wnd_proc(
                         s.display_position, s.desktop_auto_collapse,
                     )
             );
+            let fade_grip = lock_state().as_ref().is_some_and(|s|
+                s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                    && docked_grip_needs_hover_watch(
+                        s.floating_edge,
+                        floating_auto_collapse_allowed(
+                            s.display_position, s.desktop_auto_collapse,
+                        ),
+                        s.floating_collapsed, s.dragging,
+                    )
+            );
+            if fade_grip {
+                // Restore the hover state after menu focus consumed the last
+                // mouse-leave event. Never collapse an explicitly expanded dock.
+                let hovered = floating_pointer_over_expanded_docked_panel(hwnd);
+                let grip_hovered = hovered && floating_pointer_over_actual_grip(hwnd);
+                if let Some(s) = lock_state().as_mut() {
+                    s.drag_handle_hovered = grip_hovered;
+                    if !hovered { s.minimal_hover_target = None; }
+                }
+                if hovered {
+                    floating_arm_hover_recheck(hwnd);
+                } else {
+                    floating_cancel_hover_recheck(hwnd);
+                    hide_minimal_usage_tooltip();
+                }
+                set_floating_grip_hover(hovered);
+                render_layered();
+            }
             if eligible {
                 if floating_pointer_in_docked_hover_zone(hwnd) {
                     // WM_MOUSELEAVE tracking is consumed while hovering a
@@ -8058,10 +8111,9 @@ unsafe extern "system" fn wnd_proc(
                     );
                     if let Some((active, tab_fades)) = active {
                         if tab_fades {
-                            // V24.26: only the transient body-to-tab gutter
-                            // receives this grace period. On expiry, use the
-                            // actual cursor position, not a stale leave event.
-                            floating_cancel_hover_recheck(active);
+                            // Keep checking the actual cursor while hovering.
+                            // Transparent layered pixels can miss WM_MOUSELEAVE,
+                            // especially at a physical top-screen boundary.
                             if floating_pointer_over_expanded_docked_panel(active) {
                                 let over_grip = floating_pointer_over_actual_grip(active);
                                 let changed = {
@@ -8074,7 +8126,8 @@ unsafe extern "system" fn wnd_proc(
                                 };
                                 set_floating_grip_hover(true);
                                 if changed { render_layered(); }
-                            } else {
+                            } else if !floating_pointer_in_expanded_docked_transition(active) {
+                                floating_cancel_hover_recheck(active);
                                 if let Some(s) = lock_state().as_mut() {
                                     s.minimal_hover_target = None;
                                     s.drag_handle_hovered = false;
@@ -8278,9 +8331,22 @@ unsafe extern "system" fn wnd_proc(
             let in_docked_hover_zone = docked_hover
                 && floating_pointer_in_docked_hover_zone(hwnd);
             if in_docked_hover_zone {
-                // Real mouse movement resumed over the stable docked region.
-                // The leave-only fallback timer is no longer necessary.
-                floating_cancel_hover_recheck(hwnd);
+                // For auto-collapsing docks, mouse motion resolves a pending
+                // leave. For non-collapsing docks the timer remains a cursor
+                // watchdog: transparent layered pixels can lose the final
+                // WM_MOUSELEAVE even after ordinary movement has resumed.
+                let watch_grip = lock_state().as_ref().is_some_and(|s|
+                    docked_grip_needs_hover_watch(
+                        s.floating_edge,
+                        floating_auto_collapse_allowed(
+                            s.display_position, s.desktop_auto_collapse,
+                        ),
+                        s.floating_collapsed, s.dragging,
+                    )
+                );
+                if !watch_grip {
+                    floating_cancel_hover_recheck(hwnd);
+                }
             }
             if lock_state().as_ref().is_some_and(|s|
                 s.floating_mode && floating_hover_can_reveal(
@@ -8297,6 +8363,18 @@ unsafe extern "system" fn wnd_proc(
                 hide_minimal_usage_tooltip();
             } else {
                 set_floating_grip_hover(true);
+                if lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                        && docked_grip_needs_hover_watch(
+                            s.floating_edge,
+                            floating_auto_collapse_allowed(
+                                s.display_position, s.desktop_auto_collapse,
+                            ),
+                            s.floating_collapsed, s.dragging,
+                        )
+                ) {
+                    floating_arm_hover_recheck(hwnd);
+                }
                 let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let drag_hovered = is_drag_handle_point(client_x, client_y);
@@ -9235,6 +9313,10 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_APP_FOCUS_EXISTING_SETTINGS => {
+            hide_minimal_usage_tooltip();
+            if let Some(s) = lock_state().as_mut() {
+                s.minimal_hover_target = None;
+            }
             close_style_editors();
             style_window::open_or_focus(
                 taskbar_replica_service_hwnd(hwnd),
@@ -10328,6 +10410,13 @@ fn quick_appearance_submenus(
 }
 
 fn show_context_menu(hwnd: HWND, anchor: POINT, preserve_foreground: bool) {
+    // Opening a popup takes interaction away from the quota panel. Its
+    // independent topmost tooltip HWND will not necessarily receive a leave
+    // message, so dismiss both tooltip layers before opening the menu.
+    hide_minimal_usage_tooltip();
+    if let Some(s) = lock_state().as_mut() {
+        s.minimal_hover_target = None;
+    }
     let (strings, language, available_update_version, theme_mode, layout, position, direction, auto_collapse) = {
         let state = lock_state();
         match state.as_ref() {
@@ -13330,6 +13419,21 @@ mod tests {
                 assert!(floating_grip_hit_allowed(Some(edge), false, false, 1));
             }
         }
+    }
+
+    #[test]
+    fn expanded_non_collapsing_dock_keeps_cursor_watch_for_every_edge() {
+        for edge in [
+            FloatingEdge::Top, FloatingEdge::Bottom,
+            FloatingEdge::Left, FloatingEdge::Right,
+        ] {
+            assert!(docked_grip_needs_hover_watch(Some(edge), false, false, false));
+            assert!(!docked_grip_needs_hover_watch(Some(edge), true, false, false));
+            assert!(!docked_grip_needs_hover_watch(Some(edge), false, true, false));
+            assert!(!docked_grip_needs_hover_watch(Some(edge), false, false, true));
+        }
+        assert!(!docked_grip_needs_hover_watch(None, false, false, false));
+        assert!(!floating_grip_should_show(Some(FloatingEdge::Top), false, false, false));
     }
 
     #[test]
