@@ -870,10 +870,10 @@ if ($styleWindow -notmatch 'redraw_settings_window\(' -or
     $styleWindow -notmatch 'RDW_INVALIDATE\s*\|\s*RDW_ERASE\s*\|\s*RDW_ALLCHILDREN\s*\|\s*RDW_UPDATENOW' -or
     $styleWindow -notmatch 'fill_rounded_rect\(hdc, r, section_bg' -or
     $styleWindow -notmatch 'fill_rounded_rect\([\s\S]{0,260}r\.right - scale\(hwnd, 202\)' -or
-    $styleWindow -notmatch 'fn language_popup_rect\(' -or
-    $styleWindow -notmatch 'fill_rounded_rect\(hdc, popup_rect, card' -or
-    $styleWindow -notmatch 'draw_rounded_outline_rect\([\s\S]{0,100}popup_rect') {
-    throw 'Settings page switching must fully redraw and settings UI blocks must use rounded navigation, swatches, and an opaque rounded language popup.'
+    $styleWindow -notmatch 'fn general_language_group_rect\(' -or
+    $styleWindow -notmatch 'draw_general_segment_group\(' -or
+    $styleWindow -notmatch 'draw_rounded_outline_rect\(hdc, bounds, separator, radius, 1\)') {
+    throw 'Settings page switching must fully redraw, preserve rounded navigation and swatches, and keep an inline language group with a shared border.'
 }
 if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.tooltip_corner_radius\)' -or
