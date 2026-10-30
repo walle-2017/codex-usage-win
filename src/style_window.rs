@@ -7360,6 +7360,83 @@ unsafe fn paint_navigation(
     }
 }
 
+// Connected single-choice controls: selected/hover backgrounds have square
+// inner edges, and the complete group has one rounded exterior and outline.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_general_segment_group(
+    hdc: HDC, hwnd: HWND, bounds: RECT, choices: &[(HitTarget, bool, &str)],
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    normal: Color, hover: Color, pressed_color: Color,
+    accent: Color, accent_hover: Color, accent_pressed: Color, primary: Color,
+) {
+    if choices.is_empty() { return; }
+    let radius = scale(hwnd, 9);
+    fill_rounded_rect(hdc, bounds, normal, radius);
+    for (index, &(target, selected, label)) in choices.iter().enumerate() {
+        let option = general_segment_rect(bounds, index, choices.len());
+        let background = button_background(target, selected, hovered, pressed,
+            ButtonPalette {
+                normal, hover, pressed: pressed_color,
+                selected: accent, selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        if selected || hovered == Some(target) || pressed == Some(target) {
+            fill_rounded_rect(hdc, option, background, radius);
+            if index != 0 {
+                fill(hdc, RECT { right: option.left + radius, ..option }, background);
+            }
+            if index + 1 != choices.len() {
+                fill(hdc, RECT { left: option.right - radius, ..option }, background);
+            }
+        }
+        let _ = SetTextColor(hdc, COLORREF(
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary }.to_colorref()
+        ));
+        draw_text(hdc, label, option, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    let separator = subtle_control_border(normal);
+    for index in 1..choices.len() {
+        let x = general_segment_rect(bounds, index, choices.len()).left;
+        fill(hdc, RECT {
+            left: x, top: bounds.top + scale(hwnd, 5),
+            right: x + scale(hwnd, 1), bottom: bounds.bottom - scale(hwnd, 5),
+        }, separator);
+    }
+    draw_rounded_outline_rect(hdc, bounds, separator, radius, 1);
+}
+
+// Each usage type is a checkbox; the existing persistence guard still keeps
+// at least one quota window enabled when either box is clicked.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_general_usage_checkbox(
+    hdc: HDC, hwnd: HWND, hit: RECT, target: HitTarget,
+    enabled: bool, hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    card: Color, card_hover: Color, accent: Color, primary: Color, secondary: Color,
+    label: &str,
+) {
+    if hovered == Some(target) || pressed == Some(target) {
+        fill_rounded_rect(hdc, hit, card_hover, scale(hwnd, 7));
+    }
+    let size = scale(hwnd, 20);
+    let left = hit.left + scale(hwnd, 14);
+    let top = hit.top + (hit.bottom - hit.top - size) / 2;
+    let checkbox = RECT { left, top, right: left + size, bottom: top + size };
+    fill_rounded_rect(hdc, checkbox, if enabled { accent } else { card }, scale(hwnd, 5));
+    draw_rounded_outline_rect(
+        hdc, checkbox, if enabled { accent } else { subtle_control_border(card_hover) },
+        scale(hwnd, 5), 1,
+    );
+    if enabled {
+        let _ = SetTextColor(hdc, COLORREF(Color::from_hex("#FFFFFFFF").to_colorref()));
+        draw_text(hdc, "✓", checkbox, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    let _ = SetTextColor(hdc, COLORREF(if enabled { primary } else { secondary }.to_colorref()));
+    draw_text(hdc, label, RECT {
+        left: checkbox.right + scale(hwnd, 14), ..hit
+    }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_general_page(
     hdc: HDC,
@@ -7385,11 +7462,6 @@ unsafe fn paint_general_page(
         "1h" => 3_600_000,
         _ => 900_000,
     };
-    let popup_open = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.language_popup_open).unwrap_or(false)
-    };
-
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
@@ -7400,178 +7472,97 @@ unsafe fn paint_general_page(
 
     for r in [
         settings_card_rect(hwnd, 58, 112),
-        settings_card_rect(hwnd, 128, 242),
-        settings_card_rect(hwnd, 258, 312),
-        settings_card_rect(hwnd, 328, 464),
+        settings_card_rect(hwnd, 128, 182),
+        general_usage_card_rect(hwnd),
+        general_application_card_rect(hwnd),
     ] {
         fill_rounded_rect(hdc, r, card, scale(hwnd, SETTINGS_CARD_RADIUS));
     }
 
-    // Refresh frequency and quota alerts intentionally share identical card
-    // padding, label width, option width and option gaps.
+    // Connected radio groups share button geometry with their hit targets.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
-        hdc,
-        strings.update_frequency,
-        settings_card_label_rect(hwnd, 68, 102),
+        hdc, strings.update_frequency, settings_card_label_rect(hwnd, 68, 102),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-    for (interval, label) in [
-        (60_000u32, strings.one_minute),
-        (300_000, strings.five_minutes),
-        (900_000, strings.fifteen_minutes),
-        (3_600_000, strings.one_hour),
+    draw_general_segment_group(
+        hdc, hwnd, general_refresh_group_rect(hwnd),
+        &[
+            (HitTarget::Refresh(60_000), current_interval == 60_000, strings.one_minute),
+            (HitTarget::Refresh(300_000), current_interval == 300_000, strings.five_minutes),
+            (HitTarget::Refresh(900_000), current_interval == 900_000, strings.fifteen_minutes),
+            (HitTarget::Refresh(3_600_000), current_interval == 3_600_000, strings.one_hour),
+        ],
+        hovered, pressed, card_hover, card_pressed, card_pressed,
+        accent, accent_hover, accent_pressed, primary,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc, if zh { "额度提醒" } else { "Quota alerts" },
+        settings_card_label_rect(hwnd, 138, 172),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_general_segment_group(
+        hdc, hwnd, general_alert_group_rect(hwnd),
+        &[
+            (HitTarget::Alert(0), general.quota_alert_percent == 0,
+                if zh { "关闭" } else { "Off" }),
+            (HitTarget::Alert(10), general.quota_alert_percent == 10, "10%"),
+            (HitTarget::Alert(20), general.quota_alert_percent == 20, "20%"),
+            (HitTarget::Alert(30), general.quota_alert_percent == 30, "30%"),
+        ],
+        hovered, pressed, card_hover, card_pressed, card_pressed,
+        accent, accent_hover, accent_pressed, primary,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc, if zh { "显示用量" } else { "Usage display" },
+        rect(hwnd, 218, 212, 544, 240),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    for (target, weekly, enabled, label) in [
+        (HitTarget::UsageSession, false, general.show_usage.session_5h, "5H"),
+        (HitTarget::UsageWeekly, true, general.show_usage.weekly, "7D"),
     ] {
-        let selected = current_interval == interval;
-        let target = HitTarget::Refresh(interval);
-        draw_segment(
-            hdc,
-            general_refresh_rect(hwnd, interval),
-            selected,
-            button_background(
-                target,
-                selected,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            label,
+        draw_general_usage_checkbox(
+            hdc, hwnd, general_usage_rect(hwnd, weekly),
+            target, enabled, hovered, pressed,
+            card, card_hover, accent, primary, secondary, label,
         );
     }
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
-        hdc,
-        if zh { "显示用量" } else { "Usage display" },
-        rect(hwnd, 218, 138, 500, 162),
+        hdc, if zh { "应用" } else { "Application" },
+        rect(hwnd, 596, 212, 922, 240),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
-        hdc,
-        "5H",
-        rect(hwnd, 238, 162, 650, 194),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    draw_text(
-        hdc,
-        "7D",
-        rect(hwnd, 238, 202, 650, 234),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    for (target, enabled, weekly) in [
-        (HitTarget::UsageSession, general.show_usage.session_5h, false),
-        (HitTarget::UsageWeekly, general.show_usage.weekly, true),
-    ] {
-        draw_switch(
-            hdc,
-            general_usage_rect(hwnd, weekly),
-            enabled,
-            button_background(
-                target,
-                enabled,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
-        );
-    }
-
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh { "额度提醒" } else { "Quota alerts" },
-        settings_card_label_rect(hwnd, 268, 302),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    for (threshold, zh_label, en_label) in [
-        (0u8, "关闭", "Off"),
-        (10, "10%", "10%"),
-        (20, "20%", "20%"),
-        (30, "30%", "30%"),
-    ] {
-        let selected = general.quota_alert_percent == threshold;
-        let target = HitTarget::Alert(threshold);
-        draw_segment(
-            hdc,
-            general_alert_rect(hwnd, threshold),
-            selected,
-            button_background(
-                target,
-                selected,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            if zh { zh_label } else { en_label },
-        );
-    }
-
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh { "应用" } else { "Application" },
-        rect(hwnd, 218, 338, 500, 362),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(
-        hdc,
-        strings.start_with_windows,
-        rect(hwnd, 238, 370, 650, 402),
+        hdc, strings.start_with_windows,
+        rect(hwnd, 596, 246, 854, 286),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let startup = general.start_with_windows;
     draw_switch(
-        hdc,
-        general_startup_rect(hwnd),
-        startup,
+        hdc, general_startup_rect(hwnd), startup,
         button_background(
-            HitTarget::Startup,
-            startup,
-            hovered,
-            pressed,
+            HitTarget::Startup, startup, hovered, pressed,
             ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
+                normal: card_hover, hover: card_pressed, pressed: card_pressed,
+                selected: accent, selected_hover: accent_hover,
                 selected_pressed: accent_pressed,
             },
         ),
     );
 
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
-        hdc,
-        strings.language,
-        rect(hwnd, 238, 414, 600, 450),
+        hdc, strings.language, rect(hwnd, 596, 302, 700, 338),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-
     let selected_language = if general.language == "system" {
         snapshot.language
     } else {
@@ -7579,134 +7570,19 @@ unsafe fn paint_general_page(
             .map(LanguageId::ui_supported)
             .unwrap_or(snapshot.language)
     };
-    let current_language_index = LanguageId::SELECTABLE
-        .iter()
-        .position(|language| *language == selected_language)
-        .unwrap_or_else(|| {
-            LanguageId::SELECTABLE
-                .iter()
-                .position(|language| *language == LanguageId::English)
-                .unwrap_or(0)
-        });
-    let language_target = HitTarget::LanguageToggle;
-    let language_button = language_button_rect(hwnd);
-    let language_background = button_background(
-        language_target,
-        false,
-        hovered,
-        pressed,
-        ButtonPalette {
-            normal: card_hover,
-            hover: card_pressed,
-            pressed: card_pressed,
-            selected: card_hover,
-            selected_hover: card_pressed,
-            selected_pressed: card_pressed,
-        },
+    let language_choices: Vec<(HitTarget, bool, &str)> = LanguageId::SELECTABLE
+        .iter().enumerate()
+        .map(|(index, language)| (
+            HitTarget::LanguageOption(index),
+            *language == selected_language,
+            language_label_for_index(index, snapshot.language),
+        ))
+        .collect();
+    draw_general_segment_group(
+        hdc, hwnd, general_language_group_rect(hwnd), &language_choices,
+        hovered, pressed, card_hover, card_pressed, card_pressed,
+        accent, accent_hover, accent_pressed, primary,
     );
-    fill_rounded_rect(hdc, language_button, language_background, scale(hwnd, 8));
-    draw_rounded_outline_rect(
-        hdc,
-        language_button,
-        if popup_open {
-            accent
-        } else {
-            subtle_control_border(language_background)
-        },
-        scale(hwnd, 8),
-        1,
-    );
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        language_label_for_index(current_language_index, snapshot.language),
-        RECT {
-            left: language_button.left + scale(hwnd, 12),
-            top: language_button.top,
-            right: language_button.right - scale(hwnd, 38),
-            bottom: language_button.bottom,
-        },
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    draw_text(
-        hdc,
-        if popup_open { "▲" } else { "▼" },
-        RECT {
-            left: language_button.right - scale(hwnd, 34),
-            top: language_button.top,
-            right: language_button.right - scale(hwnd, 8),
-            bottom: language_button.bottom,
-        },
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    if popup_open {
-        // Paint one opaque popup surface first. The option rows use rounded
-        // corners individually; without this backing surface their clipped
-        // corners expose controls from the General page underneath.
-        let popup_rect = language_popup_rect(hwnd);
-        fill_rounded_rect(hdc, popup_rect, card, scale(hwnd, 7));
-
-        for index in 0..language_option_count() {
-            let option = language_option_rect(hwnd, index);
-            let selected = current_language_index == index;
-            let target = HitTarget::LanguageOption(index);
-            fill_rounded_rect(
-                hdc,
-                option,
-                button_background(
-                    target,
-                    selected,
-                    hovered,
-                    pressed,
-                    ButtonPalette {
-                        normal: card,
-                        hover: card_hover,
-                        pressed: card_pressed,
-                        selected: card_hover,
-                        selected_hover: card_pressed,
-                        selected_pressed: card_pressed,
-                    },
-                ),
-                scale(hwnd, 6),
-            );
-            let _ = SetTextColor(
-                hdc,
-                COLORREF(if selected { accent } else { primary }.to_colorref()),
-            );
-            draw_text(
-                hdc,
-                language_label_for_index(index, snapshot.language),
-                RECT {
-                    left: option.left + scale(hwnd, 12),
-                    top: option.top,
-                    right: option.right - scale(hwnd, 34),
-                    bottom: option.bottom,
-                },
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-            if selected {
-                draw_text(
-                    hdc,
-                    "✓",
-                    RECT {
-                        left: option.right - scale(hwnd, 30),
-                        top: option.top,
-                        right: option.right - scale(hwnd, 8),
-                        bottom: option.bottom,
-                    },
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
-        }
-        draw_rounded_outline_rect(
-            hdc,
-            popup_rect,
-            accent,
-            scale(hwnd, 7),
-            1,
-        );
-    }
 }
 
 // Shared between the full JSON page paint and scrollbar-only child paints.
