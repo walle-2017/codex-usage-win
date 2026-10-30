@@ -8699,6 +8699,22 @@ unsafe extern "system" fn wnd_proc(
                     s.dragging = false;
                 }
                 let _ = ReleaseCapture();
+                // On a docked drop, WM_CAPTURECHANGED can consume the leave
+                // tracking before the user moves away. Keep the cursor watch
+                // armed after capture ends, even if no WM_MOUSEMOVE follows.
+                if lock_state().as_ref().is_some_and(|s|
+                    s.floating_mode && s.hwnd.to_hwnd() == hwnd
+                        && s.floating_grip_hover
+                        && docked_grip_needs_hover_watch(
+                            s.floating_edge,
+                            floating_auto_collapse_allowed(
+                                s.display_position, s.desktop_auto_collapse,
+                            ),
+                            s.floating_collapsed, s.dragging,
+                        )
+                ) {
+                    floating_arm_hover_recheck(hwnd);
+                }
                 if floating_pointer_still_over_free_grip(hwnd) {
                     // Capture ended but no mouse motion is required to
                     // maintain hover or re-arm leave tracking.
