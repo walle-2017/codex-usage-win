@@ -7904,35 +7904,114 @@ unsafe fn paint_submenu_well(
     top
 }
 
+/// Connected single-choice group with optional submenu fade. All groups
+/// share general_segment_rect so the painted boundaries and hit areas agree.
 #[allow(clippy::too_many_arguments)]
-unsafe fn paint_submenu_choice(hdc:HDC,hwnd:HWND,bounds:RECT,icon:SettingsIcon,
-    label:&str,selected:bool,target:HitTarget,hovered:Option<HitTarget>,
-    pressed:Option<HitTarget>,alpha:f32,inset:Color,palette:ButtonPalette,primary:Color) {
-    if alpha<=0.005 {return;}
-    let mut r=scaled_rect(hwnd,bounds);
-    let shift=scale(hwnd,((1.0-alpha)*8.0).round() as i32);
-    r.left+=shift; r.right+=shift;
-    let desired=button_background(target,selected,hovered,pressed,palette);
-    let bg=submenu_mix(inset,desired,alpha);
-    let fg=submenu_mix(inset,if selected {Color::from_hex("#FFFFFFFF")}else{primary},alpha);
-    fill_rounded_rect(hdc,r,bg,scale(hwnd,7));
-    let outline=submenu_mix(inset,if selected{Color::from_hex("#76A7FFFF")}
-        else{subtle_control_border(desired)},alpha);
-    draw_rounded_outline_rect(hdc,r,outline,scale(hwnd,7),1);
-    // V24.32: the 14px glyphs in V24.31 lost the silhouette at 100% DPI.
-    // Use 18px and reserve text width even on English / scaled displays.
-    let gap=scale(hwnd,2);
-    let text_width=text_width_px(hwnd,label);
-    let size=scale(hwnd,DESKTOP_SUBMENU_ICON_SIZE)
-        .min((r.right-r.left-text_width-gap-scale(hwnd,6)).max(scale(hwnd,12)));
-    let group=size+gap+text_width;
-    let left=r.left+((r.right-r.left-group)/2).max(scale(hwnd,3));
-    let top=r.top+(r.bottom-r.top-size)/2;
-    let ir=RECT{left,top,right:left+size,bottom:top+size};
-    draw_settings_icon(hdc,hwnd,icon,ir,fg,bg);
-    let _=SetTextColor(hdc,COLORREF(fg.to_colorref()));
-    draw_text(hdc,label,RECT{left:ir.right+gap,top:r.top,right:r.right-scale(hwnd,2),
-        bottom:r.bottom},DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+unsafe fn draw_appearance_choice_group(
+    hdc: HDC, hwnd: HWND, mut bounds: RECT,
+    choices: &[(HitTarget, bool, SettingsIcon, &str)],
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    palette: ButtonPalette, primary: Color, fade: Option<(Color, f32)>,
+) {
+    if choices.is_empty() { return; }
+    let alpha = fade.map_or(1.0, |(_, a)| a.clamp(0.0, 1.0));
+    if alpha <= 0.005 { return; }
+    if fade.is_some() {
+        let shift = scale(hwnd, ((1.0 - alpha) * 8.0).round() as i32);
+        bounds.left += shift;
+        bounds.right += shift;
+    }
+    let tint = |color: Color| match fade {
+        Some((inset, _)) => submenu_mix(inset, color, alpha),
+        None => color,
+    };
+    let radius = scale(hwnd, 8);
+    fill_rounded_rect(hdc, bounds, tint(palette.normal), radius);
+    for (index, &(target, selected, icon, label)) in choices.iter().enumerate() {
+        let option = general_segment_rect(bounds, index, choices.len());
+        let desired = button_background(target, selected, hovered, pressed, palette);
+        let background = tint(desired);
+        if selected || hovered == Some(target) || pressed == Some(target) {
+            fill_rounded_rect(hdc, option, background, radius);
+            if index > 0 {
+                fill(hdc, RECT { right: option.left + radius, ..option }, background);
+            }
+            if index + 1 < choices.len() {
+                fill(hdc, RECT { left: option.right - radius, ..option }, background);
+            }
+        }
+        let foreground = tint(if selected {
+            Color::from_hex("#FFFFFFFF")
+        } else { primary });
+        let height = (option.bottom - option.top).max(1);
+        let glyph_size = scale(hwnd, 18).min((height - scale(hwnd, 8)).max(1));
+        let gap = scale(hwnd, 4);
+        let label_width = text_width_px(hwnd, label).max(0);
+        let group_width = glyph_size + gap + label_width;
+        let group_left = option.left + ((option.right - option.left - group_width) / 2)
+            .max(scale(hwnd, 3));
+        let glyph_top = option.top + (height - glyph_size) / 2;
+        draw_settings_icon(
+            hdc, hwnd, icon,
+            RECT {
+                left: group_left, top: glyph_top,
+                right: group_left + glyph_size, bottom: glyph_top + glyph_size,
+            },
+            foreground, background,
+        );
+        let _ = SetTextColor(hdc, COLORREF(foreground.to_colorref()));
+        draw_text(hdc, label, RECT {
+            left: group_left + glyph_size + gap, top: option.top,
+            right: option.right - scale(hwnd, 3), bottom: option.bottom,
+        }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    let border = tint(subtle_control_border(palette.normal));
+    for index in 1..choices.len() {
+        let x = general_segment_rect(bounds, index, choices.len()).left;
+        fill(hdc, RECT {
+            left: x, right: x + scale(hwnd, 1),
+            top: bounds.top + scale(hwnd, 5),
+            bottom: bounds.bottom - scale(hwnd, 5),
+        }, border);
+    }
+    draw_rounded_outline_rect(hdc, bounds, border, radius, 1);
+}
+
+/// The desktop collapse toggle shares the General page switch geometry and
+/// colors; its Composition-style submenu reveal tints both track and knob.
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_collapse_switch(
+    hdc: HDC, hwnd: HWND, mut hit: RECT, enabled: bool,
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    alpha: f32, inset: Color, palette: ButtonPalette,
+) {
+    if alpha <= 0.005 { return; }
+    let shift = scale(hwnd, ((1.0 - alpha) * 8.0).round() as i32);
+    hit.left += shift;
+    hit.right += shift;
+    let height = hit.bottom - hit.top;
+    let track_height = (height * 11 / 16).max(12);
+    let track_width = (track_height * 20 / 11).min(hit.right - hit.left);
+    let track = RECT {
+        left: hit.right - track_width,
+        right: hit.right,
+        top: hit.top + (height - track_height) / 2,
+        bottom: hit.top + (height - track_height) / 2 + track_height,
+    };
+    let target = HitTarget::DesktopAutoCollapse(!enabled);
+    let bg = submenu_mix(inset, button_background(target, enabled, hovered, pressed, palette), alpha);
+    fill_rounded_rect(hdc, track, bg, track_height / 2);
+    draw_rounded_outline_rect(
+        hdc, track, submenu_mix(inset, subtle_control_border(bg), alpha),
+        track_height / 2, 1,
+    );
+    let knob = (track_height - 4).max(8);
+    let left = if enabled { track.right - knob - 2 } else { track.left + 2 };
+    let top = track.top + (track_height - knob) / 2;
+    fill_rounded_rect(
+        hdc, RECT { left, top, right: left + knob, bottom: top + knob },
+        submenu_mix(inset, Color::from_hex("#FFFFFFFF"), alpha), knob / 2,
+    );
 }
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
@@ -7956,23 +8035,24 @@ unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
         DT_LEFT|DT_VCENTER|DT_SINGLELINE);
     draw_text(hdc,if zh{"收缩"}else{"Collapse"},
         txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
-        let horizontal=direction==DesktopDirection::Horizontal;
-        paint_submenu_choice(hdc,hwnd,if horizontal{l.horizontal}else{l.vertical},
-            if horizontal{SettingsIcon::DirectionHorizontal}else{SettingsIcon::DirectionVertical},
-            match(zh,horizontal){(true,true)=>"横向",(true,false)=>"纵向",
-                (false,true)=>"Horz",(false,false)=>"Vert"},
-            snapshot.desktop_direction==direction,HitTarget::DesktopDirection(direction),
-            hovered,pressed,opacity,inset,palette,primary);
-    }
-    for enabled in [true,false] {
-        paint_submenu_choice(hdc,hwnd,if enabled{l.enabled}else{l.disabled},
-            if enabled{SettingsIcon::ToggleOn}else{SettingsIcon::ToggleOff},
-            match(zh,enabled){(true,true)=>"开启",(true,false)=>"关闭",
-                (false,true)=>"On",(false,false)=>"Off"},
-            snapshot.desktop_auto_collapse==enabled,HitTarget::DesktopAutoCollapse(enabled),
-            hovered,pressed,opacity,inset,palette,primary);
-    }
+    draw_appearance_choice_group(
+        hdc, hwnd,
+        scaled_rect(hwnd, RECT { right: l.vertical.right, ..l.horizontal }),
+        &[
+            (HitTarget::DesktopDirection(DesktopDirection::Horizontal),
+                snapshot.desktop_direction == DesktopDirection::Horizontal,
+                SettingsIcon::DirectionHorizontal, if zh { "横向" } else { "Horz" }),
+            (HitTarget::DesktopDirection(DesktopDirection::Vertical),
+                snapshot.desktop_direction == DesktopDirection::Vertical,
+                SettingsIcon::DirectionVertical, if zh { "纵向" } else { "Vert" }),
+        ],
+        hovered, pressed, palette, primary, Some((inset, opacity)),
+    );
+    paint_submenu_collapse_switch(
+        hdc, hwnd, scaled_rect(hwnd, l.collapse_switch),
+        snapshot.desktop_auto_collapse, hovered, pressed,
+        opacity, inset, palette,
+    );
     let _=RestoreDC(hdc,saved);
 }
 
