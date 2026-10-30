@@ -538,12 +538,13 @@ if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
     $styleWindow -notmatch 'WS_THICKFRAME' -or
     $styleWindow -notmatch '"常规"' -or
     $styleWindow -notmatch '"JSON 配置"' -or
-    $styleWindow -notmatch 'language_button_rect' -or
-    $styleWindow -notmatch 'rect\(hwnd,\s*760,\s*414,\s*920,\s*450\)' -or
-    $styleWindow -notmatch 'language_popup_open' -or
+    $styleWindow -notmatch 'general_language_group_rect' -or
+    $styleWindow -notmatch 'language_option_rect' -or
     $styleWindow -notmatch 'LanguageOption' -or
+    $styleWindow -notmatch 'language_label_for_index' -or
+    $styleWindow -match 'language_popup_open' -or
     $styleWindow -notmatch 'ID_EDIT_JSON') {
-    throw 'Unified settings window must provide resizable General, Appearance, JSON pages and a self-drawn language selector.'
+    throw 'Unified settings window must provide General, Appearance, JSON pages and inline two-choice language selection.'
 }
 foreach ($message in @(
     'WM_SETTINGS_REFRESH_CHANGE',
@@ -785,12 +786,15 @@ if ($styleWindow -match 'Manage refresh, display, alerts, and application behavi
     $styleWindow -notmatch 'settings_page_title_rect' -or
     $styleWindow -notmatch 'settings_card_rect' -or
     $styleWindow -notmatch 'settings_card_label_rect' -or
-    $styleWindow -notmatch 'settings_choice_rect' -or
+    $styleWindow -notmatch 'general_segment_rect' -or
+    $styleWindow -notmatch 'draw_general_segment_group' -or
+    $styleWindow -notmatch 'draw_general_usage_checkbox' -or
     $styleWindow -notmatch 'if zh \{ "常规" \} else \{ "General" \}' -or
-    $styleWindow -notmatch 'settings_choice_rect\(hwnd, 68, 102, index\)' -or
-    $styleWindow -notmatch 'settings_choice_rect\(hwnd, 268, 302, index\)' -or
-    $styleWindow -notmatch 'settings_card_rect\(hwnd, 328, 464\)') {
-    throw 'Settings pages must keep the shared right-pane layout baseline, restored General title, and matched refresh/alert padding.'
+    $styleWindow -notmatch 'general_refresh_group_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_alert_group_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_usage_card_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_application_card_rect\(hwnd\)') {
+    throw 'Settings pages must keep the shared right pane and connected General choice groups plus half-width cards.'
 }
 if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
     $styleWindow -notmatch 'SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30' -or
