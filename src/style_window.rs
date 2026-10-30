@@ -9747,6 +9747,60 @@ mod ui_smoke_tests {
     use super::*;
 
     #[test]
+    fn general_choice_groups_are_contiguous_and_match_click_areas() {
+        let hwnd = HWND::default(); // logical 96-DPI fallback
+        for group in [general_refresh_group_rect(hwnd), general_alert_group_rect(hwnd)] {
+            let all: Vec<_> = (0..4).map(|i| general_segment_rect(group, i, 4)).collect();
+            assert_eq!(all.first().unwrap().left, group.left);
+            assert_eq!(all.last().unwrap().right, group.right);
+            for pair in all.windows(2) {
+                assert_eq!(pair[0].right, pair[1].left, "segmented controls cannot have gaps");
+                assert_eq!(pair[0].top, pair[1].top);
+                assert_eq!(pair[0].bottom, pair[1].bottom);
+            }
+            assert!(all.iter().all(|r| r.right > r.left));
+        }
+        assert_eq!(
+            general_refresh_rect(hwnd, 300_000),
+            general_segment_rect(general_refresh_group_rect(hwnd), 1, 4)
+        );
+        assert_eq!(
+            general_alert_rect(hwnd, 20),
+            general_segment_rect(general_alert_group_rect(hwnd), 2, 4)
+        );
+    }
+
+    #[test]
+    fn general_usage_and_application_share_equal_non_overlapping_cards() {
+        let hwnd = HWND::default();
+        let usage = general_usage_card_rect(hwnd);
+        let app = general_application_card_rect(hwnd);
+        assert_eq!(usage.right - usage.left, app.right - app.left);
+        assert_eq!(app.left - usage.right, 16);
+        assert_eq!(usage.top, app.top);
+        assert_eq!(usage.bottom, app.bottom);
+        for r in [
+            general_usage_rect(hwnd, false),
+            general_usage_rect(hwnd, true),
+        ] {
+            assert!(r.left >= usage.left && r.right <= usage.right);
+            assert!(r.top >= usage.top && r.bottom <= usage.bottom);
+        }
+        let startup = general_startup_rect(hwnd);
+        let language = general_language_group_rect(hwnd);
+        for r in [startup, language] {
+            assert!(r.left >= app.left && r.right <= app.right);
+            assert!(r.top >= app.top && r.bottom <= app.bottom);
+        }
+        assert!(general_usage_rect(hwnd, false).bottom <= general_usage_rect(hwnd, true).top);
+        assert_eq!(language_option_count(), 2);
+        assert_eq!(language_option_rect(hwnd, 0).right, language_option_rect(hwnd, 1).left);
+        assert_eq!(language_option_rect(hwnd, 0).left, language.left);
+        assert_eq!(language_option_rect(hwnd, 1).right, language.right);
+    }
+
+
+    #[test]
     fn interactive_paint_frame_throttles_drag_but_never_drops_release() {
         let now = Instant::now();
         assert!(settings_interactive_frame_due(None, now, true));
