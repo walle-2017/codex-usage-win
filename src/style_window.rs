@@ -612,7 +612,7 @@ fn desktop_submenu_layout() -> DesktopSubmenuLayout {
             right: 894, bottom: collapse_top + row_height + 15,
         },
         // Keep the 4px inset around Desktop without touching Taskbar.
-        foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
+        foot: RECT { left: 422, top: 155, right: 654, bottom: 201 },
         direction_label: row(650, 728, direction_top),
         collapse_label: row(650, 728, collapse_top),
         horizontal: row(736, 807, direction_top),
@@ -8121,105 +8121,50 @@ unsafe fn paint_appearance_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
-    for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
-        let selected = snapshot.theme_mode == mode;
-        let target = HitTarget::Theme(mode);
-        let control_background = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment_with_icon(
-            hdc,
-            hwnd,
-            theme_rect(hwnd, mode),
-            selected,
-            control_background,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            theme_icon(mode),
-            match (zh, mode) {
-                (true, ThemeMode::System) => "系统",
-                (true, ThemeMode::Dark) => "深色",
-                (true, ThemeMode::Light) => "浅色",
-                (false, ThemeMode::System) => "System",
-                (false, ThemeMode::Dark) => "Dark",
-                (false, ThemeMode::Light) => "Light",
-            },
-        );
-    }
-
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
-        let selected = snapshot.appearance_preset == preset;
-        let target = HitTarget::Layout(preset);
-        let control_background = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment_with_icon(
-            hdc,
-            hwnd,
-            layout_rect(hwnd, preset),
-            selected,
-            control_background,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            layout_icon(preset),
-            match (zh, preset) {
-                (true, AppearancePreset::Default) => "默认",
-                (true, AppearancePreset::Minimal) => "极简",
-                (false, AppearancePreset::Default) => "Default",
-                (false, AppearancePreset::Minimal) => "Minimal",
-            },
-        );
-    }
-
-
-    for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
-        let selected = snapshot.display_position == position;
-        let target = HitTarget::Position(position);
-        let background = button_background(
-            target, selected, hovered, pressed,
-            ButtonPalette {
-                normal: card_hover, hover: card_pressed, pressed: card_pressed,
-                selected: accent, selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment_with_icon(
-            hdc, hwnd, position_rect(hwnd, position), selected,
-            background,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            if position == DisplayPosition::Taskbar {
-                SettingsIcon::PositionTaskbar
-            } else {
-                SettingsIcon::PositionDesktop
-            },
-            match (zh, position) {
-                (true, DisplayPosition::Taskbar) => "任务栏",
-                (true, DisplayPosition::Desktop) => "桌面",
-                (false, DisplayPosition::Taskbar) => "Taskbar",
-                (false, DisplayPosition::Desktop) => "Desktop",
-            },
-        );
-    }
+    let choice_palette = ButtonPalette {
+        normal: card_hover,
+        hover: card_pressed,
+        pressed: card_pressed,
+        selected: accent,
+        selected_hover: accent_hover,
+        selected_pressed: accent_pressed,
+    };
+    draw_appearance_choice_group(
+        hdc, hwnd, appearance_group_rect(hwnd, 70, 3),
+        &[
+            (HitTarget::Theme(ThemeMode::System), snapshot.theme_mode == ThemeMode::System,
+                SettingsIcon::ThemeSystem, if zh { "系统" } else { "System" }),
+            (HitTarget::Theme(ThemeMode::Dark), snapshot.theme_mode == ThemeMode::Dark,
+                SettingsIcon::ThemeDark, if zh { "深色" } else { "Dark" }),
+            (HitTarget::Theme(ThemeMode::Light), snapshot.theme_mode == ThemeMode::Light,
+                SettingsIcon::ThemeLight, if zh { "浅色" } else { "Light" }),
+        ],
+        hovered, pressed, choice_palette, primary, None,
+    );
+    draw_appearance_choice_group(
+        hdc, hwnd, appearance_group_rect(hwnd, 116, 2),
+        &[
+            (HitTarget::Layout(AppearancePreset::Default),
+                snapshot.appearance_preset == AppearancePreset::Default,
+                SettingsIcon::LayoutDefault, if zh { "默认" } else { "Default" }),
+            (HitTarget::Layout(AppearancePreset::Minimal),
+                snapshot.appearance_preset == AppearancePreset::Minimal,
+                SettingsIcon::LayoutMinimal, if zh { "极简" } else { "Minimal" }),
+        ],
+        hovered, pressed, choice_palette, primary, None,
+    );
+    draw_appearance_choice_group(
+        hdc, hwnd, appearance_group_rect(hwnd, 162, 2),
+        &[
+            (HitTarget::Position(DisplayPosition::Taskbar),
+                snapshot.display_position == DisplayPosition::Taskbar,
+                SettingsIcon::PositionTaskbar, if zh { "任务栏" } else { "Taskbar" }),
+            (HitTarget::Position(DisplayPosition::Desktop),
+                snapshot.display_position == DisplayPosition::Desktop,
+                SettingsIcon::PositionDesktop, if zh { "桌面" } else { "Desktop" }),
+        ],
+        hovered, pressed, choice_palette, primary, None,
+    );
 
     if desktop_submenu_progress > 0.0 {
         paint_submenu_content(hdc,hwnd,snapshot,desktop_submenu_progress,
