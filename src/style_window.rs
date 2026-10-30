@@ -91,6 +91,9 @@ const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
 const WM_SETTINGS_PRESET_GALLERY_REFRESH: u32 = WM_APP + 146;
 const WM_SETTINGS_PREWARM_GALLERY: u32 = WM_APP + 147;
 const WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK: u32 = WM_APP + 148;
+// Interactive paint requests are posted (not generated WM_PAINT messages)
+// to prevent low-priority paint starvation under continuous user input.
+const WM_SETTINGS_PRESENT_INTERACTIVE_FRAME: u32 = WM_APP + 149;
 // WM_TIMER is a low-priority generated message. A periodic multimedia timer
 // posts one coalesced message to the UI queue for a steadier ~60Hz cadence.
 const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
@@ -419,6 +422,45 @@ fn mark_settings_paint_cause(cause: SettingsPaintCause) {
     SETTINGS_PAINT_CAUSE.with(|cell| cell.set(cause));
 }
 
+// WM_PAINT is generated only when the thread's queue has no higher-priority
+// messages. Persistent widget updates can leave the Settings parent dirty
+// without presenting it, while its hit testing continues to work. An
+// explicitly posted, coalesced frame calls UpdateWindow on the UI thread.
+// Only interactive changes use this path; JSON's own child scroll rendering
+// and full-page synchronous redraws retain their existing behavior.
+fn settings_interactive_frame_due(last: Option<Instant>, now: Instant, throttle: bool) -> bool {
+    !throttle || last.is_none_or(|at| {
+        now.saturating_duration_since(at) >= Duration::from_millis(16)
+    })
+}
+
+fn queue_settings_interactive_frame(hwnd: HWND, throttle: bool) {
+    let now = Instant::now();
+    let queued = SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| {
+        if pending.get() {
+            return false;
+        }
+        let due = SETTINGS_LAST_INTERACTIVE_FRAME.with(|last| {
+            settings_interactive_frame_due(last.get(), now, throttle)
+        });
+        if !due {
+            return false;
+        }
+        pending.set(true);
+        true
+    });
+    if !queued {
+        return;
+    }
+    if unsafe {
+        PostMessageW(hwnd, WM_SETTINGS_PRESENT_INTERACTIVE_FRAME, WPARAM(0), LPARAM(0))
+    }.is_ok() {
+        SETTINGS_LAST_INTERACTIVE_FRAME.with(|last| last.set(Some(now)));
+    } else {
+        SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| pending.set(false));
+    }
+}
+
 static SUBMENU_MEDIA_TICK_QUEUED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -426,6 +468,9 @@ thread_local! {
     static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
     static SETTINGS_PAINT_CAUSE: Cell<SettingsPaintCause> =
         const { Cell::new(SettingsPaintCause::Unknown) };
+    static SETTINGS_INTERACTIVE_FRAME_QUEUED: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_LAST_INTERACTIVE_FRAME: Cell<Option<Instant>> =
+        const { Cell::new(None) };
 }
 
 type MultimediaTimerCallback = unsafe extern "system" fn(u32, u32, usize, usize, usize);
@@ -534,6 +579,7 @@ unsafe fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
     if rendered {
         mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
         let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+        queue_settings_interactive_frame(hwnd, active);
     }
 }
 
@@ -2698,6 +2744,9 @@ unsafe fn invalidate_appearance_card_or_window(
         let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
     } else {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+    if section != Section::Json {
+        queue_settings_interactive_frame(hwnd, false);
     }
 }
 
@@ -5701,6 +5750,10 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
+    // A drag can keep the message queue nonempty, starving generated WM_PAINT.
+    // Cap active drag presentation at ~60 fps, then flush the final value on
+    // WM_LBUTTONUP via invalidate_appearance_card_or_window.
+    queue_settings_interactive_frame(hwnd, true);
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -5788,6 +5841,7 @@ unsafe extern "system" fn wnd_proc(
                     SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(true));
                     mark_settings_paint_cause(SettingsPaintCause::GalleryRefresh);
                     let _ = InvalidateRect(hwnd, Some(&rect), false);
+                    queue_settings_interactive_frame(hwnd, false);
                 }
             }
             LRESULT(0)
@@ -5798,6 +5852,14 @@ unsafe extern "system" fn wnd_proc(
             if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0) {
                 drive_submenu_frame_tick(hwnd, true);
             }
+            LRESULT(0)
+        }
+        WM_SETTINGS_PRESENT_INTERACTIVE_FRAME => {
+            SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| pending.set(false));
+            // Unlike generated WM_PAINT, UpdateWindow bypasses the message
+            // queue; the original invalid region and cached renderer remain
+            // responsible for what is drawn.
+            let _ = UpdateWindow(hwnd);
             LRESULT(0)
         }
         WM_TIMER => {
@@ -9876,6 +9938,16 @@ unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORM
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+
+    #[test]
+    fn interactive_paint_frame_throttles_drag_but_never_drops_release() {
+        let now = Instant::now();
+        assert!(settings_interactive_frame_due(None, now, true));
+        assert!(!settings_interactive_frame_due(Some(now), now + Duration::from_millis(8), true));
+        assert!(settings_interactive_frame_due(Some(now), now + Duration::from_millis(16), true));
+        assert!(settings_interactive_frame_due(Some(now), now, false));
+    }
+
 
     #[test]
     fn appearance_subpage_titles_do_not_overlap_the_shared_options_card() {
