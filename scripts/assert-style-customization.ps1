@@ -784,6 +784,14 @@ if ($styleWindow -notmatch 'fn draw_appearance_choice_group\(' -or
     $styleWindow -notmatch 'hdc, strings\.start_with_windows,') {
     throw 'Appearance controls must use joined icon choices, a single collapse switch and abbreviated Auto-start label.'
 }
+if ($styleWindow -notmatch 'title:\s*RECT' -or
+    $styleWindow -notmatch 'if zh \{ "桌面模式" \} else \{ "Desktop mode" \}' -or
+    $styleWindow -notmatch 'draw_antialiased_rounded_rect\(' -or
+    $styleWindow -notmatch '0\.45 \+ 0\.55 \* submenu_content_alpha' -or
+    $styleWindow -match 'foot:\s*RECT' -or
+    $styleWindow -match 'draw_antialiased_desktop_inset_well\(') {
+    throw 'Desktop controls must use a permanently visible, titled, independent right-side inset without the old L-shaped connection.'
+}
 $localeZh = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\simplified_chinese.rs')
 $localeEn = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\english.rs')
 if ($localeZh -notmatch 'start_with_windows:\s*"自启"' -or
