@@ -8133,11 +8133,11 @@ unsafe fn paint_appearance_page(
         hdc, hwnd, appearance_group_rect(hwnd, 70, 3),
         &[
             (HitTarget::Theme(ThemeMode::System), snapshot.theme_mode == ThemeMode::System,
-                SettingsIcon::ThemeSystem, if zh { "系统" } else { "System" }),
+                theme_icon(ThemeMode::System), if zh { "系统" } else { "System" }),
             (HitTarget::Theme(ThemeMode::Dark), snapshot.theme_mode == ThemeMode::Dark,
-                SettingsIcon::ThemeDark, if zh { "深色" } else { "Dark" }),
+                theme_icon(ThemeMode::Dark), if zh { "深色" } else { "Dark" }),
             (HitTarget::Theme(ThemeMode::Light), snapshot.theme_mode == ThemeMode::Light,
-                SettingsIcon::ThemeLight, if zh { "浅色" } else { "Light" }),
+                theme_icon(ThemeMode::Light), if zh { "浅色" } else { "Light" }),
         ],
         hovered, pressed, choice_palette, primary, None,
     );
@@ -8146,10 +8146,10 @@ unsafe fn paint_appearance_page(
         &[
             (HitTarget::Layout(AppearancePreset::Default),
                 snapshot.appearance_preset == AppearancePreset::Default,
-                SettingsIcon::LayoutDefault, if zh { "默认" } else { "Default" }),
+                layout_icon(AppearancePreset::Default), if zh { "默认" } else { "Default" }),
             (HitTarget::Layout(AppearancePreset::Minimal),
                 snapshot.appearance_preset == AppearancePreset::Minimal,
-                SettingsIcon::LayoutMinimal, if zh { "极简" } else { "Minimal" }),
+                layout_icon(AppearancePreset::Minimal), if zh { "极简" } else { "Minimal" }),
         ],
         hovered, pressed, choice_palette, primary, None,
     );
@@ -10064,83 +10064,66 @@ mod ui_smoke_tests {
         let system = include_str!("../assets/settings-icons/theme-system.svg");
         assert!(system.contains("fill-rule=\"evenodd\""));
         let l = desktop_submenu_layout();
-        assert_eq!(l.collapse_label.top, l.enabled.top);
+        assert_eq!(l.collapse_label.top, l.collapse_switch.top);
         assert!(l.collapse_label.top > l.direction_label.bottom);
-        assert_eq!(l.foot.left, APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH + 4);
+        assert_eq!(l.foot.left, APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH);
     }
 
     #[test]
-    fn v24_28_desktop_submenu_fits_existing_card_and_includes_desktop_button() {
+    fn connected_appearance_groups_and_desktop_submenu_fit_existing_card() {
         let l = desktop_submenu_layout();
         let card = RECT { left: 200, top: 58, right: 940, bottom: 206 };
-        for r in [l.well,l.foot,l.direction_label,l.collapse_label,
-            l.horizontal,l.vertical,l.enabled,l.disabled] {
-            assert!(r.left>=card.left && r.right<=card.right);
-            assert!(r.top>=card.top && r.bottom<=card.bottom);
-            assert!(r.right>r.left && r.bottom>r.top);
+        for r in [
+            l.well, l.foot, l.direction_label, l.collapse_label,
+            l.horizontal, l.vertical, l.collapse_switch,
+        ] {
+            assert!(r.left >= card.left && r.right <= card.right);
+            assert!(r.top >= card.top && r.bottom <= card.bottom);
+            assert!(r.right > r.left && r.bottom > r.top);
         }
-        // The bottom foot surrounds Desktop, but never overlaps Taskbar.
-        let desktop = RECT { left: 422, top: 162, right: 522, bottom: 196 };
-        let taskbar = RECT { left: 314, top: 162, right: 414, bottom: 196 };
-        assert!(l.foot.left < desktop.left && l.foot.right > desktop.right);
+        let taskbar = appearance_button_rect(HWND::default(), 0, 162);
+        let desktop = appearance_button_rect(HWND::default(), 1, 162);
+        assert_eq!(taskbar.right, desktop.left);
+        assert_eq!(l.foot.left, desktop.left);
+        assert!(l.foot.right > desktop.right);
         assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
-        assert_eq!(desktop.left - l.foot.left, 4,
-            "Desktop must have a consistent left inset");
-        assert_eq!(l.foot.left - taskbar.right, 4,
-            "the inset must leave space after Taskbar");
-        assert_eq!(desktop.left - taskbar.right, APPEARANCE_BUTTON_GAP,
-            "position buttons must share the same column spacing");
-        assert!(l.well.left > 630, "do not overlap the Light theme button");
-        assert_eq!(l.well.right - l.well.left, 258,
-            "desktop submenu width stays compact");
+        assert!(l.well.left > appearance_group_rect(HWND::default(), 70, 3).right - 8);
+        assert_eq!(l.well.right - l.well.left, 258);
         assert_eq!(l.horizontal.left - l.direction_label.right, 8);
-        assert_eq!(l.enabled.left - l.collapse_label.right, 8);
         assert_eq!(l.well.right - l.vertical.right, 16);
-        assert_eq!(l.well.right - l.disabled.right, 16);
-        assert!(l.direction_label.right <= l.horizontal.left);
-        assert!(l.collapse_label.right <= l.enabled.left);
-        assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
-            "the two depressed regions must overlap to hide their seam");
-        assert_eq!(submenu_background_alpha(0.0), 0.0);
-        assert_eq!(submenu_background_alpha(1.0), 1.0);
-        assert_eq!(submenu_content_offset(0.0), 8);
-        assert_eq!(submenu_content_offset(1.0), 0);
-        assert_eq!(PRESET_CARD_TOP, 226,
-            "preset gallery starts immediately below the shared options card");
-        for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
-            assert!(r.left>=l.well.left && r.right<l.well.right);
-        }
-        assert!(l.horizontal.right<l.vertical.left);
-        assert!(l.enabled.right<l.disabled.left);
-        assert!(l.direction_label.right<l.horizontal.left);
-        assert!(l.collapse_label.right<l.enabled.left);
-        assert_eq!(l.horizontal.left, l.enabled.left);
-        assert_eq!(l.horizontal.right, l.enabled.right);
-        assert_eq!(l.vertical.left, l.disabled.left);
-        assert_eq!(l.vertical.right, l.disabled.right);
-        assert_eq!(l.horizontal.right - l.horizontal.left,
-                   l.vertical.right - l.vertical.left);
-        assert_eq!(l.vertical.left - l.horizontal.right, APPEARANCE_BUTTON_GAP);
+        assert_eq!(l.well.right - l.collapse_switch.right, 16);
+        assert!(l.collapse_label.right <= l.collapse_switch.left);
+        assert_eq!(l.horizontal.right, l.vertical.left);
+        assert_eq!(l.horizontal.right - l.horizontal.left, l.vertical.right - l.vertical.left);
+        assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom);
+        assert_eq!(PRESET_CARD_TOP, 226);
     }
 
     #[test]
-    fn appearance_buttons_share_aligned_columns_across_all_rows() {
-        let a = appearance_button_rect(HWND::default(), 0, 70);
-        let b = appearance_button_rect(HWND::default(), 1, 70);
-        let c = appearance_button_rect(HWND::default(), 2, 70);
-        assert_eq!(a.right - a.left, APPEARANCE_BUTTON_WIDTH);
-        assert_eq!(b.right - b.left, APPEARANCE_BUTTON_WIDTH);
-        assert_eq!(c.right - c.left, APPEARANCE_BUTTON_WIDTH);
-        assert_eq!(b.left - a.right, APPEARANCE_BUTTON_GAP);
-        assert_eq!(c.left - b.right, APPEARANCE_BUTTON_GAP);
-        for top in [116, 162] {
-            for column in 0..2 {
-                let r = appearance_button_rect(HWND::default(), column, top);
-                let reference = appearance_button_rect(HWND::default(), column, 70);
-                assert_eq!((r.left, r.right), (reference.left, reference.right));
-                assert_eq!(r.bottom - r.top, APPEARANCE_BUTTON_HEIGHT);
+    fn appearance_button_hit_rects_join_without_gaps() {
+        let hwnd = HWND::default();
+        let themes: Vec<_> = (0..3).map(|i| appearance_button_rect(hwnd, i, 70)).collect();
+        let layouts: Vec<_> = (0..2).map(|i| appearance_button_rect(hwnd, i, 116)).collect();
+        let positions: Vec<_> = (0..2).map(|i| appearance_button_rect(hwnd, i, 162)).collect();
+        for (top, group) in [(70, &themes), (116, &layouts), (162, &positions)] {
+            let bounds = appearance_group_rect(hwnd, top, group.len());
+            assert_eq!(group[0].left, bounds.left);
+            assert_eq!(group.last().unwrap().right, bounds.right);
+            for pair in group.windows(2) {
+                assert_eq!(pair[0].right, pair[1].left);
+                assert_eq!(pair[0].top, pair[1].top);
+                assert_eq!(pair[0].bottom, pair[1].bottom);
             }
+            assert!(group.iter().all(|r| r.bottom - r.top == APPEARANCE_BUTTON_HEIGHT));
         }
+        assert_eq!(theme_rect(hwnd, ThemeMode::Light), themes[2]);
+        assert_eq!(layout_rect(hwnd, AppearancePreset::Minimal), layouts[1]);
+        assert_eq!(position_rect(hwnd, DisplayPosition::Desktop), positions[1]);
+        let h = desktop_direction_rect(hwnd, DesktopDirection::Horizontal);
+        let v = desktop_direction_rect(hwnd, DesktopDirection::Vertical);
+        assert_eq!(h.right, v.left);
+        assert_eq!(desktop_auto_collapse_rect(hwnd),
+                   scaled_rect(hwnd, desktop_submenu_layout().collapse_switch));
     }
 
     #[test]
@@ -10515,34 +10498,29 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn desktop_submenu_has_only_direction_and_collapse_rows() {
+    fn desktop_submenu_has_connected_direction_and_single_collapse_switch() {
         let l = desktop_submenu_layout();
-        for r in [l.direction_label, l.collapse_label, l.horizontal,
-            l.vertical, l.enabled, l.disabled]
-        {
+        for r in [
+            l.direction_label, l.collapse_label, l.horizontal,
+            l.vertical, l.collapse_switch,
+        ] {
             assert!(r.top >= l.well.top && r.bottom <= l.well.bottom);
             assert!(r.left >= l.well.left && r.right <= l.well.right);
         }
-        assert!(l.horizontal.bottom < l.enabled.top);
-        assert_eq!(l.enabled.top, l.disabled.top);
+        assert_eq!(l.horizontal.right, l.vertical.left);
+        assert!(l.horizontal.bottom < l.collapse_switch.top);
         assert_eq!(l.direction_label.top, l.horizontal.top);
-        assert_eq!(l.collapse_label.top, l.enabled.top);
-        assert_eq!(l.direction_label.bottom - l.direction_label.top,
-            l.collapse_label.bottom - l.collapse_label.top);
-        assert_eq!(l.horizontal.bottom - l.horizontal.top,
-            l.enabled.bottom - l.enabled.top);
+        assert_eq!(l.collapse_label.top, l.collapse_switch.top);
         assert_eq!(l.collapse_label.top - l.direction_label.bottom, 10);
         assert_eq!(l.well.bottom, l.foot.bottom);
         assert_eq!(l.well.bottom, 201);
-        // Both rows belong beside Layout/Position. The old 65..161 well
-        // floated beside Theme and connected to Desktop for just 6px.
-        assert!(l.well.top > 104, "submenu must not intrude into Theme row");
+        assert!(l.well.top > 104);
         assert_eq!(l.horizontal.top, 116);
-        assert_eq!(l.enabled.top, 156);
+        assert_eq!(l.collapse_switch.top, 156);
         assert_eq!(l.foot.right - l.well.left, 18);
         assert_eq!(l.well.bottom - l.foot.top, 46);
-        assert!(l.foot.top < l.enabled.top && l.enabled.bottom < l.foot.bottom,
-            "Collapse row must remain beside the actual Desktop button");
+        assert!(l.foot.top < l.collapse_switch.top
+            && l.collapse_switch.bottom < l.foot.bottom);
     }
 
     #[test]
