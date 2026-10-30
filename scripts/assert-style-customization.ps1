@@ -770,12 +770,19 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::JsonApply' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
     $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
-    $styleWindow -notmatch 'theme_icon\(mode\)' -or
-    $styleWindow -notmatch 'layout_icon\(preset\)' -or
+    $styleWindow -notmatch 'theme_icon\(ThemeMode::System\)' -or
+    $styleWindow -notmatch 'layout_icon\(AppearancePreset::Default\)' -or
     $styleWindow -notmatch 'preset_icon\(preset,\s*snapshot\.is_dark\)' -or
     $styleWindow -notmatch 'json_action_icon\(action\)' -or
     $styleWindow -notmatch 'json_action_icon\(apply\)') {
     throw 'Settings icon vocabulary must use the precise anti-aliased path renderer for navigation, Theme/Layout buttons, preset cards, and Custom.'
+}
+if ($styleWindow -notmatch 'fn draw_appearance_choice_group\(' -or
+    $styleWindow -notmatch 'general_segment_rect\(bounds, index, choices\.len\(\)\)' -or
+    $styleWindow -notmatch 'fn paint_submenu_collapse_switch\(' -or
+    $styleWindow -notmatch 'fn desktop_auto_collapse_rect\(hwnd: HWND\)' -or
+    $styleWindow -notmatch 'if zh \{ "自启" \} else \{ "Auto-start" \}') {
+    throw 'Appearance controls must use joined icon choices, a single collapse switch and abbreviated Auto-start label.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
