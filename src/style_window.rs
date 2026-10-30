@@ -248,7 +248,9 @@ enum SettingsIcon {
     JsonApply,
     DirectionHorizontal,
     DirectionVertical,
+    #[allow(dead_code)] // Keep SVG icon IDs stable for saved resource maps.
     ToggleOn,
+    #[allow(dead_code)]
     ToggleOff,
     PositionTaskbar,
     PositionDesktop,
@@ -7544,7 +7546,7 @@ unsafe fn paint_general_page(
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
-        hdc, if zh { "自启" } else { "Auto-start" },
+        hdc, strings.start_with_windows,
         rect(hwnd, 596, 246, 854, 286),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
@@ -7944,7 +7946,8 @@ unsafe fn draw_appearance_choice_group(
             Color::from_hex("#FFFFFFFF")
         } else { primary });
         let height = (option.bottom - option.top).max(1);
-        let glyph_size = scale(hwnd, 18).min((height - scale(hwnd, 8)).max(1));
+        let glyph_size = scale(hwnd, DESKTOP_SUBMENU_ICON_SIZE)
+            .min((height - scale(hwnd, 8)).max(1));
         let gap = scale(hwnd, 4);
         let label_width = text_width_px(hwnd, label).max(0);
         let group_width = glyph_size + gap + label_width;
