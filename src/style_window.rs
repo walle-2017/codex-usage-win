@@ -592,8 +592,7 @@ struct DesktopSubmenuLayout {
     collapse_label: RECT,
     horizontal: RECT,
     vertical: RECT,
-    enabled: RECT,
-    disabled: RECT,
+    collapse_switch: RECT,
 }
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
     // Both rows share one source of vertical geometry. When a menu option
@@ -616,10 +615,9 @@ fn desktop_submenu_layout() -> DesktopSubmenuLayout {
         foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
         direction_label: row(650, 728, direction_top),
         collapse_label: row(650, 728, collapse_top),
-        horizontal: row(736, 803, direction_top),
-        vertical: row(811, 878, direction_top),
-        enabled: row(736, 803, collapse_top),
-        disabled: row(811, 878, collapse_top),
+        horizontal: row(736, 807, direction_top),
+        vertical: row(807, 878, direction_top),
+        collapse_switch: row(824, 878, collapse_top),
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -1721,18 +1719,22 @@ fn json_action_icon(action: JsonAction) -> SettingsIcon {
     }
 }
 
-// Shared appearance-button grid: all rows use equal widths and 8px gaps.
+// Appearance options use the same adjacent segments for painting and hit
+// testing. The left edge and row spacing match the existing settings card.
 const APPEARANCE_BUTTON_LEFT: i32 = 314;
-const APPEARANCE_BUTTON_WIDTH: i32 = 100;
-const APPEARANCE_BUTTON_GAP: i32 = 8;
+const APPEARANCE_BUTTON_WIDTH: i32 = 108;
 const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
 
+fn appearance_group_rect(hwnd: HWND, top: i32, count: usize) -> RECT {
+    rect(hwnd, APPEARANCE_BUTTON_LEFT, top,
+        APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH * count as i32,
+        top + APPEARANCE_BUTTON_HEIGHT)
+}
+
 fn appearance_button_rect(hwnd: HWND, column: i32, top: i32) -> RECT {
-    let left = APPEARANCE_BUTTON_LEFT
-        + column * (APPEARANCE_BUTTON_WIDTH + APPEARANCE_BUTTON_GAP);
-    rect(
-        hwnd, left, top,
-        left + APPEARANCE_BUTTON_WIDTH, top + APPEARANCE_BUTTON_HEIGHT,
+    general_segment_rect(
+        appearance_group_rect(hwnd, top, if top == 70 { 3 } else { 2 }),
+        column as usize, if top == 70 { 3 } else { 2 },
     )
 }
 
@@ -1759,11 +1761,10 @@ fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
     })
 }
 
-// The controls are stable throughout animation; painted displacement is
-// disabled for hit testing until the subpanel has almost fully expanded.
-fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
-    let layout = desktop_submenu_layout();
-    scaled_rect(hwnd, if enabled { layout.enabled } else { layout.disabled })
+// A single switch hit area; the desired state is derived from the current
+// snapshot when clicked, rather than exposing separate On and Off buttons.
+fn desktop_auto_collapse_rect(hwnd: HWND) -> RECT {
+    scaled_rect(hwnd, desktop_submenu_layout().collapse_switch)
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -5039,14 +5040,16 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Position(position));
             }
         }
-        if STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| {
-            s.snapshot.display_position == DisplayPosition::Desktop
-                && s.desktop_submenu.hit_enabled()
-        }) {
-            for enabled in [true, false] {
-                if pt_in_rect(desktop_auto_collapse_rect(hwnd, enabled), x, y) {
-                    return Some(HitTarget::DesktopAutoCollapse(enabled));
-                }
+        let submenu = {
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.as_ref().and_then(|s| (
+                s.snapshot.display_position == DisplayPosition::Desktop
+                    && s.desktop_submenu.hit_enabled()
+            ).then_some(s.snapshot.desktop_auto_collapse))
+        };
+        if let Some(collapsed) = submenu {
+            if pt_in_rect(desktop_auto_collapse_rect(hwnd), x, y) {
+                return Some(HitTarget::DesktopAutoCollapse(!collapsed));
             }
             for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
                 if pt_in_rect(desktop_direction_rect(hwnd, direction), x, y) {
@@ -7541,7 +7544,7 @@ unsafe fn paint_general_page(
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
-        hdc, strings.start_with_windows,
+        hdc, if zh { "自启" } else { "Auto-start" },
         rect(hwnd, 596, 246, 854, 286),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
