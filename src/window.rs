@@ -7206,7 +7206,7 @@ fn tooltip_width_with_render_slack(measured_text_px: i32, logical: impl Fn(i32) 
 // the rightmost pixel rather than the total nonzero pixel count also keeps
 // space between digits and glyph overhangs from being cropped.
 fn tooltip_mask_content_width(mask: &[u8], row_width: usize) -> Option<i32> {
-    if row_width == 0 || mask.len() % row_width != 0 {
+    if row_width == 0 || !mask.len().is_multiple_of(row_width) {
         return None;
     }
     mask.chunks_exact(row_width)
