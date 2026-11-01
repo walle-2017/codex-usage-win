@@ -8,7 +8,7 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
@@ -19,7 +19,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, ExtractIconExW, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW,
+    DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -27,6 +27,7 @@ use crate::appearance::{AppearancePreset, DesktopDirection, DisplayPosition};
 use crate::fonts;
 use crate::localization::LanguageId;
 use crate::native_interop::{self, Color, WM_APP};
+use crate::window_common::{load_embedded_app_icons, set_window_caption_icons, SendHwnd};
 use crate::settings_model::{parse_jsonc, EditableSettings, EditableThemeStyle};
 use crate::style::{
     panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
@@ -297,21 +298,6 @@ enum HitTarget {
     DiscardChanges,
     KeepEditing,
     LanguageOption(usize),
-}
-
-#[derive(Clone, Copy)]
-struct SendHwnd(isize);
-
-unsafe impl Send for SendHwnd {}
-
-impl SendHwnd {
-    fn from_hwnd(hwnd: HWND) -> Self {
-        Self(hwnd.0 as isize)
-    }
-
-    fn to_hwnd(self) -> HWND {
-        HWND(self.0 as *mut _)
-    }
 }
 
 /// Visual-only animation. Persisted desktop settings never depend on this
@@ -722,31 +708,6 @@ const COLOR_TARGETS: [StyleColorTarget; HEX_EDIT_COUNT] = [
     StyleColorTarget::TooltipBorder,
 ];
 
-fn load_embedded_app_icons() -> (HICON, HICON) {
-    unsafe {
-        let mut exe_buf = [0u16; 260];
-        let len = GetModuleFileNameW(None, &mut exe_buf) as usize;
-        if len == 0 {
-            return (HICON::default(), HICON::default());
-        }
-        let mut large_icon = HICON::default();
-        let mut small_icon = HICON::default();
-        let extracted = ExtractIconExW(
-            PCWSTR::from_raw(exe_buf.as_ptr()),
-            0,
-            Some(&mut large_icon),
-            Some(&mut small_icon),
-            1,
-        );
-        if extracted == 0 {
-            (HICON::default(), HICON::default())
-        } else {
-            (large_icon, small_icon)
-        }
-    }
-}
-
-
 fn discard_dialog_rect(hwnd: HWND) -> RECT {
     let mut client = RECT::default();
     unsafe { let _ = GetClientRect(hwnd, &mut client); }
@@ -917,22 +878,7 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             Err(_) => return,
         };
 
-        if !large_icon.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(ICON_BIG as usize),
-                LPARAM(large_icon.0 as isize),
-            );
-        }
-        if !small_icon.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(ICON_SMALL as usize),
-                LPARAM(small_icon.0 as isize),
-            );
-        }
+        set_window_caption_icons(hwnd, large_icon, small_icon);
 
         // Keep the original ownerless CW_USEDEFAULT creation contract. Move
         // this still-hidden window to the active widget's monitor before
