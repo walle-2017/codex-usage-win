@@ -6,6 +6,7 @@ $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$windowCommon = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window_common.rs')
 $settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
@@ -884,10 +885,22 @@ if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
 if ($styleWindow -notmatch 'load_embedded_app_icons\(' -or
     $styleWindow -notmatch 'hIcon:\s*large_icon' -or
     $styleWindow -notmatch 'hIconSm:\s*small_icon' -or
-    $styleWindow -notmatch 'WM_SETICON' -or
-    $styleWindow -notmatch 'ICON_BIG' -or
-    $styleWindow -notmatch 'ICON_SMALL') {
-    throw 'Settings window must bind the embedded executable icon to its standard caption.'
+    $styleWindow -notmatch 'set_window_caption_icons\(' -or
+    $windowProduction -notmatch 'set_window_caption_icons\(' -or
+    $windowCommon -notmatch 'fn load_embedded_app_icons\(' -or
+    $windowCommon -notmatch 'fn set_window_caption_icons\(' -or
+    $windowCommon -notmatch 'WM_SETICON' -or
+    $windowCommon -notmatch 'ICON_BIG' -or
+    $windowCommon -notmatch 'ICON_SMALL' -or
+    $windowCommon -notmatch 'unsafe impl Send for SendHwnd' -or
+    $window -match 'struct SendHwnd\(' -or
+    $styleWindow -match 'struct SendHwnd\(') {
+    throw 'Both windows must reuse the shared Win32 handle and embedded executable caption icon helpers.'
+}
+if ($controlPrimitives -match 'codex_draw_desktop_inset_well' -or
+    $controlPrimitives -match 'DesktopInsetCache' -or
+    $controlPrimitives -match 'g_desktop_inset_cache') {
+    throw 'The removed L-shaped desktop inset must not remain in native C++.'
 }
 if ($styleWindow -match 'WS_VSCROLL' -or
     $styleWindow -match 'ShowScrollBar' -or
