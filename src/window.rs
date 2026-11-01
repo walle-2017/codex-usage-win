@@ -3044,19 +3044,6 @@ fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
     (diffuse + hairline).round().clamp(0.0, 200.0) as u8
 }
 
-/// Rounded-rectangle signed distance. Negative is inside the actual panel,
-/// positive is outside; returns zero at its edge.
-#[allow(dead_code)]
-fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
-    let inset = sc(1).max(1) as f32;
-    let half_w = (width as f32 / 2.0 - inset).max(0.5);
-    let half_h = (height as f32 / 2.0 - inset).max(0.5);
-    let radius = (radius as f32).min(half_w.min(half_h)).max(0.0);
-    let dx = (x as f32 + 0.5 - width as f32 / 2.0).abs() - (half_w - radius);
-    let dy = (y as f32 + 0.5 - height as f32 / 2.0).abs() - (half_h - radius);
-    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
-}
-
 /// Feather hover feedback around the actual body or detached grip perimeter.
 /// Desktop canvases provide up to 12 logical pixels of outer glow. Visual-only
 /// transparent margins never extend the component's interactive hit targets.
@@ -3228,48 +3215,6 @@ fn draw_taskbar_hover_inner_glow_gdi(
             }
         }
     }
-}
-
-#[allow(dead_code)]
-fn draw_drag_hover_outline(
-    pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
-    bounds: RECT, corner_radius: u8, color: Color,
-) {
-    if canvas_w <= 0 || canvas_h <= 0 || bounds.right <= bounds.left
-        || bounds.bottom <= bounds.top { return; }
-    let w = bounds.right - bounds.left;
-    let h = bounds.bottom - bounds.top;
-    let radius = sc(i32::from(corner_radius))
-        .min((w.min(h) / 2).max(0));
-    let extent = sc(12).max(2);
-    // Restrict work to the edge envelope, avoiding per-pixel work over the
-    // center of larger horizontal panels.
-    for y in bounds.top.saturating_sub(extent).max(0)
-        ..bounds.bottom.saturating_add(extent).min(canvas_h) {
-        for x in bounds.left.saturating_sub(extent).max(0)
-            ..bounds.right.saturating_add(extent).min(canvas_w) {
-            let local_x = x - bounds.left;
-            let local_y = y - bounds.top;
-            let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
-            if distance.abs() > extent as f32 { continue; }
-            let coverage = drag_hover_glow_coverage(distance);
-            if coverage == 0 { continue; }
-            let index = (y * canvas_w + x) as usize;
-            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
-        }
-    }
-}
-
-/// Draw the dedicated desktop drag tab into the premultiplied layered surface.
-/// When collapsed, every pixel outside the tab is fully transparent and cannot
-/// obstruct other desktop windows or leave a visible panel edge.
-#[allow(dead_code)]
-fn render_floating_handle_bitmap(
-    pixels: &mut [u32], width: i32, height: i32,
-    edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
-) {
-    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
-    render_floating_handle_bitmap_at(pixels, width, height, grip, hovered, style, opacity);
 }
 
 fn render_floating_handle_bitmap_at(
@@ -4805,27 +4750,6 @@ fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
     else { -1 } // HTCLIENT or HTTRANSPARENT
 }
 
-#[allow(dead_code)]
-fn floating_drag_handle_hit(
-    x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
-) -> bool {
-    point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
-}
-
-// The desktop tab lives OUTSIDE the panel body. Hover must be checked against
-// its final screen-space rectangle, especially after the canvas origin changes
-// on drop from a docked edge to the free-floating top tab.
-#[allow(dead_code)]
-fn floating_drag_grip_contains_screen_point(
-    origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
-    edge: Option<FloatingEdge>, pointer: POINT,
-) -> bool {
-    floating_drag_handle_hit(
-        pointer.x - origin_x, pointer.y - origin_y,
-        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
-    )
-}
-
 // A stale WM_MOUSELEAVE can be queued when mouse capture ends or a layered
 // popup is repositioned. Recheck where the pointer actually is, rather than
 // clearing an otherwise valid hover until another WM_MOUSEMOVE arrives.
@@ -5318,13 +5242,6 @@ fn floating_clamp_drag_visible_position(
     let min_y = bounds.top.saturating_sub(visible.top);
     let max_y = bounds.bottom.saturating_sub(visible.bottom).max(min_y);
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
-}
-
-#[allow(dead_code)]
-fn floating_clamp_free_visible_position(
-    bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
-) -> (i32, i32) {
-    floating_clamp_drag_visible_position(bounds, width, height, body, None, false, x, y)
 }
 
 // Explicit Desktop docking requires contact between the body/drag tab that
@@ -11017,6 +10934,86 @@ mod tests {
     }
 
     use super::*;
+
+    // Geometry adapters retained solely for regression tests of historical
+    // edge cases; production uses the unified hover and handle render paths.
+    /// Rounded-rectangle signed distance. Negative is inside the actual panel,
+    /// positive is outside; returns zero at its edge.
+    fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
+        let inset = sc(1).max(1) as f32;
+        let half_w = (width as f32 / 2.0 - inset).max(0.5);
+        let half_h = (height as f32 / 2.0 - inset).max(0.5);
+        let radius = (radius as f32).min(half_w.min(half_h)).max(0.0);
+        let dx = (x as f32 + 0.5 - width as f32 / 2.0).abs() - (half_w - radius);
+        let dy = (y as f32 + 0.5 - height as f32 / 2.0).abs() - (half_h - radius);
+        dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+    }
+
+    fn draw_drag_hover_outline(
+        pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
+        bounds: RECT, corner_radius: u8, color: Color,
+    ) {
+        if canvas_w <= 0 || canvas_h <= 0 || bounds.right <= bounds.left
+            || bounds.bottom <= bounds.top { return; }
+        let w = bounds.right - bounds.left;
+        let h = bounds.bottom - bounds.top;
+        let radius = sc(i32::from(corner_radius))
+            .min((w.min(h) / 2).max(0));
+        let extent = sc(12).max(2);
+        // Restrict work to the edge envelope, avoiding per-pixel work over the
+        // center of larger horizontal panels.
+        for y in bounds.top.saturating_sub(extent).max(0)
+            ..bounds.bottom.saturating_add(extent).min(canvas_h) {
+            for x in bounds.left.saturating_sub(extent).max(0)
+                ..bounds.right.saturating_add(extent).min(canvas_w) {
+                let local_x = x - bounds.left;
+                let local_y = y - bounds.top;
+                let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
+                if distance.abs() > extent as f32 { continue; }
+                let coverage = drag_hover_glow_coverage(distance);
+                if coverage == 0 { continue; }
+                let index = (y * canvas_w + x) as usize;
+                pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+            }
+        }
+    }
+
+    /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
+    /// When collapsed, every pixel outside the tab is fully transparent and cannot
+    /// obstruct other desktop windows or leave a visible panel edge.
+    fn render_floating_handle_bitmap(
+        pixels: &mut [u32], width: i32, height: i32,
+        edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
+    ) {
+        let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+        render_floating_handle_bitmap_at(pixels, width, height, grip, hovered, style, opacity);
+    }
+
+    fn floating_drag_handle_hit(
+        x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
+    ) -> bool {
+        point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
+    }
+
+    // The desktop tab lives OUTSIDE the panel body. Hover must be checked against
+    // its final screen-space rectangle, especially after the canvas origin changes
+    // on drop from a docked edge to the free-floating top tab.
+    fn floating_drag_grip_contains_screen_point(
+        origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
+        edge: Option<FloatingEdge>, pointer: POINT,
+    ) -> bool {
+        floating_drag_handle_hit(
+            pointer.x - origin_x, pointer.y - origin_y,
+            canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+        )
+    }
+
+    fn floating_clamp_free_visible_position(
+        bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
+    ) -> (i32, i32) {
+        floating_clamp_drag_visible_position(bounds, width, height, body, None, false, x, y)
+    }
+
 
     #[test]
     fn v24_22_taskbar_inner_glow_never_touches_border_or_outside() {
