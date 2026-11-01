@@ -155,7 +155,7 @@ if ($windowProduction -notmatch 'TrackMouseEvent' -or
 if ($windowProduction -notmatch 'drag_handle_hovered' -or
     $windowProduction -notmatch 'draw_drag_handle\(hdc, height, &drag_color, drag_handle_hovered\)' -or
     $windowProduction -notmatch 'fn drag_hover_outline_color\(' -or
-    $windowProduction -notmatch 'fn draw_drag_hover_outline\(' -or
+    $windowProduction -notmatch 'fn draw_drag_hover_outer_glow\(' -or
     $windowProduction -notmatch 'let dot = sc\(2\)\.max\(1\)' -or
     $windowProduction -notmatch 'default_reset_hit\(' -or
     $windowProduction -notmatch 'usage_hover_hit\(') {
