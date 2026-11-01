@@ -9980,8 +9980,8 @@ fn open_color_editor(owner: HWND, target: StyleColorTarget) {
 
         let channel_names = ["R", "G", "B", "A"];
         let channel_values = [color.r, color.g, color.b, color.a];
-        let mut sliders = [SendHwnd(0); 4];
-        let mut labels = [SendHwnd(0); 4];
+        let mut sliders = [SendHwnd::from_hwnd(HWND::default()); 4];
+        let mut labels = [SendHwnd::from_hwnd(HWND::default()); 4];
         for index in 0..4 {
             let y = 18 + index as i32 * 38;
             let Some(_) = create_editor_static(hwnd, channel_names[index], 12, y + 5, 20, 22)
