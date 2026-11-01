@@ -91,6 +91,9 @@ const DESKTOP_SUBMENU_TIMER_ID: usize = 0x4A59;
 const WM_SETTINGS_PRESET_GALLERY_REFRESH: u32 = WM_APP + 146;
 const WM_SETTINGS_PREWARM_GALLERY: u32 = WM_APP + 147;
 const WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK: u32 = WM_APP + 148;
+// Interactive paint requests are posted (not generated WM_PAINT messages)
+// to prevent low-priority paint starvation under continuous user input.
+const WM_SETTINGS_PRESENT_INTERACTIVE_FRAME: u32 = WM_APP + 149;
 // WM_TIMER is a low-priority generated message. A periodic multimedia timer
 // posts one coalesced message to the UI queue for a steadier ~60Hz cadence.
 const DESKTOP_SUBMENU_FRAME_MS: u32 = 16;
@@ -245,7 +248,9 @@ enum SettingsIcon {
     JsonApply,
     DirectionHorizontal,
     DirectionVertical,
+    #[allow(dead_code)] // Keep SVG icon IDs stable for saved resource maps.
     ToggleOn,
+    #[allow(dead_code)]
     ToggleOff,
     PositionTaskbar,
     PositionDesktop,
@@ -291,7 +296,6 @@ enum HitTarget {
     JsonStatusPath,
     DiscardChanges,
     KeepEditing,
-    LanguageToggle,
     LanguageOption(usize),
 }
 
@@ -419,6 +423,45 @@ fn mark_settings_paint_cause(cause: SettingsPaintCause) {
     SETTINGS_PAINT_CAUSE.with(|cell| cell.set(cause));
 }
 
+// WM_PAINT is generated only when the thread's queue has no higher-priority
+// messages. Persistent widget updates can leave the Settings parent dirty
+// without presenting it, while its hit testing continues to work. An
+// explicitly posted, coalesced frame calls UpdateWindow on the UI thread.
+// Only interactive changes use this path; JSON's own child scroll rendering
+// and full-page synchronous redraws retain their existing behavior.
+fn settings_interactive_frame_due(last: Option<Instant>, now: Instant, throttle: bool) -> bool {
+    !throttle || last.is_none_or(|at| {
+        now.saturating_duration_since(at) >= Duration::from_millis(16)
+    })
+}
+
+fn queue_settings_interactive_frame(hwnd: HWND, throttle: bool) {
+    let now = Instant::now();
+    let queued = SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| {
+        if pending.get() {
+            return false;
+        }
+        let due = SETTINGS_LAST_INTERACTIVE_FRAME.with(|last| {
+            settings_interactive_frame_due(last.get(), now, throttle)
+        });
+        if !due {
+            return false;
+        }
+        pending.set(true);
+        true
+    });
+    if !queued {
+        return;
+    }
+    if unsafe {
+        PostMessageW(hwnd, WM_SETTINGS_PRESENT_INTERACTIVE_FRAME, WPARAM(0), LPARAM(0))
+    }.is_ok() {
+        SETTINGS_LAST_INTERACTIVE_FRAME.with(|last| last.set(Some(now)));
+    } else {
+        SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| pending.set(false));
+    }
+}
+
 static SUBMENU_MEDIA_TICK_QUEUED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -426,6 +469,9 @@ thread_local! {
     static PRECISE_ANIMATION_TIMER: RefCell<bool> = const { RefCell::new(false) };
     static SETTINGS_PAINT_CAUSE: Cell<SettingsPaintCause> =
         const { Cell::new(SettingsPaintCause::Unknown) };
+    static SETTINGS_INTERACTIVE_FRAME_QUEUED: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_LAST_INTERACTIVE_FRAME: Cell<Option<Instant>> =
+        const { Cell::new(None) };
 }
 
 type MultimediaTimerCallback = unsafe extern "system" fn(u32, u32, usize, usize, usize);
@@ -534,47 +580,35 @@ unsafe fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
     if rendered {
         mark_settings_paint_cause(SettingsPaintCause::AnimationTimer);
         let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
+        queue_settings_interactive_frame(hwnd, active);
     }
 }
 
-/// Logical 96-DPI bounds. The lower foot contains the existing Desktop
-/// button; the right well fits strictly within the original 740px card.
+/// Fixed 96-DPI geometry for an independent inset on the right of the
+/// appearance option groups. It never touches the Desktop position button.
 #[derive(Clone, Copy, Debug)]
 struct DesktopSubmenuLayout {
     well: RECT,
-    foot: RECT,
+    title: RECT,
     direction_label: RECT,
     collapse_label: RECT,
     horizontal: RECT,
     vertical: RECT,
-    enabled: RECT,
-    disabled: RECT,
+    collapse_switch: RECT,
 }
 fn desktop_submenu_layout() -> DesktopSubmenuLayout {
-    // Both rows share one source of vertical geometry. When a menu option
-    // changes, the drawing and hit-test bounds must move together.
     let row_height = 30;
-    let row_gap = 10;
-    let direction_top = 116;
-    let collapse_top = direction_top + row_height + row_gap;
     let row = |left, right, top| RECT {
         left, top, right, bottom: top + row_height,
     };
     DesktopSubmenuLayout {
-        // Anchor the two-row well beside Layout/Position. The lower edge
-        // joins the Desktop button inset, not the Theme row above it.
-        well: RECT {
-            left: 636, top: direction_top - 10,
-            right: 894, bottom: collapse_top + row_height + 15,
-        },
-        // Keep the 4px inset around Desktop without touching Taskbar.
-        foot: RECT { left: 418, top: 155, right: 654, bottom: 201 },
-        direction_label: row(650, 728, direction_top),
-        collapse_label: row(650, 728, collapse_top),
-        horizontal: row(736, 803, direction_top),
-        vertical: row(811, 878, direction_top),
-        enabled: row(736, 803, collapse_top),
-        disabled: row(811, 878, collapse_top),
+        well: RECT { left: 652, top: 66, right: 924, bottom: 198 },
+        title: RECT { left: 668, top: 76, right: 904, bottom: 96 },
+        direction_label: row(668, 736, 106),
+        collapse_label: row(668, 736, 152),
+        horizontal: row(742, 823, 106),
+        vertical: row(823, 904, 106),
+        collapse_switch: row(850, 904, 152),
     }
 }
 fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
@@ -612,7 +646,6 @@ struct PanelState {
     syncing_corner_edit: bool,
     syncing_hex_edits: bool,
     syncing_json_edit: bool,
-    language_popup_open: bool,
     json_dirty: bool,
     json_status: String,
     json_status_path: Option<PathBuf>,
@@ -1290,7 +1323,6 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
                 syncing_corner_edit: false,
                 syncing_hex_edits: false,
                 syncing_json_edit: false,
-                language_popup_open: false,
                 json_dirty: false,
                 json_status: String::new(),
                 json_status_path: None,
@@ -1548,9 +1580,6 @@ const SETTINGS_CONTENT_RIGHT: i32 = 940;
 const SETTINGS_CARD_RADIUS: i32 = 10;
 const SETTINGS_CARD_INSET_X: i32 = 18;
 const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
-const SETTINGS_CHOICE_LEFT: i32 = 360;
-const SETTINGS_CHOICE_WIDTH: i32 = 130;
-const SETTINGS_CHOICE_GAP: i32 = 10;
 const SETTINGS_EDITOR_HEIGHT: i32 = 164;
 const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
 
@@ -1584,16 +1613,34 @@ fn settings_card_label_rect(hwnd: HWND, top: i32, bottom: i32) -> RECT {
     )
 }
 
-fn settings_choice_rect(hwnd: HWND, top: i32, bottom: i32, index: i32) -> RECT {
-    let left = SETTINGS_CHOICE_LEFT
-        + index * (SETTINGS_CHOICE_WIDTH + SETTINGS_CHOICE_GAP);
-    rect(
-        hwnd,
-        left,
-        top,
-        left + SETTINGS_CHOICE_WIDTH,
-        bottom,
-    )
+// One shared segment formula for painting and hit tests.
+fn general_segment_rect(bounds: RECT, index: usize, count: usize) -> RECT {
+    let width = bounds.right - bounds.left;
+    RECT {
+        left: bounds.left + width * index as i32 / count as i32,
+        right: bounds.left + width * (index as i32 + 1) / count as i32,
+        ..bounds
+    }
+}
+
+fn general_refresh_group_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 360, 68, 920, 102)
+}
+
+fn general_alert_group_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 360, 138, 920, 172)
+}
+
+fn general_usage_card_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 200, 198, 562, 378)
+}
+
+fn general_application_card_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 578, 198, 940, 378)
+}
+
+fn general_language_group_rect(hwnd: HWND) -> RECT {
+    rect(hwnd, 708, 302, 922, 338)
 }
 
 fn section_rect(hwnd: HWND, section: Section) -> RECT {
@@ -1663,18 +1710,22 @@ fn json_action_icon(action: JsonAction) -> SettingsIcon {
     }
 }
 
-// Shared appearance-button grid: all rows use equal widths and 8px gaps.
+// Appearance options use the same adjacent segments for painting and hit
+// testing. The left edge and row spacing match the existing settings card.
 const APPEARANCE_BUTTON_LEFT: i32 = 314;
-const APPEARANCE_BUTTON_WIDTH: i32 = 100;
-const APPEARANCE_BUTTON_GAP: i32 = 8;
+const APPEARANCE_BUTTON_WIDTH: i32 = 108;
 const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
 
+fn appearance_group_rect(hwnd: HWND, top: i32, count: usize) -> RECT {
+    rect(hwnd, APPEARANCE_BUTTON_LEFT, top,
+        APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH * count as i32,
+        top + APPEARANCE_BUTTON_HEIGHT)
+}
+
 fn appearance_button_rect(hwnd: HWND, column: i32, top: i32) -> RECT {
-    let left = APPEARANCE_BUTTON_LEFT
-        + column * (APPEARANCE_BUTTON_WIDTH + APPEARANCE_BUTTON_GAP);
-    rect(
-        hwnd, left, top,
-        left + APPEARANCE_BUTTON_WIDTH, top + APPEARANCE_BUTTON_HEIGHT,
+    general_segment_rect(
+        appearance_group_rect(hwnd, top, if top == 70 { 3 } else { 2 }),
+        column as usize, if top == 70 { 3 } else { 2 },
     )
 }
 
@@ -1701,11 +1752,10 @@ fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
     })
 }
 
-// The controls are stable throughout animation; painted displacement is
-// disabled for hit testing until the subpanel has almost fully expanded.
-fn desktop_auto_collapse_rect(hwnd: HWND, enabled: bool) -> RECT {
-    let layout = desktop_submenu_layout();
-    scaled_rect(hwnd, if enabled { layout.enabled } else { layout.disabled })
+// A single switch hit area; the desired state is derived from the current
+// snapshot when clicked, rather than exposing separate On and Off buttons.
+fn desktop_auto_collapse_rect(hwnd: HWND) -> RECT {
+    scaled_rect(hwnd, desktop_submenu_layout().collapse_switch)
 }
 
 fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
@@ -1975,37 +2025,12 @@ fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: 
         rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
     }
 }
-fn language_button_rect(hwnd: HWND) -> RECT {
-    // Chinese / English only: keep the selector compact and right-aligned.
-    rect(hwnd, 760, 414, 920, 450)
-}
-
 fn language_option_count() -> usize {
     LanguageId::SELECTABLE.len()
 }
 
 fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
-    let button = language_button_rect(hwnd);
-    let row_h = scale(hwnd, 28);
-    let total_h = row_h * language_option_count() as i32;
-    let bottom = button.top - scale(hwnd, 6);
-    RECT {
-        left: button.left,
-        top: bottom - total_h + row_h * index as i32,
-        right: button.right,
-        bottom: bottom - total_h + row_h * (index as i32 + 1),
-    }
-}
-
-fn language_popup_rect(hwnd: HWND) -> RECT {
-    let first = language_option_rect(hwnd, 0);
-    let last = language_option_rect(hwnd, language_option_count() - 1);
-    RECT {
-        left: first.left,
-        top: first.top,
-        right: last.right,
-        bottom: last.bottom,
-    }
+    general_segment_rect(general_language_group_rect(hwnd), index, language_option_count())
 }
 
 fn language_code_for_index(index: usize) -> String {
@@ -2628,17 +2653,12 @@ fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
         900_000 => 2,
         _ => 3,
     };
-    settings_choice_rect(hwnd, 68, 102, index)
+    general_segment_rect(general_refresh_group_rect(hwnd), index, 4)
 }
 
 fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
-    rect(
-        hwnd,
-        812,
-        if weekly { 202 } else { 162 },
-        920,
-        if weekly { 234 } else { 194 },
-    )
+    rect(hwnd, 218, if weekly { 298 } else { 246 }, 544,
+        if weekly { 342 } else { 290 })
 }
 
 fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
@@ -2648,11 +2668,11 @@ fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
         20 => 2,
         _ => 3,
     };
-    settings_choice_rect(hwnd, 268, 302, index)
+    general_segment_rect(general_alert_group_rect(hwnd), index, 4)
 }
 
 fn general_startup_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 812, 370, 920, 402)
+    rect(hwnd, 860, 250, 922, 282)
 }
 
 fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
@@ -2698,6 +2718,9 @@ unsafe fn invalidate_appearance_card_or_window(
         let _ = InvalidateRect(hwnd, Some(&settings_card_rect(hwnd, 58, 206)), false);
     } else {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+    if section != Section::Json {
+        queue_settings_interactive_frame(hwnd, false);
     }
 }
 
@@ -4970,29 +4993,12 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         return None;
     }
 
-    let (section, language_popup_open, json_dirty, json_status_path, language, json_action_pending) = {
+    let (section, json_dirty, json_status_path, language, json_action_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
-        (
-            s.section,
-            s.language_popup_open,
-            s.json_dirty,
-            s.json_status_path.is_some(),
-            s.snapshot.language,
-            s.pending_json_action.is_some(),
-        )
+        (s.section, s.json_dirty, s.json_status_path.is_some(),
+            s.snapshot.language, s.pending_json_action.is_some())
     };
-
-    if section == Section::General && language_popup_open {
-        for index in 0..language_option_count() {
-            if pt_in_rect(language_option_rect(hwnd, index), x, y) {
-                return Some(HitTarget::LanguageOption(index));
-            }
-        }
-        if pt_in_rect(language_button_rect(hwnd), x, y) {
-            return Some(HitTarget::LanguageToggle);
-        }
-    }
 
     for item in [
         Section::General,
@@ -5025,14 +5031,16 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
                 return Some(HitTarget::Position(position));
             }
         }
-        if STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| {
-            s.snapshot.display_position == DisplayPosition::Desktop
-                && s.desktop_submenu.hit_enabled()
-        }) {
-            for enabled in [true, false] {
-                if pt_in_rect(desktop_auto_collapse_rect(hwnd, enabled), x, y) {
-                    return Some(HitTarget::DesktopAutoCollapse(enabled));
-                }
+        let submenu = {
+            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.as_ref().and_then(|s| (
+                s.snapshot.display_position == DisplayPosition::Desktop
+                    && s.desktop_submenu.hit_enabled()
+            ).then_some(s.snapshot.desktop_auto_collapse))
+        };
+        if let Some(collapsed) = submenu {
+            if pt_in_rect(desktop_auto_collapse_rect(hwnd), x, y) {
+                return Some(HitTarget::DesktopAutoCollapse(!collapsed));
             }
             for direction in [DesktopDirection::Horizontal, DesktopDirection::Vertical] {
                 if pt_in_rect(desktop_direction_rect(hwnd, direction), x, y) {
@@ -5055,8 +5063,10 @@ fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
     }
 
     if section == Section::General {
-        if pt_in_rect(language_button_rect(hwnd), x, y) {
-            return Some(HitTarget::LanguageToggle);
+        for index in 0..language_option_count() {
+            if pt_in_rect(language_option_rect(hwnd, index), x, y) {
+                return Some(HitTarget::LanguageOption(index));
+            }
         }
         for interval in [60_000u32, 300_000, 900_000, 3_600_000] {
             if pt_in_rect(general_refresh_rect(hwnd, interval), x, y) {
@@ -5252,18 +5262,11 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 begin_json_action(hwnd, action);
             }
         },
-        HitTarget::LanguageToggle => {
-            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = state.as_mut() {
-                s.language_popup_open = !s.language_popup_open;
-            }
-        }
         HitTarget::LanguageOption(index) => {
             {
                 let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = state.as_mut() {
                     s.snapshot.editable_settings.general.language = language_code_for_index(index);
-                    s.language_popup_open = false;
                 }
             }
             send_parent(WM_SETTINGS_LANGUAGE_CHANGE, index, 0);
@@ -5327,9 +5330,6 @@ fn set_section(section: Section) {
             return;
         };
         s.section = section;
-        if section != Section::General {
-            s.language_popup_open = false;
-        }
         if let Some(editor) = rows(section).first().copied() {
             s.editor = editor;
         } else {
@@ -5701,6 +5701,10 @@ fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
     }
+    // A drag can keep the message queue nonempty, starving generated WM_PAINT.
+    // Cap active drag presentation at ~60 fps, then flush the final value on
+    // WM_LBUTTONUP via invalidate_appearance_card_or_window.
+    queue_settings_interactive_frame(hwnd, true);
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -5788,6 +5792,7 @@ unsafe extern "system" fn wnd_proc(
                     SETTINGS_GALLERY_REFRESH.with(|cell| cell.set(true));
                     mark_settings_paint_cause(SettingsPaintCause::GalleryRefresh);
                     let _ = InvalidateRect(hwnd, Some(&rect), false);
+                    queue_settings_interactive_frame(hwnd, false);
                 }
             }
             LRESULT(0)
@@ -5798,6 +5803,14 @@ unsafe extern "system" fn wnd_proc(
             if SUBMENU_MULTIMEDIA_TIMER_ID.with(|cell| cell.get() != 0) {
                 drive_submenu_frame_tick(hwnd, true);
             }
+            LRESULT(0)
+        }
+        WM_SETTINGS_PRESENT_INTERACTIVE_FRAME => {
+            SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| pending.set(false));
+            // Unlike generated WM_PAINT, UpdateWindow bypasses the message
+            // queue; the original invalid region and cached renderer remain
+            // responsible for what is drawn.
+            let _ = UpdateWindow(hwnd);
             LRESULT(0)
         }
         WM_TIMER => {
@@ -5935,32 +5948,6 @@ unsafe extern "system" fn wnd_proc(
                             return LRESULT(0);
                         }
                     }
-                }
-            }
-
-            let popup_open = {
-                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state
-                    .as_ref()
-                    .map(|s| s.section == Section::General && s.language_popup_open)
-                    .unwrap_or(false)
-            };
-            if popup_open {
-                let target = hit_target_at(hwnd, x, y);
-                if !matches!(
-                    target,
-                    Some(HitTarget::LanguageToggle | HitTarget::LanguageOption(_))
-                ) {
-                    {
-                        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(s) = state.as_mut() {
-                            s.language_popup_open = false;
-                            s.hovered = None;
-                            s.pressed = None;
-                        }
-                    }
-                    let _ = InvalidateRect(hwnd, None, false);
-                    return LRESULT(0);
                 }
             }
 
@@ -7367,6 +7354,83 @@ unsafe fn paint_navigation(
     }
 }
 
+// Connected single-choice controls: selected/hover backgrounds have square
+// inner edges, and the complete group has one rounded exterior and outline.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_general_segment_group(
+    hdc: HDC, hwnd: HWND, bounds: RECT, choices: &[(HitTarget, bool, &str)],
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    normal: Color, hover: Color, pressed_color: Color,
+    accent: Color, accent_hover: Color, accent_pressed: Color, primary: Color,
+) {
+    if choices.is_empty() { return; }
+    let radius = scale(hwnd, 9);
+    fill_rounded_rect(hdc, bounds, normal, radius);
+    for (index, &(target, selected, label)) in choices.iter().enumerate() {
+        let option = general_segment_rect(bounds, index, choices.len());
+        let background = button_background(target, selected, hovered, pressed,
+            ButtonPalette {
+                normal, hover, pressed: pressed_color,
+                selected: accent, selected_hover: accent_hover,
+                selected_pressed: accent_pressed,
+            },
+        );
+        if selected || hovered == Some(target) || pressed == Some(target) {
+            fill_rounded_rect(hdc, option, background, radius);
+            if index != 0 {
+                fill(hdc, RECT { right: option.left + radius, ..option }, background);
+            }
+            if index + 1 != choices.len() {
+                fill(hdc, RECT { left: option.right - radius, ..option }, background);
+            }
+        }
+        let _ = SetTextColor(hdc, COLORREF(
+            if selected { Color::from_hex("#FFFFFFFF") } else { primary }.to_colorref()
+        ));
+        draw_text(hdc, label, option, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    let separator = subtle_control_border(normal);
+    for index in 1..choices.len() {
+        let x = general_segment_rect(bounds, index, choices.len()).left;
+        fill(hdc, RECT {
+            left: x, top: bounds.top + scale(hwnd, 5),
+            right: x + scale(hwnd, 1), bottom: bounds.bottom - scale(hwnd, 5),
+        }, separator);
+    }
+    draw_rounded_outline_rect(hdc, bounds, separator, radius, 1);
+}
+
+// Each usage type is a checkbox; the existing persistence guard still keeps
+// at least one quota window enabled when either box is clicked.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_general_usage_checkbox(
+    hdc: HDC, hwnd: HWND, hit: RECT, target: HitTarget,
+    enabled: bool, hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    card: Color, card_hover: Color, accent: Color, primary: Color, secondary: Color,
+    label: &str,
+) {
+    if hovered == Some(target) || pressed == Some(target) {
+        fill_rounded_rect(hdc, hit, card_hover, scale(hwnd, 7));
+    }
+    let size = scale(hwnd, 20);
+    let left = hit.left + scale(hwnd, 14);
+    let top = hit.top + (hit.bottom - hit.top - size) / 2;
+    let checkbox = RECT { left, top, right: left + size, bottom: top + size };
+    fill_rounded_rect(hdc, checkbox, if enabled { accent } else { card }, scale(hwnd, 5));
+    draw_rounded_outline_rect(
+        hdc, checkbox, if enabled { accent } else { subtle_control_border(card_hover) },
+        scale(hwnd, 5), 1,
+    );
+    if enabled {
+        let _ = SetTextColor(hdc, COLORREF(Color::from_hex("#FFFFFFFF").to_colorref()));
+        draw_text(hdc, "✓", checkbox, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    let _ = SetTextColor(hdc, COLORREF(if enabled { primary } else { secondary }.to_colorref()));
+    draw_text(hdc, label, RECT {
+        left: checkbox.right + scale(hwnd, 14), ..hit
+    }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn paint_general_page(
     hdc: HDC,
@@ -7392,11 +7456,6 @@ unsafe fn paint_general_page(
         "1h" => 3_600_000,
         _ => 900_000,
     };
-    let popup_open = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.language_popup_open).unwrap_or(false)
-    };
-
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
         hdc,
@@ -7407,178 +7466,97 @@ unsafe fn paint_general_page(
 
     for r in [
         settings_card_rect(hwnd, 58, 112),
-        settings_card_rect(hwnd, 128, 242),
-        settings_card_rect(hwnd, 258, 312),
-        settings_card_rect(hwnd, 328, 464),
+        settings_card_rect(hwnd, 128, 182),
+        general_usage_card_rect(hwnd),
+        general_application_card_rect(hwnd),
     ] {
         fill_rounded_rect(hdc, r, card, scale(hwnd, SETTINGS_CARD_RADIUS));
     }
 
-    // Refresh frequency and quota alerts intentionally share identical card
-    // padding, label width, option width and option gaps.
+    // Connected radio groups share button geometry with their hit targets.
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
-        hdc,
-        strings.update_frequency,
-        settings_card_label_rect(hwnd, 68, 102),
+        hdc, strings.update_frequency, settings_card_label_rect(hwnd, 68, 102),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-    for (interval, label) in [
-        (60_000u32, strings.one_minute),
-        (300_000, strings.five_minutes),
-        (900_000, strings.fifteen_minutes),
-        (3_600_000, strings.one_hour),
+    draw_general_segment_group(
+        hdc, hwnd, general_refresh_group_rect(hwnd),
+        &[
+            (HitTarget::Refresh(60_000), current_interval == 60_000, strings.one_minute),
+            (HitTarget::Refresh(300_000), current_interval == 300_000, strings.five_minutes),
+            (HitTarget::Refresh(900_000), current_interval == 900_000, strings.fifteen_minutes),
+            (HitTarget::Refresh(3_600_000), current_interval == 3_600_000, strings.one_hour),
+        ],
+        hovered, pressed, card_hover, card_pressed, card_pressed,
+        accent, accent_hover, accent_pressed, primary,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc, if zh { "额度提醒" } else { "Quota alerts" },
+        settings_card_label_rect(hwnd, 138, 172),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_general_segment_group(
+        hdc, hwnd, general_alert_group_rect(hwnd),
+        &[
+            (HitTarget::Alert(0), general.quota_alert_percent == 0,
+                if zh { "关闭" } else { "Off" }),
+            (HitTarget::Alert(10), general.quota_alert_percent == 10, "10%"),
+            (HitTarget::Alert(20), general.quota_alert_percent == 20, "20%"),
+            (HitTarget::Alert(30), general.quota_alert_percent == 30, "30%"),
+        ],
+        hovered, pressed, card_hover, card_pressed, card_pressed,
+        accent, accent_hover, accent_pressed, primary,
+    );
+
+    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
+    draw_text(
+        hdc, if zh { "显示用量" } else { "Usage display" },
+        rect(hwnd, 218, 212, 544, 240),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    for (target, weekly, enabled, label) in [
+        (HitTarget::UsageSession, false, general.show_usage.session_5h, "5H"),
+        (HitTarget::UsageWeekly, true, general.show_usage.weekly, "7D"),
     ] {
-        let selected = current_interval == interval;
-        let target = HitTarget::Refresh(interval);
-        draw_segment(
-            hdc,
-            general_refresh_rect(hwnd, interval),
-            selected,
-            button_background(
-                target,
-                selected,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            label,
+        draw_general_usage_checkbox(
+            hdc, hwnd, general_usage_rect(hwnd, weekly),
+            target, enabled, hovered, pressed,
+            card, card_hover, accent, primary, secondary, label,
         );
     }
 
     let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
     draw_text(
-        hdc,
-        if zh { "显示用量" } else { "Usage display" },
-        rect(hwnd, 218, 138, 500, 162),
+        hdc, if zh { "应用" } else { "Application" },
+        rect(hwnd, 596, 212, 922, 240),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
-        hdc,
-        "5H",
-        rect(hwnd, 238, 162, 650, 194),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    draw_text(
-        hdc,
-        "7D",
-        rect(hwnd, 238, 202, 650, 234),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    for (target, enabled, weekly) in [
-        (HitTarget::UsageSession, general.show_usage.session_5h, false),
-        (HitTarget::UsageWeekly, general.show_usage.weekly, true),
-    ] {
-        draw_switch(
-            hdc,
-            general_usage_rect(hwnd, weekly),
-            enabled,
-            button_background(
-                target,
-                enabled,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
-        );
-    }
-
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh { "额度提醒" } else { "Quota alerts" },
-        settings_card_label_rect(hwnd, 268, 302),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    for (threshold, zh_label, en_label) in [
-        (0u8, "关闭", "Off"),
-        (10, "10%", "10%"),
-        (20, "20%", "20%"),
-        (30, "30%", "30%"),
-    ] {
-        let selected = general.quota_alert_percent == threshold;
-        let target = HitTarget::Alert(threshold);
-        draw_segment(
-            hdc,
-            general_alert_rect(hwnd, threshold),
-            selected,
-            button_background(
-                target,
-                selected,
-                hovered,
-                pressed,
-                ButtonPalette {
-                    normal: card_hover,
-                    hover: card_pressed,
-                    pressed: card_pressed,
-                    selected: accent,
-                    selected_hover: accent_hover,
-                    selected_pressed: accent_pressed,
-                },
-            ),
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            if zh { zh_label } else { en_label },
-        );
-    }
-
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh { "应用" } else { "Application" },
-        rect(hwnd, 218, 338, 500, 362),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(
-        hdc,
-        strings.start_with_windows,
-        rect(hwnd, 238, 370, 650, 402),
+        hdc, strings.start_with_windows,
+        rect(hwnd, 596, 246, 854, 286),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     let startup = general.start_with_windows;
     draw_switch(
-        hdc,
-        general_startup_rect(hwnd),
-        startup,
+        hdc, general_startup_rect(hwnd), startup,
         button_background(
-            HitTarget::Startup,
-            startup,
-            hovered,
-            pressed,
+            HitTarget::Startup, startup, hovered, pressed,
             ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
+                normal: card_hover, hover: card_pressed, pressed: card_pressed,
+                selected: accent, selected_hover: accent_hover,
                 selected_pressed: accent_pressed,
             },
         ),
     );
 
+    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
-        hdc,
-        strings.language,
-        rect(hwnd, 238, 414, 600, 450),
+        hdc, strings.language, rect(hwnd, 596, 302, 700, 338),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
-
     let selected_language = if general.language == "system" {
         snapshot.language
     } else {
@@ -7586,134 +7564,19 @@ unsafe fn paint_general_page(
             .map(LanguageId::ui_supported)
             .unwrap_or(snapshot.language)
     };
-    let current_language_index = LanguageId::SELECTABLE
-        .iter()
-        .position(|language| *language == selected_language)
-        .unwrap_or_else(|| {
-            LanguageId::SELECTABLE
-                .iter()
-                .position(|language| *language == LanguageId::English)
-                .unwrap_or(0)
-        });
-    let language_target = HitTarget::LanguageToggle;
-    let language_button = language_button_rect(hwnd);
-    let language_background = button_background(
-        language_target,
-        false,
-        hovered,
-        pressed,
-        ButtonPalette {
-            normal: card_hover,
-            hover: card_pressed,
-            pressed: card_pressed,
-            selected: card_hover,
-            selected_hover: card_pressed,
-            selected_pressed: card_pressed,
-        },
+    let language_choices: Vec<(HitTarget, bool, &str)> = LanguageId::SELECTABLE
+        .iter().enumerate()
+        .map(|(index, language)| (
+            HitTarget::LanguageOption(index),
+            *language == selected_language,
+            language_label_for_index(index, snapshot.language),
+        ))
+        .collect();
+    draw_general_segment_group(
+        hdc, hwnd, general_language_group_rect(hwnd), &language_choices,
+        hovered, pressed, card_hover, card_pressed, card_pressed,
+        accent, accent_hover, accent_pressed, primary,
     );
-    fill_rounded_rect(hdc, language_button, language_background, scale(hwnd, 8));
-    draw_rounded_outline_rect(
-        hdc,
-        language_button,
-        if popup_open {
-            accent
-        } else {
-            subtle_control_border(language_background)
-        },
-        scale(hwnd, 8),
-        1,
-    );
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        language_label_for_index(current_language_index, snapshot.language),
-        RECT {
-            left: language_button.left + scale(hwnd, 12),
-            top: language_button.top,
-            right: language_button.right - scale(hwnd, 38),
-            bottom: language_button.bottom,
-        },
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    draw_text(
-        hdc,
-        if popup_open { "▲" } else { "▼" },
-        RECT {
-            left: language_button.right - scale(hwnd, 34),
-            top: language_button.top,
-            right: language_button.right - scale(hwnd, 8),
-            bottom: language_button.bottom,
-        },
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    if popup_open {
-        // Paint one opaque popup surface first. The option rows use rounded
-        // corners individually; without this backing surface their clipped
-        // corners expose controls from the General page underneath.
-        let popup_rect = language_popup_rect(hwnd);
-        fill_rounded_rect(hdc, popup_rect, card, scale(hwnd, 7));
-
-        for index in 0..language_option_count() {
-            let option = language_option_rect(hwnd, index);
-            let selected = current_language_index == index;
-            let target = HitTarget::LanguageOption(index);
-            fill_rounded_rect(
-                hdc,
-                option,
-                button_background(
-                    target,
-                    selected,
-                    hovered,
-                    pressed,
-                    ButtonPalette {
-                        normal: card,
-                        hover: card_hover,
-                        pressed: card_pressed,
-                        selected: card_hover,
-                        selected_hover: card_pressed,
-                        selected_pressed: card_pressed,
-                    },
-                ),
-                scale(hwnd, 6),
-            );
-            let _ = SetTextColor(
-                hdc,
-                COLORREF(if selected { accent } else { primary }.to_colorref()),
-            );
-            draw_text(
-                hdc,
-                language_label_for_index(index, snapshot.language),
-                RECT {
-                    left: option.left + scale(hwnd, 12),
-                    top: option.top,
-                    right: option.right - scale(hwnd, 34),
-                    bottom: option.bottom,
-                },
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
-            if selected {
-                draw_text(
-                    hdc,
-                    "✓",
-                    RECT {
-                        left: option.right - scale(hwnd, 30),
-                        top: option.top,
-                        right: option.right - scale(hwnd, 8),
-                        bottom: option.bottom,
-                    },
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
-        }
-        draw_rounded_outline_rect(
-            hdc,
-            popup_rect,
-            accent,
-            scale(hwnd, 7),
-            1,
-        );
-    }
 }
 
 // Shared between the full JSON page paint and scrollbar-only child paints.
@@ -7974,134 +7837,189 @@ fn submenu_content_alpha(progress: f32) -> f32 {
     p * p * (3.0 - 2.0 * p)
 }
 
-fn submenu_content_offset(progress: f32) -> i32 {
-    // A subtle slide from the right, measured in logical (96 DPI) pixels.
-    ((1.0 - submenu_content_alpha(progress)) * 8.0).round() as i32
-}
-
-fn submenu_background_alpha(progress: f32) -> f32 {
-    progress.clamp(0.0, 1.0)
-}
-
-/// One anti-aliased, continuous L-shaped inset. The old implementation
-/// overpainted two rounded rectangles and four opaque shadow bars; its joined
-/// horizontal/vertical edges produced the heavy black seams in V24.28.
-/// A native Direct2D path now owns the union AND its low-contrast inner shadow.
+/// The inset surface is independent of the selected display position.
+/// Only the opacity of the controls changes while switching positions.
 unsafe fn paint_submenu_well(
-    hdc: HDC, hwnd: HWND, progress: f32, card: Color, dark: bool,
+    hdc: HDC, hwnd: HWND, _card: Color, dark: bool,
 ) -> Color {
-    let top_target = if dark {
-        Color::from_hex("#252A30FF")
-    } else {
-        Color::from_hex("#E4EBF2FF")
-    };
-    let bottom_target = if dark {
+    let surface = if dark {
         Color::from_hex("#22272DFF")
     } else {
-        Color::from_hex("#E0E7EFFF")
+        Color::from_hex("#DFE7EFFF")
     };
-    if progress <= 0.0 { return top_target; }
-    let l = desktop_submenu_layout();
-    // Paint the WHOLE L-shaped surface on every animated frame. A sweeping
-    // clipping edge used to hide nearly half the animation before the well
-    // appeared, then visibly cut glyphs and controls during the reveal.
-    let opacity = submenu_background_alpha(progress);
-    let top = submenu_mix(card, top_target, opacity);
-    let bottom = submenu_mix(card, bottom_target, opacity);
-    let well = scaled_rect(hwnd, l.well);
-    let foot = scaled_rect(hwnd, l.foot);
-    let reveal = well.right;
-    let shadow_opacity = if dark { 0.12 } else { 0.075 } * opacity;
-    if !native_interop::draw_antialiased_desktop_inset_well(
-        hdc, well, foot, reveal, scale(hwnd, 11) as f32,
-        top, bottom, shadow_opacity,
+    let rim = if dark {
+        Color::from_hex("#15191EFF")
+    } else {
+        Color::from_hex("#BFCCD9FF")
+    };
+    let bounds = scaled_rect(hwnd, desktop_submenu_layout().well);
+    let radius = scale(hwnd, 11);
+    if !native_interop::draw_antialiased_rounded_rect(
+        hdc, bounds, radius as f32, Some(surface),
+        Some((rim, scale(hwnd, 1).max(1) as f32)),
     ) {
-        // Degraded systems without the Direct2D DC renderer: use a subtle
-        // solid inset, but never restore the hard black shadow rectangles.
-        let saved = SaveDC(hdc);
-        let _ = IntersectClipRect(
-            hdc, foot.left, well.top, reveal, well.bottom,
-        );
-        fill_rounded_rect(hdc, well, top, scale(hwnd, 11));
-        fill_rounded_rect(hdc, foot, top, scale(hwnd, 11));
-        fill(hdc, rect(hwnd, 641, 163, 652, 191), top);
-        let _ = RestoreDC(hdc, saved);
+        fill_rounded_rect(hdc, bounds, surface, radius);
+        draw_rounded_outline_rect(hdc, bounds, rim, radius, 1);
     }
-    // This is also the backing color used when fading the submenu labels and
-    // controls. Its exact value is independent of the persistent user theme.
-    top
+    surface
 }
 
+/// Connected single-choice group with optional submenu fade. All groups
+/// share general_segment_rect so the painted boundaries and hit areas agree.
 #[allow(clippy::too_many_arguments)]
-unsafe fn paint_submenu_choice(hdc:HDC,hwnd:HWND,bounds:RECT,icon:SettingsIcon,
-    label:&str,selected:bool,target:HitTarget,hovered:Option<HitTarget>,
-    pressed:Option<HitTarget>,alpha:f32,inset:Color,palette:ButtonPalette,primary:Color) {
-    if alpha<=0.005 {return;}
-    let mut r=scaled_rect(hwnd,bounds);
-    let shift=scale(hwnd,((1.0-alpha)*8.0).round() as i32);
-    r.left+=shift; r.right+=shift;
-    let desired=button_background(target,selected,hovered,pressed,palette);
-    let bg=submenu_mix(inset,desired,alpha);
-    let fg=submenu_mix(inset,if selected {Color::from_hex("#FFFFFFFF")}else{primary},alpha);
-    fill_rounded_rect(hdc,r,bg,scale(hwnd,7));
-    let outline=submenu_mix(inset,if selected{Color::from_hex("#76A7FFFF")}
-        else{subtle_control_border(desired)},alpha);
-    draw_rounded_outline_rect(hdc,r,outline,scale(hwnd,7),1);
-    // V24.32: the 14px glyphs in V24.31 lost the silhouette at 100% DPI.
-    // Use 18px and reserve text width even on English / scaled displays.
-    let gap=scale(hwnd,2);
-    let text_width=text_width_px(hwnd,label);
-    let size=scale(hwnd,DESKTOP_SUBMENU_ICON_SIZE)
-        .min((r.right-r.left-text_width-gap-scale(hwnd,6)).max(scale(hwnd,12)));
-    let group=size+gap+text_width;
-    let left=r.left+((r.right-r.left-group)/2).max(scale(hwnd,3));
-    let top=r.top+(r.bottom-r.top-size)/2;
-    let ir=RECT{left,top,right:left+size,bottom:top+size};
-    draw_settings_icon(hdc,hwnd,icon,ir,fg,bg);
-    let _=SetTextColor(hdc,COLORREF(fg.to_colorref()));
-    draw_text(hdc,label,RECT{left:ir.right+gap,top:r.top,right:r.right-scale(hwnd,2),
-        bottom:r.bottom},DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+unsafe fn draw_appearance_choice_group(
+    hdc: HDC, hwnd: HWND, bounds: RECT,
+    choices: &[(HitTarget, bool, SettingsIcon, &str)],
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    palette: ButtonPalette, primary: Color, fade: Option<(Color, f32)>,
+) {
+    if choices.is_empty() { return; }
+    let alpha = fade.map_or(1.0, |(_, a)| a.clamp(0.0, 1.0));
+    if alpha <= 0.005 { return; }
+    // The painted controls stay aligned with their hit rectangles.
+    let tint = |color: Color| match fade {
+        Some((inset, _)) => submenu_mix(inset, color, alpha),
+        None => color,
+    };
+    let radius = scale(hwnd, 8);
+    fill_rounded_rect(hdc, bounds, tint(palette.normal), radius);
+    for (index, &(target, selected, icon, label)) in choices.iter().enumerate() {
+        let option = general_segment_rect(bounds, index, choices.len());
+        let desired = button_background(target, selected, hovered, pressed, palette);
+        let background = tint(desired);
+        if selected || hovered == Some(target) || pressed == Some(target) {
+            fill_rounded_rect(hdc, option, background, radius);
+            if index > 0 {
+                fill(hdc, RECT { right: option.left + radius, ..option }, background);
+            }
+            if index + 1 < choices.len() {
+                fill(hdc, RECT { left: option.right - radius, ..option }, background);
+            }
+        }
+        let foreground = tint(if selected {
+            Color::from_hex("#FFFFFFFF")
+        } else { primary });
+        let height = (option.bottom - option.top).max(1);
+        let glyph_size = scale(hwnd, DESKTOP_SUBMENU_ICON_SIZE)
+            .min((height - scale(hwnd, 8)).max(1));
+        let gap = scale(hwnd, 4);
+        let label_width = text_width_px(hwnd, label).max(0);
+        let group_width = glyph_size + gap + label_width;
+        let group_left = option.left + ((option.right - option.left - group_width) / 2)
+            .max(scale(hwnd, 3));
+        let glyph_top = option.top + (height - glyph_size) / 2;
+        draw_settings_icon(
+            hdc, hwnd, icon,
+            RECT {
+                left: group_left, top: glyph_top,
+                right: group_left + glyph_size, bottom: glyph_top + glyph_size,
+            },
+            foreground, background,
+        );
+        let _ = SetTextColor(hdc, COLORREF(foreground.to_colorref()));
+        draw_text(hdc, label, RECT {
+            left: group_left + glyph_size + gap, top: option.top,
+            right: option.right - scale(hwnd, 3), bottom: option.bottom,
+        }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    let border = tint(subtle_control_border(palette.normal));
+    for index in 1..choices.len() {
+        let x = general_segment_rect(bounds, index, choices.len()).left;
+        fill(hdc, RECT {
+            left: x, right: x + scale(hwnd, 1),
+            top: bounds.top + scale(hwnd, 5),
+            bottom: bounds.bottom - scale(hwnd, 5),
+        }, border);
+    }
+    draw_rounded_outline_rect(hdc, bounds, border, radius, 1);
+}
+
+/// The desktop collapse toggle shares the General page switch geometry and
+/// colors; its Composition-style submenu reveal tints both track and knob.
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_submenu_collapse_switch(
+    hdc: HDC, hit: RECT, enabled: bool,
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    alpha: f32, inset: Color, palette: ButtonPalette,
+) {
+    if alpha <= 0.005 { return; }
+    let height = hit.bottom - hit.top;
+    let track_height = (height * 11 / 16).max(12);
+    let track_width = (track_height * 20 / 11).min(hit.right - hit.left);
+    let track = RECT {
+        left: hit.right - track_width,
+        right: hit.right,
+        top: hit.top + (height - track_height) / 2,
+        bottom: hit.top + (height - track_height) / 2 + track_height,
+    };
+    let target = HitTarget::DesktopAutoCollapse(!enabled);
+    let bg = submenu_mix(inset, button_background(target, enabled, hovered, pressed, palette), alpha);
+    fill_rounded_rect(hdc, track, bg, track_height / 2);
+    draw_rounded_outline_rect(
+        hdc, track, submenu_mix(inset, subtle_control_border(bg), alpha),
+        track_height / 2, 1,
+    );
+    let knob = (track_height - 4).max(8);
+    let left = if enabled { track.right - knob - 2 } else { track.left + 2 };
+    let top = track.top + (track_height - knob) / 2;
+    fill_rounded_rect(
+        hdc, RECT { left, top, right: left + knob, bottom: top + knob },
+        submenu_mix(inset, Color::from_hex("#FFFFFFFF"), alpha), knob / 2,
+    );
 }
 #[allow(clippy::too_many_arguments)]
-unsafe fn paint_submenu_content(hdc:HDC,hwnd:HWND,snapshot:&StyleWindowSnapshot,
-    progress:f32,inset:Color,hovered:Option<HitTarget>,pressed:Option<HitTarget>,
-    palette:ButtonPalette,primary:Color,secondary:Color) {
-    let opacity=submenu_content_alpha(progress);
-    if opacity<=0.005 {return;}
-    let l=desktop_submenu_layout();
-    // Clip only to the FIXED well bounds, never to an animated vertical edge.
-    // The background, labels and controls now move/fade as a complete unit.
-    let saved=SaveDC(hdc);
-    let _=IntersectClipRect(hdc,scale(hwnd,l.well.left),scale(hwnd,l.well.top),
-        scale(hwnd,l.well.right),scale(hwnd,l.well.bottom));
-    let zh=snapshot.language==LanguageId::SimplifiedChinese;
-    let dx=scale(hwnd,submenu_content_offset(progress));
-    let txt=|mut r:RECT|{r.left+=dx;r.right+=dx;r};
-    // The inset and selected Desktop button already convey the hierarchy;
-    // avoid a redundant secondary-panel title.
-    let _=SetTextColor(hdc,COLORREF(submenu_mix(inset,secondary,opacity).to_colorref()));
-    draw_text(hdc,if zh{"方向"}else{"Direction"},txt(scaled_rect(hwnd,l.direction_label)),
-        DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    draw_text(hdc,if zh{"收缩"}else{"Collapse"},
-        txt(scaled_rect(hwnd,l.collapse_label)),DT_LEFT|DT_VCENTER|DT_SINGLELINE);
-    for direction in [DesktopDirection::Horizontal,DesktopDirection::Vertical] {
-        let horizontal=direction==DesktopDirection::Horizontal;
-        paint_submenu_choice(hdc,hwnd,if horizontal{l.horizontal}else{l.vertical},
-            if horizontal{SettingsIcon::DirectionHorizontal}else{SettingsIcon::DirectionVertical},
-            match(zh,horizontal){(true,true)=>"横向",(true,false)=>"纵向",
-                (false,true)=>"Horz",(false,false)=>"Vert"},
-            snapshot.desktop_direction==direction,HitTarget::DesktopDirection(direction),
-            hovered,pressed,opacity,inset,palette,primary);
-    }
-    for enabled in [true,false] {
-        paint_submenu_choice(hdc,hwnd,if enabled{l.enabled}else{l.disabled},
-            if enabled{SettingsIcon::ToggleOn}else{SettingsIcon::ToggleOff},
-            match(zh,enabled){(true,true)=>"开启",(true,false)=>"关闭",
-                (false,true)=>"On",(false,false)=>"Off"},
-            snapshot.desktop_auto_collapse==enabled,HitTarget::DesktopAutoCollapse(enabled),
-            hovered,pressed,opacity,inset,palette,primary);
-    }
-    let _=RestoreDC(hdc,saved);
+unsafe fn paint_submenu_content(
+    hdc: HDC, hwnd: HWND, snapshot: &StyleWindowSnapshot,
+    progress: f32, inset: Color,
+    hovered: Option<HitTarget>, pressed: Option<HitTarget>,
+    palette: ButtonPalette, primary: Color, secondary: Color,
+) {
+    // The controls remain legible but disabled in taskbar mode; their tint
+    // transitions smoothly without moving the well or click targets.
+    let opacity = 0.45 + 0.55 * submenu_content_alpha(progress);
+    let l = desktop_submenu_layout();
+    let saved = SaveDC(hdc);
+    let well = scaled_rect(hwnd, l.well);
+    let _ = IntersectClipRect(hdc, well.left, well.top, well.right, well.bottom);
+    let zh = snapshot.language == LanguageId::SimplifiedChinese;
+    let title_color = if snapshot.is_dark {
+        Color::from_hex("#98A3AEFF")
+    } else {
+        Color::from_hex("#7D8996FF")
+    };
+    let _ = SetTextColor(hdc, COLORREF(title_color.to_colorref()));
+    draw_text(
+        hdc, if zh { "桌面模式" } else { "Desktop mode" },
+        scaled_rect(hwnd, l.title), DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    let _ = SetTextColor(hdc, COLORREF(submenu_mix(inset, secondary, opacity).to_colorref()));
+    draw_text(
+        hdc, if zh { "方向" } else { "Direction" },
+        scaled_rect(hwnd, l.direction_label), DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text(
+        hdc, if zh { "收缩" } else { "Collapse" },
+        scaled_rect(hwnd, l.collapse_label), DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_appearance_choice_group(
+        hdc, hwnd,
+        scaled_rect(hwnd, RECT { right: l.vertical.right, ..l.horizontal }),
+        &[
+            (HitTarget::DesktopDirection(DesktopDirection::Horizontal),
+                snapshot.desktop_direction == DesktopDirection::Horizontal,
+                SettingsIcon::DirectionHorizontal, if zh { "横向" } else { "Horz" }),
+            (HitTarget::DesktopDirection(DesktopDirection::Vertical),
+                snapshot.desktop_direction == DesktopDirection::Vertical,
+                SettingsIcon::DirectionVertical, if zh { "纵向" } else { "Vert" }),
+        ],
+        hovered, pressed, palette, primary, Some((inset, opacity)),
+    );
+    paint_submenu_collapse_switch(
+        hdc, scaled_rect(hwnd, l.collapse_switch),
+        snapshot.desktop_auto_collapse, hovered, pressed,
+        opacity, inset, palette,
+    );
+    let _ = RestoreDC(hdc, saved);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8146,9 +8064,7 @@ unsafe fn paint_appearance_page(
         card,
         scale(hwnd, SETTINGS_CARD_RADIUS),
     );
-    let submenu_inset = paint_submenu_well(
-        hdc, hwnd, desktop_submenu_progress, card, snapshot.is_dark,
-    );
+    let submenu_inset = paint_submenu_well(hdc, hwnd, card, snapshot.is_dark);
     let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
     draw_text(
         hdc,
@@ -8169,114 +8085,59 @@ unsafe fn paint_appearance_page(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
-    for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
-        let selected = snapshot.theme_mode == mode;
-        let target = HitTarget::Theme(mode);
-        let control_background = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment_with_icon(
-            hdc,
-            hwnd,
-            theme_rect(hwnd, mode),
-            selected,
-            control_background,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            theme_icon(mode),
-            match (zh, mode) {
-                (true, ThemeMode::System) => "系统",
-                (true, ThemeMode::Dark) => "深色",
-                (true, ThemeMode::Light) => "浅色",
-                (false, ThemeMode::System) => "System",
-                (false, ThemeMode::Dark) => "Dark",
-                (false, ThemeMode::Light) => "Light",
-            },
-        );
-    }
+    let choice_palette = ButtonPalette {
+        normal: card_hover,
+        hover: card_pressed,
+        pressed: card_pressed,
+        selected: accent,
+        selected_hover: accent_hover,
+        selected_pressed: accent_pressed,
+    };
+    draw_appearance_choice_group(
+        hdc, hwnd, appearance_group_rect(hwnd, 70, 3),
+        &[
+            (HitTarget::Theme(ThemeMode::System), snapshot.theme_mode == ThemeMode::System,
+                theme_icon(ThemeMode::System), if zh { "系统" } else { "System" }),
+            (HitTarget::Theme(ThemeMode::Dark), snapshot.theme_mode == ThemeMode::Dark,
+                theme_icon(ThemeMode::Dark), if zh { "深色" } else { "Dark" }),
+            (HitTarget::Theme(ThemeMode::Light), snapshot.theme_mode == ThemeMode::Light,
+                theme_icon(ThemeMode::Light), if zh { "浅色" } else { "Light" }),
+        ],
+        hovered, pressed, choice_palette, primary, None,
+    );
+    draw_appearance_choice_group(
+        hdc, hwnd, appearance_group_rect(hwnd, 116, 2),
+        &[
+            (HitTarget::Layout(AppearancePreset::Default),
+                snapshot.appearance_preset == AppearancePreset::Default,
+                layout_icon(AppearancePreset::Default), if zh { "默认" } else { "Default" }),
+            (HitTarget::Layout(AppearancePreset::Minimal),
+                snapshot.appearance_preset == AppearancePreset::Minimal,
+                layout_icon(AppearancePreset::Minimal), if zh { "极简" } else { "Minimal" }),
+        ],
+        hovered, pressed, choice_palette, primary, None,
+    );
+    draw_appearance_choice_group(
+        hdc, hwnd, appearance_group_rect(hwnd, 162, 2),
+        &[
+            (HitTarget::Position(DisplayPosition::Taskbar),
+                snapshot.display_position == DisplayPosition::Taskbar,
+                SettingsIcon::PositionTaskbar, if zh { "任务栏" } else { "Taskbar" }),
+            (HitTarget::Position(DisplayPosition::Desktop),
+                snapshot.display_position == DisplayPosition::Desktop,
+                SettingsIcon::PositionDesktop, if zh { "桌面" } else { "Desktop" }),
+        ],
+        hovered, pressed, choice_palette, primary, None,
+    );
 
-    for preset in [AppearancePreset::Default, AppearancePreset::Minimal] {
-        let selected = snapshot.appearance_preset == preset;
-        let target = HitTarget::Layout(preset);
-        let control_background = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: accent,
-                selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment_with_icon(
-            hdc,
-            hwnd,
-            layout_rect(hwnd, preset),
-            selected,
-            control_background,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            layout_icon(preset),
-            match (zh, preset) {
-                (true, AppearancePreset::Default) => "默认",
-                (true, AppearancePreset::Minimal) => "极简",
-                (false, AppearancePreset::Default) => "Default",
-                (false, AppearancePreset::Minimal) => "Minimal",
-            },
-        );
-    }
-
-
-    for position in [DisplayPosition::Taskbar, DisplayPosition::Desktop] {
-        let selected = snapshot.display_position == position;
-        let target = HitTarget::Position(position);
-        let background = button_background(
-            target, selected, hovered, pressed,
-            ButtonPalette {
-                normal: card_hover, hover: card_pressed, pressed: card_pressed,
-                selected: accent, selected_hover: accent_hover,
-                selected_pressed: accent_pressed,
-            },
-        );
-        draw_segment_with_icon(
-            hdc, hwnd, position_rect(hwnd, position), selected,
-            background,
-            if selected { Color::from_hex("#FFFFFFFF") } else { primary },
-            if position == DisplayPosition::Taskbar {
-                SettingsIcon::PositionTaskbar
-            } else {
-                SettingsIcon::PositionDesktop
-            },
-            match (zh, position) {
-                (true, DisplayPosition::Taskbar) => "任务栏",
-                (true, DisplayPosition::Desktop) => "桌面",
-                (false, DisplayPosition::Taskbar) => "Taskbar",
-                (false, DisplayPosition::Desktop) => "Desktop",
-            },
-        );
-    }
-
-    if desktop_submenu_progress > 0.0 {
-        paint_submenu_content(hdc,hwnd,snapshot,desktop_submenu_progress,
-            submenu_inset,hovered,pressed,
-            ButtonPalette{
-                normal:card_hover,hover:card_pressed,pressed:card_pressed,
-                selected:accent,selected_hover:accent_hover,selected_pressed:accent_pressed,
-            },primary,secondary);
-    }
+    paint_submenu_content(
+        hdc, hwnd, snapshot, desktop_submenu_progress,
+        submenu_inset, hovered, pressed,
+        ButtonPalette {
+            normal: card_hover, hover: card_pressed, pressed: card_pressed,
+            selected: accent, selected_hover: accent_hover, selected_pressed: accent_pressed,
+        }, primary, secondary,
+    );
 
     if submenu_only { return; }
 
@@ -9878,6 +9739,70 @@ mod ui_smoke_tests {
     use super::*;
 
     #[test]
+    fn general_choice_groups_are_contiguous_and_match_click_areas() {
+        let hwnd = HWND::default(); // logical 96-DPI fallback
+        for group in [general_refresh_group_rect(hwnd), general_alert_group_rect(hwnd)] {
+            let all: Vec<_> = (0..4).map(|i| general_segment_rect(group, i, 4)).collect();
+            assert_eq!(all.first().unwrap().left, group.left);
+            assert_eq!(all.last().unwrap().right, group.right);
+            for pair in all.windows(2) {
+                assert_eq!(pair[0].right, pair[1].left, "segmented controls cannot have gaps");
+                assert_eq!(pair[0].top, pair[1].top);
+                assert_eq!(pair[0].bottom, pair[1].bottom);
+            }
+            assert!(all.iter().all(|r| r.right > r.left));
+        }
+        assert_eq!(
+            general_refresh_rect(hwnd, 300_000),
+            general_segment_rect(general_refresh_group_rect(hwnd), 1, 4)
+        );
+        assert_eq!(
+            general_alert_rect(hwnd, 20),
+            general_segment_rect(general_alert_group_rect(hwnd), 2, 4)
+        );
+    }
+
+    #[test]
+    fn general_usage_and_application_share_equal_non_overlapping_cards() {
+        let hwnd = HWND::default();
+        let usage = general_usage_card_rect(hwnd);
+        let app = general_application_card_rect(hwnd);
+        assert_eq!(usage.right - usage.left, app.right - app.left);
+        assert_eq!(app.left - usage.right, 16);
+        assert_eq!(usage.top, app.top);
+        assert_eq!(usage.bottom, app.bottom);
+        for r in [
+            general_usage_rect(hwnd, false),
+            general_usage_rect(hwnd, true),
+        ] {
+            assert!(r.left >= usage.left && r.right <= usage.right);
+            assert!(r.top >= usage.top && r.bottom <= usage.bottom);
+        }
+        let startup = general_startup_rect(hwnd);
+        let language = general_language_group_rect(hwnd);
+        for r in [startup, language] {
+            assert!(r.left >= app.left && r.right <= app.right);
+            assert!(r.top >= app.top && r.bottom <= app.bottom);
+        }
+        assert!(general_usage_rect(hwnd, false).bottom <= general_usage_rect(hwnd, true).top);
+        assert_eq!(language_option_count(), 2);
+        assert_eq!(language_option_rect(hwnd, 0).right, language_option_rect(hwnd, 1).left);
+        assert_eq!(language_option_rect(hwnd, 0).left, language.left);
+        assert_eq!(language_option_rect(hwnd, 1).right, language.right);
+    }
+
+
+    #[test]
+    fn interactive_paint_frame_throttles_drag_but_never_drops_release() {
+        let now = Instant::now();
+        assert!(settings_interactive_frame_due(None, now, true));
+        assert!(!settings_interactive_frame_due(Some(now), now + Duration::from_millis(8), true));
+        assert!(settings_interactive_frame_due(Some(now), now + Duration::from_millis(16), true));
+        assert!(settings_interactive_frame_due(Some(now), now, false));
+    }
+
+
+    #[test]
     fn appearance_subpage_titles_do_not_overlap_the_shared_options_card() {
         for (section, zh, en) in [
             (Section::Preset, "外观 · 预设", "Appearance · Presets"),
@@ -10103,83 +10028,66 @@ mod ui_smoke_tests {
         let system = include_str!("../assets/settings-icons/theme-system.svg");
         assert!(system.contains("fill-rule=\"evenodd\""));
         let l = desktop_submenu_layout();
-        assert_eq!(l.collapse_label.top, l.enabled.top);
+        assert_eq!(l.collapse_label.top, l.collapse_switch.top);
         assert!(l.collapse_label.top > l.direction_label.bottom);
-        assert_eq!(l.foot.left, APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH + 4);
+        assert!(l.title.top >= l.well.top && l.title.bottom < l.direction_label.top);
     }
 
     #[test]
-    fn v24_28_desktop_submenu_fits_existing_card_and_includes_desktop_button() {
+    fn independent_desktop_submenu_fits_beside_all_appearance_groups() {
         let l = desktop_submenu_layout();
         let card = RECT { left: 200, top: 58, right: 940, bottom: 206 };
-        for r in [l.well,l.foot,l.direction_label,l.collapse_label,
-            l.horizontal,l.vertical,l.enabled,l.disabled] {
-            assert!(r.left>=card.left && r.right<=card.right);
-            assert!(r.top>=card.top && r.bottom<=card.bottom);
-            assert!(r.right>r.left && r.bottom>r.top);
+        for r in [
+            l.well, l.title, l.direction_label, l.collapse_label,
+            l.horizontal, l.vertical, l.collapse_switch,
+        ] {
+            assert!(r.left >= card.left && r.right <= card.right);
+            assert!(r.top >= card.top && r.bottom <= card.bottom);
+            assert!(r.right > r.left && r.bottom > r.top);
         }
-        // The bottom foot surrounds Desktop, but never overlaps Taskbar.
-        let desktop = RECT { left: 422, top: 162, right: 522, bottom: 196 };
-        let taskbar = RECT { left: 314, top: 162, right: 414, bottom: 196 };
-        assert!(l.foot.left < desktop.left && l.foot.right > desktop.right);
-        assert!(l.foot.top < desktop.top && l.foot.bottom > desktop.bottom);
-        assert_eq!(desktop.left - l.foot.left, 4,
-            "Desktop must have a consistent left inset");
-        assert_eq!(l.foot.left - taskbar.right, 4,
-            "the inset must leave space after Taskbar");
-        assert_eq!(desktop.left - taskbar.right, APPEARANCE_BUTTON_GAP,
-            "position buttons must share the same column spacing");
-        assert!(l.well.left > 630, "do not overlap the Light theme button");
-        assert_eq!(l.well.right - l.well.left, 258,
-            "desktop submenu width stays compact");
-        assert_eq!(l.horizontal.left - l.direction_label.right, 8);
-        assert_eq!(l.enabled.left - l.collapse_label.right, 8);
-        assert_eq!(l.well.right - l.vertical.right, 16);
-        assert_eq!(l.well.right - l.disabled.right, 16);
-        assert!(l.direction_label.right <= l.horizontal.left);
-        assert!(l.collapse_label.right <= l.enabled.left);
-        assert!(l.foot.right > l.well.left && l.foot.top < l.well.bottom,
-            "the two depressed regions must overlap to hide their seam");
-        assert_eq!(submenu_background_alpha(0.0), 0.0);
-        assert_eq!(submenu_background_alpha(1.0), 1.0);
-        assert_eq!(submenu_content_offset(0.0), 8);
-        assert_eq!(submenu_content_offset(1.0), 0);
-        assert_eq!(PRESET_CARD_TOP, 226,
-            "preset gallery starts immediately below the shared options card");
-        for r in [l.horizontal,l.vertical,l.enabled,l.disabled] {
-            assert!(r.left>=l.well.left && r.right<l.well.right);
-        }
-        assert!(l.horizontal.right<l.vertical.left);
-        assert!(l.enabled.right<l.disabled.left);
-        assert!(l.direction_label.right<l.horizontal.left);
-        assert!(l.collapse_label.right<l.enabled.left);
-        assert_eq!(l.horizontal.left, l.enabled.left);
-        assert_eq!(l.horizontal.right, l.enabled.right);
-        assert_eq!(l.vertical.left, l.disabled.left);
-        assert_eq!(l.vertical.right, l.disabled.right);
-        assert_eq!(l.horizontal.right - l.horizontal.left,
-                   l.vertical.right - l.vertical.left);
-        assert_eq!(l.vertical.left - l.horizontal.right, APPEARANCE_BUTTON_GAP);
+        let taskbar = appearance_button_rect(HWND::default(), 0, 162);
+        let desktop = appearance_button_rect(HWND::default(), 1, 162);
+        assert_eq!(taskbar.right, desktop.left);
+        assert!(l.well.left >= appearance_group_rect(HWND::default(), 70, 3).right + 14);
+        assert!(l.well.left > desktop.right);
+        assert_eq!(l.well.right, card.right - 16);
+        assert_eq!(l.well.bottom, card.bottom - 8);
+        assert!(l.title.bottom < l.horizontal.top);
+        assert!(l.title.left >= l.well.left && l.title.right <= l.well.right);
+        assert_eq!(l.horizontal.left - l.direction_label.right, 6);
+        assert_eq!(l.well.right - l.vertical.right, 20);
+        assert_eq!(l.well.right - l.collapse_switch.right, 20);
+        assert!(l.collapse_label.right <= l.collapse_switch.left);
+        assert_eq!(l.horizontal.right, l.vertical.left);
+        assert_eq!(l.horizontal.right - l.horizontal.left, l.vertical.right - l.vertical.left);
+        assert_eq!(PRESET_CARD_TOP, 226);
     }
 
     #[test]
-    fn appearance_buttons_share_aligned_columns_across_all_rows() {
-        let a = appearance_button_rect(HWND::default(), 0, 70);
-        let b = appearance_button_rect(HWND::default(), 1, 70);
-        let c = appearance_button_rect(HWND::default(), 2, 70);
-        assert_eq!(a.right - a.left, APPEARANCE_BUTTON_WIDTH);
-        assert_eq!(b.right - b.left, APPEARANCE_BUTTON_WIDTH);
-        assert_eq!(c.right - c.left, APPEARANCE_BUTTON_WIDTH);
-        assert_eq!(b.left - a.right, APPEARANCE_BUTTON_GAP);
-        assert_eq!(c.left - b.right, APPEARANCE_BUTTON_GAP);
-        for top in [116, 162] {
-            for column in 0..2 {
-                let r = appearance_button_rect(HWND::default(), column, top);
-                let reference = appearance_button_rect(HWND::default(), column, 70);
-                assert_eq!((r.left, r.right), (reference.left, reference.right));
-                assert_eq!(r.bottom - r.top, APPEARANCE_BUTTON_HEIGHT);
+    fn appearance_button_hit_rects_join_without_gaps() {
+        let hwnd = HWND::default();
+        let themes: Vec<_> = (0..3).map(|i| appearance_button_rect(hwnd, i, 70)).collect();
+        let layouts: Vec<_> = (0..2).map(|i| appearance_button_rect(hwnd, i, 116)).collect();
+        let positions: Vec<_> = (0..2).map(|i| appearance_button_rect(hwnd, i, 162)).collect();
+        for (top, group) in [(70, &themes), (116, &layouts), (162, &positions)] {
+            let bounds = appearance_group_rect(hwnd, top, group.len());
+            assert_eq!(group[0].left, bounds.left);
+            assert_eq!(group.last().unwrap().right, bounds.right);
+            for pair in group.windows(2) {
+                assert_eq!(pair[0].right, pair[1].left);
+                assert_eq!(pair[0].top, pair[1].top);
+                assert_eq!(pair[0].bottom, pair[1].bottom);
             }
+            assert!(group.iter().all(|r| r.bottom - r.top == APPEARANCE_BUTTON_HEIGHT));
         }
+        assert_eq!(theme_rect(hwnd, ThemeMode::Light), themes[2]);
+        assert_eq!(layout_rect(hwnd, AppearancePreset::Minimal), layouts[1]);
+        assert_eq!(position_rect(hwnd, DisplayPosition::Desktop), positions[1]);
+        let h = desktop_direction_rect(hwnd, DesktopDirection::Horizontal);
+        let v = desktop_direction_rect(hwnd, DesktopDirection::Vertical);
+        assert_eq!(h.right, v.left);
+        assert_eq!(desktop_auto_collapse_rect(hwnd),
+                   scaled_rect(hwnd, desktop_submenu_layout().collapse_switch));
     }
 
     #[test]
@@ -10369,23 +10277,17 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn compact_desktop_submenu_reveal_and_reverse_stay_continuous() {
+    fn independent_desktop_submenu_fade_and_reverse_stay_continuous() {
         let layout = desktop_submenu_layout();
         assert!(layout.well.left < layout.well.right);
-        assert!(layout.foot.left < layout.well.left);
-        // The animated endpoints use the same layout; joining regions must
-        // overlap with a real area at every frame, not a 6px seam.
-        assert!(layout.foot.right - layout.well.left >= 16);
-        assert!(layout.well.bottom - layout.foot.top >= 40);
-        assert_eq!(layout.well.bottom, layout.foot.bottom);
-        assert_eq!(submenu_background_alpha(0.0), 0.0);
-        assert_eq!(submenu_background_alpha(1.0), 1.0);
+        assert!(layout.title.bottom < layout.direction_label.top);
+        assert!(layout.well.left > APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH * 3);
+        assert_eq!(submenu_content_alpha(0.0), 0.0);
+        assert_eq!(submenu_content_alpha(1.0), 1.0);
         for step in 1..=10 {
             let prev = (step - 1) as f32 / 10.0;
             let next = step as f32 / 10.0;
-            assert!(submenu_background_alpha(next) >= submenu_background_alpha(prev));
             assert!(submenu_content_alpha(next) >= submenu_content_alpha(prev));
-            assert!(submenu_content_offset(next) <= submenu_content_offset(prev));
         }
         let start = Instant::now();
         let mut state = DesktopSubmenuAnimation::initial(false);
@@ -10554,34 +10456,25 @@ mod ui_smoke_tests {
     }
 
     #[test]
-    fn desktop_submenu_has_only_direction_and_collapse_rows() {
+    fn desktop_submenu_has_title_joined_direction_and_single_collapse_switch() {
         let l = desktop_submenu_layout();
-        for r in [l.direction_label, l.collapse_label, l.horizontal,
-            l.vertical, l.enabled, l.disabled]
-        {
+        for r in [
+            l.title, l.direction_label, l.collapse_label, l.horizontal,
+            l.vertical, l.collapse_switch,
+        ] {
             assert!(r.top >= l.well.top && r.bottom <= l.well.bottom);
             assert!(r.left >= l.well.left && r.right <= l.well.right);
         }
-        assert!(l.horizontal.bottom < l.enabled.top);
-        assert_eq!(l.enabled.top, l.disabled.top);
+        assert_eq!(l.horizontal.right, l.vertical.left);
+        assert!(l.horizontal.bottom < l.collapse_switch.top);
         assert_eq!(l.direction_label.top, l.horizontal.top);
-        assert_eq!(l.collapse_label.top, l.enabled.top);
-        assert_eq!(l.direction_label.bottom - l.direction_label.top,
-            l.collapse_label.bottom - l.collapse_label.top);
-        assert_eq!(l.horizontal.bottom - l.horizontal.top,
-            l.enabled.bottom - l.enabled.top);
-        assert_eq!(l.collapse_label.top - l.direction_label.bottom, 10);
-        assert_eq!(l.well.bottom, l.foot.bottom);
-        assert_eq!(l.well.bottom, 201);
-        // Both rows belong beside Layout/Position. The old 65..161 well
-        // floated beside Theme and connected to Desktop for just 6px.
-        assert!(l.well.top > 104, "submenu must not intrude into Theme row");
-        assert_eq!(l.horizontal.top, 116);
-        assert_eq!(l.enabled.top, 156);
-        assert_eq!(l.foot.right - l.well.left, 18);
-        assert_eq!(l.well.bottom - l.foot.top, 46);
-        assert!(l.foot.top < l.enabled.top && l.enabled.bottom < l.foot.bottom,
-            "Collapse row must remain beside the actual Desktop button");
+        assert_eq!(l.collapse_label.top, l.collapse_switch.top);
+        assert!(l.title.bottom < l.direction_label.top);
+        assert_eq!(l.well, RECT { left: 652, top: 66, right: 924, bottom: 198 });
+        assert_eq!(l.horizontal.top, 106);
+        assert_eq!(l.collapse_switch.top, 152);
+        assert!(l.well.left > appearance_group_rect(HWND::default(), 70, 3).right);
+        assert!(l.well.top < l.title.top && l.collapse_switch.bottom < l.well.bottom);
     }
 
     #[test]

@@ -538,13 +538,44 @@ if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
     $styleWindow -notmatch 'WS_THICKFRAME' -or
     $styleWindow -notmatch '"常规"' -or
     $styleWindow -notmatch '"JSON 配置"' -or
-    $styleWindow -notmatch 'language_button_rect' -or
-    $styleWindow -notmatch 'rect\(hwnd,\s*760,\s*414,\s*920,\s*450\)' -or
-    $styleWindow -notmatch 'language_popup_open' -or
+    $styleWindow -notmatch 'general_language_group_rect' -or
+    $styleWindow -notmatch 'language_option_rect' -or
     $styleWindow -notmatch 'LanguageOption' -or
+    $styleWindow -notmatch 'language_label_for_index' -or
+    $styleWindow -match 'language_popup_open' -or
     $styleWindow -notmatch 'ID_EDIT_JSON') {
-    throw 'Unified settings window must provide resizable General, Appearance, JSON pages and a self-drawn language selector.'
+    throw 'Unified settings window must provide General, Appearance, JSON pages and inline two-choice language selection.'
 }
+# Title changes are synchronous Win32 messages. Explorer-hosted taskbar
+# children can re-enter the app, so language state must be unlocked first.
+$languageStateBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn apply_language_to_state\(.*?\n\}'
+).Value
+$titleRefreshBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn refresh_window_title\(\) \{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($languageStateBlock) -or
+    $languageStateBlock -match 'set_window_title\(' -or
+    $languageStateBlock -match 'SetWindowTextW\(' -or
+    [string]::IsNullOrWhiteSpace($titleRefreshBlock) -or
+    $titleRefreshBlock -notmatch '(?s)let title = \{.*?lock_state\(\).*?\};\s*if let Some\(\(hwnd, strings\)\) = title \{\s*set_window_title\(') {
+    throw 'Language state updates must release AppState lock before synchronous SetWindowTextW.'
+}
+foreach ($fragment in @(
+    'apply_language_to_state(s, Some(language));',
+    'apply_language_to_state(s, language_override);',
+    'apply_language_to_state(app_state, None);'
+)) {
+    if (-not $windowProduction.Contains($fragment)) {
+        throw "Missing language update path: $fragment"
+    }
+}
+if ($windowProduction -notmatch '(?s)WM_SETTINGS_LANGUAGE_CHANGE\s*=>\s*\{.*?refresh_window_title\(\);.*?style_window::sync\(') {
+    throw 'Settings language command must refresh title outside the app state lock before syncing UI.'
+}
+
 foreach ($message in @(
     'WM_SETTINGS_REFRESH_CHANGE',
     'WM_SETTINGS_USAGE_CHANGE',
@@ -586,6 +617,9 @@ if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
     $styleWindow -match 'preset, "5H", "20[0-9]{2}-[0-9]{2}-[0-9]{2}' -or
     $windowProduction -notmatch 'fn tooltip_width_with_render_slack\(' -or
     $windowProduction -notmatch 'TOOLTIP_TEXT_MEASUREMENT_SLACK' -or
+    $windowProduction -notmatch 'fn tooltip_mask_content_width\(' -or
+    $windowProduction -notmatch 'native_interop::directwrite_text_mask\(' -or
+    $windowProduction -notmatch 'const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 3;' -or
     $styleWindow -match 'draw_text\(hdc, "21:30", tip,') {
     throw 'Every preview tooltip must use the real default/minimal reset-time text template, not a time-only placeholder.'
 }
@@ -739,12 +773,33 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::JsonApply' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
     $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
-    $styleWindow -notmatch 'theme_icon\(mode\)' -or
-    $styleWindow -notmatch 'layout_icon\(preset\)' -or
+    $styleWindow -notmatch 'theme_icon\(ThemeMode::System\)' -or
+    $styleWindow -notmatch 'layout_icon\(AppearancePreset::Default\)' -or
     $styleWindow -notmatch 'preset_icon\(preset,\s*snapshot\.is_dark\)' -or
     $styleWindow -notmatch 'json_action_icon\(action\)' -or
     $styleWindow -notmatch 'json_action_icon\(apply\)') {
     throw 'Settings icon vocabulary must use the precise anti-aliased path renderer for navigation, Theme/Layout buttons, preset cards, and Custom.'
+}
+if ($styleWindow -notmatch 'fn draw_appearance_choice_group\(' -or
+    $styleWindow -notmatch 'general_segment_rect\(bounds, index, choices\.len\(\)\)' -or
+    $styleWindow -notmatch 'fn paint_submenu_collapse_switch\(' -or
+    $styleWindow -notmatch 'fn desktop_auto_collapse_rect\(hwnd: HWND\)' -or
+    $styleWindow -notmatch 'hdc, strings\.start_with_windows,') {
+    throw 'Appearance controls must use joined icon choices, a single collapse switch and abbreviated Auto-start label.'
+}
+if ($styleWindow -notmatch 'title:\s*RECT' -or
+    $styleWindow -notmatch 'if zh \{ "桌面模式" \} else \{ "Desktop mode" \}' -or
+    $styleWindow -notmatch 'draw_antialiased_rounded_rect\(' -or
+    $styleWindow -notmatch '0\.45 \+ 0\.55 \* submenu_content_alpha' -or
+    $styleWindow -match 'foot:\s*RECT' -or
+    $styleWindow -match 'draw_antialiased_desktop_inset_well\(') {
+    throw 'Desktop controls must use a permanently visible, titled, independent right-side inset without the old L-shaped connection.'
+}
+$localeZh = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\simplified_chinese.rs')
+$localeEn = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\english.rs')
+if ($localeZh -notmatch 'start_with_windows:\s*"自启"' -or
+    $localeEn -notmatch 'start_with_windows:\s*"Auto-start"') {
+    throw 'Localized startup labels must be shortened without bypassing the Strings resource.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
@@ -785,12 +840,15 @@ if ($styleWindow -match 'Manage refresh, display, alerts, and application behavi
     $styleWindow -notmatch 'settings_page_title_rect' -or
     $styleWindow -notmatch 'settings_card_rect' -or
     $styleWindow -notmatch 'settings_card_label_rect' -or
-    $styleWindow -notmatch 'settings_choice_rect' -or
+    $styleWindow -notmatch 'general_segment_rect' -or
+    $styleWindow -notmatch 'draw_general_segment_group' -or
+    $styleWindow -notmatch 'draw_general_usage_checkbox' -or
     $styleWindow -notmatch 'if zh \{ "常规" \} else \{ "General" \}' -or
-    $styleWindow -notmatch 'settings_choice_rect\(hwnd, 68, 102, index\)' -or
-    $styleWindow -notmatch 'settings_choice_rect\(hwnd, 268, 302, index\)' -or
-    $styleWindow -notmatch 'settings_card_rect\(hwnd, 328, 464\)') {
-    throw 'Settings pages must keep the shared right-pane layout baseline, restored General title, and matched refresh/alert padding.'
+    $styleWindow -notmatch 'general_refresh_group_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_alert_group_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_usage_card_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_application_card_rect\(hwnd\)') {
+    throw 'Settings pages must keep the shared right pane and connected General choice groups plus half-width cards.'
 }
 if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
     $styleWindow -notmatch 'SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30' -or
@@ -866,10 +924,10 @@ if ($styleWindow -notmatch 'redraw_settings_window\(' -or
     $styleWindow -notmatch 'RDW_INVALIDATE\s*\|\s*RDW_ERASE\s*\|\s*RDW_ALLCHILDREN\s*\|\s*RDW_UPDATENOW' -or
     $styleWindow -notmatch 'fill_rounded_rect\(hdc, r, section_bg' -or
     $styleWindow -notmatch 'fill_rounded_rect\([\s\S]{0,260}r\.right - scale\(hwnd, 202\)' -or
-    $styleWindow -notmatch 'fn language_popup_rect\(' -or
-    $styleWindow -notmatch 'fill_rounded_rect\(hdc, popup_rect, card' -or
-    $styleWindow -notmatch 'draw_rounded_outline_rect\([\s\S]{0,100}popup_rect') {
-    throw 'Settings page switching must fully redraw and settings UI blocks must use rounded navigation, swatches, and an opaque rounded language popup.'
+    $styleWindow -notmatch 'fn general_language_group_rect\(' -or
+    $styleWindow -notmatch 'draw_general_segment_group\(' -or
+    $styleWindow -notmatch 'draw_rounded_outline_rect\(hdc, bounds, separator, radius, 1\)') {
+    throw 'Settings page switching must fully redraw, preserve rounded navigation and swatches, and keep an inline language group with a shared border.'
 }
 if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.tooltip_corner_radius\)' -or

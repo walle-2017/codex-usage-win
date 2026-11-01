@@ -1,4 +1,4 @@
-# Focused regression guard: settings reuse + Alpha-gated Composition blur.
+# Focused regression guard: settings reuse + Alpha-gated visible blur with prewarmed backdrop.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -19,7 +19,8 @@ foreach ($token in @(
 }
 
 foreach ($token in @(
-    'let blur_requested = style.panel_frosted_active();',
+    'let blur_requested = panel_blur_backdrop_needed(&style);',
+    'if composition_blur_active && background.a < u8::MAX',
     'style.tooltip_frosted_active()',
     'WM_APP_FOCUS_EXISTING_SETTINGS',
     'style_window::open_or_focus('
@@ -27,6 +28,15 @@ foreach ($token in @(
     if (-not $window.Contains($token)) {
         throw "Panel/tooltip or deferred settings path missing: $token"
     }
+}
+# At alpha=255 the Composition backdrop remains allocated but the layered
+# foreground stays opaque. Crossing to 254 reuses the prepared background.
+# Do not regress to first creating the asynchronous blur visual at that edge.
+if ($window -notmatch '(?s)fn panel_blur_backdrop_needed\(style: &ThemeStyle\) -> bool\s*\{\s*style\.panel_frosted_strength > 0\s*\}') {
+    throw 'Frosted Composition visual must be prepared whenever strength > 0.'
+}
+if ($window -notmatch 'fn frosted_backdrop_is_prepared_before_panel_alpha_becomes_translucent\(') {
+    throw 'Alpha 255 to 254 transition must retain its regression test.'
 }
 if ($replica -notmatch 's\.styles\.active\(s\.is_dark\)\.panel_frosted_active\(\)') {
     throw 'Replica handoff must use the same Alpha-gated frosted predicate.'
@@ -54,4 +64,4 @@ if ($window -notmatch '(?s)IDM_STYLE_SETTINGS\s*=>.*?PostMessageW\(.*?WM_APP_FOC
     throw 'Menu commands must defer settings focus until popup dismissal.'
 }
 
-Write-Host 'PASS: settings singleton/foreground and Alpha-gated panel/tooltip blur.'
+Write-Host 'PASS: settings singleton/foreground, Alpha-gated visible blur and prewarmed panel backdrop.'
