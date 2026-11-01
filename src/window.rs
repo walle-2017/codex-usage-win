@@ -18,7 +18,7 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
-use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::{self, AppearancePreset, DesktopDirection, DisplayPosition};
@@ -43,6 +43,7 @@ use crate::style_window;
 use crate::theme;
 use crate::tray_icon;
 use crate::updater;
+use crate::window_common::{load_embedded_app_icons, set_window_caption_icons, SendHwnd};
 
 mod taskbar_replica;
 mod blur_backdrop;
@@ -66,21 +67,6 @@ impl FloatingInitialPlacementGuard {
 impl Drop for FloatingInitialPlacementGuard {
     fn drop(&mut self) {
         FLOATING_INITIAL_PLACEMENT.with(|flag| flag.set(false));
-    }
-}
-
-/// Wrapper to make HWND sendable across threads (safe for PostMessage usage)
-#[derive(Clone, Copy)]
-struct SendHwnd(isize);
-
-unsafe impl Send for SendHwnd {}
-
-impl SendHwnd {
-    fn from_hwnd(hwnd: HWND) -> Self {
-        Self(hwnd.0 as isize)
-    }
-    fn to_hwnd(self) -> HWND {
-        HWND(self.0 as *mut _)
     }
 }
 
@@ -510,32 +496,6 @@ fn spawn_taskbar_watchdog() {
             relaunch_self();
         }
     });
-}
-
-fn load_embedded_app_icons() -> (HICON, HICON) {
-    unsafe {
-        let mut exe_buf = [0u16; 260];
-        let len = GetModuleFileNameW(None, &mut exe_buf) as usize;
-        if len == 0 {
-            return (HICON::default(), HICON::default());
-        }
-
-        let mut large_icon = HICON::default();
-        let mut small_icon = HICON::default();
-        let extracted = ExtractIconExW(
-            PCWSTR::from_raw(exe_buf.as_ptr()),
-            0,
-            Some(&mut large_icon),
-            Some(&mut small_icon),
-            1,
-        );
-
-        if extracted == 0 {
-            (HICON::default(), HICON::default())
-        } else {
-            (large_icon, small_icon)
-        }
-    }
 }
 
 unsafe impl Send for AppState {}
@@ -2407,22 +2367,7 @@ pub fn run() {
         )
         .unwrap();
 
-        if !large_icon.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(ICON_BIG as usize),
-                LPARAM(large_icon.0 as isize),
-            );
-        }
-        if !small_icon.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(ICON_SMALL as usize),
-                LPARAM(small_icon.0 as isize),
-            );
-        }
+        set_window_caption_icons(hwnd, large_icon, small_icon);
 
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
         TASKBAR_PRIMARY_WINDOW.with(|cell| cell.set(hwnd.0 as isize));
