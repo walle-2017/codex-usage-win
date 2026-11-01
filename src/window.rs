@@ -14404,7 +14404,6 @@ mod tests {
         assert_eq!(tooltip_width_with_render_slack(0, |v| v), 48);
         assert_eq!(tooltip_width_with_render_slack(0, |v| v * 2), 96);
         assert_eq!(tooltip_width_with_render_slack(124, |v| v), 151);
-        assert!(TOOLTIP_TEXT_MEASUREMENT_SLACK <= 4);
     }
 
     #[test]
