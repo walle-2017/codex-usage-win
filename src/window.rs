@@ -50,8 +50,6 @@ mod blur_backdrop;
 mod layered_bitmap;
 mod tooltip_measure;
 use self::tooltip_measure::{cached_minimal_tooltip_width, TOOLTIP_TEXT_INSET};
-#[cfg(test)]
-use self::tooltip_measure::{tooltip_mask_content_width, tooltip_width_with_render_slack};
 use self::taskbar_replica::*;
 use self::blur_backdrop::*;
 use self::layered_bitmap::{DibSurface, WindowDc};
@@ -10734,6 +10732,7 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 
 #[cfg(test)]
 mod tests {
+    use super::tooltip_measure::{tooltip_mask_content_width, tooltip_width_with_render_slack};
     use crate::popup_menu::PopupAction;
     #[test]
     fn quick_appearance_menu_tracks_explicit_user_choices() {
