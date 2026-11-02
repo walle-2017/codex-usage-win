@@ -7,6 +7,22 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $windowCommon = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window_common.rs')
+$layeredBitmap = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\layered_bitmap.rs')
+if ($layeredBitmap -notmatch 'struct WindowDc' -or
+    $layeredBitmap -notmatch 'struct DibSurface' -or
+    $layeredBitmap -notmatch 'impl Drop for WindowDc' -or
+    $layeredBitmap -notmatch 'impl Drop for DibSurface' -or
+    $layeredBitmap -notmatch 'SelectObject\(self\.dc, self\.previous\)' -or
+    $layeredBitmap -notmatch 'DeleteObject\(self\.bitmap\)' -or
+    $layeredBitmap -notmatch 'ReleaseDC\(self\.owner, self\.dc\)' -or
+    $windowProduction -notmatch 'DibSurface::create\(screen_dc, width, height\)' -or
+    $windowProduction -notmatch 'DibSurface::create\(screen_dc, canvas_w, canvas_h\)' -or
+    ([regex]::Matches($windowProduction, 'DibSurface::create\(screen_dc, width, height\)')).Count -ne 2 -or
+    ([regex]::Matches($windowProduction, 'reset_floating_transition_state\(s\)')).Count -ne 2 -or
+    $windowProduction -notmatch 'fn reset_floating_transition_state\(') {
+    throw 'Layered widget and tooltip must use scoped GDI handles and desktop transitions must share one reset routine.'
+}
+
 $settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
