@@ -157,14 +157,6 @@ struct RichCharRange {
     cp_max: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JsonTokenKind {
-    Comment,
-    Key,
-    String,
-    Number,
-    Keyword,
-}
 const EN_SETFOCUS_CODE: u16 = 0x0100;
 const EN_KILLFOCUS_CODE: u16 = 0x0200;
 const EN_CHANGE_CODE: u16 = 0x0300;
