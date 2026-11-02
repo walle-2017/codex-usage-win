@@ -14,6 +14,23 @@ $jsonScroll = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\jso
 $styleWindow += "`n" + $jsonScroll
 $inputEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')
 $styleWindow += "`n" + $inputEvents
+$commandEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\command_events.rs')
+$styleWindow += "`n" + $commandEvents
+if ($styleWindowRoot -notmatch 'mod command_events;' -or
+    $styleWindowRoot -notmatch 'WM_COMMAND\s*=>\s*handle_settings_command\(' -or
+    $commandEvents -notmatch 'pub\(super\) unsafe fn handle_settings_command\(' -or
+    $commandEvents -notmatch 'pub\(super\) fn decode_settings_command\(' -or
+    $commandEvents -notmatch 'control_id == ID_EDIT_JSON' -or
+    $commandEvents -notmatch 'target_from_hex_control_id\(control_id\)' -or
+    $commandEvents -notmatch 'EN_CHANGE_CODE\s*=>' -or
+    $commandEvents -notmatch 'EN_SETFOCUS_CODE\s*=>' -or
+    $commandEvents -notmatch 'EN_KILLFOCUS_CODE\s*=>' -or
+    $commandEvents -notmatch 'update_color_from_numeric_edit\(' -or
+    $commandEvents -notmatch 'sync_corner_edit\(' -or
+    $commandEvents -notmatch 'update_blur_from_numeric_edit\(' -or
+    $styleWindowRoot -match '(?m)^\s*let control_id = \(wparam\.0 \& 0xFFFF\) as u16;') {
+    throw 'Edit-control WM_COMMAND handlers must remain in command_events.rs.'
+}
 if ($styleWindowRoot -notmatch 'mod input_events;' -or
     $styleWindowRoot -notmatch 'x if is_settings_input_message\(x\)' -or
     $inputEvents -notmatch 'pub\(super\) unsafe fn handle_settings_input_message\(' -or

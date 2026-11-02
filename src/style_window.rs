@@ -33,10 +33,12 @@ mod preset_preview;
 mod json_support;
 mod json_scroll;
 mod input_events;
+mod command_events;
 use self::preset_preview::*;
 use self::json_support::*;
 use self::json_scroll::*;
 use self::input_events::*;
+use self::command_events::*;
 
 use crate::style::{
     panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
@@ -4986,166 +4988,7 @@ unsafe extern "system" fn wnd_proc(
         x if is_settings_input_message(x) => {
             handle_settings_input_message(hwnd, msg, wparam, lparam)
         }
-        WM_COMMAND => {
-            let control_id = (wparam.0 & 0xFFFF) as u16;
-            let notification = ((wparam.0 >> 16) & 0xFFFF) as u16;
-
-            if control_id == ID_EDIT_JSON && notification == EN_CHANGE_CODE {
-                invalidate_json_scroll_layout_cache();
-                schedule_json_validation(hwnd);
-                return LRESULT(0);
-            }
-            if let Some(target) = target_from_hex_control_id(control_id) {
-                match notification {
-                    EN_CHANGE_CODE => {
-                        update_color_from_hex_edit(target);
-                        return LRESULT(0);
-                    }
-                    EN_SETFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.focused_hex_edit = Some(target);
-                            }
-                        }
-                        select_editor(EditorSelection::Color(target));
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    EN_KILLFOCUS_CODE => {
-                        normalize_hex_edit(target);
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                if s.focused_hex_edit == Some(target) {
-                                    s.focused_hex_edit = None;
-                                }
-                            }
-                        }
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    _ => {}
-                }
-            }
-
-            let channel = match control_id {
-                ID_EDIT_R => Some(0),
-                ID_EDIT_G => Some(1),
-                ID_EDIT_B => Some(2),
-                ID_EDIT_A => Some(3),
-                _ => None,
-            };
-            if let Some(channel) = channel {
-                match notification {
-                    EN_CHANGE_CODE => {
-                        update_color_from_numeric_edit(channel);
-                        return LRESULT(0);
-                    }
-                    EN_SETFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.focused_numeric_edit = Some(channel);
-                            }
-                        }
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    EN_KILLFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                if s.focused_numeric_edit == Some(channel) {
-                                    s.focused_numeric_edit = None;
-                                }
-                            }
-                        }
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    _ => {}
-                }
-            }
-
-            if control_id == ID_EDIT_CORNER {
-                match notification {
-                    EN_CHANGE_CODE => {
-                        update_corner_from_numeric_edit();
-                        return LRESULT(0);
-                    }
-                    EN_SETFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.focused_corner_edit = true;
-                            }
-                        }
-                        select_editor(EditorSelection::CornerRadius);
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    EN_KILLFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.focused_corner_edit = false;
-                            }
-                        }
-                        sync_corner_edit();
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    _ => {}
-                }
-            }
-
-            if control_id == ID_EDIT_BLUR {
-                match notification {
-                    EN_CHANGE_CODE => {
-                        update_blur_from_numeric_edit();
-                        return LRESULT(0);
-                    }
-                    EN_SETFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.focused_blur_edit = true;
-                            }
-                        }
-                        let editor = {
-                            let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            state
-                                .as_ref()
-                                .map(|s| {
-                                    if s.section == Section::Tooltip {
-                                        EditorSelection::TooltipBlur
-                                    } else {
-                                        EditorSelection::Blur
-                                    }
-                                })
-                                .unwrap_or(EditorSelection::Blur)
-                        };
-                        select_editor(editor);
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    EN_KILLFOCUS_CODE => {
-                        {
-                            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = state.as_mut() {
-                                s.focused_blur_edit = false;
-                            }
-                        }
-                        let _ = InvalidateRect(hwnd, None, false);
-                        return LRESULT(0);
-                    }
-                    _ => {}
-                }
-            }
-
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
+        WM_COMMAND => handle_settings_command(hwnd, msg, wparam, lparam),
         WM_CTLCOLOREDIT => {
             let hdc = HDC(wparam.0 as *mut _);
             let (is_dark, brush) = {
@@ -7992,6 +7835,27 @@ unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORM
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+    #[test]
+    fn settings_command_packs_edit_notification_words_without_sign_extension() {
+        assert_eq!(decode_settings_command(WPARAM(0)), (0, 0));
+        assert_eq!(
+            decode_settings_command(WPARAM((usize::from(EN_CHANGE_CODE) << 16) | usize::from(ID_EDIT_JSON))),
+            (ID_EDIT_JSON, EN_CHANGE_CODE)
+        );
+        assert_eq!(
+            decode_settings_command(WPARAM((usize::from(EN_SETFOCUS_CODE) << 16) | usize::from(ID_EDIT_R))),
+            (ID_EDIT_R, EN_SETFOCUS_CODE)
+        );
+        assert_eq!(
+            decode_settings_command(WPARAM((usize::from(EN_KILLFOCUS_CODE) << 16) | usize::from(ID_EDIT_BLUR))),
+            (ID_EDIT_BLUR, EN_KILLFOCUS_CODE)
+        );
+        assert_eq!(
+            decode_settings_command(WPARAM(usize::MAX)),
+            (u16::MAX, u16::MAX)
+        );
+    }
+
     
     #[test]
     fn settings_mouse_dispatch_preserves_all_input_and_capture_messages() {
