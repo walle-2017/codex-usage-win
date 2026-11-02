@@ -20,12 +20,12 @@ pub(super) fn json_scrollbar_track_rect(hwnd: HWND) -> RECT {
 // and asked RichEdit to lay out the whole document multiple times per event.
 #[derive(Clone, Copy)]
 pub(super) struct JsonScrollLayoutCache {
-    pub(super) $2 isize,
-    pub(super) $2 isize,
-    pub(super) $2 i32,
-    pub(super) $2 i32,
-    pub(super) $2 i32,
-    pub(super) $2 i32,
+    pub(super) edit: isize,
+    pub(super) font: isize,
+    pub(super) viewport_height: i32,
+    pub(super) viewport_width: i32,
+    pub(super) line_height: i32,
+    pub(super) total_lines: i32,
 }
 
 impl JsonScrollLayoutCache {
@@ -361,7 +361,7 @@ const JSON_DRAG_DIRECT_MIN_LINES: i32 = 8;
 
 pub(super) fn json_direct_drag_pixel_target(
     current_pixel_y: i32, first_visible: i32, target_first: i32,
-    pub(super) $2 i32, total_lines: i32, visible_lines: i32,
+    line_height: i32, total_lines: i32, visible_lines: i32,
 ) -> Option<i32> {
     if line_height <= 0 || current_pixel_y < 0 || total_lines <= visible_lines {
         return None;
