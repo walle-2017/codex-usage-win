@@ -47,8 +47,10 @@ use crate::window_common::{load_embedded_app_icons, set_window_caption_icons, Se
 
 mod taskbar_replica;
 mod blur_backdrop;
+mod layered_bitmap;
 use self::taskbar_replica::*;
 use self::blur_backdrop::*;
+use self::layered_bitmap::{DibSurface, WindowDc};
 
 // Set only while restoring the desktop popup to a different monitor.
 // SetWindowPos may synchronously emit WM_DPICHANGED, which must not re-enter
@@ -2770,32 +2772,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     }
 
     unsafe {
-        let screen_dc = GetDC(hwnd);
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        let dib =
-            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
-        if dib.is_invalid() || bits.is_null() {
-            let _ = DeleteDC(mem_dc);
-            ReleaseDC(hwnd, screen_dc);
-            return;
-        }
-
-        let old_bmp = SelectObject(mem_dc, dib);
-        let pixel_count = (width * height) as usize;
-        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
+        let Some(window_dc) = WindowDc::acquire(hwnd) else { return };
+        let screen_dc = window_dc.handle();
+        let Some(mut panel_surface) = DibSurface::create(screen_dc, width, height) else { return };
+        let mem_dc = panel_surface.handle();
+        let pixel_data = panel_surface.pixels();
         fill_bitmap(pixel_data, bg_color);
 
         blend_panel_bitmap(pixel_data, width, height, &surface_style);
@@ -2893,28 +2874,9 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             let grip = floating_layout_grip_rect(
                 canvas_w, canvas_h, edge, free_below,
             );
-            let canvas_info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: canvas_w,
-                    biHeight: -canvas_h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: 0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let canvas_dc = CreateCompatibleDC(screen_dc);
-            let mut canvas_bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let canvas_dib = CreateDIBSection(
-                canvas_dc, &canvas_info, DIB_RGB_COLORS, &mut canvas_bits, None, 0,
-            ).unwrap_or_default();
-            if !canvas_dib.is_invalid() && !canvas_bits.is_null() {
-                let old_canvas_bmp = SelectObject(canvas_dc, canvas_dib);
-                let canvas = std::slice::from_raw_parts_mut(
-                    canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
-                );
+            if let Some(mut canvas_surface) = DibSurface::create(screen_dc, canvas_w, canvas_h) {
+                let canvas_dc = canvas_surface.handle();
+                let canvas = canvas_surface.pixels();
                 let accent = drag_hover_outline_color(&style);
                 canvas.fill(0);
                 if hovered && !hidden {
@@ -2967,10 +2929,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas_dc, Some(&pt_src),
                     COLORREF(0), Some(&blend), ULW_ALPHA,
                 );
-                SelectObject(canvas_dc, old_canvas_bmp);
             }
-            if !canvas_dib.is_invalid() { let _ = DeleteObject(canvas_dib); }
-            let _ = DeleteDC(canvas_dc);
         } else {
             let sz = SIZE { cx: width, cy: height };
             let _ = UpdateLayeredWindow(
@@ -2978,10 +2937,8 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 COLORREF(0), Some(&blend), ULW_ALPHA,
             );
         }
-        SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(dib);
-        let _ = DeleteDC(mem_dc);
-        ReleaseDC(hwnd, screen_dc);
+        // Both DIB surfaces are deselected/deleted before the window DC is
+        // returned, including failure and early-exit paths.
     }
 
     if composition_blur_active {
@@ -7100,32 +7057,11 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    let screen_dc = GetDC(hwnd);
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mem_dc = CreateCompatibleDC(screen_dc);
-    let dib =
-        CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
-    if dib.is_invalid() || bits.is_null() {
-        let _ = DeleteDC(mem_dc);
-        ReleaseDC(hwnd, screen_dc);
-        return;
-    }
-
-    let old_bmp = SelectObject(mem_dc, dib);
-    let pixel_data =
-        std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
+    let Some(window_dc) = WindowDc::acquire(hwnd) else { return };
+    let screen_dc = window_dc.handle();
+    let Some(mut tooltip_surface) = DibSurface::create(screen_dc, width, height) else { return };
+    let mem_dc = tooltip_surface.handle();
+    let pixel_data = tooltip_surface.pixels();
     let outer_radius = sc(i32::from(tooltip_corner_radius))
         .min((width.min(height) / 2).max(0));
     let inner_radius = (outer_radius - 1).max(1);
@@ -7203,10 +7139,7 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
         ULW_ALPHA,
     );
 
-    let _ = SelectObject(mem_dc, old_bmp);
-    let _ = DeleteObject(dib);
-    let _ = DeleteDC(mem_dc);
-    ReleaseDC(hwnd, screen_dc);
+    // Guarded surfaces restore GDI selection and release the HWND DC.
 }
 
 unsafe extern "system" fn minimal_tooltip_wnd_proc(
