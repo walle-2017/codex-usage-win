@@ -6,6 +6,15 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JsonTokenKind {
+    Comment,
+    Key,
+    String,
+    Number,
+    Keyword,
+}
+
 pub(super) fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
