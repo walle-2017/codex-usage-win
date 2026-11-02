@@ -13,6 +13,7 @@ $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tooltip_measure.rs'))
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 $layeredBitmap = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\layered_bitmap.rs')
 if ($layeredBitmap -notmatch 'struct WindowDc' -or
@@ -626,6 +627,11 @@ if ($styleWindow -match '"当前自定义"' -or
 # Both thumbnail orientations must use the same sample text template
 # as the production tooltip, with no time-only legacy preview strings.
 $appearanceSource = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\appearance.rs')
+if ($window -notmatch 'mod tooltip_measure;' -or
+    $window -notmatch 'tooltip_measure::\{cached_minimal_tooltip_width, TOOLTIP_TEXT_INSET\}' -or
+    $window -match 'static MINIMAL_TOOLTIP_WIDTH_CACHE:') {
+    throw 'Tooltip measurement and cache must be owned by the dedicated window module.'
+}
 if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
     $windowProduction -notmatch 'appearance::quota_reset_tooltip_text\(' -or
     $styleWindow -notmatch 'fn preview_reset_tooltip_lines\(' -or
