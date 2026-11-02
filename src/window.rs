@@ -6385,6 +6385,26 @@ fn floating_content_size_for_state(s: &AppState, vertical: bool) -> (i32, i32) {
     (width, height)
 }
 
+/// Reset animation endpoints when entering or reconfiguring a desktop popup.
+/// Keep this state-only: never call synchronous Win32 APIs under the state lock.
+fn reset_floating_transition_state(s: &mut AppState) {
+    let (collapsed, reveal) = initial_floating_visibility(
+        s.floating_edge, s.display_position, s.desktop_auto_collapse,
+    );
+    s.floating_collapsed = collapsed;
+    s.floating_reveal = reveal;
+    s.floating_slide_from = reveal;
+    s.floating_slide_target = reveal;
+    s.floating_slide_started = Instant::now();
+    s.floating_reserved_drag_reveal = reveal;
+    s.floating_grip_hover = false;
+    s.floating_first_collapse_guard = false;
+    s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
+    s.floating_fade_from = s.floating_grip_alpha;
+    s.floating_fade_target = s.floating_grip_alpha;
+    s.floating_fade_started = Instant::now();
+}
+
 fn enable_floating_widget(reason: &str, vertical: bool) {
     let vertical = {
         let state = lock_state();
@@ -6403,20 +6423,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             s.small_taskbar_mode = false;
             s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
             s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
-            let (collapsed, reveal) = initial_floating_visibility(
-                s.floating_edge, s.display_position, s.desktop_auto_collapse,
-            );
-            s.floating_collapsed = collapsed;
-            s.floating_reveal = reveal;
-            s.floating_slide_from = reveal;
-            s.floating_slide_target = reveal;
-            s.floating_slide_started = Instant::now();
-            s.floating_reserved_drag_reveal = reveal;
-            s.floating_grip_hover = false;
-            s.floating_first_collapse_guard = false;
-            s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
-            s.floating_fade_from = s.floating_grip_alpha;
-            s.floating_fade_target = s.floating_grip_alpha;
+            reset_floating_transition_state(s);
             s.floating_fade_started = Instant::now();
             s.hwnd.to_hwnd()
         };
@@ -6547,20 +6554,7 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_mode = true;
         s.embedded = false;
         s.hidden_for_taskbar_space = false;
-        let (collapsed, reveal) = initial_floating_visibility(
-            s.floating_edge, s.display_position, s.desktop_auto_collapse,
-        );
-        s.floating_collapsed = collapsed;
-        s.floating_reveal = reveal;
-        s.floating_slide_from = reveal;
-        s.floating_slide_target = reveal;
-        s.floating_slide_started = Instant::now();
-        s.floating_reserved_drag_reveal = reveal;
-        s.floating_grip_hover = false;
-        s.floating_first_collapse_guard = false;
-        s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
-        s.floating_fade_from = s.floating_grip_alpha;
-        s.floating_fade_target = s.floating_grip_alpha;
+        reset_floating_transition_state(s);
         s.floating_fade_started = Instant::now();
         s.floating_x = x;
         s.floating_y = y;
