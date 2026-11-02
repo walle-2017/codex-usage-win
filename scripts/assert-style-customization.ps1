@@ -7,6 +7,13 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $windowCommon = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window_common.rs')
+$settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
+$popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
+$fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
+$windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
+$styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 $layeredBitmap = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\layered_bitmap.rs')
 if ($layeredBitmap -notmatch 'struct WindowDc' -or
     $layeredBitmap -notmatch 'struct DibSurface' -or
@@ -23,13 +30,7 @@ if ($layeredBitmap -notmatch 'struct WindowDc' -or
     throw 'Layered widget and tooltip must use scoped GDI handles and desktop transitions must share one reset routine.'
 }
 
-$settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
-$popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
-$fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
-$windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
-$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
-$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
-$styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
+
 
 foreach ($mode in @('System', 'Dark', 'Light')) {
     if ($styleProduction -notmatch ("\b" + $mode + "\b")) {
