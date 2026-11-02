@@ -6,6 +6,7 @@ $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $simplifiedChinese = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\simplified_chinese.rs')
 $appearanceProduction = ($appearance -split '#\[cfg\(test\)\]', 2)[0]
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tooltip_measure.rs'))
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 
 if ($appearanceProduction -notmatch '(?m)^\s*Default,\s*$') {
