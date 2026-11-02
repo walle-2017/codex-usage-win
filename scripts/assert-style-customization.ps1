@@ -12,6 +12,22 @@ $jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\js
 $styleWindow += "`n" + $jsonSupport
 $jsonScroll = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_scroll.rs')
 $styleWindow += "`n" + $jsonScroll
+$inputEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')
+$styleWindow += "`n" + $inputEvents
+if ($styleWindowRoot -notmatch 'mod input_events;' -or
+    $styleWindowRoot -notmatch 'x if is_settings_input_message\(x\)' -or
+    $inputEvents -notmatch 'pub\(super\) unsafe fn handle_settings_input_message\(' -or
+    $inputEvents -notmatch 'WM_MOUSEWHEEL\s*=>' -or
+    $inputEvents -notmatch 'WM_SETCURSOR\s*=>' -or
+    $inputEvents -notmatch 'WM_LBUTTONDOWN\s*=>' -or
+    $inputEvents -notmatch 'WM_MOUSEMOVE\s*=>' -or
+    $inputEvents -notmatch 'WM_MOUSELEAVE_MSG\s*=>' -or
+    $inputEvents -notmatch 'WM_LBUTTONUP\s*=>' -or
+    $inputEvents -notmatch 'WM_CANCELMODE\s*\|\s*WM_CAPTURECHANGED\s*=>' -or
+    $styleWindowRoot -match '(?m)^\s*WM_LBUTTONDOWN\s*=>' -or
+    $styleWindowRoot -match '(?m)^\s*WM_MOUSEMOVE\s*=>') {
+    throw 'Settings mouse/wheel/capture event handling must live in input_events.rs.'
+}
 if ($styleWindowRoot -notmatch 'mod json_scroll;' -or
     $jsonScroll -notmatch 'pub\(super\) fn json_scroll_drag_should_apply\(' -or
     $jsonScroll -notmatch 'pub\(super\) fn json_scroll_thumb_rect\(' -or
