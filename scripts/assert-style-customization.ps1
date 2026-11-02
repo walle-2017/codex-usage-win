@@ -6,9 +6,21 @@ $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$styleWindowRoot = $styleWindow
 $styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
 $jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
 $styleWindow += "`n" + $jsonSupport
+$jsonScroll = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_scroll.rs')
+$styleWindow += "`n" + $jsonScroll
+if ($styleWindowRoot -notmatch 'mod json_scroll;' -or
+    $jsonScroll -notmatch 'pub\(super\) fn json_scroll_drag_should_apply\(' -or
+    $jsonScroll -notmatch 'pub\(super\) fn json_scroll_thumb_rect\(' -or
+    $jsonScroll -notmatch 'pub\(super\) fn json_scrollbar_wheel_target\(' -or
+    $jsonScroll -notmatch 'pub\(super\) fn reset_json_scroll_frame_clock\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn json_scroll_line_metrics\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn update_json_scroll_drag\(') {
+    throw 'JSON scroll geometry, pacing and drag management must live in json_scroll.rs.'
+}
 if ($styleWindow -notmatch 'mod json_support;' -or
     $jsonSupport -notmatch 'pub\(super\) fn jsonc_highlight_ranges\(' -or
     $jsonSupport -notmatch 'pub\(super\) fn friendly_json_error\(' -or
