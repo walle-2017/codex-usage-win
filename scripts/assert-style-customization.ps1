@@ -7,6 +7,15 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
+$jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+$styleWindow += "`n" + $jsonSupport
+if ($styleWindow -notmatch 'mod json_support;' -or
+    $jsonSupport -notmatch 'pub\(super\) fn jsonc_highlight_ranges\(' -or
+    $jsonSupport -notmatch 'pub\(super\) fn friendly_json_error\(' -or
+    $jsonSupport -notmatch 'pub\(super\) fn normalize_to_lf\(' -or
+    ($styleWindow -split 'mod json_support;', 2)[0] -match 'fn jsonc_highlight_ranges\(') {
+    throw 'JSONC text helpers must live in the shared JSON support module.'
+}
 $windowCommon = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window_common.rs')
 if ($styleWindow -notmatch 'pub\(super\) unsafe fn paint_horizontal_style_preview\(' -or
     $styleWindow -notmatch 'pub\(super\) unsafe fn paint_vertical_style_preview\(' -or
