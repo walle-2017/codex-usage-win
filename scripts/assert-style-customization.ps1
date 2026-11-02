@@ -14,6 +14,7 @@ $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tooltip_measure.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\floating_geometry.rs'))
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
 $layeredBitmap = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\layered_bitmap.rs')
 if ($layeredBitmap -notmatch 'struct WindowDc' -or
