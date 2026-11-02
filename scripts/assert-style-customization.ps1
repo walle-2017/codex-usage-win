@@ -16,6 +16,24 @@ $inputEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\in
 $styleWindow += "`n" + $inputEvents
 $commandEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\command_events.rs')
 $styleWindow += "`n" + $commandEvents
+$timerEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\timer_events.rs')
+$styleWindow += "`n" + $timerEvents
+if ($styleWindowRoot -notmatch 'mod timer_events;' -or
+    $styleWindowRoot -notmatch 'x if is_settings_scheduled_message\(x\)' -or
+    $timerEvents -notmatch 'pub\(super\) unsafe fn handle_settings_scheduled_message\(' -or
+    $timerEvents -notmatch 'pub\(super\) fn is_settings_scheduled_message\(' -or
+    $timerEvents -notmatch 'WM_TIMER\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_PREWARM_GALLERY\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_PRESET_GALLERY_REFRESH\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_PRESENT_INTERACTIVE_FRAME\s*=>' -or
+    $timerEvents -notmatch 'json_scroll_drag_paced\(' -and $timerEvents -notmatch 'update_json_scroll_drag_paced\(' -or
+    $timerEvents -notmatch 'refresh_json_scrollbar_if_changed\(' -or
+    $timerEvents -notmatch 'update_json_validation_status\(' -or
+    $timerEvents -notmatch 'drive_submenu_frame_tick\(' -or
+    $styleWindowRoot -match '(?m)^\s*WM_TIMER\s*=>') {
+    throw 'Settings timer and scheduled refresh handlers must live in timer_events.rs.'
+}
 if ($styleWindowRoot -notmatch 'mod command_events;' -or
     $styleWindowRoot -notmatch 'WM_COMMAND\s*=>\s*handle_settings_command\(' -or
     $commandEvents -notmatch 'pub\(super\) unsafe fn handle_settings_command\(' -or
