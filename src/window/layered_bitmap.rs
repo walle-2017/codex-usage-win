@@ -18,7 +18,11 @@ pub(super) struct WindowDc {
 impl WindowDc {
     pub(super) fn acquire(owner: HWND) -> Option<Self> {
         let dc = unsafe { GetDC(owner) };
-        (!dc.0.is_null()).then_some(Self { owner, dc })
+        if dc.0.is_null() {
+            None
+        } else {
+            Some(Self { owner, dc })
+        }
     }
 
     pub(super) fn handle(&self) -> HDC {
@@ -119,6 +123,19 @@ impl Drop for DibSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocated_surface_exposes_exactly_its_owned_pixel_buffer() {
+        // A null reference DC makes CreateCompatibleDC target the display.
+        // The guard must keep this selected DIB valid for the full borrow.
+        let mut surface = DibSurface::create(HDC::default(), 4, 3)
+            .expect("4x3 top-down GDI DIB");
+        let pixels = surface.pixels();
+        assert_eq!(pixels.len(), 12);
+        pixels.fill(0xFF01_0203);
+        assert!(pixels.iter().all(|&pixel| pixel == 0xFF01_0203));
+        // Drop restores the original bitmap before deleting the DIB/DC.
+    }
 
     #[test]
     fn rejects_invalid_dimensions_without_allocating_gdi_resources() {
