@@ -18,6 +18,25 @@ $commandEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\
 $styleWindow += "`n" + $commandEvents
 $timerEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\timer_events.rs')
 $styleWindow += "`n" + $timerEvents
+$lifecycleEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\lifecycle_events.rs')
+$styleWindow += "`n" + $lifecycleEvents
+if ($styleWindowRoot -notmatch 'mod lifecycle_events;' -or
+    $styleWindowRoot -notmatch 'x if is_settings_lifecycle_message\(x\)' -or
+    $lifecycleEvents -notmatch 'pub\(super\) unsafe fn handle_settings_lifecycle_message\(' -or
+    $lifecycleEvents -notmatch 'pub\(super\) fn is_settings_lifecycle_message\(' -or
+    $lifecycleEvents -notmatch 'WM_DPICHANGED\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_SIZE\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_GETMINMAXINFO\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_CLOSE\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_DESTROY\s*=>' -or
+    $lifecycleEvents -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Close\)' -or
+    $lifecycleEvents -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $lifecycleEvents -notmatch 'let _ = DestroyWindow\(hwnd\)' -or
+    $lifecycleEvents -notmatch 'state.take\(\).map\(' -or
+    $lifecycleEvents -notmatch 'end_submenu_frame_clock\(hwnd\)' -or
+    $styleWindowRoot -match '(?m)^\s*WM_(?:DPICHANGED|SIZE|GETMINMAXINFO|CLOSE|DESTROY)\s*=>') {
+    throw 'Settings lifecycle and DPI/size messages must remain in lifecycle_events.rs.'
+}
 if ($styleWindowRoot -notmatch 'mod timer_events;' -or
     $styleWindowRoot -notmatch 'x if is_settings_scheduled_message\(x\)' -or
     $timerEvents -notmatch 'pub\(super\) unsafe fn handle_settings_scheduled_message\(' -or
