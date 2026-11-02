@@ -372,3 +372,34 @@ pub(super) fn friendly_json_error(error: &str, language: LanguageId) -> String {
     }
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newline_normalization_preserves_json_content() {
+        assert_eq!(normalize_to_lf("{\r\n  \"key\": 1\r}\n"), "{\n  \"key\": 1\n}\n");
+        assert_eq!(to_windows_newlines("{\r\n  \"key\": 1\r}\n"), "{\r\n  \"key\": 1\r\n}\r\n");
+    }
+
+    #[test]
+    fn jsonc_highlighting_uses_utf16_offsets_for_non_bmp_keys() {
+        let ranges = jsonc_highlight_ranges("{\"🧪\":12}\n// note");
+        assert!(ranges.contains(&(1, 5, JsonTokenKind::Key)));
+        assert!(ranges.contains(&(6, 8, JsonTokenKind::Number)));
+        assert!(ranges.iter().any(|(_, _, kind)| *kind == JsonTokenKind::Comment));
+    }
+
+    #[test]
+    fn localized_json_errors_keep_keys_and_precise_locations() {
+        let error = "line 2, column 4: unknown field `missing_setting`";
+        let zh = friendly_json_error(error, LanguageId::SimplifiedChinese);
+        let en = friendly_json_error(error, LanguageId::English);
+        assert!(zh.contains("第 2 行，第 4 列"));
+        assert!(en.contains("Line 2, column 4"));
+        assert!(zh.contains("`missing_setting`"));
+        assert!(en.contains("`missing_setting`"));
+    }
+}
