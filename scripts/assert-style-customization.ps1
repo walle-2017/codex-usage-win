@@ -33,6 +33,22 @@ $lifecycleEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $styleWindow += "`n" + $lifecycleEvents
 $renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\render_primitives.rs')
 $styleWindow += "`n" + $renderPrimitives
+$jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
+$styleWindow += "`n" + $jsonPaint
+if ($styleWindowRoot -notmatch 'mod json_paint;' -or
+    $styleWindowRoot -notmatch 'use self::json_paint::\*;' -or
+    $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_page\(' -or
+    $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_scrollbar_decoration\(' -or
+    $jsonPaint -notmatch 'json_scroll_thumb_rect\(hwnd\)' -or
+    $jsonPaint -notmatch 'json_editor_background\(snapshot\.is_dark\)' -or
+    $jsonPaint -notmatch 'json_error_shake_offset\(hwnd, error_shake_step\)' -or
+    $jsonPaint -notmatch 'JsonSaveFeedback::Saving' -or
+    $jsonPaint -notmatch 'JsonSaveFeedback::Saved' -or
+    $jsonPaint -notmatch 'JsonAction::Apply' -or
+    $jsonPaint -notmatch 'paint_json_scrollbar_decoration\(hdc, hwnd, snapshot\.is_dark\)' -or
+    $styleWindowRoot -match '(?m)^unsafe fn paint_json_(?:page|scrollbar_decoration)\(') {
+    throw 'JSON page and scrollbar decoration painting must live in json_paint.rs without losing status and action rendering.'
+}
 if ($styleWindowRoot -notmatch 'mod render_primitives;' -or
     $styleWindowRoot -notmatch 'use self::render_primitives::\*;' -or
     $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_settings_icon\(' -or
