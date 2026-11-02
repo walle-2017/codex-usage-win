@@ -20,6 +20,29 @@ $timerEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\ti
 $styleWindow += "`n" + $timerEvents
 $lifecycleEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\lifecycle_events.rs')
 $styleWindow += "`n" + $lifecycleEvents
+$renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\render_primitives.rs')
+$styleWindow += "`n" + $renderPrimitives
+if ($styleWindowRoot -notmatch 'mod render_primitives;' -or
+    $styleWindowRoot -notmatch 'use self::render_primitives::\*;' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_settings_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_segment_with_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_segment\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn subtle_control_border\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn fill_rounded_rect\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_rounded_outline_rect\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_switch\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_outline_rect\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_outline_rect_width\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn fill\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_text\(' -or
+    $renderPrimitives -notmatch 'native_interop::draw_antialiased_rounded_rect\(' -or
+    $renderPrimitives -notmatch 'GetStockObject\(NULL_BRUSH\)' -or
+    $renderPrimitives -notmatch 'SelectObject\(hdc, old_brush\)' -or
+    $renderPrimitives -notmatch 'DeleteObject\(pen\)' -or
+    $renderPrimitives -notmatch 'if text\.is_empty\(\)' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:draw_settings_icon|draw_segment_with_icon|draw_segment|subtle_control_border|fill_rounded_rect|draw_rounded_outline_rect|draw_switch|draw_outline_rect|draw_outline_rect_width|fill|draw_text)\(') {
+    throw 'Settings drawing primitives must remain in render_primitives.rs with GDI fallbacks and empty-text guard.'
+}
 if ($styleWindowRoot -notmatch 'mod lifecycle_events;' -or
     $styleWindowRoot -notmatch 'x if is_settings_lifecycle_message\(x\)' -or
     $lifecycleEvents -notmatch 'pub\(super\) unsafe fn handle_settings_lifecycle_message\(' -or
