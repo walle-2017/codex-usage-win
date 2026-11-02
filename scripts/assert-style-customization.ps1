@@ -6,7 +6,13 @@ $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
 $windowCommon = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window_common.rs')
+if ($styleWindow -notmatch 'pub\(super\) unsafe fn paint_horizontal_style_preview\(' -or
+    $styleWindow -notmatch 'pub\(super\) unsafe fn paint_vertical_style_preview\(' -or
+    $styleWindow -notmatch 'pub\(super\) fn preview_ring_angles\(') {
+    throw 'Preset preview painting must remain in the dedicated settings module.'
+}
 $settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
