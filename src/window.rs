@@ -1757,6 +1757,17 @@ fn refresh_usage_texts(state: &mut AppState) {
     );
 }
 
+// The desktop popup does not use the taskbar's adaptive space fallback.
+// Rebuild the formatted usage strings *after* changing the effective preset:
+// Minimal omits the reset suffix, so a stale Minimal string cannot recover
+// its date/time merely by repainting a Default-width widget.
+fn sync_floating_preset_and_usage(s: &mut AppState, preset: AppearancePreset) {
+    if s.effective_appearance_preset != preset {
+        s.effective_appearance_preset = preset;
+        refresh_usage_texts(s);
+    }
+}
+
 fn manual_update_required_message(language: LanguageId, version: &str) -> String {
     match language {
         LanguageId::English => format!("Version v{version} is available, but the release asset is missing. Open GitHub Releases and update manually."),
@@ -6213,7 +6224,8 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             let Some(s) = state.as_mut() else { return };
             s.vertical_taskbar_mode = vertical;
             s.small_taskbar_mode = false;
-            s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
+            let preset = vertical_effective_preset(s.appearance_preset);
+            sync_floating_preset_and_usage(s, preset);
             s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
             reset_floating_transition_state(s);
             s.floating_fade_started = Instant::now();
@@ -6352,11 +6364,12 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_y = y;
         s.vertical_taskbar_mode = vertical;
         s.small_taskbar_mode = false;
-        s.effective_appearance_preset = if vertical {
+        let preset = if vertical {
             vertical_effective_preset(s.appearance_preset)
         } else {
             effective_appearance_preset(s)
         };
+        sync_floating_preset_and_usage(s, preset);
         s.vertical_widget_width = width;
     }
     unsafe { let _ = ShowWindow(old, SW_HIDE); }

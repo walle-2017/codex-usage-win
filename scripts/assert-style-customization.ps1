@@ -1,6 +1,17 @@
 $ErrorActionPreference = 'Stop'
 
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
+# Desktop Default->Minimal->Default must recompute reset labels when the
+# effective popup preset changes, not only at the earlier settings-message step.
+$floatingWidgetBlock = [regex]::Match(
+    $window,
+    '(?s)fn enable_floating_widget\(reason: &str, vertical: bool\)\s*\{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($floatingWidgetBlock) -or
+    [regex]::Matches($floatingWidgetBlock, 'sync_floating_preset_and_usage\(s, preset\)').Count -ne 2 -or
+    $window -notmatch '(?s)fn sync_floating_preset_and_usage\(s: &mut AppState, preset: AppearancePreset\)\s*\{\s*if s\.effective_appearance_preset != preset\s*\{\s*s\.effective_appearance_preset = preset;\s*refresh_usage_texts\(s\);') {
+    throw 'Desktop layout changes must regenerate usage reset timestamps after the effective preset changes.'
+}
 $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
