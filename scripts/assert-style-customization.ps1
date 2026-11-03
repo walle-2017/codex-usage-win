@@ -37,6 +37,30 @@ $jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json
 $styleWindow += "`n" + $jsonPaint
 $presetGalleryPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_paint.rs')
 $styleWindow += "`n" + $presetGalleryPaint
+$appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
+$styleWindow += "`n" + $appearancePaint
+if ($styleWindowRoot -notmatch 'mod appearance_paint;' -or
+    $styleWindowRoot -notmatch 'use self::appearance_paint::\*;' -or
+    $appearancePaint -notmatch 'pub\(super\) fn submenu_mix\(' -or
+    $appearancePaint -notmatch 'pub\(super\) fn submenu_content_alpha\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_submenu_well\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn draw_appearance_choice_group\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_submenu_collapse_switch\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_submenu_content\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_appearance_page\(' -or
+    $appearancePaint -notmatch '0\.45 \+ 0\.55 \* submenu_content_alpha\(progress\)' -or
+    $appearancePaint -notmatch 'let saved = SaveDC\(hdc\)' -or
+    $appearancePaint -notmatch 'RestoreDC\(hdc, saved\)' -or
+    $appearancePaint -notmatch 'if submenu_only \{ return; \}' -or
+    $appearancePaint -notmatch 'paint_preset_gallery\(' -or
+    $appearancePaint -notmatch 'paint_hex_edit_frames\(' -or
+    $appearancePaint -notmatch 'paint_numeric_edit_frames\(' -or
+    $appearancePaint -notmatch 'paint_blur_edit_frame\(' -or
+    $appearancePaint -notmatch 'paint_corner_edit_frame\(' -or
+    $appearancePaint -notmatch 'draw_slider\(' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:submenu_mix|submenu_content_alpha|paint_submenu_well|draw_appearance_choice_group|paint_submenu_collapse_switch|paint_submenu_content|paint_appearance_page)\(') {
+    throw 'Appearance page and desktop submenu painters must remain in appearance_paint.rs with existing selection, animation, clip and edit frames.'
+}
 if ($styleWindowRoot -notmatch 'mod preset_gallery_paint;' -or
     $styleWindowRoot -notmatch 'use self::preset_gallery_paint::\*;' -or
     $presetGalleryPaint -notmatch 'pub\(super\) fn preset_label\(' -or
