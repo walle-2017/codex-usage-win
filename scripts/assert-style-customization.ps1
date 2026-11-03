@@ -18,6 +18,19 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Direct typing must explicitly present the Settings slider and native
+# EDIT without rewriting the in-progress text or moving its caret.
+$typedBlurHandler = [regex]::Match(
+    $styleWindowRoot,
+    '(?s)fn update_blur_from_numeric_edit\(\)\s*\{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($typedBlurHandler) -or
+    $typedBlurHandler -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or
+    $typedBlurHandler -notmatch 'queue_settings_interactive_frame\(hwnd, false\)' -or
+    $typedBlurHandler -match 'sync_blur_edit\(' -or
+    $styleWindowRoot -notmatch 'for \(section, typed_value\) in \[\(Section::Panel, 27\), \(Section::Tooltip, 43\)\]') {
+    throw 'Typed panel/tooltip blur must present the native edit and slider without replacing focused input text.'
+}
 # A wheel step on a native EDIT must update both the model and the actual
 # child window text, even when the settings parent uses WS_EX_COMPOSITED.
 $wheelTextSync = [regex]::Match(

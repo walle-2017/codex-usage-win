@@ -4062,7 +4062,22 @@ fn update_blur_from_numeric_edit() {
             let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.as_ref().map(|s| s.hwnd.to_hwnd()).unwrap_or_default()
         };
+        // Panel blur previews invoke render_layered() in the parent window,
+        // unlike Tooltip blur previews. The native EDIT has already delivered
+        // EN_CHANGE and the model is correct, but a normal invalidation can
+        // leave both the focused glyphs and slider visually stale while the
+        // composited Settings parent continues handling updates.
+        //
+        // Flush the EDIT separately and post a coalesced Settings presentation
+        // after this command finishes. Do NOT call sync_blur_edit() here: that
+        // would rewrite partially typed text and reset the caret/selection.
+        // No STATE mutex may be held during these synchronous Win32 calls.
+        let _ = RedrawWindow(
+            edit, None, HRGN::default(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+        );
         let _ = InvalidateRect(hwnd, None, false);
+        queue_settings_interactive_frame(hwnd, false);
     }
 }
 
@@ -7501,6 +7516,40 @@ mod ui_smoke_tests {
             };
             assert_eq!(actual_down, start_blur);
             assert_eq!(read_edit_value(blur_edit), Some(u16::from(actual_down)));
+
+            // Direct typing is distinct from wheel: EN_CHANGE must update
+            // model + slider and schedule a frame even if Panel's live preview
+            // is busy composing the desktop widget. Compare the already-good
+            // Tooltip path using exactly the same native EDIT.
+            for (section, typed_value) in [(Section::Panel, 27), (Section::Tooltip, 43)] {
+                set_section(section);
+                let blur_edit = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.as_ref().unwrap().blur_edit.to_hwnd()
+                };
+                let _ = SetFocus(blur_edit);
+                SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| pending.set(false));
+                set_edit_text(blur_edit, typed_value);
+                let stored = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = state.as_ref().unwrap();
+                    if section == Section::Tooltip {
+                        s.snapshot.active_style.tooltip_frosted_strength()
+                    } else {
+                        s.snapshot.active_style.panel_frosted_strength
+                    }
+                };
+                assert_eq!(stored, typed_value);
+                assert_eq!(read_edit_value(blur_edit), Some(u16::from(typed_value)));
+                assert!(
+                    SETTINGS_INTERACTIVE_FRAME_QUEUED.with(|pending| pending.get()),
+                    "typing blur must request an explicit frame for both pages",
+                );
+                let _ = SendMessageW(
+                    hwnd, WM_SETTINGS_PRESENT_INTERACTIVE_FRAME, WPARAM(0), LPARAM(0),
+                );
+                assert_eq!(read_edit_value(blur_edit), Some(u16::from(typed_value)));
+            }
 
             let _ = DestroyWindow(hwnd);
 
