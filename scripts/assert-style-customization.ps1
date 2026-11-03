@@ -35,6 +35,21 @@ $renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_wind
 $styleWindow += "`n" + $renderPrimitives
 $jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
 $styleWindow += "`n" + $jsonPaint
+$presetGalleryPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_paint.rs')
+$styleWindow += "`n" + $presetGalleryPaint
+if ($styleWindowRoot -notmatch 'mod preset_gallery_paint;' -or
+    $styleWindowRoot -notmatch 'use self::preset_gallery_paint::\*;' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preset_label\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) unsafe fn paint_preset_gallery\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) unsafe fn paint_style_preview_card\(' -or
+    $presetGalleryPaint -notmatch 'if\s+!matched' -or
+    $presetGalleryPaint -notmatch 'paint_vertical_style_preview\(' -or
+    $presetGalleryPaint -notmatch 'paint_horizontal_style_preview\(' -or
+    $presetGalleryPaint -notmatch 'StyleColorTarget::ProgressConsumed' -or
+    $presetGalleryPaint -notmatch 'if selected \{ 2 \} else \{ 1 \}' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:preset_label|paint_preset_gallery|paint_style_preview_card)\(') {
+    throw 'Preset gallery labels, cards and thumbnail rendering must live in preset_gallery_paint.rs.'
+}
 if ($styleWindowRoot -notmatch 'mod json_paint;' -or
     $styleWindowRoot -notmatch 'use self::json_paint::\*;' -or
     $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_page\(' -or
@@ -1125,12 +1140,13 @@ if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
 }
 # The card outline is required, but the preview-positioning rectangle must
 # never draw an additional frame around the grip, panel and tooltip.
-$previewCardStart = $styleWindow.IndexOf('unsafe fn paint_style_preview_card(')
-$previewCardEnd = $styleWindow.IndexOf('unsafe fn paint_hex_edit_frames(', $previewCardStart)
-if ($previewCardStart -lt 0 -or $previewCardEnd -le $previewCardStart) {
+$previewCardPainter = [regex]::Match(
+    $presetGalleryPaint,
+    '(?s)pub\(super\) unsafe fn paint_style_preview_card\(.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($previewCardPainter)) {
     throw 'Unable to isolate preset preview card painting for border regression verification.'
 }
-$previewCardPainter = $styleWindow.Substring($previewCardStart, $previewCardEnd - $previewCardStart)
 if ($previewCardPainter -notmatch 'draw_rounded_outline_rect\(\s*hdc,\s*r,' -or
     $previewCardPainter -match '(?:draw_rounded_outline_rect|draw_outline_rect|fill_rounded_rect|fill)\(\s*hdc,\s*preview\s*,') {
     throw 'Preset cards must keep their outer selection border but never paint a secondary enclosing preview frame.'
