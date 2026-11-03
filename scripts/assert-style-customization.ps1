@@ -18,6 +18,19 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Native single-line EDIT has no vertical-text alignment API. The child
+# must be centered inside the themed input background using real font metrics.
+if ($styleWindowRoot -notmatch 'fn centered_single_line_edit_rect\(' -or
+    $styleWindowRoot -notmatch 'fn single_line_edit_font_height\(' -or
+    $styleWindowRoot -notmatch 'WM_GETFONT' -or
+    $styleWindowRoot -notmatch 'GetTextMetricsW\(' -or
+    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*numeric_edit_rect\(' -or
+    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*blur_edit_rect\(' -or
+    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*corner_edit_rect\(' -or
+    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*hex_edit_rect\(' -or
+    $styleWindowRoot -notmatch 'fn single_line_edits_stay_vertically_centered_across_font_metrics_and_dpi\(') {
+    throw 'Settings single-line edit controls must center the native text window using measured font metrics across all input types.'
+}
 $styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
 $jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
 $styleWindow += "`n" + $jsonSupport

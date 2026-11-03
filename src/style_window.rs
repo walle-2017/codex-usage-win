@@ -2220,6 +2220,47 @@ fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT
     }
 }
 
+// A standard single-line EDIT only supports horizontal ES_CENTER; EM_SETRECT
+// does not change its vertical text position. Center the native child window
+// within our larger, separately painted rounded input background instead.
+// Keep full horizontal bounds so caret/selection and horizontal scrolling work.
+fn centered_single_line_edit_rect(bounds: RECT, font_height: i32, padding: i32) -> RECT {
+    let available = (bounds.bottom - bounds.top).max(0);
+    if available == 0 {
+        return bounds;
+    }
+    let height = font_height.saturating_add(padding).clamp(1, available);
+    let top = bounds.top + (available - height) / 2;
+    RECT { top, bottom: top + height, ..bounds }
+}
+
+// Read the edit's actual selected font, not an assumed 96-DPI line height.
+// This also handles a popup moved between monitors with different DPI and
+// Windows font metrics without relying on EM_SETRECT (multiline-only).
+unsafe fn single_line_edit_font_height(edit: HWND, fallback: i32) -> i32 {
+    let dc = GetDC(edit);
+    if dc.0.is_null() {
+        return fallback.max(1);
+    }
+    let selected = SendMessageW(edit, WM_GETFONT, WPARAM(0), LPARAM(0));
+    let old_font = if selected.0 != 0 {
+        Some(SelectObject(dc, HGDIOBJ(selected.0 as *mut _)))
+    } else {
+        None
+    };
+    let mut metrics = TEXTMETRICW::default();
+    let measured = GetTextMetricsW(dc, &mut metrics).as_bool();
+    if let Some(old_font) = old_font {
+        let _ = SelectObject(dc, old_font);
+    }
+    let _ = ReleaseDC(edit, dc);
+    if measured && metrics.tmHeight > 0 {
+        metrics.tmHeight.saturating_add(metrics.tmExternalLeading.max(0))
+    } else {
+        fallback.max(1)
+    }
+}
+
 fn is_appearance_section(section: Section) -> bool {
     matches!(
         section,
@@ -2324,8 +2365,14 @@ fn layout_numeric_edits(hwnd: HWND) {
     );
 
     unsafe {
+        // All numeric/blur/corner children use the same UI font. Measure once
+        // per relayout, then center each native single-line EDIT in its frame.
+        let font_height = single_line_edit_font_height(numeric_edits[0].to_hwnd(), scale(hwnd, 14));
+        let text_padding = scale(hwnd, 4);
         for (index, edit) in numeric_edits.iter().enumerate() {
-            let r = numeric_edit_rect(hwnd, section, index);
+            let r = centered_single_line_edit_rect(
+                numeric_edit_rect(hwnd, section, index), font_height, text_padding,
+            );
             let _ = SetWindowPos(
                 edit.to_hwnd(),
                 HWND::default(),
@@ -2341,7 +2388,9 @@ fn layout_numeric_edits(hwnd: HWND) {
             );
         }
 
-        let blur_rect = blur_edit_rect(hwnd, section);
+        let blur_rect = centered_single_line_edit_rect(
+            blur_edit_rect(hwnd, section), font_height, text_padding,
+        );
         let _ = SetWindowPos(
             blur_edit.to_hwnd(),
             HWND::default(),
@@ -2356,7 +2405,9 @@ fn layout_numeric_edits(hwnd: HWND) {
             if show_blur { SW_SHOW } else { SW_HIDE },
         );
 
-        let corner_rect = corner_edit_rect(hwnd);
+        let corner_rect = centered_single_line_edit_rect(
+            corner_edit_rect(hwnd), font_height, text_padding,
+        );
         let _ = SetWindowPos(
             corner_edit.to_hwnd(),
             HWND::default(),
@@ -3595,6 +3646,8 @@ fn layout_hex_edits(hwnd: HWND) {
     };
 
     unsafe {
+        let font_height = single_line_edit_font_height(hex_edits[0].to_hwnd(), scale(hwnd, 14));
+        let text_padding = scale(hwnd, 4);
         if let Some(target) = focused_target {
             if color_row_index(section, target).is_none() {
                 let index = encode_color_target(target);
@@ -3606,7 +3659,9 @@ fn layout_hex_edits(hwnd: HWND) {
         for (index, target) in COLOR_TARGETS.iter().copied().enumerate() {
             let edit = hex_edits[index].to_hwnd();
             if let Some(row_index) = color_row_index(section, target) {
-                let r = hex_edit_rect(hwnd, row_index);
+                let r = centered_single_line_edit_rect(
+                    hex_edit_rect(hwnd, row_index), font_height, text_padding,
+                );
                 let _ = SetWindowPos(
                     edit,
                     HWND::default(),
@@ -6447,6 +6502,30 @@ fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
+    #[test]
+    fn single_line_edits_stay_vertically_centered_across_font_metrics_and_dpi() {
+        // Pixel-space layout works equally for 96, 144 and 192 DPI.
+        for (top, bottom, font_height, padding) in [
+            (0, 24, 17, 4),
+            (8, 38, 21, 5),
+            (12, 48, 29, 6),
+            (20, 68, 43, 8),
+            (0, 20, 25, 4), // Oversized fonts must not exceed the frame.
+        ] {
+            let bounds = RECT { left: 11, top, right: 123, bottom };
+            let actual = centered_single_line_edit_rect(bounds, font_height, padding);
+            assert_eq!((actual.left, actual.right), (bounds.left, bounds.right));
+            assert!(actual.top >= bounds.top && actual.bottom <= bounds.bottom);
+            assert!(
+                ((actual.top - bounds.top) - (bounds.bottom - actual.bottom)).abs() <= 1,
+                "native edit window must be centered to within one pixel",
+            );
+        }
+        let zero = RECT { left: 0, top: 10, right: 50, bottom: 10 };
+        assert_eq!(centered_single_line_edit_rect(zero, 14, 4).top, 10);
+        assert_eq!(centered_single_line_edit_rect(zero, 14, 4).bottom, 10);
+    }
+
     #[test]
     fn appearance_submenu_color_mix_clamps_and_preserves_rgba_endpoints() {
         let a = Color::rgba(12, 34, 56, 78);
