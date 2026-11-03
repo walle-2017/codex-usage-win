@@ -52,6 +52,27 @@ $presetGalleryPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_wi
 $styleWindow += "`n" + $presetGalleryPaint
 $appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
 $styleWindow += "`n" + $appearancePaint
+$editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_paint.rs')
+$styleWindow += "`n" + $editorPaint
+if ($styleWindowRoot -notmatch 'mod editor_paint;' -or
+    $styleWindowRoot -notmatch 'use self::editor_paint::\*;' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_hex_edit_frames\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_numeric_edit_frames\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_blur_edit_frame\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_corner_edit_frame\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_editor\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn draw_slider\(' -or
+    $editorPaint -notmatch 'if invalid\[index\]' -or
+    $editorPaint -notmatch 'focused == Some\(target\)' -or
+    $editorPaint -notmatch 'focused == Some\(index\)' -or
+    $editorPaint -notmatch 'draw_text\(\s*hdc,\s*"%"' -or
+    $editorPaint -notmatch 'draw_text\(\s*hdc,\s*"px"' -or
+    $editorPaint -notmatch 'Color channels' -or
+    $editorPaint -notmatch 'fill_rounded_rect\(hdc, track' -or
+    $editorPaint -notmatch 'fill_rounded_rect\(hdc, thumb, accent, radius\)' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn (?:paint_hex_edit_frames|paint_numeric_edit_frames|paint_blur_edit_frame|paint_corner_edit_frame|paint_editor|draw_slider)\(') {
+    throw 'Color editor frames and sliders must live in editor_paint.rs with original input focus, error, suffix and slider rendering.'
+}
 if ($styleWindowRoot -notmatch 'mod appearance_paint;' -or
     $styleWindowRoot -notmatch 'use self::appearance_paint::\*;' -or
     $appearancePaint -notmatch 'pub\(super\) fn submenu_mix\(' -or
