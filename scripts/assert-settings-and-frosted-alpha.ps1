@@ -6,6 +6,7 @@ $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $replica = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs')
 $settings = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
 
 foreach ($token in @(
     'pub fn panel_frosted_active(&self) -> bool',
@@ -42,8 +43,11 @@ if ($replica -notmatch 's\.styles\.active\(s\.is_dark\)\.panel_frosted_active\(\
     throw 'Replica handoff must use the same Alpha-gated frosted predicate.'
 }
 
+if (-not $appearancePaint.Contains('paint_frosted_alpha_hint(hdc, hwnd, snapshot.language, secondary)')) {
+    throw 'Appearance page must keep the frosted alpha hint even after its painter is extracted.'
+}
+
 foreach ($token in @(
-    'paint_frosted_alpha_hint(hdc, hwnd, snapshot.language, secondary)',
     'Alpha < 255',
     'SW_RESTORE',
     'HWND_TOP,',
