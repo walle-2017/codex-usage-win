@@ -39,7 +39,7 @@ $wheelTextSync = [regex]::Match(
 ).Value
 if ([string]::IsNullOrWhiteSpace($wheelTextSync) -or
     $wheelTextSync -notmatch 'set_edit_text\(edit, next\)' -or
-    $wheelTextSync -notmatch 'WheelNumericTarget::Blur => sync_blur_edit\(\)' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Blur => return,' -or
     $wheelTextSync -notmatch 'WheelNumericTarget::Corner => sync_corner_edit\(\)' -or
     $wheelTextSync -notmatch 'WheelNumericTarget::Color\(_\) => sync_numeric_edits\(\)' -or
     $wheelTextSync -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or

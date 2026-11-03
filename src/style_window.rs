@@ -4768,15 +4768,13 @@ fn adjust_numeric_by_wheel(target: WheelNumericTarget, direction: i32) {
     let next = (i32::from(current) + direction.signum())
         .clamp(0, i32::from(max)) as u8;
     if next != current {
-        // WM_SETTEXT synchronously notifies EN_CHANGE, which updates the style.
-        // A focused native EDIT under WS_EX_COMPOSITED can still display its
-        // previous glyphs while the parent/slider repaints. Reconcile from the
-        // committed style and present this child immediately, not the full page.
-        // None of these synchronous Win32 calls may run with STATE locked.
+        // WM_SETTEXT synchronously triggers EN_CHANGE. Blur's handler already
+        // updates state, redraws EDIT and queues a slider frame. Other numeric
+        // controls keep their existing synchronization and repaint behavior.
         set_edit_text(edit, next);
         match target {
             WheelNumericTarget::Color(_) => sync_numeric_edits(),
-            WheelNumericTarget::Blur => sync_blur_edit(),
+            WheelNumericTarget::Blur => return,
             WheelNumericTarget::Corner => sync_corner_edit(),
         }
         unsafe {
