@@ -18,6 +18,21 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# A wheel step on a native EDIT must update both the model and the actual
+# child window text, even when the settings parent uses WS_EX_COMPOSITED.
+$wheelTextSync = [regex]::Match(
+    $styleWindowRoot,
+    '(?s)fn adjust_numeric_by_wheel\(.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($wheelTextSync) -or
+    $wheelTextSync -notmatch 'set_edit_text\(edit, next\)' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Blur => sync_blur_edit\(\)' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Corner => sync_corner_edit\(\)' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Color\(_\) => sync_numeric_edits\(\)' -or
+    $wheelTextSync -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or
+    $styleWindowRoot -notmatch 'focused native EDIT text must match the blur slider/model') {
+    throw 'Numeric wheel adjustments must synchronize and repaint the focused native edit after updating style.'
+}
 # Native single-line EDIT has no vertical-text alignment API. The child
 # must be centered inside the themed input background using real font metrics.
 if ($styleWindowRoot -notmatch 'fn centered_single_line_edit_rect\(' -or

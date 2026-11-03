@@ -4753,7 +4753,23 @@ fn adjust_numeric_by_wheel(target: WheelNumericTarget, direction: i32) {
     let next = (i32::from(current) + direction.signum())
         .clamp(0, i32::from(max)) as u8;
     if next != current {
+        // WM_SETTEXT synchronously notifies EN_CHANGE, which updates the style.
+        // A focused native EDIT under WS_EX_COMPOSITED can still display its
+        // previous glyphs while the parent/slider repaints. Reconcile from the
+        // committed style and present this child immediately, not the full page.
+        // None of these synchronous Win32 calls may run with STATE locked.
         set_edit_text(edit, next);
+        match target {
+            WheelNumericTarget::Color(_) => sync_numeric_edits(),
+            WheelNumericTarget::Blur => sync_blur_edit(),
+            WheelNumericTarget::Corner => sync_corner_edit(),
+        }
+        unsafe {
+            let _ = RedrawWindow(
+                edit, None, HRGN::default(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            );
+        }
     }
 }
 
@@ -7451,6 +7467,40 @@ mod ui_smoke_tests {
             assert!(!show_rgba, "blur selection must clear the lower RGBA editor");
             assert!(show_blur, "blur control must remain visible inline");
             assert!(show_corner, "corner radius input must remain visible inline");
+
+            // Regression: wheel over the focused blur EDIT used to move the
+            // slider/live preview while the native text still showed "0".
+            // Exercise repeated increments and decrements with the real
+            // HWND and ensure both the model and displayed text stay in step.
+            let (blur_edit, start_blur) = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let s = state.as_ref().unwrap();
+                (s.blur_edit.to_hwnd(), s.snapshot.active_style.panel_frosted_strength)
+            };
+            let _ = SetFocus(blur_edit);
+            let expected_up = start_blur.saturating_add(3).min(FROSTED_STRENGTH_MAX);
+            for _ in 0..3 {
+                adjust_numeric_by_wheel(WheelNumericTarget::Blur, 120);
+            }
+            let actual_up = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().unwrap().snapshot.active_style.panel_frosted_strength
+            };
+            assert_eq!(actual_up, expected_up, "wheel must update blur strength");
+            assert_eq!(
+                read_edit_value(blur_edit),
+                Some(u16::from(actual_up)),
+                "focused native EDIT text must match the blur slider/model",
+            );
+            for _ in 0..3 {
+                adjust_numeric_by_wheel(WheelNumericTarget::Blur, -120);
+            }
+            let actual_down = {
+                let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.as_ref().unwrap().snapshot.active_style.panel_frosted_strength
+            };
+            assert_eq!(actual_down, start_blur);
+            assert_eq!(read_edit_value(blur_edit), Some(u16::from(actual_down)));
 
             let _ = DestroyWindow(hwnd);
 
