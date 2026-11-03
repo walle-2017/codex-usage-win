@@ -27,7 +27,7 @@ $typedBlurHandler = [regex]::Match(
 if ([string]::IsNullOrWhiteSpace($typedBlurHandler) -or
     $typedBlurHandler -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or
     $typedBlurHandler -notmatch 'queue_settings_interactive_frame\(hwnd, false\)' -or
-    $typedBlurHandler -match 'sync_blur_edit\(' -or
+    $typedBlurHandler -match '(?m)^\s*sync_blur_edit\(' -or
     $styleWindowRoot -notmatch 'for \(section, typed_value\) in \[\(Section::Panel, 27\), \(Section::Tooltip, 43\)\]') {
     throw 'Typed panel/tooltip blur must present the native edit and slider without replacing focused input text.'
 }
