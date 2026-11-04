@@ -138,6 +138,21 @@ $navigationPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $styleWindow += "`n" + $navigationPaint
 $layoutGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
 $styleWindow += "`n" + $layoutGeometry
+$editorGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_geometry.rs')
+$styleWindow += "`n" + $editorGeometry
+if ($styleWindowRoot -notmatch 'mod editor_geometry;' -or
+    $styleWindowRoot -notmatch 'use self::editor_geometry::\*;' -or
+    $editorGeometry -notmatch 'pub\(super\) fn rows\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn blur_row_index\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn blur_slider_track_rect\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn blur_edit_rect\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn numeric_edit_frame_rect\(' -or
+    $editorGeometry -notmatch 'client.bottom - scale\(hwnd, 24\)' -or
+    $editorGeometry -notmatch 'right: frame.right - scale\(hwnd, 28\)' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:rows|blur_row_index|blur_edit_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn editor_slider_hit_regions_keep_blur_rows_aligned\(') {
+    throw 'Editor row/slider/blur geometry must preserve original paint and hit targets.'
+}
 if ($styleWindowRoot -notmatch 'mod layout_geometry;' -or
     $styleWindowRoot -notmatch 'use self::layout_geometry::\*;' -or
     $layoutGeometry -notmatch 'pub\(super\) fn general_segment_rect\(' -or
