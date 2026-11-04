@@ -125,6 +125,19 @@ $generalPagePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_wind
 $styleWindow += "`n" + $generalPagePaint
 $navigationPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_paint.rs')
 $styleWindow += "`n" + $navigationPaint
+$layoutGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
+$styleWindow += "`n" + $layoutGeometry
+if ($styleWindowRoot -notmatch 'mod layout_geometry;' -or
+    $styleWindowRoot -notmatch 'use self::layout_geometry::\*;' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn general_segment_rect\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn section_rect\(' -or
+    $layoutGeometry -notmatch 'Section::Tooltip => \(220, 260\)' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn desktop_auto_collapse_rect\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn appearance_button_rect\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:general_segment_rect|section_rect|appearance_button_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn appearance_button_hit_areas_keep_joined_edges\(') {
+    throw 'Sidebar/General/appearance paint and hit-test geometry must remain shared.'
+}
 if ($styleWindowRoot -notmatch 'mod navigation_paint;' -or
     $styleWindowRoot -notmatch 'use self::navigation_paint::\*;' -or
     $navigationPaint -notmatch 'pub\(super\) unsafe fn paint_navigation\(' -or

@@ -43,6 +43,7 @@ mod appearance_paint;
 mod editor_paint;
 mod general_page_paint;
 mod navigation_paint;
+mod layout_geometry;
 use self::preset_preview::*;
 use self::json_support::*;
 use self::json_scroll::*;
@@ -57,6 +58,7 @@ use self::appearance_paint::*;
 use self::editor_paint::*;
 use self::general_page_paint::*;
 use self::navigation_paint::*;
+use self::layout_geometry::*;
 
 use crate::style::{
     panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
@@ -1550,80 +1552,6 @@ const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
 const SETTINGS_EDITOR_HEIGHT: i32 = 164;
 const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
 
-fn settings_page_title_rect(hwnd: HWND) -> RECT {
-    rect(
-        hwnd,
-        SETTINGS_CONTENT_LEFT,
-        18,
-        SETTINGS_CONTENT_RIGHT,
-        46,
-    )
-}
-
-fn settings_card_rect(hwnd: HWND, top: i32, bottom: i32) -> RECT {
-    rect(
-        hwnd,
-        SETTINGS_CONTENT_LEFT,
-        top,
-        SETTINGS_CONTENT_RIGHT,
-        bottom,
-    )
-}
-
-fn settings_card_label_rect(hwnd: HWND, top: i32, bottom: i32) -> RECT {
-    rect(
-        hwnd,
-        SETTINGS_CONTENT_LEFT + SETTINGS_CARD_INSET_X,
-        top,
-        SETTINGS_CHOICE_LABEL_RIGHT,
-        bottom,
-    )
-}
-
-// One shared segment formula for painting and hit tests.
-fn general_segment_rect(bounds: RECT, index: usize, count: usize) -> RECT {
-    let width = bounds.right - bounds.left;
-    RECT {
-        left: bounds.left + width * index as i32 / count as i32,
-        right: bounds.left + width * (index as i32 + 1) / count as i32,
-        ..bounds
-    }
-}
-
-fn general_refresh_group_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 360, 68, 920, 102)
-}
-
-fn general_alert_group_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 360, 138, 920, 172)
-}
-
-fn general_usage_card_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 200, 198, 562, 378)
-}
-
-fn general_application_card_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 578, 198, 940, 378)
-}
-
-fn general_language_group_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 708, 302, 922, 338)
-}
-
-fn section_rect(hwnd: HWND, section: Section) -> RECT {
-    let (top, bottom) = match section {
-        Section::General => (28, 68),
-        Section::Preset => (132, 172),
-        Section::Panel => (176, 216),
-        Section::Tooltip => (220, 260),
-        Section::Text => (264, 304),
-        Section::Progress => (308, 348),
-        Section::Interaction => (352, 392),
-        Section::Json => (456, 496),
-    };
-    rect(hwnd, 20, top, 166, bottom)
-}
-
 fn theme_icon(mode: ThemeMode) -> SettingsIcon {
     match mode {
         ThemeMode::System => SettingsIcon::ThemeSystem,
@@ -1659,63 +1587,6 @@ fn json_action_icon(action: JsonAction) -> SettingsIcon {
         JsonAction::Apply => SettingsIcon::JsonApply,
     }
 }
-
-// Appearance options use the same adjacent segments for painting and hit
-// testing. The left edge and row spacing match the existing settings card.
-const APPEARANCE_BUTTON_LEFT: i32 = 314;
-const APPEARANCE_BUTTON_WIDTH: i32 = 108;
-const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
-
-fn appearance_group_rect(hwnd: HWND, top: i32, count: usize) -> RECT {
-    rect(hwnd, APPEARANCE_BUTTON_LEFT, top,
-        APPEARANCE_BUTTON_LEFT + APPEARANCE_BUTTON_WIDTH * count as i32,
-        top + APPEARANCE_BUTTON_HEIGHT)
-}
-
-fn appearance_button_rect(hwnd: HWND, column: i32, top: i32) -> RECT {
-    general_segment_rect(
-        appearance_group_rect(hwnd, top, if top == 70 { 3 } else { 2 }),
-        column as usize, if top == 70 { 3 } else { 2 },
-    )
-}
-
-fn theme_rect(hwnd: HWND, mode: ThemeMode) -> RECT {
-    let column = match mode {
-        ThemeMode::System => 0,
-        ThemeMode::Dark => 1,
-        ThemeMode::Light => 2,
-    };
-    appearance_button_rect(hwnd, column, 70)
-}
-
-fn position_rect(hwnd: HWND, position: DisplayPosition) -> RECT {
-    let column = if position == DisplayPosition::Desktop { 1 } else { 0 };
-    appearance_button_rect(hwnd, column, 162)
-}
-
-fn desktop_direction_rect(hwnd: HWND, direction: DesktopDirection) -> RECT {
-    let layout = desktop_submenu_layout();
-    scaled_rect(hwnd, if direction == DesktopDirection::Vertical {
-        layout.vertical
-    } else {
-        layout.horizontal
-    })
-}
-
-// A single switch hit area; the desired state is derived from the current
-// snapshot when clicked, rather than exposing separate On and Off buttons.
-fn desktop_auto_collapse_rect(hwnd: HWND) -> RECT {
-    scaled_rect(hwnd, desktop_submenu_layout().collapse_switch)
-}
-
-fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
-    let column = match preset {
-        AppearancePreset::Default => 0,
-        AppearancePreset::Minimal => 1,
-    };
-    appearance_button_rect(hwnd, column, 116)
-}
-
 
 // Four tall, narrow cards fit the complete 740px settings content band.
 const PRESET_GALLERY_LEFT: i32 = 200;
@@ -5726,6 +5597,22 @@ mod ui_smoke_tests {
         }
     }
 
+
+    #[test]
+    fn appearance_button_hit_areas_keep_joined_edges() {
+        let hwnd = HWND::default();
+        let a = theme_rect(hwnd, ThemeMode::System);
+        let b = theme_rect(hwnd, ThemeMode::Dark);
+        let c = theme_rect(hwnd, ThemeMode::Light);
+        assert_eq!(a.right, b.left);
+        assert_eq!(b.right, c.left);
+        assert_eq!(a.left, appearance_group_rect(hwnd, 70, 3).left);
+        assert_eq!(c.right, appearance_group_rect(hwnd, 70, 3).right);
+        assert_eq!(layout_rect(hwnd, AppearancePreset::Default).right,
+                   layout_rect(hwnd, AppearancePreset::Minimal).left);
+        assert_eq!(position_rect(hwnd, DisplayPosition::Taskbar).right,
+                   position_rect(hwnd, DisplayPosition::Desktop).left);
+    }
 
     #[test]
     fn general_choice_groups_are_contiguous_and_match_click_areas() {
