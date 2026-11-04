@@ -76,6 +76,21 @@ $renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_wind
 $styleWindow += "`n" + $renderPrimitives
 $jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
 $styleWindow += "`n" + $jsonPaint
+# Unsaved JSON overlay painting belongs with the JSON page rendering;
+# click hit-testing and the dialog action remain in the parent window.
+if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_discard_dialog\(' -or
+    $jsonPaint -notmatch 'discard_dialog_button_rect\(hwnd, true\)' -or
+    $jsonPaint -notmatch 'discard_dialog_button_rect\(hwnd, false\)' -or
+    $jsonPaint -notmatch 'HitTarget::DiscardChanges' -or
+    $jsonPaint -notmatch 'HitTarget::KeepEditing' -or
+    $jsonPaint -notmatch '未保存的更改' -or
+    $jsonPaint -notmatch '#B65F63FF' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn paint_discard_dialog\(' -or
+    $styleWindowRoot -notmatch 'fn discard_dialog_rect\(' -or
+    $styleWindowRoot -notmatch 'fn discard_dialog_button_rect\(' -or
+    $styleWindowRoot -notmatch 'fn unsaved_json_confirmation_buttons_keep_distinct_hit_rects\(') {
+    throw 'Unsaved JSON confirmation must keep its original layout, copy and actions when moving painting to json_paint.rs.'
+}
 $presetGalleryPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_paint.rs')
 $styleWindow += "`n" + $presetGalleryPaint
 $appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')

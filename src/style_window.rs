@@ -4980,133 +4980,6 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn paint_discard_dialog(
-    hdc: HDC,
-    hwnd: HWND,
-    snapshot: &StyleWindowSnapshot,
-    hovered: Option<HitTarget>,
-    pressed: Option<HitTarget>,
-    background: Color,
-    card: Color,
-    card_hover: Color,
-    card_pressed: Color,
-    primary: Color,
-    secondary: Color,
-) {
-    let zh = snapshot.language == LanguageId::SimplifiedChinese;
-    let mut client = RECT::default();
-    let _ = GetClientRect(hwnd, &mut client);
-    let veil = if snapshot.is_dark {
-        Color::from_hex("#17191DFF")
-    } else {
-        Color::from_hex("#DCE3EBFF")
-    };
-    fill(hdc, client, veil);
-
-    let dialog = discard_dialog_rect(hwnd);
-    fill_rounded_rect(hdc, dialog, card, scale(hwnd, 12));
-    draw_rounded_outline_rect(
-        hdc,
-        dialog,
-        if snapshot.is_dark {
-            Color::from_hex("#4B5360FF")
-        } else {
-            Color::from_hex("#B8C3CFFF")
-        },
-        scale(hwnd, 12),
-        1,
-    );
-
-    let _ = SetTextColor(hdc, COLORREF(primary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh { "未保存的更改" } else { "Unsaved changes" },
-        RECT {
-            left: dialog.left + scale(hwnd, 24),
-            top: dialog.top + scale(hwnd, 20),
-            right: dialog.right - scale(hwnd, 24),
-            bottom: dialog.top + scale(hwnd, 52),
-        },
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(
-        hdc,
-        if zh {
-            "当前 JSON 配置尚未保存。继续操作将丢失这些更改。"
-        } else {
-            "The current JSON configuration has not been saved. Continuing will discard these changes."
-        },
-        RECT {
-            left: dialog.left + scale(hwnd, 24),
-            top: dialog.top + scale(hwnd, 58),
-            right: dialog.right - scale(hwnd, 24),
-            bottom: dialog.top + scale(hwnd, 112),
-        },
-        DT_LEFT | DT_VCENTER | DT_WORDBREAK,
-    );
-
-    let discard_normal = if snapshot.is_dark {
-        Color::from_hex("#8F5054FF")
-    } else {
-        Color::from_hex("#B65F63FF")
-    };
-    let discard_hover = if snapshot.is_dark {
-        Color::from_hex("#A25A5EFF")
-    } else {
-        Color::from_hex("#C56A6EFF")
-    };
-    let discard_pressed = if snapshot.is_dark {
-        Color::from_hex("#7E464AFF")
-    } else {
-        Color::from_hex("#A95357FF")
-    };
-    draw_segment(
-        hdc,
-        discard_dialog_button_rect(hwnd, true),
-        false,
-        button_background(
-            HitTarget::DiscardChanges,
-            false,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: discard_normal,
-                hover: discard_hover,
-                pressed: discard_pressed,
-                selected: discard_normal,
-                selected_hover: discard_hover,
-                selected_pressed: discard_pressed,
-            },
-        ),
-        Color::from_hex("#FFF8F8FF"),
-        if zh { "丢弃更改" } else { "Discard changes" },
-    );
-    draw_segment(
-        hdc,
-        discard_dialog_button_rect(hwnd, false),
-        false,
-        button_background(
-            HitTarget::KeepEditing,
-            false,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: card_hover,
-                hover: card_pressed,
-                pressed: card_pressed,
-                selected: card_hover,
-                selected_hover: card_pressed,
-                selected_pressed: card_pressed,
-            },
-        ),
-        primary,
-        if zh { "返回编辑" } else { "Return to editing" },
-    );
-    let _ = background;
-}
-
 // Reuse the offscreen DC and bitmap between WM_PAINT frames. Previously
 // every 16 ms tick allocated and released a full-window compatible bitmap.
 struct SettingsPaintBuffer {
@@ -6194,6 +6067,22 @@ mod ui_smoke_tests {
             "editor rows must start after the shared appearance options");
         assert_eq!(PRESET_CARD_TOP - shared_card.bottom, 20,
             "preset gallery should immediately follow the shared options without a redundant heading");
+    }
+
+    #[test]
+    fn unsaved_json_confirmation_buttons_keep_distinct_hit_rects() {
+        // Both button painter and hit-test routing must use these unchanged
+        // shared geometries (including the padding and inter-button gap).
+        let hwnd = HWND::default();
+        let dialog = discard_dialog_rect(hwnd);
+        let discard = discard_dialog_button_rect(hwnd, true);
+        let keep = discard_dialog_button_rect(hwnd, false);
+        assert_eq!(discard.top, keep.top);
+        assert_eq!(discard.bottom, keep.bottom);
+        assert_eq!(discard.right + scale(hwnd, 12), keep.left);
+        assert!(discard.left >= dialog.left && keep.right <= dialog.right);
+        assert!(discard.top >= dialog.top && discard.bottom <= dialog.bottom);
+        assert!(discard.right < keep.left, "discard and keep hit targets must not overlap");
     }
 
     #[test]
