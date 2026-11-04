@@ -113,6 +113,14 @@ $appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $styleWindow += "`n" + $appearancePaint
 $editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_paint.rs')
 $styleWindow += "`n" + $editorPaint
+if ($editorPaint -notmatch 'pub\(super\) unsafe fn paint_frosted_alpha_hint\(' -or
+    $editorPaint -notmatch 'pub\(super\) fn row_label\(' -or
+    $editorPaint -notmatch 'CreateFontW\(' -or
+    $editorPaint -notmatch 'DeleteObject\(hint_font\)' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:paint_frosted_alpha_hint|row_label)\(' -or
+    $styleWindowRoot -notmatch 'fn editor_labels_preserve_localized_frosted_and_progress_values\(') {
+    throw 'Editor label and alpha-hint rendering must retain original locale and GDI lifecycle.'
+}
 $generalPagePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\general_page_paint.rs')
 $styleWindow += "`n" + $generalPagePaint
 $navigationPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_paint.rs')

@@ -5547,99 +5547,6 @@ unsafe fn paint(hwnd: HWND) {
 }
 
 
-/// The final blur row ends at logical Y=410; the editor begins at Y=432.
-/// Render a small non-interactive hint inside that existing 22px gap.
-unsafe fn paint_frosted_alpha_hint(
-    hdc: HDC,
-    hwnd: HWND,
-    language: LanguageId,
-    secondary: Color,
-) {
-    let label = if language == LanguageId::SimplifiedChinese {
-        "仅当背景颜色含透明度（Alpha < 255）时，磨砂效果才会生效。"
-    } else {
-        "Frosted effect requires background transparency (Alpha < 255)."
-    };
-    let face = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(language)));
-    let hint_font = CreateFontW(
-        -scale(hwnd, 11),
-        0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-        DEFAULT_CHARSET.0 as u32,
-        OUT_TT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32,
-        CLEARTYPE_QUALITY.0 as u32,
-        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-        PCWSTR::from_raw(face.as_ptr()),
-    );
-    let original = if !hint_font.0.is_null() {
-        Some(SelectObject(hdc, hint_font))
-    } else {
-        None
-    };
-    let _ = SetTextColor(hdc, COLORREF(secondary.to_colorref()));
-    draw_text(
-        hdc,
-        label,
-        rect(hwnd, 218, 410, 940, 431),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-    if let Some(old_font) = original {
-        let _ = SelectObject(hdc, old_font);
-        let _ = DeleteObject(hint_font);
-    }
-}
-
-fn row_label(row: EditorSelection, language: LanguageId) -> &'static str {
-    let zh = language == LanguageId::SimplifiedChinese;
-    match row {
-        EditorSelection::CornerRadius => {
-            if zh { "圆角半径" } else { "Corner radius" }
-        }
-        EditorSelection::Color(StyleColorTarget::PanelBackground) => {
-            if zh { "背景颜色" } else { "Background" }
-        }
-        EditorSelection::Color(StyleColorTarget::PanelBorder) => {
-            if zh { "边框颜色" } else { "Border" }
-        }
-        EditorSelection::Blur | EditorSelection::TooltipBlur => {
-            if zh { "磨砂强度" } else { "Frosted intensity" }
-        }
-        EditorSelection::Color(StyleColorTarget::TooltipBackground) => {
-            if zh { "背景颜色" } else { "Background" }
-        }
-        EditorSelection::Color(StyleColorTarget::TooltipBorder) => {
-            if zh { "边框颜色" } else { "Border" }
-        }
-        EditorSelection::Color(StyleColorTarget::QuotaType) => {
-            if zh { "额度类型" } else { "Quota type" }
-        }
-        EditorSelection::Color(StyleColorTarget::Remaining) => {
-            if zh { "剩余额度" } else { "Remaining quota" }
-        }
-        EditorSelection::Color(StyleColorTarget::ResetTime) => {
-            if zh { "重置时间" } else { "Reset time" }
-        }
-        EditorSelection::Color(StyleColorTarget::Error) => {
-            if zh { "异常状态" } else { "Error state" }
-        }
-        EditorSelection::Color(StyleColorTarget::ProgressHigh) => {
-            if zh { "充足额度" } else { "High quota" }
-        }
-        EditorSelection::Color(StyleColorTarget::ProgressMedium) => {
-            if zh { "中等额度" } else { "Medium quota" }
-        }
-        EditorSelection::Color(StyleColorTarget::ProgressLow) => {
-            if zh { "低额度" } else { "Low quota" }
-        }
-        EditorSelection::Color(StyleColorTarget::ProgressConsumed) => {
-            if zh { "已消耗部分" } else { "Consumed" }
-        }
-        EditorSelection::Color(StyleColorTarget::DragHandle) => {
-            if zh { "拖拽点" } else { "Drag handle" }
-        }
-    }
-}
-
 #[cfg(test)]
 mod ui_smoke_tests {
     use super::*;
@@ -5678,6 +5585,19 @@ mod ui_smoke_tests {
         assert_eq!(rgba(submenu_mix(a, b, 1.5)), rgba(b));
         let midpoint = submenu_mix(a, b, 0.5);
         assert_eq!(rgba(midpoint), (111, 107, 103, 99));
+    }
+
+    #[test]
+    fn editor_labels_preserve_localized_frosted_and_progress_values() {
+        for (row, zh, en) in [
+            (EditorSelection::Blur, "磨砂强度", "Frosted intensity"),
+            (EditorSelection::TooltipBlur, "磨砂强度", "Frosted intensity"),
+            (EditorSelection::CornerRadius, "圆角半径", "Corner radius"),
+            (EditorSelection::Color(StyleColorTarget::ProgressConsumed), "已消耗部分", "Consumed"),
+        ] {
+            assert_eq!(row_label(row, LanguageId::SimplifiedChinese), zh);
+            assert_eq!(row_label(row, LanguageId::English), en);
+        }
     }
 
     #[test]
