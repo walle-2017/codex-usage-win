@@ -82,6 +82,25 @@ $appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $styleWindow += "`n" + $appearancePaint
 $editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_paint.rs')
 $styleWindow += "`n" + $editorPaint
+$generalPagePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\general_page_paint.rs')
+$styleWindow += "`n" + $generalPagePaint
+if ($styleWindowRoot -notmatch 'mod general_page_paint;' -or
+    $styleWindowRoot -notmatch 'use self::general_page_paint::\*;' -or
+    $generalPagePaint -notmatch 'pub\(super\) unsafe fn draw_general_segment_group\(' -or
+    $generalPagePaint -notmatch 'pub\(super\) unsafe fn draw_general_usage_checkbox\(' -or
+    $generalPagePaint -notmatch 'pub\(super\) unsafe fn paint_general_page\(' -or
+    $generalPagePaint -notmatch 'HitTarget::Refresh\(60_000\)' -or
+    $generalPagePaint -notmatch 'HitTarget::Refresh\(3_600_000\)' -or
+    $generalPagePaint -notmatch 'HitTarget::Alert\(30\)' -or
+    $generalPagePaint -notmatch 'HitTarget::UsageSession' -or
+    $generalPagePaint -notmatch 'HitTarget::UsageWeekly' -or
+    $generalPagePaint -notmatch 'HitTarget::Startup' -or
+    $generalPagePaint -notmatch 'HitTarget::LanguageOption\(index\)' -or
+    $generalPagePaint -notmatch 'draw_rounded_outline_rect\(hdc, bounds, separator, radius, 1\)' -or
+    $generalPagePaint -notmatch 'draw_switch\(' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn (?:draw_general_segment_group|draw_general_usage_checkbox|paint_general_page)\(') {
+    throw 'General-page painters must live in general_page_paint.rs with refresh, quota, usage, startup, language and border contracts intact.'
+}
 if ($styleWindowRoot -notmatch 'mod editor_paint;' -or
     $styleWindowRoot -notmatch 'use self::editor_paint::\*;' -or
     $editorPaint -notmatch 'pub\(super\) unsafe fn paint_hex_edit_frames\(' -or
