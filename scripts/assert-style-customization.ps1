@@ -84,6 +84,23 @@ $editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\ed
 $styleWindow += "`n" + $editorPaint
 $generalPagePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\general_page_paint.rs')
 $styleWindow += "`n" + $generalPagePaint
+$navigationPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_paint.rs')
+$styleWindow += "`n" + $navigationPaint
+if ($styleWindowRoot -notmatch 'mod navigation_paint;' -or
+    $styleWindowRoot -notmatch 'use self::navigation_paint::\*;' -or
+    $navigationPaint -notmatch 'pub\(super\) unsafe fn paint_navigation\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn navigation_icon\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn navigation_text_inset\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn section_label\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn appearance_page_title\(' -or
+    $navigationPaint -notmatch 'navigation_icon\(item\)' -or
+    $navigationPaint -notmatch 'section_label\(item, snapshot.language\)' -or
+    $navigationPaint -notmatch 'navigation_text_inset\(item\)' -or
+    $navigationPaint -notmatch 'Section::Tooltip' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:paint_navigation|navigation_icon|navigation_text_inset|section_label|appearance_page_title)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_navigation_icons_labels_and_hit_regions_are_consistent\(') {
+    throw 'Navigation painting, icon mapping and labels must remain in navigation_paint.rs without changing sidebar hit geometry or localization.'
+}
 if ($styleWindowRoot -notmatch 'mod general_page_paint;' -or
     $styleWindowRoot -notmatch 'use self::general_page_paint::\*;' -or
     $generalPagePaint -notmatch 'pub\(super\) unsafe fn draw_general_segment_group\(' -or

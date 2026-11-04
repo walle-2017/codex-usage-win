@@ -42,6 +42,7 @@ mod preset_gallery_paint;
 mod appearance_paint;
 mod editor_paint;
 mod general_page_paint;
+mod navigation_paint;
 use self::preset_preview::*;
 use self::json_support::*;
 use self::json_scroll::*;
@@ -55,6 +56,7 @@ use self::preset_gallery_paint::*;
 use self::appearance_paint::*;
 use self::editor_paint::*;
 use self::general_page_paint::*;
+use self::navigation_paint::*;
 
 use crate::style::{
     panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
@@ -1620,23 +1622,6 @@ fn section_rect(hwnd: HWND, section: Section) -> RECT {
         Section::Json => (456, 496),
     };
     rect(hwnd, 20, top, 166, bottom)
-}
-
-fn navigation_text_inset(_section: Section) -> i32 {
-    44
-}
-
-fn navigation_icon(section: Section) -> SettingsIcon {
-    match section {
-        Section::General => SettingsIcon::General,
-        Section::Preset => SettingsIcon::Preset,
-        Section::Panel => SettingsIcon::Panel,
-        Section::Tooltip => SettingsIcon::Tooltip,
-        Section::Text => SettingsIcon::Text,
-        Section::Progress => SettingsIcon::Progress,
-        Section::Interaction => SettingsIcon::Interaction,
-        Section::Json => SettingsIcon::Json,
-    }
 }
 
 fn theme_icon(mode: ThemeMode) -> SettingsIcon {
@@ -5841,160 +5826,6 @@ unsafe fn paint(hwnd: HWND) {
 }
 
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn paint_navigation(
-    hdc: HDC,
-    hwnd: HWND,
-    snapshot: &StyleWindowSnapshot,
-    section: Section,
-    hovered: Option<HitTarget>,
-    pressed: Option<HitTarget>,
-    background: Color,
-    hover: Color,
-    pressed_color: Color,
-    accent: Color,
-    primary: Color,
-    secondary: Color,
-) {
-    for item in [
-        Section::General,
-        Section::Preset,
-        Section::Panel,
-        Section::Tooltip,
-        Section::Text,
-        Section::Progress,
-        Section::Interaction,
-        Section::Json,
-    ] {
-        let selected = item == section;
-        let r = section_rect(hwnd, item);
-        let target = HitTarget::Section(item);
-        let section_bg = button_background(
-            target,
-            selected,
-            hovered,
-            pressed,
-            ButtonPalette {
-                normal: background,
-                hover,
-                pressed: pressed_color,
-                selected: hover,
-                selected_hover: hover,
-                selected_pressed: pressed_color,
-            },
-        );
-        fill_rounded_rect(hdc, r, section_bg, scale(hwnd, 7));
-        if selected {
-            fill_rounded_rect(
-                hdc,
-                RECT {
-                    right: r.left + scale(hwnd, 3),
-                    ..r
-                },
-                accent,
-                scale(hwnd, 2),
-            );
-        }
-        let icon_color = if selected { accent } else { secondary };
-        let icon_size = scale(hwnd, 20);
-        let icon_rect = RECT {
-            left: r.left + scale(hwnd, 14),
-            top: r.top + ((r.bottom - r.top) - icon_size) / 2,
-            right: r.left + scale(hwnd, 14) + icon_size,
-            bottom: r.top + ((r.bottom - r.top) - icon_size) / 2 + icon_size,
-        };
-        draw_settings_icon(
-            hdc,
-            hwnd,
-            navigation_icon(item),
-            icon_rect,
-            icon_color,
-            section_bg,
-        );
-
-        let _ = SetTextColor(
-            hdc,
-            COLORREF(if selected { primary } else { secondary }.to_colorref()),
-        );
-        draw_text(
-            hdc,
-            section_label(item, snapshot.language),
-            RECT {
-                left: r.left + scale(hwnd, navigation_text_inset(item)),
-                ..r
-            },
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-    }
-}
-
-fn appearance_page_title(section: Section, language: LanguageId) -> String {
-    let root = if language == LanguageId::SimplifiedChinese {
-        "外观"
-    } else {
-        "Appearance"
-    };
-    if matches!(
-        section,
-        Section::Preset | Section::Panel | Section::Tooltip | Section::Text
-            | Section::Progress | Section::Interaction
-    ) {
-        format!("{root} · {}", section_label(section, language))
-    } else {
-        root.to_string()
-    }
-}
-
-fn section_label(section: Section, language: LanguageId) -> &'static str {
-    let zh = language == LanguageId::SimplifiedChinese;
-    match section {
-        Section::General => {
-            if zh { "常规" } else { "General" }
-        }
-        Section::Preset => {
-            if zh {
-                "预设"
-            } else {
-                "Presets"
-            }
-        }
-        Section::Panel => {
-            if zh {
-                "面板"
-            } else {
-                "Panel"
-            }
-        }
-        Section::Tooltip => {
-            if zh { "浮框" } else { "Tooltip" }
-        }
-        Section::Text => {
-            if zh {
-                "文字"
-            } else {
-                "Text"
-            }
-        }
-        Section::Progress => {
-            if zh {
-                "进度条"
-            } else {
-                "Progress"
-            }
-        }
-        Section::Interaction => {
-            if zh {
-                "交互"
-            } else {
-                "Interaction"
-            }
-        }
-        Section::Json => {
-            if zh { "JSON 配置" } else { "JSON config" }
-        }
-    }
-}
-
 /// The final blur row ends at logical Y=410; the editor begins at Y=432.
 /// Render a small non-interactive hint inside that existing 22px gap.
 unsafe fn paint_frosted_alpha_hint(
@@ -6318,6 +6149,27 @@ mod ui_smoke_tests {
         assert!(settings_interactive_frame_due(Some(now), now, false));
     }
 
+
+    #[test]
+    fn settings_navigation_icons_labels_and_hit_regions_are_consistent() {
+        for (section, icon, zh, en) in [
+            (Section::General, SettingsIcon::General, "常规", "General"),
+            (Section::Preset, SettingsIcon::Preset, "预设", "Presets"),
+            (Section::Panel, SettingsIcon::Panel, "面板", "Panel"),
+            (Section::Tooltip, SettingsIcon::Tooltip, "浮框", "Tooltip"),
+            (Section::Text, SettingsIcon::Text, "文字", "Text"),
+            (Section::Progress, SettingsIcon::Progress, "进度条", "Progress"),
+            (Section::Interaction, SettingsIcon::Interaction, "交互", "Interaction"),
+            (Section::Json, SettingsIcon::Json, "JSON 配置", "JSON config"),
+        ] {
+            assert_eq!(navigation_icon(section), icon);
+            assert_eq!(section_label(section, LanguageId::SimplifiedChinese), zh);
+            assert_eq!(section_label(section, LanguageId::English), en);
+            assert_eq!(navigation_text_inset(section), 44);
+            let rect = section_rect(HWND::default(), section);
+            assert!(rect.right > rect.left && rect.bottom > rect.top);
+        }
+    }
 
     #[test]
     fn appearance_subpage_titles_do_not_overlap_the_shared_options_card() {
