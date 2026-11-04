@@ -216,3 +216,59 @@ pub(super) unsafe fn paint_style_preview_card(
     }
 }
 
+// Preset card dimensions and orientation calculations, unchanged.
+// Four tall, narrow cards fit the complete 740px settings content band.
+pub(super) const PRESET_GALLERY_LEFT: i32 = 200;
+// No duplicate dark/light preset group heading: cards follow the shared appearance options.
+pub(super) const PRESET_CARD_TOP: i32 = 226;
+pub(super) const PRESET_CARD_WIDTH: i32 = 172;
+pub(super) const PRESET_CARD_HEIGHT: i32 = 350;
+pub(super) const PRESET_CARD_MINIMAL_HEIGHT: i32 = 250;
+pub(super) const PRESET_CARD_GAP: i32 = 16;
+
+pub(super) fn preset_gallery_card_rect(index: i32, minimal: bool) -> RECT {
+    let left = PRESET_GALLERY_LEFT + index * (PRESET_CARD_WIDTH + PRESET_CARD_GAP);
+    let height = if minimal { PRESET_CARD_MINIMAL_HEIGHT } else { PRESET_CARD_HEIGHT };
+    RECT { left, top: PRESET_CARD_TOP, right: left + PRESET_CARD_WIDTH,
+        bottom: PRESET_CARD_TOP + height }
+}
+
+pub(super) fn preview_vertical_for_snapshot(snapshot: &StyleWindowSnapshot) -> bool {
+    if snapshot.display_position == DisplayPosition::Desktop {
+        snapshot.desktop_direction == DesktopDirection::Vertical
+    } else {
+        snapshot.vertical_taskbar_mode
+    }
+}
+
+pub(super) fn preview_layout_flags() -> (bool, bool) {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.as_ref().map(|s| (
+        preview_vertical_for_snapshot(&s.snapshot),
+        s.snapshot.appearance_preset == AppearancePreset::Minimal,
+    )).unwrap_or((false, false))
+}
+
+pub(super) fn preset_card_rect_for_orientation(
+    hwnd: HWND, preset: ThemePreset, vertical: bool, minimal: bool,
+) -> RECT {
+    let index = match preset {
+        ThemePreset::Classic => 0,
+        ThemePreset::Ocean => 1,
+        ThemePreset::Forest => 2,
+    };
+    if vertical {
+        let r = preset_gallery_card_rect(index, minimal);
+        rect(hwnd, r.left, r.top, r.right, r.bottom)
+    } else {
+        // Restore the original three-across horizontal gallery.
+        let left = 200 + index * 244;
+        rect(hwnd, left, PRESET_CARD_TOP, left + 224, PRESET_CARD_TOP + 184)
+    }
+}
+
+pub(super) fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
+    let (vertical, minimal) = preview_layout_flags();
+    preset_card_rect_for_orientation(hwnd, preset, vertical, minimal)
+}
+

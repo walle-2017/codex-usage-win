@@ -109,6 +109,17 @@ if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_discard_dialog\(' -or
 }
 $presetGalleryPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_paint.rs')
 $styleWindow += "`n" + $presetGalleryPaint
+if ($presetGalleryPaint -notmatch 'pub\(super\) fn preset_gallery_card_rect\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preview_vertical_for_snapshot\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preview_layout_flags\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preset_card_rect_for_orientation\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preset_card_rect\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) const PRESET_CARD_TOP:' -or
+    $presetGalleryPaint -notmatch 'PRESET_CARD_MINIMAL_HEIGHT: i32 = 250' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:preset_gallery_card_rect|preview_layout_flags|preset_card_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn preset_gallery_retains_vertical_and_horizontal_card_sizes\(') {
+    throw 'Preset card sizing and position must remain unchanged.'
+}
 $appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
 $styleWindow += "`n" + $appearancePaint
 $editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_paint.rs')
