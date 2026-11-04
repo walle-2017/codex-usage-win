@@ -80,9 +80,9 @@ pub(super) fn section_rect(hwnd: HWND, section: Section) -> RECT {
 
 // Appearance options use the same adjacent segments for painting and hit
 // testing. The left edge and row spacing match the existing settings card.
-const APPEARANCE_BUTTON_LEFT: i32 = 314;
-const APPEARANCE_BUTTON_WIDTH: i32 = 108;
-const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
+pub(super) const APPEARANCE_BUTTON_LEFT: i32 = 314;
+pub(super) const APPEARANCE_BUTTON_WIDTH: i32 = 108;
+pub(super) const APPEARANCE_BUTTON_HEIGHT: i32 = 34;
 
 pub(super) fn appearance_group_rect(hwnd: HWND, top: i32, count: usize) -> RECT {
     rect(hwnd, APPEARANCE_BUTTON_LEFT, top,
