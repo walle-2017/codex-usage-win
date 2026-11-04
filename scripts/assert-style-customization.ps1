@@ -76,6 +76,22 @@ $renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_wind
 $styleWindow += "`n" + $renderPrimitives
 $jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
 $styleWindow += "`n" + $jsonPaint
+# JSON child pane and its narrow scrollbar repaint must share json_paint.rs.
+# Keep the retained tiny bitmap, clipped scrollbar frame, full-page fallback
+# and the existing Windows HWND regression that exercises the buffered painter.
+if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_scrollbar_buffered\(' -or
+    $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_page_surface\(' -or
+    $jsonPaint -notmatch 'JSON_SCROLLBAR_PAINT_BUFFER.with\(' -or
+    $jsonPaint -notmatch 'SettingsPaintBuffer::create\(' -or
+    $jsonPaint -notmatch 'if scrollbar_only \{' -or
+    $jsonPaint -notmatch 'if !buffered \{' -or
+    $jsonPaint -notmatch 'SetViewportOrgEx\(buffer.dc, -track.left, -track.top' -or
+    $jsonPaint -notmatch 'paint_json_scrollbar_decoration\(' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn (?:paint_json_scrollbar_buffered|paint_json_page_surface)\(' -or
+    $styleWindowRoot -notmatch 'paint_json_page_surface\(hwnd\);' -or
+    $styleWindowRoot -notmatch 'the narrow scrollbar must support double-buffered painting') {
+    throw 'JSON child-pane rendering must keep buffered scrollbar and fallback semantics when moved to json_paint.rs.'
+}
 # Unsaved JSON overlay painting belongs with the JSON page rendering;
 # click hit-testing and the dialog action remain in the parent window.
 if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_discard_dialog\(' -or

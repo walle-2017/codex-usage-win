@@ -380,3 +380,155 @@ pub(super) unsafe fn paint_discard_dialog(
     let _ = background;
 }
 
+// Render an entire scrollbar frame offscreen, then publish it in one blit.
+// This is also directly exercised by the Windows UI test; HWND invalidation
+// can be coalesced with a whole-page repaint, hiding the narrow paint path.
+pub(super) unsafe fn paint_json_scrollbar_buffered(
+    screen: HDC, owner: HWND, is_dark: bool, origin_x: i32, track: RECT,
+) -> bool {
+    JSON_SCROLLBAR_PAINT_BUFFER.with(|cell| {
+        let width = (track.right - track.left).max(1);
+        let height = (track.bottom - track.top).max(1);
+        let mut slot = cell.borrow_mut();
+        if slot.as_ref().is_none_or(|buffer| {
+            buffer.width != width || buffer.height != height
+        }) {
+            *slot = SettingsPaintBuffer::create(screen, width, height);
+        }
+        let Some(buffer) = slot.as_ref() else { return false; };
+        let _ = SetViewportOrgEx(buffer.dc, -track.left, -track.top, None);
+        fill(buffer.dc, track, json_editor_background(is_dark));
+        paint_json_scrollbar_decoration(buffer.dc, owner, is_dark);
+        let _ = SetViewportOrgEx(buffer.dc, 0, 0, None);
+        let _ = BitBlt(
+            screen, track.left - origin_x, track.top,
+            width, height, buffer.dc, 0, 0, SRCCOPY,
+        );
+        true
+    })
+}
+
+pub(super) unsafe fn paint_json_page_surface(page: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let screen = BeginPaint(page, &mut ps);
+    // A scrollbar-only invalidation is far narrower than the JSON pane.
+    // Paint the track directly on the child HDC instead of allocating a
+    // fullscreen bitmap and redrawing the toolbar and status on every scroll.
+    let owner_state = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| (s.hwnd.to_hwnd(), s.snapshot.is_dark))
+    };
+    if let Some((owner, is_dark)) = owner_state {
+        let origin_x = scale(owner, 180);
+        let track = json_scrollbar_track_rect(owner);
+        let dirty = ps.rcPaint;
+        let scrollbar_only = dirty.left >= track.left - origin_x
+            && dirty.right <= track.right - origin_x
+            && dirty.top >= track.top && dirty.bottom <= track.bottom
+            && dirty.left < dirty.right && dirty.top < dirty.bottom;
+        if scrollbar_only {
+            // Do not erase the visible track before drawing its moving thumb.
+            // Without WS_EX_COMPOSITED the direct-to-window erase/draw steps
+            // become separate visible frames, making the scrollbar blink
+            // during continuous dragging. Compose the complete track in a
+            // tiny retained bitmap and publish it with one clipped BitBlt.
+            let buffered = paint_json_scrollbar_buffered(
+                screen, owner, is_dark, origin_x, track,
+            );
+            if !buffered {
+                // Low-memory fallback: retain the existing paint behavior
+                // instead of leaving a missing scrollbar.
+                let _ = SetViewportOrgEx(screen, -origin_x, 0, None);
+                fill(screen, track, json_editor_background(is_dark));
+                paint_json_scrollbar_decoration(screen, owner, is_dark);
+                let _ = SetViewportOrgEx(screen, 0, 0, None);
+            }
+            let _ = EndPaint(page, &ps);
+            return;
+        }
+    }
+    let mut client = RECT::default();
+    let _ = GetClientRect(page, &mut client);
+    let width = (client.right - client.left).max(1);
+    let height = (client.bottom - client.top).max(1);
+    let dc = CreateCompatibleDC(screen);
+    if dc.0.is_null() {
+        let _ = EndPaint(page, &ps);
+        return;
+    }
+    let bitmap = CreateCompatibleBitmap(screen, width, height);
+    if bitmap.0.is_null() {
+        let _ = DeleteDC(dc);
+        let _ = EndPaint(page, &ps);
+        return;
+    }
+    let previous_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+    let state_snapshot = {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|s| (
+            s.hwnd.to_hwnd(), s.snapshot.clone(),
+            s.json_status.clone(), s.json_status_path.clone(),
+            s.json_save_feedback, s.json_error_shake_step, s.json_dirty,
+            s.hovered, s.pressed, s.font,
+        ))
+    };
+    if let Some((
+        owner, snapshot, status, status_path, feedback, shake_step,
+        dirty, hovered, pressed, font,
+    )) = state_snapshot {
+        let left = scale(owner, 180);
+        // Reuse JSON painting geometry, which is expressed in the parent's
+        // client coordinates. Only the viewport origin changes here.
+        let _ = SetViewportOrgEx(dc, -left, 0, None);
+        let background = if snapshot.is_dark {
+            Color::from_hex("#1F2125FF")
+        } else {
+            Color::from_hex("#E9EEF4FF")
+        };
+        fill(dc, RECT { left, top: 0, right: left + width, bottom: height }, background);
+        let old_font = SelectObject(dc, HGDIOBJ(font as *mut _));
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let primary = if snapshot.is_dark {
+            Color::from_hex("#F2F3F5FF")
+        } else {
+            Color::from_hex("#202124FF")
+        };
+        let secondary = if snapshot.is_dark {
+            Color::from_hex("#A8ADB5FF")
+        } else {
+            Color::from_hex("#666B73FF")
+        };
+        let card = if snapshot.is_dark {
+            Color::from_hex("#292C31FF")
+        } else {
+            Color::from_hex("#FFFFFFFF")
+        };
+        let card_hover = if snapshot.is_dark {
+            Color::from_hex("#343840FF")
+        } else {
+            Color::from_hex("#DCE5EFFF")
+        };
+        let card_pressed = if snapshot.is_dark {
+            Color::from_hex("#414751FF")
+        } else {
+            Color::from_hex("#CBD7E4FF")
+        };
+        paint_json_page(
+            dc, owner, &snapshot, &status, status_path.as_deref(),
+            feedback, shake_step, dirty, hovered, pressed,
+            card, card_hover, card_pressed,
+            Color::from_hex("#4C8DFFFF"),
+            Color::from_hex("#629CFFFF"),
+            Color::from_hex("#3678E6FF"),
+            primary, secondary,
+        );
+        SelectObject(dc, old_font);
+        let _ = SetViewportOrgEx(dc, 0, 0, None);
+    }
+    let _ = BitBlt(screen, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, previous_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(dc);
+    let _ = EndPaint(page, &ps);
+}
+
