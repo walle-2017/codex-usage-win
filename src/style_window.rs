@@ -2985,18 +2985,7 @@ fn read_edit_text(edit: HWND) -> String {
     String::from_utf16_lossy(&buffer[..len.min(buffer.len())])
 }
 
-fn parse_hex_input(value: &str) -> Result<Option<Color>, ()> {
-    let trimmed = value.trim();
-    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if digits.len() > 8 || !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(());
-    }
-    match digits.len() {
-        6 | 8 => Color::try_from_hex(trimmed).map(Some).ok_or(()),
-        0..=5 | 7 => Ok(None),
-        _ => Err(()),
-    }
-}
+
 
 fn sync_active_style_into_editable(state: &mut PanelState) {
     let editable = EditableThemeStyle::from_theme_style(&state.snapshot.active_style);
@@ -3108,10 +3097,7 @@ fn normalize_hex_edit(target: StyleColorTarget) {
     }
 }
 
-fn target_from_hex_control_id(control_id: u16) -> Option<StyleColorTarget> {
-    let index = control_id.checked_sub(ID_EDIT_HEX_BASE)? as usize;
-    COLOR_TARGETS.get(index).copied()
-}
+
 
 fn update_color_from_numeric_edit(channel_index: usize) {
     let (edit, target, syncing) = {
@@ -4942,6 +4928,18 @@ mod ui_smoke_tests {
             Some(HitTarget::Theme(ThemeMode::Dark)),
             Some(HitTarget::Layout(AppearancePreset::Minimal)),
         ));
+    }
+
+    #[test]
+    fn hex_input_helpers_keep_partial_and_full_color_behavior() {
+        assert!(parse_hex_input("#").unwrap().is_none());
+        assert!(parse_hex_input("ABCD").unwrap().is_none());
+        assert_eq!(parse_hex_input("#010203").unwrap().map(|c| (c.r,c.g,c.b,c.a)), Some((1,2,3,255)));
+        assert!(parse_hex_input("#123456789").is_err());
+        assert!(parse_hex_input("nocolor").is_err());
+        assert_eq!(target_from_hex_control_id(ID_EDIT_HEX_BASE), Some(StyleColorTarget::PanelBackground));
+        assert_eq!(target_from_hex_control_id(ID_EDIT_HEX_BASE + 12), Some(StyleColorTarget::TooltipBorder));
+        assert_eq!(target_from_hex_control_id(ID_EDIT_HEX_BASE - 1), None);
     }
 
     #[test]

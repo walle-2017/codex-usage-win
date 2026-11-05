@@ -56,3 +56,20 @@ pub(super) fn pack_color(color: Color) -> isize {
         | (u32::from(color.a) << 24)) as isize
 }
 
+pub(super) fn parse_hex_input(value: &str) -> Result<Option<Color>, ()> {
+    let trimmed = value.trim();
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if digits.len() > 8 || !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    match digits.len() {
+        6 | 8 => Color::try_from_hex(trimmed).map(Some).ok_or(()),
+        0..=5 | 7 => Ok(None),
+        _ => Err(()),
+    }
+}
+
+pub(super) fn target_from_hex_control_id(control_id: u16) -> Option<StyleColorTarget> {
+    let index = control_id.checked_sub(ID_EDIT_HEX_BASE)? as usize;
+    COLOR_TARGETS.get(index).copied()
+}
