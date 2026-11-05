@@ -806,16 +806,7 @@ fn redraw_settings_window(hwnd: HWND) {
 // HWND (which can remain on the original taskbar after replica handoffs).
 // The work area excludes taskbar reservations. Negative virtual-desktop
 // coordinates are valid for monitors left/above the primary display.
-fn settings_centered_origin(work: RECT, width: i32, height: i32) -> (i32, i32) {
-    let work_width = (i64::from(work.right) - i64::from(work.left)).max(0);
-    let work_height = (i64::from(work.bottom) - i64::from(work.top)).max(0);
-    let x = i64::from(work.left) + (work_width - i64::from(width).max(1)).max(0) / 2;
-    let y = i64::from(work.top) + (work_height - i64::from(height).max(1)).max(0) / 2;
-    (
-        x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-        y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-    )
-}
+
 
 fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
     if widget.0.is_null() || !unsafe { IsWindow(widget).as_bool() } {
@@ -1476,15 +1467,7 @@ const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
 const SETTINGS_EDITOR_HEIGHT: i32 = 164;
 const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
 
-fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: bool) -> RECT {
-    if vertical {
-        let r = preset_gallery_card_rect(3, minimal);
-        rect(hwnd, r.left, r.top, r.right, r.bottom)
-    } else {
-        // Restore original second-row custom preview for horizontal taskbars.
-        rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
-    }
-}
+
 
 
 
@@ -3316,17 +3299,7 @@ fn update_blur_from_numeric_edit() {
     }
 }
 
-fn corner_radius_max_for_section(
-    preset: AppearancePreset,
-    section: Section,
-) -> Option<u8> {
-    match section {
-        Section::Panel => Some(panel_corner_radius_max(preset)),
-        Section::Tooltip => Some(tooltip_corner_radius_max()),
-        Section::Progress => Some(progress_corner_radius_max(preset)),
-        _ => None,
-    }
-}
+
 
 fn update_corner_from_numeric_edit() {
     let (edit, syncing, section, radius_max) = {
@@ -4077,12 +4050,7 @@ fn adjust_slider_by_wheel(hwnd: HWND, kind: SliderKind, direction: i32) {
 }
 
 
-fn slider_value_from_x(track: RECT, x: i32, max: u8) -> u8 {
-    let width = (track.right - track.left).max(1);
-    let pos = (x.clamp(track.left, track.right) - track.left) as i64;
-    ((pos * i64::from(max) + i64::from(width / 2)) / i64::from(width))
-        .clamp(0, i64::from(max)) as u8
-}
+
 
 fn update_slider(hwnd: HWND, kind: SliderKind, x: i32) {
     let mut color_update: Option<(StyleColorTarget, Color)> = None;

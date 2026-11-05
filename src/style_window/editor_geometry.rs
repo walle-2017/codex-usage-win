@@ -222,3 +222,22 @@ pub(super) fn centered_single_line_edit_rect(bounds: RECT, font_height: i32, pad
     let top = bounds.top + (available - height) / 2;
     RECT { top, bottom: top + height, ..bounds }
 }
+
+pub(super) fn slider_value_from_x(track: RECT, x: i32, max: u8) -> u8 {
+    let width = (track.right - track.left).max(1);
+    let pos = (x.clamp(track.left, track.right) - track.left) as i64;
+    ((pos * i64::from(max) + i64::from(width / 2)) / i64::from(width))
+        .clamp(0, i64::from(max)) as u8
+}
+
+pub(super) fn corner_radius_max_for_section(
+    preset: AppearancePreset,
+    section: Section,
+) -> Option<u8> {
+    match section {
+        Section::Panel => Some(panel_corner_radius_max(preset)),
+        Section::Tooltip => Some(tooltip_corner_radius_max()),
+        Section::Progress => Some(progress_corner_radius_max(preset)),
+        _ => None,
+    }
+}

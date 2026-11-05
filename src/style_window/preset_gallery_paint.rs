@@ -272,3 +272,12 @@ pub(super) fn preset_card_rect(hwnd: HWND, preset: ThemePreset) -> RECT {
     preset_card_rect_for_orientation(hwnd, preset, vertical, minimal)
 }
 
+pub(super) fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: bool) -> RECT {
+    if vertical {
+        let r = preset_gallery_card_rect(3, minimal);
+        rect(hwnd, r.left, r.top, r.right, r.bottom)
+    } else {
+        // Restore original second-row custom preview for horizontal taskbars.
+        rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
+    }
+}

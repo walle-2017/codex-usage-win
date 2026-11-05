@@ -164,4 +164,13 @@ pub(super) fn layout_rect(hwnd: HWND, preset: AppearancePreset) -> RECT {
     appearance_button_rect(hwnd, column, 116)
 }
 
-
+pub(super) fn settings_centered_origin(work: RECT, width: i32, height: i32) -> (i32, i32) {
+    let work_width = (i64::from(work.right) - i64::from(work.left)).max(0);
+    let work_height = (i64::from(work.bottom) - i64::from(work.top)).max(0);
+    let x = i64::from(work.left) + (work_width - i64::from(width).max(1)).max(0) / 2;
+    let y = i64::from(work.top) + (work_height - i64::from(height).max(1)).max(0) / 2;
+    (
+        x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    )
+}
