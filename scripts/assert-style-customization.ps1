@@ -98,6 +98,8 @@ if ($renderPrimitives -notmatch 'pub\(super\) fn theme_icon\(' -or
     $styleWindowRoot -notmatch 'fn settings_icons_preserve_theme_layout_preset_and_json_mappings\(') {
     throw 'Settings icon mappings must be centralized without changing any theme, preset or JSON button icon.'
 }
+$jsonGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_geometry.rs')
+$styleWindow += "`n" + $jsonGeometry
 $jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
 $styleWindow += "`n" + $jsonPaint
 # JSON child pane and its narrow scrollbar repaint must share json_paint.rs.
@@ -1282,6 +1284,17 @@ if ($styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must use the native titlebar close button and save before closing.'
+}
+# The JSON editor, save overlay and toolbar hit zones now share one
+# geometry module rather than relying on definitions in the parent file.
+if ($styleWindowRoot -notmatch 'mod json_geometry;' -or
+    $styleWindowRoot -notmatch 'use self::json_geometry::\*;' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_edit_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_edit_text_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_save_mask_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_action_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:json_edit_rect|json_edit_text_rect|json_save_mask_rect|json_action_rect)\(') {
+    throw 'JSON editor geometry must stay shared after moving to json_geometry.rs.'
 }
 if ($styleWindow -notmatch 'let edit = json_edit_rect\(hwnd\)' -or
     $styleWindow -notmatch 'let button_width = scale\(hwnd, 108\)' -or
