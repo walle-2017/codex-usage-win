@@ -1483,28 +1483,13 @@ fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: 
         rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
     }
 }
-fn language_option_count() -> usize {
-    LanguageId::SELECTABLE.len()
-}
 
-fn language_option_rect(hwnd: HWND, index: usize) -> RECT {
-    general_segment_rect(general_language_group_rect(hwnd), index, language_option_count())
-}
 
-fn language_code_for_index(index: usize) -> String {
-    LanguageId::SELECTABLE
-        .get(index)
-        .map(|language| language.code().to_string())
-        .unwrap_or_else(|| LanguageId::English.code().to_string())
-}
 
-fn language_label_for_index(index: usize, ui_language: LanguageId) -> &'static str {
-    match LanguageId::SELECTABLE.get(index).copied() {
-        Some(LanguageId::SimplifiedChinese) => "中文",
-        Some(LanguageId::English) => "English",
-        None => ui_language.strings().system_default,
-    }
-}
+
+
+
+
 
 fn json_edit_rect(hwnd: HWND) -> RECT {
     let mut client = RECT::default();
@@ -1678,34 +1663,13 @@ fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
     }
 }
 
-fn general_refresh_rect(hwnd: HWND, interval: u32) -> RECT {
-    let index = match interval {
-        60_000 => 0,
-        300_000 => 1,
-        900_000 => 2,
-        _ => 3,
-    };
-    general_segment_rect(general_refresh_group_rect(hwnd), index, 4)
-}
 
-fn general_usage_rect(hwnd: HWND, weekly: bool) -> RECT {
-    rect(hwnd, 218, if weekly { 298 } else { 246 }, 544,
-        if weekly { 342 } else { 290 })
-}
 
-fn general_alert_rect(hwnd: HWND, threshold: u8) -> RECT {
-    let index = match threshold {
-        0 => 0,
-        10 => 1,
-        20 => 2,
-        _ => 3,
-    };
-    general_segment_rect(general_alert_group_rect(hwnd), index, 4)
-}
 
-fn general_startup_rect(hwnd: HWND) -> RECT {
-    rect(hwnd, 860, 250, 922, 282)
-}
+
+
+
+
 
 fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
     let frame = numeric_edit_frame_rect(hwnd, section, channel_index);
