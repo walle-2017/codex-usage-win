@@ -381,7 +381,24 @@ pub(super) fn friendly_json_error(error: &str, language: LanguageId) -> String {
     }
 }
 
+pub(super) fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: LanguageId) -> String {
+    let detail = friendly_json_error(error, language);
+    match language {
+        LanguageId::SimplifiedChinese => format!("× {action_zh}：{detail}"),
+        LanguageId::English => format!("× {action_en}: {detail}"),
+    }
+}
 
+pub(super) fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'static str {
+    let zh = language == LanguageId::SimplifiedChinese;
+    match action {
+        JsonAction::Reload => if zh { "◌ 载入中" } else { "◌ Reloading" },
+        JsonAction::Format => if zh { "◌ 格式化中" } else { "◌ Formatting" },
+        JsonAction::Import => if zh { "◌ 导入中" } else { "◌ Importing" },
+        JsonAction::Export => if zh { "◌ 导出中" } else { "◌ Exporting" },
+        JsonAction::Apply => if zh { "◌ 应用中" } else { "◌ Applying" },
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -410,24 +427,5 @@ mod tests {
         assert!(en.contains("Line 2, column 4"));
         assert!(zh.contains("`missing_setting`"));
         assert!(en.contains("`missing_setting`"));
-    }
-}
-
-pub(super) fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: LanguageId) -> String {
-    let detail = friendly_json_error(error, language);
-    match language {
-        LanguageId::SimplifiedChinese => format!("× {action_zh}：{detail}"),
-        LanguageId::English => format!("× {action_en}: {detail}"),
-    }
-}
-
-pub(super) fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'static str {
-    let zh = language == LanguageId::SimplifiedChinese;
-    match action {
-        JsonAction::Reload => if zh { "◌ 载入中" } else { "◌ Reloading" },
-        JsonAction::Format => if zh { "◌ 格式化中" } else { "◌ Formatting" },
-        JsonAction::Import => if zh { "◌ 导入中" } else { "◌ Importing" },
-        JsonAction::Export => if zh { "◌ 导出中" } else { "◌ Exporting" },
-        JsonAction::Apply => if zh { "◌ 应用中" } else { "◌ Applying" },
     }
 }
