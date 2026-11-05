@@ -2687,6 +2687,9 @@ fn file_dialog(hwnd: HWND, save: bool, default_name: Option<&str>) -> Option<Pat
 
 fn import_json_file(hwnd: HWND) {
     let Some(path) = file_dialog(hwnd, false, None) else {
+        // The dialog was dismissed without selecting a file. The pending
+        // action has already ended; do not leave a stale "Importing" status.
+        set_json_status(String::new());
         return;
     };
     let text = match fs::read_to_string(&path) {
@@ -2783,6 +2786,8 @@ fn export_json_file(hwnd: HWND) {
 
     let default_name = export_default_filename();
     let Some(mut path) = file_dialog(hwnd, true, Some(&default_name)) else {
+        // Discard the temporary "Exporting" status on file-dialog dismissal.
+        set_json_status(String::new());
         return;
     };
     if path.extension().is_none() {

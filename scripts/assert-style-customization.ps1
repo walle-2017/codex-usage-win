@@ -1296,6 +1296,12 @@ if ($styleWindowRoot -notmatch 'mod json_geometry;' -or
     $styleWindowRoot -match '(?m)^fn (?:json_edit_rect|json_edit_text_rect|json_save_mask_rect|json_action_rect)\(') {
     throw 'JSON editor geometry must stay shared after moving to json_geometry.rs.'
 }
+# Canceling the Windows Import/Export file picker must clear the temporary
+# progress message without changing JSON contents or save/dirty state.
+if ($styleWindowRoot -notmatch '(?s)fn import_json_file\(hwnd: HWND\).*?let Some\(path\) = file_dialog\(hwnd, false, None\) else \{\s*//[^\n]*\n\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};' -or
+    $styleWindowRoot -notmatch '(?s)fn export_json_file\(hwnd: HWND\).*?let Some\(mut path\) = file_dialog\(hwnd, true, Some\(&default_name\)\) else \{\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};') {
+    throw 'Cancelled JSON Import/Export must clear its in-progress status.'
+}
 if ($styleWindow -notmatch 'let edit = json_edit_rect\(hwnd\)' -or
     $styleWindow -notmatch 'let button_width = scale\(hwnd, 108\)' -or
     $styleWindow -notmatch 'JsonAction::Export\s*=>\s*RECT\s*\{[\s\S]{0,180}right:\s*edit\.right' -or
