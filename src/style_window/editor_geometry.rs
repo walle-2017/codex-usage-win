@@ -197,3 +197,28 @@ pub(super) fn numeric_edit_frame_rect(hwnd: HWND, section: Section, channel_inde
     rect(hwnd, 812, top, 920, top + 26)
 }
 
+// Shared helpers relocated verbatim from the settings parent module.
+
+pub(super) fn numeric_edit_rect(hwnd: HWND, section: Section, channel_index: usize) -> RECT {
+    let frame = numeric_edit_frame_rect(hwnd, section, channel_index);
+    RECT {
+        left: frame.left + scale(hwnd, 3),
+        top: frame.top + scale(hwnd, 3),
+        right: frame.right - scale(hwnd, 3),
+        bottom: frame.bottom - scale(hwnd, 3),
+    }
+}
+
+// A standard single-line EDIT only supports horizontal ES_CENTER; EM_SETRECT
+// does not change its vertical text position. Center the native child window
+// within our larger, separately painted rounded input background instead.
+// Keep full horizontal bounds so caret/selection and horizontal scrolling work.
+pub(super) fn centered_single_line_edit_rect(bounds: RECT, font_height: i32, padding: i32) -> RECT {
+    let available = (bounds.bottom - bounds.top).max(0);
+    if available == 0 {
+        return bounds;
+    }
+    let height = font_height.saturating_add(padding).clamp(1, available);
+    let top = bounds.top + (available - height) / 2;
+    RECT { top, bottom: top + height, ..bounds }
+}
