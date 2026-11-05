@@ -74,6 +74,15 @@ $lifecycleEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $styleWindow += "`n" + $lifecycleEvents
 $renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\render_primitives.rs')
 $styleWindow += "`n" + $renderPrimitives
+# Semantic icon mapping follows the shared native icon painter.
+if ($renderPrimitives -notmatch 'pub\(super\) fn theme_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn layout_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn preset_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn json_action_icon\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:theme_icon|layout_icon|preset_icon|json_action_icon)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_icons_preserve_theme_layout_preset_and_json_mappings\(') {
+    throw 'Settings icon mappings must be centralized without changing any theme, preset or JSON button icon.'
+}
 $jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
 $styleWindow += "`n" + $jsonPaint
 # JSON child pane and its narrow scrollbar repaint must share json_paint.rs.

@@ -266,4 +266,40 @@ pub(super) unsafe fn draw_text(hdc: HDC, text: &str, mut rect: RECT, format: DRA
     let _ = DrawTextW(hdc, &mut wide, &mut rect, format);
 }
 
+// Semantic icon selection stays separate from icon rasterization.
+pub(super) fn theme_icon(mode: ThemeMode) -> SettingsIcon {
+    match mode {
+        ThemeMode::System => SettingsIcon::ThemeSystem,
+        ThemeMode::Dark => SettingsIcon::ThemeDark,
+        ThemeMode::Light => SettingsIcon::ThemeLight,
+    }
+}
+
+pub(super) fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
+    match preset {
+        AppearancePreset::Default => SettingsIcon::LayoutDefault,
+        AppearancePreset::Minimal => SettingsIcon::LayoutMinimal,
+    }
+}
+
+pub(super) fn preset_icon(preset: ThemePreset, is_dark: bool) -> SettingsIcon {
+    match (is_dark, preset) {
+        (true, ThemePreset::Classic) => SettingsIcon::PresetClassic,
+        (true, ThemePreset::Ocean) => SettingsIcon::PresetOcean,
+        (true, ThemePreset::Forest) => SettingsIcon::PresetForest,
+        (false, ThemePreset::Classic) => SettingsIcon::PresetCloud,
+        (false, ThemePreset::Ocean) => SettingsIcon::PresetBay,
+        (false, ThemePreset::Forest) => SettingsIcon::PresetWheat,
+    }
+}
+
+pub(super) fn json_action_icon(action: JsonAction) -> SettingsIcon {
+    match action {
+        JsonAction::Reload => SettingsIcon::JsonReload,
+        JsonAction::Format => SettingsIcon::JsonFormat,
+        JsonAction::Import => SettingsIcon::JsonImport,
+        JsonAction::Export => SettingsIcon::JsonExport,
+        JsonAction::Apply => SettingsIcon::JsonApply,
+    }
+}
 

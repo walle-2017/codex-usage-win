@@ -1554,42 +1554,6 @@ const SETTINGS_CHOICE_LABEL_RIGHT: i32 = 338;
 const SETTINGS_EDITOR_HEIGHT: i32 = 164;
 const SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30;
 
-fn theme_icon(mode: ThemeMode) -> SettingsIcon {
-    match mode {
-        ThemeMode::System => SettingsIcon::ThemeSystem,
-        ThemeMode::Dark => SettingsIcon::ThemeDark,
-        ThemeMode::Light => SettingsIcon::ThemeLight,
-    }
-}
-
-fn layout_icon(preset: AppearancePreset) -> SettingsIcon {
-    match preset {
-        AppearancePreset::Default => SettingsIcon::LayoutDefault,
-        AppearancePreset::Minimal => SettingsIcon::LayoutMinimal,
-    }
-}
-
-fn preset_icon(preset: ThemePreset, is_dark: bool) -> SettingsIcon {
-    match (is_dark, preset) {
-        (true, ThemePreset::Classic) => SettingsIcon::PresetClassic,
-        (true, ThemePreset::Ocean) => SettingsIcon::PresetOcean,
-        (true, ThemePreset::Forest) => SettingsIcon::PresetForest,
-        (false, ThemePreset::Classic) => SettingsIcon::PresetCloud,
-        (false, ThemePreset::Ocean) => SettingsIcon::PresetBay,
-        (false, ThemePreset::Forest) => SettingsIcon::PresetWheat,
-    }
-}
-
-fn json_action_icon(action: JsonAction) -> SettingsIcon {
-    match action {
-        JsonAction::Reload => SettingsIcon::JsonReload,
-        JsonAction::Format => SettingsIcon::JsonFormat,
-        JsonAction::Import => SettingsIcon::JsonImport,
-        JsonAction::Export => SettingsIcon::JsonExport,
-        JsonAction::Apply => SettingsIcon::JsonApply,
-    }
-}
-
 fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: bool) -> RECT {
     if vertical {
         let r = preset_gallery_card_rect(3, minimal);
@@ -5209,6 +5173,32 @@ mod ui_smoke_tests {
         assert_eq!(rgba(submenu_mix(a, b, 1.5)), rgba(b));
         let midpoint = submenu_mix(a, b, 0.5);
         assert_eq!(rgba(midpoint), (111, 107, 103, 99));
+    }
+
+    #[test]
+    fn settings_icons_preserve_theme_layout_preset_and_json_mappings() {
+        assert_eq!(theme_icon(ThemeMode::System), SettingsIcon::ThemeSystem);
+        assert_eq!(theme_icon(ThemeMode::Dark), SettingsIcon::ThemeDark);
+        assert_eq!(theme_icon(ThemeMode::Light), SettingsIcon::ThemeLight);
+        assert_eq!(layout_icon(AppearancePreset::Default), SettingsIcon::LayoutDefault);
+        assert_eq!(layout_icon(AppearancePreset::Minimal), SettingsIcon::LayoutMinimal);
+        for (preset, dark_icon, light_icon) in [
+            (ThemePreset::Classic, SettingsIcon::PresetClassic, SettingsIcon::PresetCloud),
+            (ThemePreset::Ocean, SettingsIcon::PresetOcean, SettingsIcon::PresetBay),
+            (ThemePreset::Forest, SettingsIcon::PresetForest, SettingsIcon::PresetWheat),
+        ] {
+            assert_eq!(preset_icon(preset, true), dark_icon);
+            assert_eq!(preset_icon(preset, false), light_icon);
+        }
+        for (action, icon) in [
+            (JsonAction::Reload, SettingsIcon::JsonReload),
+            (JsonAction::Format, SettingsIcon::JsonFormat),
+            (JsonAction::Import, SettingsIcon::JsonImport),
+            (JsonAction::Export, SettingsIcon::JsonExport),
+            (JsonAction::Apply, SettingsIcon::JsonApply),
+        ] {
+            assert_eq!(json_action_icon(action), icon);
+        }
     }
 
     #[test]
