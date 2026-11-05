@@ -612,24 +612,8 @@ struct DesktopSubmenuLayout {
     vertical: RECT,
     collapse_switch: RECT,
 }
-fn desktop_submenu_layout() -> DesktopSubmenuLayout {
-    let row_height = 30;
-    let row = |left, right, top| RECT {
-        left, top, right, bottom: top + row_height,
-    };
-    DesktopSubmenuLayout {
-        well: RECT { left: 652, top: 66, right: 924, bottom: 198 },
-        title: RECT { left: 668, top: 76, right: 904, bottom: 96 },
-        direction_label: row(668, 736, 106),
-        collapse_label: row(668, 736, 152),
-        horizontal: row(742, 823, 106),
-        vertical: row(823, 904, 106),
-        collapse_switch: row(850, 904, 152),
-    }
-}
-fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
-    rect(hwnd, bounds.left, bounds.top, bounds.right, bounds.bottom)
-}
+
+
 
 struct PanelState {
     hwnd: SendHwnd,
@@ -4230,14 +4214,7 @@ struct PresetGalleryFrames {
     desktop: SettingsPaintBuffer,
 }
 
-fn preset_gallery_region(hwnd: HWND, width: i32, height: i32) -> RECT {
-    RECT {
-        left: scale(hwnd, SETTINGS_CONTENT_LEFT),
-        top: scale(hwnd, 206),
-        right: width,
-        bottom: height,
-    }
-}
+
 
 fn preset_gallery_cache_ready(
     hwnd: HWND, width: i32, height: i32, snapshot: &StyleWindowSnapshot,

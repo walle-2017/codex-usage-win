@@ -281,3 +281,12 @@ pub(super) fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool
         rect(hwnd, 200, PRESET_CARD_TOP + 200, 424, PRESET_CARD_TOP + 384)
     }
 }
+
+pub(super) fn preset_gallery_region(hwnd: HWND, width: i32, height: i32) -> RECT {
+    RECT {
+        left: scale(hwnd, SETTINGS_CONTENT_LEFT),
+        top: scale(hwnd, 206),
+        right: width,
+        bottom: height,
+    }
+}

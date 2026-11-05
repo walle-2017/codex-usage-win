@@ -174,3 +174,23 @@ pub(super) fn settings_centered_origin(work: RECT, width: i32, height: i32) -> (
         y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
     )
 }
+
+pub(super) fn desktop_submenu_layout() -> DesktopSubmenuLayout {
+    let row_height = 30;
+    let row = |left, right, top| RECT {
+        left, top, right, bottom: top + row_height,
+    };
+    DesktopSubmenuLayout {
+        well: RECT { left: 652, top: 66, right: 924, bottom: 198 },
+        title: RECT { left: 668, top: 76, right: 904, bottom: 96 },
+        direction_label: row(668, 736, 106),
+        collapse_label: row(668, 736, 152),
+        horizontal: row(742, 823, 106),
+        vertical: row(823, 904, 106),
+        collapse_switch: row(850, 904, 152),
+    }
+}
+
+pub(super) fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
+    rect(hwnd, bounds.left, bounds.top, bounds.right, bounds.bottom)
+}
