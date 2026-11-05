@@ -45,6 +45,7 @@ mod general_page_paint;
 mod navigation_paint;
 mod layout_geometry;
 mod editor_geometry;
+mod json_geometry;
 mod color_codec;
 use self::preset_preview::*;
 use self::json_support::*;
@@ -62,6 +63,7 @@ use self::general_page_paint::*;
 use self::navigation_paint::*;
 use self::layout_geometry::*;
 use self::editor_geometry::*;
+use self::json_geometry::*;
 pub use self::color_codec::{decode_color_target, unpack_color};
 use self::color_codec::{encode_color_target, pack_color};
 
@@ -1491,36 +1493,11 @@ fn custom_preset_card_rect_for_orientation(hwnd: HWND, vertical: bool, minimal: 
 
 
 
-fn json_edit_rect(hwnd: HWND) -> RECT {
-    let mut client = RECT::default();
-    unsafe { let _ = GetClientRect(hwnd, &mut client); }
-    RECT {
-        left: scale(hwnd, 200),
-        top: scale(hwnd, 108),
-        right: client.right - scale(hwnd, 24),
-        bottom: client.bottom - scale(hwnd, 140),
-    }
-}
 
-fn json_edit_text_rect(hwnd: HWND) -> RECT {
-    let outer = json_edit_rect(hwnd);
-    RECT {
-        left: outer.left + scale(hwnd, 2),
-        top: outer.top + scale(hwnd, 2),
-        right: outer.right - scale(hwnd, 16),
-        bottom: outer.bottom - scale(hwnd, 2),
-    }
-}
 
-fn json_save_mask_rect(hwnd: HWND) -> RECT {
-    let outer = json_edit_rect(hwnd);
-    RECT {
-        left: outer.left + scale(hwnd, 2),
-        top: outer.top + scale(hwnd, 2),
-        right: outer.right - scale(hwnd, 2),
-        bottom: outer.bottom - scale(hwnd, 2),
-    }
-}
+
+
+
 
 fn settings_window_ex_style() -> WINDOW_EX_STYLE {
     WS_EX_APPWINDOW | WS_EX_COMPOSITED
@@ -1627,41 +1604,7 @@ unsafe extern "system" fn json_edit_subclass_proc(
 }
 
 
-fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
-    let edit = json_edit_rect(hwnd);
-    let button_width = scale(hwnd, 108);
-    let button_gap = scale(hwnd, 12);
-    match action {
-        JsonAction::Reload => rect(hwnd, 200, 58, 306, 94),
-        JsonAction::Format => rect(hwnd, 318, 58, 424, 94),
-        JsonAction::Export => RECT {
-            left: edit.right - button_width,
-            top: scale(hwnd, 58),
-            right: edit.right,
-            bottom: scale(hwnd, 94),
-        },
-        JsonAction::Import => RECT {
-            left: edit.right - button_width * 2 - button_gap,
-            top: scale(hwnd, 58),
-            right: edit.right - button_width - button_gap,
-            bottom: scale(hwnd, 94),
-        },
-        JsonAction::Apply => {
-            let mut client = RECT::default();
-            unsafe { let _ = GetClientRect(hwnd, &mut client); }
-            let right = edit.right;
-            let width = button_width;
-            let height = scale(hwnd, 36);
-            let bottom = client.bottom - scale(hwnd, 24);
-            RECT {
-                left: right - width,
-                top: bottom - height,
-                right,
-                bottom,
-            }
-        }
-    }
-}
+
 
 
 
