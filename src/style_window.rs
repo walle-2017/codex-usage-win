@@ -65,7 +65,7 @@ use self::layout_geometry::*;
 use self::editor_geometry::*;
 use self::json_geometry::*;
 pub use self::color_codec::{decode_color_target, unpack_color};
-use self::color_codec::{encode_color_target, pack_color};
+use self::color_codec::{encode_color_target, pack_color, parse_hex_input, target_from_hex_control_id};
 
 use crate::style::{
     panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
