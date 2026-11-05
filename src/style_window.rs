@@ -5100,17 +5100,20 @@ mod ui_smoke_tests {
         let hwnd = HWND::default();
         assert_eq!(window_dpi(hwnd), 96);
         assert_eq!(scale(hwnd, 44), 44);
-        let region = rect(hwnd, -12, 5, 8, 25);
-        assert_eq!((region.left, region.top, region.right, region.bottom), (-12, 5, 8, 25));
+        // Retain the existing signed-division rounding, while testing hit
+        // rectangle boundaries with nonnegative screen-space coordinates.
+        assert_eq!(scale(hwnd, -12), -11);
+        let region = rect(hwnd, 12, 5, 32, 25);
+        assert_eq!((region.left, region.top, region.right, region.bottom), (12, 5, 32, 25));
         let packed = |x: i16, y: i16| {
             LPARAM((((y as u16 as u32) << 16) | (x as u16 as u32)) as isize)
         };
         assert_eq!(point_from_lparam(packed(-50, 320)), (-50, 320));
         assert_eq!(point_from_lparam(packed(210, -12)), (210, -12));
-        assert!(pt_in_rect(region, -12, 5));
-        assert!(pt_in_rect(region, 7, 24));
-        assert!(!pt_in_rect(region, 8, 24));
-        assert!(!pt_in_rect(region, 7, 25));
+        assert!(pt_in_rect(region, 12, 5));
+        assert!(pt_in_rect(region, 31, 24));
+        assert!(!pt_in_rect(region, 32, 24));
+        assert!(!pt_in_rect(region, 31, 25));
     }
 
     #[test]
