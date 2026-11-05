@@ -128,8 +128,10 @@ if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_discard_dialog\(' -or
     $jsonPaint -notmatch '未保存的更改' -or
     $jsonPaint -notmatch '#B65F63FF' -or
     $styleWindowRoot -match '(?m)^\s*unsafe fn paint_discard_dialog\(' -or
-    $styleWindowRoot -notmatch 'fn discard_dialog_rect\(' -or
-    $styleWindowRoot -notmatch 'fn discard_dialog_button_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn discard_dialog_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn discard_dialog_button_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn discard_dialog_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn discard_dialog_button_rect\(' -or
     $styleWindowRoot -notmatch 'fn unsaved_json_confirmation_buttons_keep_distinct_hit_rects\(') {
     throw 'Unsaved JSON confirmation must keep its original layout, copy and actions when moving painting to json_paint.rs.'
 }

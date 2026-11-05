@@ -722,44 +722,9 @@ const COLOR_TARGETS: [StyleColorTarget; HEX_EDIT_COUNT] = [
     StyleColorTarget::TooltipBorder,
 ];
 
-fn discard_dialog_rect(hwnd: HWND) -> RECT {
-    let mut client = RECT::default();
-    unsafe { let _ = GetClientRect(hwnd, &mut client); }
-    let width = scale(hwnd, 430);
-    let height = scale(hwnd, 184);
-    let left = (client.right - width) / 2;
-    let top = (client.bottom - height) / 2;
-    RECT {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
-    }
-}
 
-fn discard_dialog_button_rect(hwnd: HWND, discard: bool) -> RECT {
-    let dialog = discard_dialog_rect(hwnd);
-    let width = scale(hwnd, 136);
-    let height = scale(hwnd, 36);
-    let gap = scale(hwnd, 12);
-    let bottom = dialog.bottom - scale(hwnd, 22);
-    let right = dialog.right - scale(hwnd, 22);
-    if discard {
-        RECT {
-            left: right - width * 2 - gap,
-            top: bottom - height,
-            right: right - width - gap,
-            bottom,
-        }
-    } else {
-        RECT {
-            left: right - width,
-            top: bottom - height,
-            right,
-            bottom,
-        }
-    }
-}
+
+
 
 fn request_discard_confirmation(hwnd: HWND, action: PendingDiscardAction) {
     {

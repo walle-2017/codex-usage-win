@@ -84,3 +84,42 @@ pub(super) fn json_error_shake_offset(hwnd: HWND, step: u8) -> i32 {
 pub(super) fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> bool {
     section == Section::Json && !discard_pending
 }
+
+pub(super) fn discard_dialog_rect(hwnd: HWND) -> RECT {
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let width = scale(hwnd, 430);
+    let height = scale(hwnd, 184);
+    let left = (client.right - width) / 2;
+    let top = (client.bottom - height) / 2;
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+pub(super) fn discard_dialog_button_rect(hwnd: HWND, discard: bool) -> RECT {
+    let dialog = discard_dialog_rect(hwnd);
+    let width = scale(hwnd, 136);
+    let height = scale(hwnd, 36);
+    let gap = scale(hwnd, 12);
+    let bottom = dialog.bottom - scale(hwnd, 22);
+    let right = dialog.right - scale(hwnd, 22);
+    if discard {
+        RECT {
+            left: right - width * 2 - gap,
+            top: bottom - height,
+            right: right - width - gap,
+            bottom,
+        }
+    } else {
+        RECT {
+            left: right - width,
+            top: bottom - height,
+            right,
+            bottom,
+        }
+    }
+}
