@@ -160,6 +160,17 @@ $navigationPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $styleWindow += "`n" + $navigationPaint
 $layoutGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
 $styleWindow += "`n" + $layoutGeometry
+if ($layoutGeometry -notmatch 'pub\(super\) fn window_dpi\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn scale\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn rect\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn point_from_lparam\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn pt_in_rect\(' -or
+    $layoutGeometry -notmatch 'GetDpiForWindow\(hwnd\).max\(96\)' -or
+    $layoutGeometry -notmatch 'as i16 as i32' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:window_dpi|scale|rect|point_from_lparam|pt_in_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_coordinate_helpers_keep_signed_points_and_half_open_hits\(') {
+    throw 'Shared DPI pixel geometry and signed pointer hit bounds must remain unchanged.'
+}
 $editorGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_geometry.rs')
 $styleWindow += "`n" + $editorGeometry
 if ($styleWindowRoot -notmatch 'mod editor_geometry;' -or

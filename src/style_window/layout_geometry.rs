@@ -3,6 +3,36 @@
 
 use super::*;
 
+// Shared DPI scaling, rectangle construction and signed pointer coordinates.
+pub(super) fn window_dpi(hwnd: HWND) -> u32 {
+    unsafe { GetDpiForWindow(hwnd).max(96) }
+}
+
+pub(super) fn scale(hwnd: HWND, value: i32) -> i32 {
+    let dpi = window_dpi(hwnd);
+    ((value as i64 * dpi as i64 + 48) / 96) as i32
+}
+
+pub(super) fn rect(hwnd: HWND, left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+    RECT {
+        left: scale(hwnd, left),
+        top: scale(hwnd, top),
+        right: scale(hwnd, right),
+        bottom: scale(hwnd, bottom),
+    }
+}
+
+pub(super) fn point_from_lparam(lparam: LPARAM) -> (i32, i32) {
+    (
+        (lparam.0 & 0xFFFF) as i16 as i32,
+        ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    )
+}
+
+pub(super) fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
 pub(super) fn settings_page_title_rect(hwnd: HWND) -> RECT {
     rect(
         hwnd,

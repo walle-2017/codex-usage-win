@@ -1466,35 +1466,6 @@ fn apply_fixed_titlebar(hwnd: HWND) {
     }
 }
 
-fn window_dpi(hwnd: HWND) -> u32 {
-    unsafe { GetDpiForWindow(hwnd).max(96) }
-}
-
-fn scale(hwnd: HWND, value: i32) -> i32 {
-    let dpi = window_dpi(hwnd);
-    ((value as i64 * dpi as i64 + 48) / 96) as i32
-}
-
-fn rect(hwnd: HWND, left: i32, top: i32, right: i32, bottom: i32) -> RECT {
-    RECT {
-        left: scale(hwnd, left),
-        top: scale(hwnd, top),
-        right: scale(hwnd, right),
-        bottom: scale(hwnd, bottom),
-    }
-}
-
-fn point_from_lparam(lparam: LPARAM) -> (i32, i32) {
-    (
-        (lparam.0 & 0xFFFF) as i16 as i32,
-        ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
-    )
-}
-
-fn pt_in_rect(rect: RECT, x: i32, y: i32) -> bool {
-    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
-}
-
 const SETTINGS_CONTENT_LEFT: i32 = 200;
 const SETTINGS_CONTENT_RIGHT: i32 = 940;
 const SETTINGS_CARD_RADIUS: i32 = 10;
@@ -5122,6 +5093,24 @@ mod ui_smoke_tests {
         assert_eq!(rgba(submenu_mix(a, b, 1.5)), rgba(b));
         let midpoint = submenu_mix(a, b, 0.5);
         assert_eq!(rgba(midpoint), (111, 107, 103, 99));
+    }
+
+    #[test]
+    fn settings_coordinate_helpers_keep_signed_points_and_half_open_hits() {
+        let hwnd = HWND::default();
+        assert_eq!(window_dpi(hwnd), 96);
+        assert_eq!(scale(hwnd, 44), 44);
+        let region = rect(hwnd, -12, 5, 8, 25);
+        assert_eq!((region.left, region.top, region.right, region.bottom), (-12, 5, 8, 25));
+        let packed = |x: i16, y: i16| {
+            LPARAM((((y as u16 as u32) << 16) | (x as u16 as u32)) as isize)
+        };
+        assert_eq!(point_from_lparam(packed(-50, 320)), (-50, 320));
+        assert_eq!(point_from_lparam(packed(210, -12)), (210, -12));
+        assert!(pt_in_rect(region, -12, 5));
+        assert!(pt_in_rect(region, 7, 24));
+        assert!(!pt_in_rect(region, 8, 24));
+        assert!(!pt_in_rect(region, 7, 25));
     }
 
     #[test]
