@@ -69,3 +69,18 @@ pub(super) fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
         }
     }
 }
+
+pub(super) fn json_error_shake_offset(hwnd: HWND, step: u8) -> i32 {
+    if step == 0 || JSON_ERROR_SHAKE_STEPS <= 1 {
+        return 0;
+    }
+    let progress = f32::from(step.saturating_sub(1))
+        / f32::from(JSON_ERROR_SHAKE_STEPS.saturating_sub(1));
+    let amplitude = scale(hwnd, 4) as f32 * (1.0 - progress);
+    let phase = progress * std::f32::consts::PI * 4.0;
+    (amplitude * phase.sin()).round() as i32
+}
+
+pub(super) fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> bool {
+    section == Section::Json && !discard_pending
+}

@@ -1917,9 +1917,7 @@ fn ensure_json_save_mask(owner: HWND) -> Option<HWND> {
     }
 }
 
-fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> bool {
-    section == Section::Json && !discard_pending
-}
+
 
 fn layout_settings_children(hwnd: HWND) {
     let Some((json_edit, json_page_surface, json_save_mask, section, discard_pending, save_mask_visible)) = ({
@@ -2279,16 +2277,7 @@ fn open_json_status_path() {
     }
 }
 
-fn json_action_running_text(action: JsonAction, language: LanguageId) -> &'static str {
-    let zh = language == LanguageId::SimplifiedChinese;
-    match action {
-        JsonAction::Reload => if zh { "◌ 载入中" } else { "◌ Reloading" },
-        JsonAction::Format => if zh { "◌ 格式化中" } else { "◌ Formatting" },
-        JsonAction::Import => if zh { "◌ 导入中" } else { "◌ Importing" },
-        JsonAction::Export => if zh { "◌ 导出中" } else { "◌ Exporting" },
-        JsonAction::Apply => if zh { "◌ 应用中" } else { "◌ Applying" },
-    }
-}
+
 
 fn start_json_error_shake(hwnd: HWND) {
     {
@@ -2336,16 +2325,7 @@ fn advance_json_error_shake(hwnd: HWND) {
     }
 }
 
-fn json_error_shake_offset(hwnd: HWND, step: u8) -> i32 {
-    if step == 0 || JSON_ERROR_SHAKE_STEPS <= 1 {
-        return 0;
-    }
-    let progress = f32::from(step.saturating_sub(1))
-        / f32::from(JSON_ERROR_SHAKE_STEPS.saturating_sub(1));
-    let amplitude = scale(hwnd, 4) as f32 * (1.0 - progress);
-    let phase = progress * std::f32::consts::PI * 4.0;
-    (amplitude * phase.sin()).round() as i32
-}
+
 
 fn show_json_apply_validation_error(
     hwnd: HWND,
@@ -2468,13 +2448,7 @@ fn finish_pending_json_action(hwnd: HWND) {
     }
 }
 
-fn json_action_error(action_zh: &str, action_en: &str, error: &str, language: LanguageId) -> String {
-    let detail = friendly_json_error(error, language);
-    match language {
-        LanguageId::SimplifiedChinese => format!("× {action_zh}：{detail}"),
-        LanguageId::English => format!("× {action_en}: {detail}"),
-    }
-}
+
 
 fn schedule_json_validation(hwnd: HWND) {
     let should_schedule = {
@@ -4932,6 +4906,42 @@ mod ui_smoke_tests {
         assert!(pt_in_rect(region, 31, 24));
         assert!(!pt_in_rect(region, 32, 24));
         assert!(!pt_in_rect(region, 31, 25));
+    }
+
+    #[test]
+    fn settings_relocated_helpers_preserve_original_boundaries_and_status() {
+        let screen = RECT { left: -40, top: -30, right: 60, bottom: 70 };
+        assert_eq!(settings_centered_origin(screen, 20, 20), (0, 10));
+        assert_eq!(settings_centered_origin(screen, 200, 200), (-40, -30));
+
+        let track = RECT { left: -20, top: 0, right: 80, bottom: 12 };
+        assert_eq!(slider_value_from_x(track, -25, 100), 0);
+        assert_eq!(slider_value_from_x(track, 30, 100), 50);
+        assert_eq!(slider_value_from_x(track, 150, 100), 100);
+
+        assert!(json_editor_should_be_visible(Section::Json, false));
+        assert!(!json_editor_should_be_visible(Section::Json, true));
+        assert!(!json_editor_should_be_visible(Section::General, false));
+        assert_eq!(
+            json_action_running_text(JsonAction::Import, LanguageId::SimplifiedChinese),
+            "◌ 导入中"
+        );
+        assert_eq!(
+            json_action_running_text(JsonAction::Export, LanguageId::English),
+            "◌ Exporting"
+        );
+        assert!(is_appearance_section(Section::Panel));
+        assert!(!is_appearance_section(Section::Json));
+        assert!(card_only_hover_change(
+            Section::Panel,
+            Some(HitTarget::Theme(ThemeMode::Dark)),
+            Some(HitTarget::Layout(AppearancePreset::Minimal)),
+        ));
+        assert!(!card_only_hover_change(
+            Section::Json,
+            Some(HitTarget::Theme(ThemeMode::Dark)),
+            Some(HitTarget::Layout(AppearancePreset::Minimal)),
+        ));
     }
 
     #[test]
