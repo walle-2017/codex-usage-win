@@ -1628,31 +1628,13 @@ unsafe fn single_line_edit_font_height(edit: HWND, fallback: i32) -> i32 {
     }
 }
 
-fn is_appearance_section(section: Section) -> bool {
-    matches!(
-        section,
-        Section::Preset | Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
-    )
-}
+
 
 // Appearance-option hover, press, and position changes are confined to the
 // shared top card; avoid invalidating every expensive settings page element.
-fn is_appearance_card_target(target: HitTarget) -> bool {
-    matches!(
-        target,
-        HitTarget::Theme(_) | HitTarget::Layout(_)
-            | HitTarget::Position(_) | HitTarget::DesktopDirection(_)
-            | HitTarget::DesktopAutoCollapse(_)
-    )
-}
 
-fn card_only_hover_change(
-    section: Section, previous: Option<HitTarget>, current: Option<HitTarget>,
-) -> bool {
-    is_appearance_section(section)
-        && [previous, current].iter().flatten().any(|target| is_appearance_card_target(*target))
-        && [previous, current].iter().flatten().all(|target| is_appearance_card_target(*target))
-}
+
+
 
 unsafe fn invalidate_appearance_card_or_window(
     hwnd: HWND, section: Section, card_only: bool,
@@ -3728,31 +3710,7 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
     }
 }
 
-fn button_background(
-    target: HitTarget,
-    selected: bool,
-    hovered: Option<HitTarget>,
-    pressed: Option<HitTarget>,
-    palette: ButtonPalette,
-) -> Color {
-    if pressed == Some(target) {
-        if selected {
-            palette.selected_pressed
-        } else {
-            palette.pressed
-        }
-    } else if hovered == Some(target) {
-        if selected {
-            palette.selected_hover
-        } else {
-            palette.hover
-        }
-    } else if selected {
-        palette.selected
-    } else {
-        palette.normal
-    }
-}
+
 
 fn set_section(section: Section) {
     let (current_section, dirty, hwnd, discard_pending) = {

@@ -303,3 +303,28 @@ pub(super) fn json_action_icon(action: JsonAction) -> SettingsIcon {
     }
 }
 
+pub(super) fn button_background(
+    target: HitTarget,
+    selected: bool,
+    hovered: Option<HitTarget>,
+    pressed: Option<HitTarget>,
+    palette: ButtonPalette,
+) -> Color {
+    if pressed == Some(target) {
+        if selected {
+            palette.selected_pressed
+        } else {
+            palette.pressed
+        }
+    } else if hovered == Some(target) {
+        if selected {
+            palette.selected_hover
+        } else {
+            palette.hover
+        }
+    } else if selected {
+        palette.selected
+    } else {
+        palette.normal
+    }
+}

@@ -486,3 +486,26 @@ pub(super) unsafe fn paint_appearance_page(
     }
 }
 
+pub(super) fn is_appearance_section(section: Section) -> bool {
+    matches!(
+        section,
+        Section::Preset | Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
+    )
+}
+
+pub(super) fn is_appearance_card_target(target: HitTarget) -> bool {
+    matches!(
+        target,
+        HitTarget::Theme(_) | HitTarget::Layout(_)
+            | HitTarget::Position(_) | HitTarget::DesktopDirection(_)
+            | HitTarget::DesktopAutoCollapse(_)
+    )
+}
+
+pub(super) fn card_only_hover_change(
+    section: Section, previous: Option<HitTarget>, current: Option<HitTarget>,
+) -> bool {
+    is_appearance_section(section)
+        && [previous, current].iter().flatten().any(|target| is_appearance_card_target(*target))
+        && [previous, current].iter().flatten().all(|target| is_appearance_card_target(*target))
+}
