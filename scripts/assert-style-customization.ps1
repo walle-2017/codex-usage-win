@@ -46,9 +46,11 @@ if ([string]::IsNullOrWhiteSpace($wheelTextSync) -or
     $styleWindowRoot -notmatch 'focused native EDIT text must match the blur slider/model') {
     throw 'Numeric wheel adjustments must synchronize and repaint the focused native edit after updating style.'
 }
+$editorGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_geometry.rs')
 # Native single-line EDIT has no vertical-text alignment API. The child
 # must be centered inside the themed input background using real font metrics.
-if ($styleWindowRoot -notmatch 'fn centered_single_line_edit_rect\(' -or
+if ($editorGeometry -notmatch 'pub\(super\) fn centered_single_line_edit_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn centered_single_line_edit_rect\(' -or
     $styleWindowRoot -notmatch 'fn single_line_edit_font_height\(' -or
     $styleWindowRoot -notmatch 'WM_GETFONT' -or
     $styleWindowRoot -notmatch 'GetTextMetricsW\(' -or
@@ -171,7 +173,6 @@ if ($layoutGeometry -notmatch 'pub\(super\) fn window_dpi\(' -or
     $styleWindowRoot -notmatch 'fn settings_coordinate_helpers_keep_signed_points_and_half_open_hits\(') {
     throw 'Shared DPI pixel geometry and signed pointer hit bounds must remain unchanged.'
 }
-$editorGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_geometry.rs')
 $styleWindow += "`n" + $editorGeometry
 if ($styleWindowRoot -notmatch 'mod editor_geometry;' -or
     $styleWindowRoot -notmatch 'use self::editor_geometry::\*;' -or
