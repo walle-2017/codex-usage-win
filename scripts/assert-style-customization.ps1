@@ -62,6 +62,19 @@ if ($styleWindowRoot -notmatch 'fn centered_single_line_edit_rect\(' -or
 $styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
 $jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
 $styleWindow += "`n" + $jsonSupport
+$colorCodec = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\color_codec.rs')
+$styleWindow += "`n" + $colorCodec
+if ($styleWindowRoot -notmatch 'mod color_codec;' -or
+    $styleWindowRoot -notmatch 'pub use self::color_codec::\{decode_color_target, unpack_color\};' -or
+    $colorCodec -notmatch 'pub fn decode_color_target\(' -or
+    $colorCodec -notmatch 'pub fn unpack_color\(' -or
+    $colorCodec -notmatch 'pub\(super\) fn encode_color_target\(' -or
+    $colorCodec -notmatch 'pub\(super\) fn pack_color\(' -or
+    $colorCodec -notmatch 'u32::from\(color.a\) << 24' -or
+    $styleWindowRoot -match '(?m)^\s*(?:pub )?fn (?:decode_color_target|unpack_color|encode_color_target|pack_color)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_color_codec_round_trips_all_targets_and_rgba_channels\(') {
+    throw 'Color target IDs and RGBA Win32 packing must remain stable and exported after modularization.'
+}
 $jsonScroll = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_scroll.rs')
 $styleWindow += "`n" + $jsonScroll
 $inputEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')

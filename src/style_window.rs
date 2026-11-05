@@ -45,6 +45,7 @@ mod general_page_paint;
 mod navigation_paint;
 mod layout_geometry;
 mod editor_geometry;
+mod color_codec;
 use self::preset_preview::*;
 use self::json_support::*;
 use self::json_scroll::*;
@@ -61,6 +62,8 @@ use self::general_page_paint::*;
 use self::navigation_paint::*;
 use self::layout_geometry::*;
 use self::editor_geometry::*;
+pub use self::color_codec::{decode_color_target, unpack_color};
+use self::color_codec::{encode_color_target, pack_color};
 
 use crate::style::{
     panel_corner_radius_max, progress_corner_radius_max, tooltip_corner_radius_max,
@@ -1461,60 +1464,6 @@ fn apply_fixed_titlebar(hwnd: HWND) {
             std::mem::size_of::<COLORREF>() as u32,
         );
     }
-}
-
-pub fn decode_color_target(value: usize) -> Option<StyleColorTarget> {
-    Some(match value {
-        0 => StyleColorTarget::PanelBackground,
-        1 => StyleColorTarget::PanelBorder,
-        2 => StyleColorTarget::QuotaType,
-        3 => StyleColorTarget::Remaining,
-        4 => StyleColorTarget::ResetTime,
-        5 => StyleColorTarget::Error,
-        6 => StyleColorTarget::ProgressHigh,
-        7 => StyleColorTarget::ProgressMedium,
-        8 => StyleColorTarget::ProgressLow,
-        9 => StyleColorTarget::ProgressConsumed,
-        10 => StyleColorTarget::DragHandle,
-        11 => StyleColorTarget::TooltipBackground,
-        12 => StyleColorTarget::TooltipBorder,
-        _ => return None,
-    })
-}
-
-pub fn unpack_color(value: isize) -> Color {
-    let value = value as u32;
-    Color::rgba(
-        (value & 0xFF) as u8,
-        ((value >> 8) & 0xFF) as u8,
-        ((value >> 16) & 0xFF) as u8,
-        ((value >> 24) & 0xFF) as u8,
-    )
-}
-
-fn encode_color_target(target: StyleColorTarget) -> usize {
-    match target {
-        StyleColorTarget::PanelBackground => 0,
-        StyleColorTarget::PanelBorder => 1,
-        StyleColorTarget::QuotaType => 2,
-        StyleColorTarget::Remaining => 3,
-        StyleColorTarget::ResetTime => 4,
-        StyleColorTarget::Error => 5,
-        StyleColorTarget::ProgressHigh => 6,
-        StyleColorTarget::ProgressMedium => 7,
-        StyleColorTarget::ProgressLow => 8,
-        StyleColorTarget::ProgressConsumed => 9,
-        StyleColorTarget::DragHandle => 10,
-        StyleColorTarget::TooltipBackground => 11,
-        StyleColorTarget::TooltipBorder => 12,
-    }
-}
-
-fn pack_color(color: Color) -> isize {
-    (u32::from(color.r)
-        | (u32::from(color.g) << 8)
-        | (u32::from(color.b) << 16)
-        | (u32::from(color.a) << 24)) as isize
 }
 
 fn window_dpi(hwnd: HWND) -> u32 {
@@ -5173,6 +5122,21 @@ mod ui_smoke_tests {
         assert_eq!(rgba(submenu_mix(a, b, 1.5)), rgba(b));
         let midpoint = submenu_mix(a, b, 0.5);
         assert_eq!(rgba(midpoint), (111, 107, 103, 99));
+    }
+
+    #[test]
+    fn settings_color_codec_round_trips_all_targets_and_rgba_channels() {
+        for (index, target) in COLOR_TARGETS.iter().copied().enumerate() {
+            assert_eq!(decode_color_target(index), Some(target));
+            assert_eq!(encode_color_target(target), index);
+        }
+        assert_eq!(decode_color_target(COLOR_TARGETS.len()), None);
+        assert_eq!(decode_color_target(usize::MAX), None);
+        for (r, g, b, a) in [(0, 0, 0, 0), (255, 255, 255, 255), (1, 42, 128, 250)] {
+            let original = Color::rgba(r, g, b, a);
+            let decoded = unpack_color(pack_color(original));
+            assert_eq!((decoded.r, decoded.g, decoded.b, decoded.a), (r, g, b, a));
+        }
     }
 
     #[test]
