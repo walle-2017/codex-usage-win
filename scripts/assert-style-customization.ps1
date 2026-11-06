@@ -18,6 +18,20 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Native editor messaging now lives in a dedicated module; retain all six helpers.
+$editControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\edit_controls.rs')
+$styleWindow += "`n" + $editControls
+if ($styleWindowRoot -notmatch 'mod edit_controls;' -or
+    $styleWindowRoot -notmatch 'use self::edit_controls::\*;' -or
+    $editControls -notmatch 'pub\(super\) fn set_edit_text_string\(' -or
+    $editControls -notmatch 'pub\(super\) fn set_edit_text\(' -or
+    $editControls -notmatch 'pub\(super\) fn read_edit_value\(' -or
+    $editControls -notmatch 'pub\(super\) fn read_edit_text\(' -or
+    $editControls -notmatch 'pub\(super\) unsafe fn rich_set_selection\(' -or
+    $editControls -notmatch 'pub\(super\) unsafe fn rich_set_selected_color\(' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe\s+)?fn (?:set_edit_text_string|set_edit_text|read_edit_value|read_edit_text|rich_set_selection|rich_set_selected_color)\(') {
+    throw 'Settings native edit helpers must remain centralized after modularization.'
+}
 # Direct typing must explicitly present the Settings slider and native
 # EDIT without rewriting the in-progress text or moving its caret.
 $typedBlurHandler = [regex]::Match(

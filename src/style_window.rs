@@ -45,6 +45,7 @@ mod general_page_paint;
 mod navigation_paint;
 mod layout_geometry;
 mod editor_geometry;
+mod edit_controls;
 mod json_geometry;
 mod color_codec;
 use self::preset_preview::*;
@@ -63,6 +64,7 @@ use self::general_page_paint::*;
 use self::navigation_paint::*;
 use self::layout_geometry::*;
 use self::editor_geometry::*;
+use self::edit_controls::*;
 use self::json_geometry::*;
 pub use self::color_codec::{decode_color_target, unpack_color};
 use self::color_codec::{encode_color_target, pack_color, parse_hex_input, target_from_hex_control_id};
@@ -1989,33 +1991,9 @@ fn read_large_edit_text(edit: HWND) -> String {
     normalize_to_lf(&read_large_edit_text_raw(edit))
 }
 
-unsafe fn rich_set_selection(edit: HWND, start: i32, end: i32) {
-    let mut range = RichCharRange {
-        cp_min: start,
-        cp_max: end,
-    };
-    let _ = SendMessageW(
-        edit,
-        EM_EXSETSEL_MSG,
-        WPARAM(0),
-        LPARAM((&mut range as *mut RichCharRange) as isize),
-    );
-}
 
-unsafe fn rich_set_selected_color(edit: HWND, color: Color) {
-    let mut format = RichCharFormatW {
-        cb_size: std::mem::size_of::<RichCharFormatW>() as u32,
-        dw_mask: CFM_COLOR_MASK,
-        cr_text_color: COLORREF(color.to_colorref()),
-        ..Default::default()
-    };
-    let _ = SendMessageW(
-        edit,
-        EM_SETCHARFORMAT_MSG,
-        WPARAM(SCF_SELECTION_FLAG),
-        LPARAM((&mut format as *mut RichCharFormatW) as isize),
-    );
-}
+
+
 
 fn syntax_highlight_json_editor(edit: HWND, text: &str, is_dark: bool) {
     unsafe {
@@ -2804,29 +2782,9 @@ fn layout_hex_edits(hwnd: HWND) {
     }
 }
 
-fn set_edit_text_string(edit: HWND, value: &str) {
-    let text = native_interop::wide_str(value);
-    unsafe {
-        let _ = SendMessageW(
-            edit,
-            WM_SETTEXT,
-            WPARAM(0),
-            LPARAM(text.as_ptr() as isize),
-        );
-    }
-}
 
-fn set_edit_text(edit: HWND, value: u8) {
-    let text = native_interop::wide_str(&value.to_string());
-    unsafe {
-        let _ = SendMessageW(
-            edit,
-            WM_SETTEXT,
-            WPARAM(0),
-            LPARAM(text.as_ptr() as isize),
-        );
-    }
-}
+
+
 
 fn sync_numeric_edits() {
     let (edits, values) = {
@@ -2903,36 +2861,9 @@ fn sync_corner_edit() {
     }
 }
 
-fn read_edit_value(edit: HWND) -> Option<u16> {
-    let mut buffer = [0u16; 4];
-    let len = unsafe {
-        SendMessageW(
-            edit,
-            WM_GETTEXT,
-            WPARAM(buffer.len()),
-            LPARAM(buffer.as_mut_ptr() as isize),
-        )
-        .0 as usize
-    };
-    if len == 0 {
-        return None;
-    }
-    String::from_utf16_lossy(&buffer[..len]).parse::<u16>().ok()
-}
 
-fn read_edit_text(edit: HWND) -> String {
-    let mut buffer = [0u16; 16];
-    let len = unsafe {
-        SendMessageW(
-            edit,
-            WM_GETTEXT,
-            WPARAM(buffer.len()),
-            LPARAM(buffer.as_mut_ptr() as isize),
-        )
-        .0 as usize
-    };
-    String::from_utf16_lossy(&buffer[..len.min(buffer.len())])
-}
+
+
 
 
 
