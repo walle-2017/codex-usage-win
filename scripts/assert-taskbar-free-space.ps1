@@ -4,6 +4,15 @@ $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $appearance = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\appearance.rs')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$styleWindowRoot = $styleWindow
+$hitTesting = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hit_testing.rs')
+$styleWindow += "`n" + $hitTesting
+if ($styleWindowRoot -notmatch 'mod hit_testing;' -or
+    $styleWindowRoot -notmatch 'use self::hit_testing::\*;' -or
+    $hitTesting -notmatch 'pub\(super\) fn hit_target_at\(' -or
+    $hitTesting -notmatch 'pub\(super\) fn slider_kind_at\(') {
+    throw 'Settings layout and position hit targets must remain available from hit_testing.rs.'
+}
 $settings = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
 
 foreach ($required in @(
