@@ -104,6 +104,20 @@ if ($editorGeometry -notmatch 'pub\(super\) fn centered_single_line_edit_rect\('
     throw 'Settings single-line edit controls must center the native text window using measured font metrics across all input types.'
 }
 $styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
+$jsonEditorText = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_editor_text.rs')
+$styleWindow += "`n" + $jsonEditorText
+if ($styleWindowRoot -notmatch 'mod json_editor_text;' -or
+    $styleWindowRoot -notmatch 'use self::json_editor_text::\*;' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn read_large_edit_text_raw\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn read_large_edit_text\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn syntax_highlight_json_editor\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn write_json_editor\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn refresh_json_editor_theme\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn reload_json_editor_from_snapshot\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn locate_json_error\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:read_large_edit_text_raw|read_large_edit_text|syntax_highlight_json_editor|write_json_editor|refresh_json_editor_theme|reload_json_editor_from_snapshot|locate_json_error)\(') {
+    throw 'JSON RichEdit text, syntax and editor refresh helpers must remain in json_editor_text.rs.'
+}
 $jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
 $styleWindow += "`n" + $jsonSupport
 $colorCodec = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\color_codec.rs')
