@@ -1,0 +1,152 @@
+//! JSON editor geometry shared by rendering, child layout and hit testing.
+//! Keep the original dimensions and Win32 client-area measurements.
+
+use super::*;
+
+pub(super) fn json_edit_rect(hwnd: HWND) -> RECT {
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    RECT {
+        left: scale(hwnd, 200),
+        top: scale(hwnd, 108),
+        right: client.right - scale(hwnd, 24),
+        bottom: client.bottom - scale(hwnd, 140),
+    }
+}
+
+pub(super) fn json_edit_text_rect(hwnd: HWND) -> RECT {
+    let outer = json_edit_rect(hwnd);
+    RECT {
+        left: outer.left + scale(hwnd, 2),
+        top: outer.top + scale(hwnd, 2),
+        right: outer.right - scale(hwnd, 16),
+        bottom: outer.bottom - scale(hwnd, 2),
+    }
+}
+
+pub(super) fn json_save_mask_rect(hwnd: HWND) -> RECT {
+    let outer = json_edit_rect(hwnd);
+    RECT {
+        left: outer.left + scale(hwnd, 2),
+        top: outer.top + scale(hwnd, 2),
+        right: outer.right - scale(hwnd, 2),
+        bottom: outer.bottom - scale(hwnd, 2),
+    }
+}
+
+pub(super) fn json_action_rect(hwnd: HWND, action: JsonAction) -> RECT {
+    let edit = json_edit_rect(hwnd);
+    let button_width = scale(hwnd, 108);
+    let button_gap = scale(hwnd, 12);
+    match action {
+        JsonAction::Reload => rect(hwnd, 200, 58, 306, 94),
+        JsonAction::Format => rect(hwnd, 318, 58, 424, 94),
+        JsonAction::Export => RECT {
+            left: edit.right - button_width,
+            top: scale(hwnd, 58),
+            right: edit.right,
+            bottom: scale(hwnd, 94),
+        },
+        JsonAction::Import => RECT {
+            left: edit.right - button_width * 2 - button_gap,
+            top: scale(hwnd, 58),
+            right: edit.right - button_width - button_gap,
+            bottom: scale(hwnd, 94),
+        },
+        JsonAction::Apply => {
+            let mut client = RECT::default();
+            unsafe { let _ = GetClientRect(hwnd, &mut client); }
+            let right = edit.right;
+            let width = button_width;
+            let height = scale(hwnd, 36);
+            let bottom = client.bottom - scale(hwnd, 24);
+            RECT {
+                left: right - width,
+                top: bottom - height,
+                right,
+                bottom,
+            }
+        }
+    }
+}
+
+pub(super) fn json_error_shake_offset(hwnd: HWND, step: u8) -> i32 {
+    if step == 0 || JSON_ERROR_SHAKE_STEPS <= 1 {
+        return 0;
+    }
+    let progress = f32::from(step.saturating_sub(1))
+        / f32::from(JSON_ERROR_SHAKE_STEPS.saturating_sub(1));
+    let amplitude = scale(hwnd, 4) as f32 * (1.0 - progress);
+    let phase = progress * std::f32::consts::PI * 4.0;
+    (amplitude * phase.sin()).round() as i32
+}
+
+pub(super) fn json_editor_should_be_visible(section: Section, discard_pending: bool) -> bool {
+    section == Section::Json && !discard_pending
+}
+
+pub(super) fn discard_dialog_rect(hwnd: HWND) -> RECT {
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let width = scale(hwnd, 430);
+    let height = scale(hwnd, 184);
+    let left = (client.right - width) / 2;
+    let top = (client.bottom - height) / 2;
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+pub(super) fn discard_dialog_button_rect(hwnd: HWND, discard: bool) -> RECT {
+    let dialog = discard_dialog_rect(hwnd);
+    let width = scale(hwnd, 136);
+    let height = scale(hwnd, 36);
+    let gap = scale(hwnd, 12);
+    let bottom = dialog.bottom - scale(hwnd, 22);
+    let right = dialog.right - scale(hwnd, 22);
+    if discard {
+        RECT {
+            left: right - width * 2 - gap,
+            top: bottom - height,
+            right: right - width - gap,
+            bottom,
+        }
+    } else {
+        RECT {
+            left: right - width,
+            top: bottom - height,
+            right,
+            bottom,
+        }
+    }
+}
+
+pub(super) fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
+    let edit_rect = json_edit_rect(hwnd);
+    let prefix_width = if language == LanguageId::SimplifiedChinese {
+        scale(hwnd, 96)
+    } else {
+        scale(hwnd, 150)
+    };
+    let path_text = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .as_ref()
+            .and_then(|s| s.json_status_path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let left = scale(hwnd, 200) + prefix_width;
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let width = text_width_px(hwnd, &path_text).max(0);
+    RECT {
+        left,
+        top: edit_rect.bottom + scale(hwnd, 8),
+        right: (left + width).min(client.right - scale(hwnd, 24)),
+        bottom: edit_rect.bottom + scale(hwnd, 34),
+    }
+}
