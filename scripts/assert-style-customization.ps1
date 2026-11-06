@@ -104,6 +104,19 @@ if ($editorGeometry -notmatch 'pub\(super\) fn centered_single_line_edit_rect\('
     throw 'Settings single-line edit controls must center the native text window using measured font metrics across all input types.'
 }
 $styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
+$jsonStatus = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_status.rs')
+$styleWindow += "`n" + $jsonStatus
+if ($styleWindowRoot -notmatch 'mod json_status;' -or
+    $styleWindowRoot -notmatch 'use self::json_status::\*;' -or
+    $jsonStatus -notmatch 'pub\(super\) fn set_json_status\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn set_json_status_with_path\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn open_json_status_path\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn start_json_error_shake\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn advance_json_error_shake\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn show_json_apply_validation_error\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:set_json_status|set_json_status_with_path|open_json_status_path|start_json_error_shake|advance_json_error_shake|show_json_apply_validation_error)\(') {
+    throw 'JSON status and validation feedback helpers must stay in json_status.rs.'
+}
 $jsonEditorText = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_editor_text.rs')
 $styleWindow += "`n" + $jsonEditorText
 if ($styleWindowRoot -notmatch 'mod json_editor_text;' -or
