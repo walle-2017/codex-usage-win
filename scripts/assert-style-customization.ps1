@@ -31,8 +31,16 @@ if ($layoutWindowHelpers -notmatch 'pub\(super\) fn settings_work_area_for_widge
 }
 # Input hit testing and JSON export name defaults stay available after splitting.
 $inputHitHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')
+$hitTesting = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hit_testing.rs')
+$styleWindow += "`n" + $hitTesting
 $jsonNameHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
-if ($inputHitHelpers -notmatch 'pub\(super\) fn wheel_numeric_target_at\(' -or
+if ($hitTesting -notmatch 'pub\(super\) fn wheel_numeric_target_at\(' -or
+    $hitTesting -notmatch 'pub\(super\) fn hit_target_at\(' -or
+    $hitTesting -notmatch 'pub\(super\) fn slider_kind_at\(' -or
+    $styleWindowRoot -notmatch 'mod hit_testing;' -or
+    $styleWindowRoot -notmatch 'use self::hit_testing::\*;' -or
+    $styleWindowRoot -match '(?m)^fn (?:hit_target_at|slider_kind_at)\(' -or
+    $inputHitHelpers -match '(?m)^pub\(super\) fn wheel_numeric_target_at\(' -or
     $jsonNameHelpers -notmatch 'pub\(super\) fn export_default_filename\(' -or
     $jsonNameHelpers -notmatch 'codex-usage-win-config-' -or
     $styleWindowRoot -match '(?m)^fn (?:wheel_numeric_target_at|export_default_filename)\(') {

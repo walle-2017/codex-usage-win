@@ -358,40 +358,4 @@ pub(super) unsafe fn handle_settings_input_message(
 }
 
 // Locate numeric wheel targets without changing the native input message routing.
-pub(super) fn wheel_numeric_target_at(
-    hwnd: HWND,
-    x: i32,
-    y: i32,
-) -> Option<WheelNumericTarget> {
-    let (section, editor) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let s = state.as_ref()?;
-        (s.section, s.editor)
-    };
 
-    if matches!(
-        section,
-        Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
-    ) && matches!(editor, EditorSelection::Color(_))
-    {
-        for index in 0..4 {
-            if pt_in_rect(numeric_edit_frame_rect(hwnd, section, index), x, y) {
-                return Some(WheelNumericTarget::Color(index));
-            }
-        }
-    }
-
-    if matches!(section, Section::Panel | Section::Tooltip)
-        && pt_in_rect(blur_edit_frame_rect(hwnd, section), x, y)
-    {
-        return Some(WheelNumericTarget::Blur);
-    }
-
-    if matches!(section, Section::Panel | Section::Tooltip | Section::Progress)
-        && pt_in_rect(corner_edit_frame_rect(hwnd), x, y)
-    {
-        return Some(WheelNumericTarget::Corner);
-    }
-
-    None
-}
