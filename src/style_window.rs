@@ -2474,13 +2474,7 @@ fn format_json_editor() {
     }
 }
 
-fn export_default_filename() -> String {
-    let time = unsafe { GetLocalTime() };
-    format!(
-        "codex-usage-win-config-{:04}{:02}{:02}-{:02}{:02}{:02}.json",
-        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
-    )
-}
+
 
 fn file_dialog(hwnd: HWND, save: bool, default_name: Option<&str>) -> Option<PathBuf> {
     let mut buffer = vec![0u16; 4096];
@@ -3608,43 +3602,7 @@ fn slider_kind_at(hwnd: HWND, x: i32, y: i32) -> Option<SliderKind> {
     None
 }
 
-fn wheel_numeric_target_at(
-    hwnd: HWND,
-    x: i32,
-    y: i32,
-) -> Option<WheelNumericTarget> {
-    let (section, editor) = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let s = state.as_ref()?;
-        (s.section, s.editor)
-    };
 
-    if matches!(
-        section,
-        Section::Panel | Section::Tooltip | Section::Text | Section::Progress | Section::Interaction
-    ) && matches!(editor, EditorSelection::Color(_))
-    {
-        for index in 0..4 {
-            if pt_in_rect(numeric_edit_frame_rect(hwnd, section, index), x, y) {
-                return Some(WheelNumericTarget::Color(index));
-            }
-        }
-    }
-
-    if matches!(section, Section::Panel | Section::Tooltip)
-        && pt_in_rect(blur_edit_frame_rect(hwnd, section), x, y)
-    {
-        return Some(WheelNumericTarget::Blur);
-    }
-
-    if matches!(section, Section::Panel | Section::Tooltip | Section::Progress)
-        && pt_in_rect(corner_edit_frame_rect(hwnd), x, y)
-    {
-        return Some(WheelNumericTarget::Corner);
-    }
-
-    None
-}
 
 fn adjust_numeric_by_wheel(target: WheelNumericTarget, direction: i32) {
     if direction == 0 {

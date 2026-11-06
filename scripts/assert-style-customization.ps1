@@ -29,6 +29,15 @@ if ($layoutWindowHelpers -notmatch 'pub\(super\) fn settings_work_area_for_widge
     $styleWindowRoot -match '(?m)^fn (?:settings_work_area_for_widget|position_is_only_snapshot_change|json_status_path_rect|text_width_px)\(') {
     throw 'Settings geometry/text helpers must be available from extracted modules.'
 }
+# Input hit testing and JSON export name defaults stay available after splitting.
+$inputHitHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')
+$jsonNameHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+if ($inputHitHelpers -notmatch 'pub\(super\) fn wheel_numeric_target_at\(' -or
+    $jsonNameHelpers -notmatch 'pub\(super\) fn export_default_filename\(' -or
+    $jsonNameHelpers -notmatch 'codex-usage-win-config-' -or
+    $styleWindowRoot -match '(?m)^fn (?:wheel_numeric_target_at|export_default_filename)\(') {
+    throw 'Wheel numeric hit targets and export file names must remain unchanged after extraction.'
+}
 # Native editor messaging now lives in a dedicated module; retain all six helpers.
 $editControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\edit_controls.rs')
 $styleWindow += "`n" + $editControls

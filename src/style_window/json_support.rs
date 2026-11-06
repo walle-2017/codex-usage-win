@@ -400,6 +400,14 @@ pub(super) fn json_action_running_text(action: JsonAction, language: LanguageId)
     }
 }
 
+pub(super) fn export_default_filename() -> String {
+    let time = unsafe { GetLocalTime() };
+    format!(
+        "codex-usage-win-config-{:04}{:02}{:02}-{:02}{:02}{:02}.json",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
