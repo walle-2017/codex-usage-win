@@ -1280,10 +1280,6 @@ pub fn set_preview_orientation(vertical: bool) {
     }
 }
 
-// Persisted position is mirrored both in display_position and JSON settings.
-// Normalize both fields before deciding whether other UI sections changed.
-
-
 pub fn sync(snapshot: StyleWindowSnapshot) {
     let (hwnd, section, json_dirty, json_apply_pending, submenu_animated, card_only, gallery_changed) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());

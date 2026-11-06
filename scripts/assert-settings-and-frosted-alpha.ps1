@@ -64,10 +64,11 @@ foreach ($token in @(
     }
 }
 
-$open = [regex]::Match($settings, '(?s)pub fn open_or_focus\(.*?\n\}\s*\n\s*pub fn sync\(')
+$open = [regex]::Match($settings, '(?s)pub fn open_or_focus_on_widget\(.*?\n\}')
 if (-not $open.Success -or $open.Value -match 'HWND_TOPMOST' -or
     $open.Value -notmatch 'IsWindow\(hwnd\)' -or
-    $open.Value -notmatch 'IsIconic\(hwnd\)') {
+    $open.Value -notmatch 'IsIconic\(hwnd\)' -or
+    $settings -notmatch 'open_or_focus_on_widget\(parent, widget, snapshot\)') {
     throw 'Existing settings HWND must be restored and raised normally, never permanently topmost.'
 }
 if ($window -notmatch '(?s)IDM_STYLE_SETTINGS\s*=>.*?PostMessageW\(.*?WM_APP_FOCUS_EXISTING_SETTINGS') {

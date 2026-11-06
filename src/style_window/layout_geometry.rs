@@ -209,6 +209,8 @@ pub(super) fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
     }
 }
 
+// Persisted position is mirrored both in display_position and JSON settings.
+// Normalize both fields before deciding whether other UI sections changed.
 pub(super) fn position_is_only_snapshot_change(
     old: &StyleWindowSnapshot, new: &StyleWindowSnapshot,
 ) -> bool {
