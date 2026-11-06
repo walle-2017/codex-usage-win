@@ -194,3 +194,37 @@ pub(super) fn desktop_submenu_layout() -> DesktopSubmenuLayout {
 pub(super) fn scaled_rect(hwnd: HWND, bounds: RECT) -> RECT {
     rect(hwnd, bounds.left, bounds.top, bounds.right, bounds.bottom)
 }
+
+pub(super) fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
+    if widget.0.is_null() || !unsafe { IsWindow(widget).as_bool() } {
+        return None;
+    }
+    unsafe {
+        let monitor = MonitorFromWindow(widget, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcWork)
+    }
+}
+
+pub(super) fn position_is_only_snapshot_change(
+    old: &StyleWindowSnapshot, new: &StyleWindowSnapshot,
+) -> bool {
+    if old.display_position == new.display_position {
+        return false;
+    }
+    let mut normalized = new.editable_settings.clone();
+    normalized.appearance.position.clone_from(&old.editable_settings.appearance.position);
+    old.language == new.language
+        && old.theme_mode == new.theme_mode
+        && old.is_dark == new.is_dark
+        && old.appearance_preset == new.appearance_preset
+        && old.desktop_direction == new.desktop_direction
+        && old.desktop_auto_collapse == new.desktop_auto_collapse
+        // Vertical taskbar preview orientation only affects the lower Preset
+        // gallery, which is refreshed separately after the card animation.
+        && old.active_style == new.active_style
+        && old.editable_settings == normalized
+}

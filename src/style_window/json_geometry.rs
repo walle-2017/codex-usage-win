@@ -123,3 +123,30 @@ pub(super) fn discard_dialog_button_rect(hwnd: HWND, discard: bool) -> RECT {
         }
     }
 }
+
+pub(super) fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
+    let edit_rect = json_edit_rect(hwnd);
+    let prefix_width = if language == LanguageId::SimplifiedChinese {
+        scale(hwnd, 96)
+    } else {
+        scale(hwnd, 150)
+    };
+    let path_text = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .as_ref()
+            .and_then(|s| s.json_status_path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let left = scale(hwnd, 200) + prefix_width;
+    let mut client = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    let width = text_width_px(hwnd, &path_text).max(0);
+    RECT {
+        left,
+        top: edit_rect.bottom + scale(hwnd, 8),
+        right: (left + width).min(client.right - scale(hwnd, 24)),
+        bottom: edit_rect.bottom + scale(hwnd, 34),
+    }
+}

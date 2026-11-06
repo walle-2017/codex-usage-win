@@ -328,3 +328,29 @@ pub(super) fn button_background(
         palette.normal
     }
 }
+
+pub(super) fn text_width_px(hwnd: HWND, text: &str) -> i32 {
+    let font = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| s.font).unwrap_or(0)
+    };
+    unsafe {
+        let hdc = GetDC(hwnd);
+        if hdc.0.is_null() {
+            return 0;
+        }
+        let old_font = if font != 0 {
+            Some(SelectObject(hdc, HGDIOBJ(font as *mut _)))
+        } else {
+            None
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let mut size = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+        if let Some(old_font) = old_font {
+            SelectObject(hdc, old_font);
+        }
+        let _ = ReleaseDC(hwnd, hdc);
+        size.cx
+    }
+}

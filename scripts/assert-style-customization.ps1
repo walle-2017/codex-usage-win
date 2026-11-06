@@ -18,6 +18,17 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Region and text-measurement helpers must stay in the shared geometry modules.
+$layoutWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
+$jsonWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_geometry.rs')
+$renderWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\render_primitives.rs')
+if ($layoutWindowHelpers -notmatch 'pub\(super\) fn settings_work_area_for_widget\(' -or
+    $layoutWindowHelpers -notmatch 'pub\(super\) fn position_is_only_snapshot_change\(' -or
+    $jsonWindowHelpers -notmatch 'pub\(super\) fn json_status_path_rect\(' -or
+    $renderWindowHelpers -notmatch 'pub\(super\) fn text_width_px\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:settings_work_area_for_widget|position_is_only_snapshot_change|json_status_path_rect|text_width_px)\(') {
+    throw 'Settings geometry/text helpers must be available from extracted modules.'
+}
 # Native editor messaging now lives in a dedicated module; retain all six helpers.
 $editControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\edit_controls.rs')
 $styleWindow += "`n" + $editControls

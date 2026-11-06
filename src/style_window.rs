@@ -759,19 +759,7 @@ fn redraw_settings_window(hwnd: HWND) {
 // coordinates are valid for monitors left/above the primary display.
 
 
-fn settings_work_area_for_widget(widget: HWND) -> Option<RECT> {
-    if widget.0.is_null() || !unsafe { IsWindow(widget).as_bool() } {
-        return None;
-    }
-    unsafe {
-        let monitor = MonitorFromWindow(widget, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcWork)
-    }
-}
+
 
 pub fn open_or_focus(parent: HWND, snapshot: StyleWindowSnapshot) {
     // The owner is a stable message endpoint, which can be on a different
@@ -1294,25 +1282,7 @@ pub fn set_preview_orientation(vertical: bool) {
 
 // Persisted position is mirrored both in display_position and JSON settings.
 // Normalize both fields before deciding whether other UI sections changed.
-fn position_is_only_snapshot_change(
-    old: &StyleWindowSnapshot, new: &StyleWindowSnapshot,
-) -> bool {
-    if old.display_position == new.display_position {
-        return false;
-    }
-    let mut normalized = new.editable_settings.clone();
-    normalized.appearance.position.clone_from(&old.editable_settings.appearance.position);
-    old.language == new.language
-        && old.theme_mode == new.theme_mode
-        && old.is_dark == new.is_dark
-        && old.appearance_preset == new.appearance_preset
-        && old.desktop_direction == new.desktop_direction
-        && old.desktop_auto_collapse == new.desktop_auto_collapse
-        // Vertical taskbar preview orientation only affects the lower Preset
-        // gallery, which is refreshed separately after the card animation.
-        && old.active_style == new.active_style
-        && old.editable_settings == normalized
-}
+
 
 pub fn sync(snapshot: StyleWindowSnapshot) {
     let (hwnd, section, json_dirty, json_apply_pending, submenu_animated, card_only, gallery_changed) = {
@@ -3198,58 +3168,9 @@ fn update_corner_from_numeric_edit() {
     }
 }
 
-fn text_width_px(hwnd: HWND, text: &str) -> i32 {
-    let font = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.font).unwrap_or(0)
-    };
-    unsafe {
-        let hdc = GetDC(hwnd);
-        if hdc.0.is_null() {
-            return 0;
-        }
-        let old_font = if font != 0 {
-            Some(SelectObject(hdc, HGDIOBJ(font as *mut _)))
-        } else {
-            None
-        };
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let mut size = SIZE::default();
-        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
-        if let Some(old_font) = old_font {
-            SelectObject(hdc, old_font);
-        }
-        let _ = ReleaseDC(hwnd, hdc);
-        size.cx
-    }
-}
 
-fn json_status_path_rect(hwnd: HWND, language: LanguageId) -> RECT {
-    let edit_rect = json_edit_rect(hwnd);
-    let prefix_width = if language == LanguageId::SimplifiedChinese {
-        scale(hwnd, 96)
-    } else {
-        scale(hwnd, 150)
-    };
-    let path_text = {
-        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state
-            .as_ref()
-            .and_then(|s| s.json_status_path.as_ref())
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let left = scale(hwnd, 200) + prefix_width;
-    let mut client = RECT::default();
-    unsafe { let _ = GetClientRect(hwnd, &mut client); }
-    let width = text_width_px(hwnd, &path_text).max(0);
-    RECT {
-        left,
-        top: edit_rect.bottom + scale(hwnd, 8),
-        right: (left + width).min(client.right - scale(hwnd, 24)),
-        bottom: edit_rect.bottom + scale(hwnd, 34),
-    }
-}
+
+
 
 fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
     let discard_pending = {
