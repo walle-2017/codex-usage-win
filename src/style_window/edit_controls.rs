@@ -58,7 +58,7 @@ pub(super) fn read_edit_text(edit: HWND) -> String {
     String::from_utf16_lossy(&buffer[..len.min(buffer.len())])
 }
 
-unsafe pub(super) fn rich_set_selection(edit: HWND, start: i32, end: i32) {
+pub(super) unsafe fn rich_set_selection(edit: HWND, start: i32, end: i32) {
     let mut range = RichCharRange {
         cp_min: start,
         cp_max: end,
@@ -71,7 +71,7 @@ unsafe pub(super) fn rich_set_selection(edit: HWND, start: i32, end: i32) {
     );
 }
 
-unsafe pub(super) fn rich_set_selected_color(edit: HWND, color: Color) {
+pub(super) unsafe fn rich_set_selected_color(edit: HWND, color: Color) {
     let mut format = RichCharFormatW {
         cb_size: std::mem::size_of::<RichCharFormatW>() as u32,
         dw_mask: CFM_COLOR_MASK,
