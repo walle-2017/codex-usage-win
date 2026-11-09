@@ -53,7 +53,7 @@ pub(super) unsafe fn handle_settings_lifecycle_message(
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state
                     .as_ref()
-                    .map(|s| (s.json_dirty, s.pending_discard_action.is_some()))
+                    .map(|s| (json_has_pending_changes(s.json_dirty, s.json_import_pending_apply), s.pending_discard_action.is_some()))
                     .unwrap_or((false, false))
             };
             if pending {

@@ -27,6 +27,30 @@ pub(super) fn begin_json_apply(hwnd: HWND) {
 }
 
 pub(super) fn begin_json_action(hwnd: HWND, action: JsonAction) {
+    let (already_pending, dirty, import_pending_apply) = {
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (
+            s.pending_json_action.is_some() || s.pending_discard_action.is_some(),
+            s.json_dirty,
+            s.json_import_pending_apply,
+        )
+    };
+    if already_pending || !json_action_enabled(action, dirty, import_pending_apply) {
+        return;
+    }
+    if json_action_needs_confirmation(action, dirty, import_pending_apply) {
+        request_discard_confirmation(hwnd, PendingDiscardAction::Json(action));
+        return;
+    }
+    begin_json_action_confirmed(hwnd, action);
+}
+
+// Called only after confirming destructive Reload/Import, or for actions
+// that do not discard editor contents. Do not hold STATE across modal dialogs.
+pub(super) fn begin_json_action_confirmed(hwnd: HWND, action: JsonAction) {
     {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = state.as_mut() else {
@@ -120,6 +144,7 @@ pub(super) fn schedule_json_validation(hwnd: HWND) {
             // Mark dirty immediately so closing the window before the debounce
             // fires still triggers the unsaved-changes confirmation.
             s.json_dirty = true;
+            s.json_import_pending_apply = false;
             true
         }
     };
@@ -263,6 +288,7 @@ pub(super) fn apply_json_editor() {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = state.as_mut() {
             s.json_dirty = false;
+            s.json_import_pending_apply = false;
             s.json_save_feedback = Some(JsonSaveFeedback::Saved);
             if s.json_status.starts_with('×') {
                 s.json_status.clear();

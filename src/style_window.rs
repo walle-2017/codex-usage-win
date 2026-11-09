@@ -1336,7 +1336,7 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
         (
             s.hwnd.to_hwnd(),
             s.section,
-            s.json_dirty,
+            json_has_pending_changes(s.json_dirty, s.json_import_pending_apply),
             s.pending_json_action == Some(JsonAction::Apply),
             submenu_animated,
             card_only,
@@ -2291,10 +2291,16 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                 let Some(s) = state.as_mut() else {
                     return;
                 };
-                s.json_dirty = false;
-                s.json_status.clear();
-                s.json_status_path = None;
-                s.pending_discard_action.take()
+                let action = s.pending_discard_action.take();
+                // JSON reload/import does not discard edits until the operation
+                // actually succeeds. Cancelling the file chooser keeps the draft.
+                if !matches!(action, Some(PendingDiscardAction::Json(_))) {
+                    s.json_dirty = false;
+                    s.json_import_pending_apply = false;
+                    s.json_status.clear();
+                    s.json_status_path = None;
+                }
+                action
             };
             match action {
                 Some(PendingDiscardAction::SwitchSection(section)) => set_section(section),
@@ -2302,6 +2308,9 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                     send_parent(WM_STYLE_SAVE, 0, 0);
                     let _ = DestroyWindow(hwnd);
                 },
+                Some(PendingDiscardAction::Json(action)) => {
+                    begin_json_action_confirmed(hwnd, action);
+                }
                 None => {}
             }
         }
@@ -2320,12 +2329,12 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
         HitTarget::JsonStatusPath => open_json_status_path(),
         HitTarget::Json(action) => {
             if action == JsonAction::Apply {
-                let dirty = STATE
+                let enabled = STATE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .as_ref()
-                    .is_some_and(|s| s.json_dirty);
-                if dirty {
+                    .is_some_and(|s| json_action_enabled(action, s.json_dirty, s.json_import_pending_apply));
+                if enabled {
                     begin_json_apply(hwnd);
                 }
             } else {
@@ -2357,7 +2366,7 @@ fn set_section(section: Section) {
         };
         (
             s.section,
-            s.json_dirty,
+            json_has_pending_changes(s.json_dirty, s.json_import_pending_apply),
             s.hwnd.to_hwnd(),
             s.pending_discard_action.is_some(),
         )
@@ -2387,7 +2396,7 @@ fn set_section(section: Section) {
         s.dragging_slider = None;
         s.pressed = None;
         s.hovered = None;
-        (s.hwnd.to_hwnd(), s.json_dirty)
+        (s.hwnd.to_hwnd(), json_has_pending_changes(s.json_dirty, s.json_import_pending_apply))
     };
     // Restore buffering before hiding JSON and drawing a non-JSON page.
     // Entering JSON takes the inverse path: the opaque pane and RichEdit
