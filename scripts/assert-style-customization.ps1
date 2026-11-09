@@ -18,6 +18,12 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Closing the discard overlay must restore the RichEdit child before the file chooser.
+if ($styleWindowRoot -notmatch '(?s)Some\(PendingDiscardAction::Json\(action\)\) => \{\s*//[^\n]*\n\s*//[^\n]*\n\s*//[^\n]*\n\s*layout_settings_children\(hwnd\);\s*redraw_settings_window\(hwnd\);\s*begin_json_action_confirmed\(hwnd, action\);' -or
+    $styleWindowRoot -notmatch 'json_has_pending_changes\(s.json_dirty, s.json_import_pending_apply\)' -or
+    $styleWindowRoot -notmatch 'json_import_pending_apply: false,') {
+    throw 'Confirmed JSON replacement must restore RichEdit and preserve imported-pending state.'
+}
 # JSON file import must not inherit an old dirty warning, and Export is disabled until applied.
 $jsonFileGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_file_io.rs')
 $jsonClickGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hit_testing.rs')
@@ -1221,7 +1227,7 @@ if ($styleWindow -notmatch '● 有未保存更改' -or
     $styleWindow -notmatch '● Unsaved changes' -or
     $styleWindow -notmatch 'settings != &applied_settings' -or
     $styleWindow -notmatch 'json_action_enabled\(action, json_dirty, json_import_pending_apply\)' -or
-    $styleWindow -notmatch 'let apply_background = if dirty') {
+    $styleWindow -notmatch 'let apply_background = if apply_enabled') {
     throw 'JSON editor must derive dirty state from parsed settings, show it on a separate line, and disable Apply while clean.'
 }
 if ($styleWindow -notmatch '✓ 已重新载入' -or

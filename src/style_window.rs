@@ -2309,6 +2309,11 @@ fn activate_target(hwnd: HWND, target: HitTarget) {
                     let _ = DestroyWindow(hwnd);
                 },
                 Some(PendingDiscardAction::Json(action)) => {
+                    // The confirmation overlay hid RichEdit. Restore the page
+                    // before scheduling Reload/Import so cancelling the file
+                    // picker returns to an editable, unchanged draft.
+                    layout_settings_children(hwnd);
+                    redraw_settings_window(hwnd);
                     begin_json_action_confirmed(hwnd, action);
                 }
                 None => {}
