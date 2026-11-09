@@ -18,6 +18,22 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Native editor value synchronization stays separate from repaint and input handlers.
+$editorSync = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_sync.rs')
+$styleWindow += "\`n" + $editorSync
+if ($styleWindowRoot -notmatch 'mod editor_sync;' -or
+    $styleWindowRoot -notmatch 'use self::editor_sync::\*;' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_numeric_edits\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_blur_edit\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_corner_edit\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_active_style_into_editable\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_hex_edits\(' -or
+    $editorSync -notmatch 'pub\(super\) fn normalize_hex_edit\(' -or
+    $editorSync -notmatch 'set_edit_text_string\(' -or
+    $editorSync -notmatch 's.syncing_hex_edits = false;' -or
+    $styleWindowRoot -match '(?m)^fn (?:sync_numeric_edits|sync_blur_edit|sync_corner_edit|sync_active_style_into_editable|sync_hex_edits|normalize_hex_edit)\(') {
+    throw 'Native edit synchronization must preserve state locks and input-message order in editor_sync.rs.'
+}
 # Native editor layout now has its own module; retain focus-safe child operations.
 $editorLayout = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_layout.rs')
 $styleWindow += "\`n" + $editorLayout
