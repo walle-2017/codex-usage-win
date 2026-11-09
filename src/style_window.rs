@@ -322,6 +322,7 @@ enum JsonSaveFeedback {
 enum PendingDiscardAction {
     SwitchSection(Section),
     Close,
+    Json(JsonAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,6 +664,8 @@ struct PanelState {
     syncing_hex_edits: bool,
     syncing_json_edit: bool,
     json_dirty: bool,
+    // Imported JSON is pristine as file content but still needs an explicit Apply.
+    json_import_pending_apply: bool,
     json_status: String,
     json_status_path: Option<PathBuf>,
     json_save_feedback: Option<JsonSaveFeedback>,
@@ -1244,6 +1247,7 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
                 syncing_hex_edits: false,
                 syncing_json_edit: false,
                 json_dirty: false,
+                json_import_pending_apply: false,
                 json_status: String::new(),
                 json_status_path: None,
                 json_save_feedback: None,

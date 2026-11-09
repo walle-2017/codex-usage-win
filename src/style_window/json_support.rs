@@ -400,6 +400,28 @@ pub(super) fn json_action_running_text(action: JsonAction, language: LanguageId)
     }
 }
 
+/// Imported files are unedited but may differ from the applied runtime settings.
+pub(super) fn json_has_pending_changes(dirty: bool, import_pending_apply: bool) -> bool {
+    dirty || import_pending_apply
+}
+
+pub(super) fn json_action_enabled(
+    action: JsonAction, dirty: bool, import_pending_apply: bool,
+) -> bool {
+    match action {
+        JsonAction::Apply => json_has_pending_changes(dirty, import_pending_apply),
+        JsonAction::Export => !json_has_pending_changes(dirty, import_pending_apply),
+        _ => true,
+    }
+}
+
+pub(super) fn json_action_needs_confirmation(
+    action: JsonAction, dirty: bool, import_pending_apply: bool,
+) -> bool {
+    json_has_pending_changes(dirty, import_pending_apply)
+        && matches!(action, JsonAction::Reload | JsonAction::Import)
+}
+
 pub(super) fn export_default_filename() -> String {
     let time = unsafe { GetLocalTime() };
     format!(
@@ -411,6 +433,25 @@ pub(super) fn export_default_filename() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_actions_guard_export_and_confirm_destructive_reload_or_import() {
+        for action in [JsonAction::Reload, JsonAction::Import] {
+            assert!(!json_action_needs_confirmation(action, false, false));
+            assert!(json_action_needs_confirmation(action, true, false));
+            assert!(json_action_needs_confirmation(action, false, true));
+        }
+        for (dirty, imported, export_allowed, apply_allowed) in [
+            (false, false, true, false),
+            (true, false, false, true),
+            (false, true, false, true),
+            (true, true, false, true),
+        ] {
+            assert_eq!(json_action_enabled(JsonAction::Export, dirty, imported), export_allowed);
+            assert_eq!(json_action_enabled(JsonAction::Apply, dirty, imported), apply_allowed);
+            assert!(!json_action_needs_confirmation(JsonAction::Export, dirty, imported));
+        }
+    }
 
     #[test]
     fn newline_normalization_preserves_json_content() {
