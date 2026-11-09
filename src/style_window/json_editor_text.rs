@@ -102,9 +102,12 @@ pub(super) fn write_json_editor(text: &str, status: String, dirty: bool) {
         s.json_status_path = None;
         s.json_save_feedback = None;
         s.json_dirty = dirty;
+        s.json_import_pending_apply = false;
         (s.json_edit.to_hwnd(), s.hwnd.to_hwnd(), s.snapshot.is_dark)
     };
 
+    // Cancel any validation of the previous draft before replacing RichEdit text.
+    unsafe { let _ = KillTimer(hwnd, JSON_VALIDATION_TIMER_ID); }
     let normalized = normalize_to_lf(text);
     let windows_text = to_windows_newlines(&normalized);
     set_edit_text_string(edit, &windows_text);

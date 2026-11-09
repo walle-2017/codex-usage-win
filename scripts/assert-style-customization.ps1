@@ -18,6 +18,26 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# JSON file import must not inherit an old dirty warning, and Export is disabled until applied.
+$jsonFileGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_file_io.rs')
+$jsonClickGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hit_testing.rs')
+$jsonPaintGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
+$jsonEditorGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_editor_text.rs')
+$jsonActionGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_actions.rs')
+$jsonSupportGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+if ($jsonClickGuards -notmatch 'json_action_enabled\(action, json_dirty, json_import_pending_apply\)' -or
+    $jsonPaintGuards -notmatch 'disabled_export = action == JsonAction::Export' -or
+    $jsonPaintGuards -notmatch '● 已导入，待应用' -or
+    $jsonFileGuards -notmatch 'write_json_editor\(&standard, status, false\)' -or
+    $jsonFileGuards -notmatch 's.json_import_pending_apply = import_pending_apply;' -or
+    $jsonFileGuards -notmatch 'json_action_enabled\(JsonAction::Export, s.json_dirty, s.json_import_pending_apply\)' -or
+    $jsonEditorGuards -notmatch 's.json_import_pending_apply = false;' -or
+    $jsonActionGuards -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Json\(action\)\)' -or
+    $jsonActionGuards -notmatch 'begin_json_action_confirmed\(hwnd, action\)' -or
+    $jsonSupportGuards -notmatch 'fn json_actions_guard_export_and_confirm_destructive_reload_or_import\(' -or
+    $styleWindowRoot -notmatch 'Some\(PendingDiscardAction::Json\(action\)\)') {
+    throw 'JSON import, unsaved confirmation, Export-disable and pending Apply regression.'
+}
 # Configuration file dialog and cancellation behavior must remain in json_file_io.rs.
 $jsonFileIo = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_file_io.rs')
 $styleWindow += [Environment]::NewLine + $jsonFileIo
@@ -1200,7 +1220,7 @@ if ($styleWindow -notmatch 'read_large_edit_text_raw' -or
 if ($styleWindow -notmatch '● 有未保存更改' -or
     $styleWindow -notmatch '● Unsaved changes' -or
     $styleWindow -notmatch 'settings != &applied_settings' -or
-    $styleWindow -notmatch 'action == JsonAction::Apply && !json_dirty' -or
+    $styleWindow -notmatch 'json_action_enabled\(action, json_dirty, json_import_pending_apply\)' -or
     $styleWindow -notmatch 'let apply_background = if dirty') {
     throw 'JSON editor must derive dirty state from parsed settings, show it on a separate line, and disable Apply while clean.'
 }

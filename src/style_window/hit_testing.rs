@@ -18,10 +18,10 @@ pub(super) fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
         return None;
     }
 
-    let (section, json_dirty, json_status_path, language, json_action_pending) = {
+    let (section, json_dirty, json_import_pending_apply, json_status_path, language, json_action_pending) = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.as_ref()?;
-        (s.section, s.json_dirty, s.json_status_path.is_some(),
+        (s.section, s.json_dirty, s.json_import_pending_apply, s.json_status_path.is_some(),
             s.snapshot.language, s.pending_json_action.is_some())
     };
 
@@ -125,7 +125,7 @@ pub(super) fn hit_target_at(hwnd: HWND, x: i32, y: i32) -> Option<HitTarget> {
             JsonAction::Export,
             JsonAction::Apply,
         ] {
-            if json_action_pending || (action == JsonAction::Apply && !json_dirty) {
+            if json_action_pending || !json_action_enabled(action, json_dirty, json_import_pending_apply) {
                 continue;
             }
             if pt_in_rect(json_action_rect(hwnd, action), x, y) {

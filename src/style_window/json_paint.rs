@@ -57,6 +57,7 @@ pub(super) unsafe fn paint_json_page(
     save_feedback: Option<JsonSaveFeedback>,
     error_shake_step: u8,
     dirty: bool,
+    import_pending_apply: bool,
     hovered: Option<HitTarget>,
     pressed: Option<HitTarget>,
     card: Color,
@@ -83,6 +84,8 @@ pub(super) unsafe fn paint_json_page(
         (JsonAction::Export, "导出", "Export"),
     ] {
         let target = HitTarget::Json(action);
+        let disabled_export = action == JsonAction::Export
+            && !json_action_enabled(action, dirty, import_pending_apply);
         let action_background = button_background(
             target,
             false,
@@ -102,8 +105,8 @@ pub(super) unsafe fn paint_json_page(
             hwnd,
             json_action_rect(hwnd, action),
             false,
-            action_background,
-            primary,
+            if disabled_export { card_pressed } else { action_background },
+            if disabled_export { secondary } else { primary },
             json_action_icon(action),
             if zh { zh_label } else { en_label },
         );
@@ -199,6 +202,10 @@ pub(super) unsafe fn paint_json_page(
             if zh { "● 有未保存更改" } else { "● Unsaved changes" },
             Color::from_hex("#D69E2EFF"),
         )),
+        None if import_pending_apply => Some((
+            if zh { "● 已导入，待应用" } else { "● Imported, pending Apply" },
+            Color::from_hex("#D69E2EFF"),
+        )),
         None => None,
     };
     if let Some((text, color)) = second_line {
@@ -217,7 +224,8 @@ pub(super) unsafe fn paint_json_page(
     }
 
     let apply = JsonAction::Apply;
-    let apply_background = if dirty {
+    let apply_enabled = json_action_enabled(apply, dirty, import_pending_apply);
+    let apply_background = if apply_enabled {
         button_background(
             HitTarget::Json(apply),
             true,
@@ -239,9 +247,9 @@ pub(super) unsafe fn paint_json_page(
         hdc,
         hwnd,
         json_action_rect(hwnd, apply),
-        dirty,
+        apply_enabled,
         apply_background,
-        if dirty {
+        if apply_enabled {
             Color::from_hex("#FFFFFFFF")
         } else {
             secondary

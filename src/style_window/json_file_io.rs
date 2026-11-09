@@ -76,7 +76,7 @@ pub(super) fn import_json_file(hwnd: HWND) {
 
     match parse_jsonc(&text) {
         Ok(settings) => {
-            let dirty = {
+            let import_pending_apply = {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state
                     .as_ref()
@@ -88,7 +88,15 @@ pub(super) fn import_json_file(hwnd: HWND) {
             } else {
                 "✓ Imported successfully".to_string()
             };
-            write_json_editor(&standard, status, dirty);
+            // Import replaces the discarded draft. The file itself is not
+            // locally edited, but different settings still need explicit Apply.
+            write_json_editor(&standard, status, false);
+            {
+                let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = state.as_mut() {
+                    s.json_import_pending_apply = import_pending_apply;
+                }
+            }
             set_json_status_with_path(
                 if language == LanguageId::SimplifiedChinese {
                     "✓ 成功导入".to_string()
@@ -123,6 +131,9 @@ pub(super) fn export_json_file(hwnd: HWND) {
         let Some(s) = state.as_ref() else {
             return;
         };
+        if !json_action_enabled(JsonAction::Export, s.json_dirty, s.json_import_pending_apply) {
+            return;
+        }
         (s.json_edit.to_hwnd(), s.snapshot.language)
     };
     let raw = read_large_edit_text(edit);
