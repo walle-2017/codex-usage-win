@@ -18,6 +18,20 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Native editor layout now has its own module; retain focus-safe child operations.
+$editorLayout = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_layout.rs')
+$styleWindow += "\`n" + $editorLayout
+if ($styleWindowRoot -notmatch 'mod editor_layout;' -or
+    $styleWindowRoot -notmatch 'use self::editor_layout::\*;' -or
+    $editorLayout -notmatch 'pub\(super\) unsafe fn single_line_edit_font_height\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn editor_layout_snapshot\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn release_editor_focus_before_layout\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn layout_numeric_edits\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn hex_layout_snapshot\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn layout_hex_edits\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe\s+)?fn (?:single_line_edit_font_height|editor_layout_snapshot|release_editor_focus_before_layout|layout_numeric_edits|hex_layout_snapshot|layout_hex_edits)\(') {
+    throw 'Editor child layout must remain centralized and preserve font/focus safety.'
+}
 # Region and text-measurement helpers must stay in the shared geometry modules.
 $layoutWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
 $jsonWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_geometry.rs')
@@ -93,13 +107,13 @@ $editorGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window
 # must be centered inside the themed input background using real font metrics.
 if ($editorGeometry -notmatch 'pub\(super\) fn centered_single_line_edit_rect\(' -or
     $styleWindowRoot -match '(?m)^fn centered_single_line_edit_rect\(' -or
-    $styleWindowRoot -notmatch 'fn single_line_edit_font_height\(' -or
-    $styleWindowRoot -notmatch 'WM_GETFONT' -or
-    $styleWindowRoot -notmatch 'GetTextMetricsW\(' -or
-    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*numeric_edit_rect\(' -or
-    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*blur_edit_rect\(' -or
-    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*corner_edit_rect\(' -or
-    $styleWindowRoot -notmatch 'centered_single_line_edit_rect\(\s*hex_edit_rect\(' -or
+    $editorLayout -notmatch 'fn single_line_edit_font_height\(' -or
+    $editorLayout -notmatch 'WM_GETFONT' -or
+    $editorLayout -notmatch 'GetTextMetricsW\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*numeric_edit_rect\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*blur_edit_rect\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*corner_edit_rect\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*hex_edit_rect\(' -or
     $styleWindowRoot -notmatch 'fn single_line_edits_stay_vertically_centered_across_font_metrics_and_dpi\(') {
     throw 'Settings single-line edit controls must center the native text window using measured font metrics across all input types.'
 }
