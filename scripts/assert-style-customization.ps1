@@ -18,6 +18,17 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Configuration file dialog and cancellation behavior must remain in json_file_io.rs.
+$jsonFileIo = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_file_io.rs')
+$styleWindow += [Environment]::NewLine + $jsonFileIo
+if ($styleWindowRoot -notmatch 'mod json_file_io;' -or
+    $styleWindowRoot -notmatch 'use self::json_file_io::\*;' -or
+    $jsonFileIo -notmatch 'pub\(super\) fn file_dialog\(' -or
+    $jsonFileIo -notmatch 'pub\(super\) fn import_json_file\(' -or
+    $jsonFileIo -notmatch 'pub\(super\) fn export_json_file\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:file_dialog|import_json_file|export_json_file)\(') {
+    throw 'JSON Windows file pickers and import/export must remain in json_file_io.rs.'
+}
 # JSON action state and validation logic is independently modularized.
 $jsonActions = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_actions.rs')
 $styleWindow += [Environment]::NewLine + $jsonActions
@@ -1414,8 +1425,8 @@ if ($styleWindowRoot -notmatch 'mod json_geometry;' -or
 }
 # Canceling the Windows Import/Export file picker must clear the temporary
 # progress message without changing JSON contents or save/dirty state.
-if ($styleWindowRoot -notmatch '(?s)fn import_json_file\(hwnd: HWND\).*?let Some\(path\) = file_dialog\(hwnd, false, None\) else \{\s*//[^\n]*\n\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};' -or
-    $styleWindowRoot -notmatch '(?s)fn export_json_file\(hwnd: HWND\).*?let Some\(mut path\) = file_dialog\(hwnd, true, Some\(&default_name\)\) else \{\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};') {
+if ($jsonFileIo -notmatch '(?s)fn import_json_file\(hwnd: HWND\).*?let Some\(path\) = file_dialog\(hwnd, false, None\) else \{\s*//[^\n]*\n\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};' -or
+    $jsonFileIo -notmatch '(?s)fn export_json_file\(hwnd: HWND\).*?let Some\(mut path\) = file_dialog\(hwnd, true, Some\(&default_name\)\) else \{\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};') {
     throw 'Cancelled JSON Import/Export must clear its in-progress status.'
 }
 if ($styleWindow -notmatch 'let edit = json_edit_rect\(hwnd\)' -or

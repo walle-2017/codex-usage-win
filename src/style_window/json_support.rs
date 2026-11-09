@@ -2,7 +2,7 @@
 //! color palettes, and localized configuration validation messages.
 //!
 //! This module intentionally has no window handles or state-lock ownership;
-//! painting, RichEdit messaging, I/O, and focus remain in style_window.rs.
+//! painting, RichEdit, file I/O, and focus live in dedicated sibling modules.
 
 use super::*;
 
