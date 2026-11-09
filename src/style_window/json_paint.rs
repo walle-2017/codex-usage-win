@@ -477,12 +477,12 @@ pub(super) unsafe fn paint_json_page_surface(page: HWND) {
             s.hwnd.to_hwnd(), s.snapshot.clone(),
             s.json_status.clone(), s.json_status_path.clone(),
             s.json_save_feedback, s.json_error_shake_step, s.json_dirty,
-            s.hovered, s.pressed, s.font,
+            s.json_import_pending_apply, s.hovered, s.pressed, s.font,
         ))
     };
     if let Some((
         owner, snapshot, status, status_path, feedback, shake_step,
-        dirty, hovered, pressed, font,
+        dirty, import_pending_apply, hovered, pressed, font,
     )) = state_snapshot {
         let left = scale(owner, 180);
         // Reuse JSON painting geometry, which is expressed in the parent's
@@ -523,7 +523,7 @@ pub(super) unsafe fn paint_json_page_surface(page: HWND) {
         };
         paint_json_page(
             dc, owner, &snapshot, &status, status_path.as_deref(),
-            feedback, shake_step, dirty, hovered, pressed,
+            feedback, shake_step, dirty, import_pending_apply, hovered, pressed,
             card, card_hover, card_pressed,
             Color::from_hex("#4C8DFFFF"),
             Color::from_hex("#629CFFFF"),
