@@ -18,6 +18,21 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# JSON action state and validation logic is independently modularized.
+$jsonActions = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_actions.rs')
+$styleWindow += [Environment]::NewLine + $jsonActions
+if ($styleWindowRoot -notmatch 'mod json_actions;' -or
+    $styleWindowRoot -notmatch 'use self::json_actions::\*;' -or
+    $jsonActions -notmatch 'pub\(super\) fn begin_json_apply\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn begin_json_action\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn finish_pending_json_action\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn schedule_json_validation\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn update_json_validation_status\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn format_json_editor\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn apply_json_editor\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:begin_json_apply|begin_json_action|finish_pending_json_action|schedule_json_validation|update_json_validation_status|format_json_editor|apply_json_editor)\(') {
+    throw 'JSON action orchestration, validation and apply helpers must remain in json_actions.rs.'
+}
 # Native editor value synchronization stays separate from repaint and input handlers.
 $editorSync = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_sync.rs')
 $styleWindow += "\`n" + $editorSync
