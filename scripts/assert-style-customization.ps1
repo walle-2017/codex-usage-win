@@ -18,6 +18,19 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Wheel and slider actions retain native EDIT updates, model synchronization and frame throttling.
+$sliderInteraction = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\slider_interaction.rs')
+$styleWindow += [Environment]::NewLine + $sliderInteraction
+if ($styleWindowRoot -notmatch 'mod slider_interaction;' -or
+    $styleWindowRoot -notmatch 'use self::slider_interaction::\*;' -or
+    $sliderInteraction -notmatch 'pub\(super\) fn adjust_numeric_by_wheel\(' -or
+    $sliderInteraction -notmatch 'pub\(super\) fn adjust_slider_by_wheel\(' -or
+    $sliderInteraction -notmatch 'pub\(super\) fn update_slider\(' -or
+    $sliderInteraction -notmatch 'queue_settings_interactive_frame\(hwnd, true\)' -or
+    $sliderInteraction -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:adjust_numeric_by_wheel|adjust_slider_by_wheel|update_slider)\(') {
+    throw 'Numeric wheel and slider interactions must retain their native controls and 60 FPS frame schedule.'
+}
 # Native EDIT change handlers are separate from value synchronization.
 # In particular a focused blur edit must be redrawn without rewriting its text.
 $editorInput = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_input.rs')
@@ -224,8 +237,8 @@ if ([string]::IsNullOrWhiteSpace($typedBlurHandler) -or
 # A wheel step on a native EDIT must update both the model and the actual
 # child window text, even when the settings parent uses WS_EX_COMPOSITED.
 $wheelTextSync = [regex]::Match(
-    $styleWindowRoot,
-    '(?s)fn adjust_numeric_by_wheel\(.*?\n\}'
+    $sliderInteraction,
+    '(?s)pub\(super\) fn adjust_numeric_by_wheel\(.*?\n\}'
 ).Value
 if ([string]::IsNullOrWhiteSpace($wheelTextSync) -or
     $wheelTextSync -notmatch 'set_edit_text\(edit, next\)' -or
