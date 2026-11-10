@@ -18,6 +18,20 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Preset gallery caches pre-render both positions and keep deferred warmup outside live frame paints.
+$presetGalleryCache = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_cache.rs')
+$styleWindow += [Environment]::NewLine + $presetGalleryCache
+if ($styleWindowRoot -notmatch 'mod preset_gallery_cache;' -or
+    $styleWindowRoot -notmatch 'use self::preset_gallery_cache::\*;' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn preset_gallery_cache_ready\(' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn build_preset_gallery_cache\(' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn request_preset_gallery_warmup\(' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn copy_cached_preset_gallery\(' -or
+    $presetGalleryCache -notmatch 'PostMessageW\(hwnd, WM_SETTINGS_PREWARM_GALLERY' -or
+    $presetGalleryCache -notmatch 'SettingsPaintBuffer::create\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe\s+)?fn (?:preset_gallery_cache_ready|build_preset_gallery_cache|request_preset_gallery_warmup|copy_cached_preset_gallery)\(') {
+    throw 'Deferred preset gallery warmup and cached position rendering must remain in preset_gallery_cache.rs.'
+}
 # First settings show is DWM-cloaked until a synchronous parent/child paint,
 # with an opaque erase only if no retained first frame exists yet.
 $firstSettingsShow = [regex]::Match(
