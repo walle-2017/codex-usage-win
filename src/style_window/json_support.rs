@@ -400,6 +400,12 @@ pub(super) fn json_action_running_text(action: JsonAction, language: LanguageId)
     }
 }
 
+/// Once RichEdit text changes, previous successful operations no longer
+/// describe the current buffer. Keep errors for the validation debounce.
+pub(super) fn json_success_status_is_stale_on_edit(status: &str) -> bool {
+    status.starts_with('✓')
+}
+
 /// Imported files are unedited but may differ from the applied runtime settings.
 pub(super) fn json_has_pending_changes(dirty: bool, import_pending_apply: bool) -> bool {
     dirty || import_pending_apply
@@ -433,6 +439,23 @@ pub(super) fn export_default_filename() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_user_edit_clears_stale_success_statuses_but_not_errors() {
+        for status in [
+            "✓ 已重新载入", "✓ 已格式化", "✓ 成功导入",
+            "✓ 成功导出", "✓ Reloaded", "✓ Formatted",
+            "✓ Imported successfully", "✓ Exported successfully",
+        ] {
+            assert!(json_success_status_is_stale_on_edit(status), "{status}");
+        }
+        for status in [
+            "", "× JSON 格式错误", "× Invalid JSON", "◌ 导入中",
+            "◌ Importing", "● 有未保存更改",
+        ] {
+            assert!(!json_success_status_is_stale_on_edit(status), "{status}");
+        }
+    }
 
     #[test]
     fn json_actions_guard_export_and_confirm_destructive_reload_or_import() {

@@ -31,6 +31,13 @@ $jsonPaintGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_windo
 $jsonEditorGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_editor_text.rs')
 $jsonActionGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_actions.rs')
 $jsonSupportGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+# Editing JSON invalidates the prior operation-success label and clickable
+# import/export path immediately, but retains errors until live validation runs.
+if ($jsonActionGuards -notmatch 'if json_success_status_is_stale_on_edit\(&s.json_status\) \{\s*s.json_status.clear\(\);\s*s.json_status_path = None;' -or
+    $jsonSupportGuards -notmatch "status.starts_with\('✓'\)" -or
+    $jsonSupportGuards -notmatch 'fn json_user_edit_clears_stale_success_statuses_but_not_errors\(') {
+    throw 'JSON user edits must clear stale Reload, Format, Import and Export success statuses immediately.'
+}
 if ($jsonClickGuards -notmatch 'json_action_enabled\(action, json_dirty, json_import_pending_apply\)' -or
     $jsonPaintGuards -notmatch 'disabled_export = action == JsonAction::Export' -or
     $jsonPaintGuards -notmatch '● 已导入，待应用' -or

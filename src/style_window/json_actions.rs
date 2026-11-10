@@ -140,6 +140,13 @@ pub(super) fn schedule_json_validation(hwnd: HWND) {
             // Any user edit after a successful save replaces the saved indicator
             // with the normal unsaved-changes state immediately.
             s.json_save_feedback = None;
+            // Operation results refer to the previous editor content. Clear
+            // successful Reload/Format/Import/Export text and its link as soon
+            // as the user makes a real edit, before deferred validation runs.
+            if json_success_status_is_stale_on_edit(&s.json_status) {
+                s.json_status.clear();
+                s.json_status_path = None;
+            }
             s.json_error_shake_step = 0;
             // Mark dirty immediately so closing the window before the debounce
             // fires still triggers the unsaved-changes confirmation.
