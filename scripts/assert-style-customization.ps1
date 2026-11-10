@@ -18,6 +18,21 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Desktop submenu's cached endpoint frames retain their GDI-backed blending and terminal refresh.
+$submenuComposition = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\submenu_composition.rs')
+$styleWindow += [Environment]::NewLine + $submenuComposition
+if ($styleWindowRoot -notmatch 'mod submenu_composition;' -or
+    $styleWindowRoot -notmatch 'use self::submenu_composition::\*;' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn paint_submenu_endpoint\(' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn composite_cached_submenu_card\(' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn finish_submenu_terminal_paint\(' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn can_reuse_coalesced_position_paint\(' -or
+    $submenuComposition -notmatch 'native_interop::alpha_blend_cached_card\(' -or
+    $submenuComposition -notmatch 'PostMessageW\(' -or
+    $submenuComposition -notmatch 'painted_section == Some\(section\)' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe\s+)?fn (?:paint_submenu_endpoint|composite_cached_submenu_card|finish_submenu_terminal_paint|can_reuse_coalesced_position_paint)\(') {
+    throw 'Cached submenu endpoint composition and safe retained-pixel reuse must remain in submenu_composition.rs.'
+}
 # Preset gallery caches pre-render both positions and keep deferred warmup outside live frame paints.
 $presetGalleryCache = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_cache.rs')
 $styleWindow += [Environment]::NewLine + $presetGalleryCache
