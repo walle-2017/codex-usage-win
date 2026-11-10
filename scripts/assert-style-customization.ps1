@@ -18,6 +18,21 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# First settings show is DWM-cloaked until a synchronous parent/child paint,
+# with an opaque erase only if no retained first frame exists yet.
+$firstSettingsShow = [regex]::Match(
+    $styleWindowRoot,
+    '(?s)let first_frame_cloaked = set_settings_initial_dwm_cloak\(hwnd, true\);.*?let _ = SetForegroundWindow\(hwnd\);'
+)
+if (-not $firstSettingsShow.Success -or
+    $firstSettingsShow.Value -notmatch 'ShowWindow\(hwnd, SW_SHOWNORMAL\)' -or
+    $firstSettingsShow.Value -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_ALLCHILDREN \| RDW_UPDATENOW' -or
+    $firstSettingsShow.Value -notmatch 'set_settings_initial_dwm_cloak\(hwnd, false\)' -or
+    $styleWindowRoot -notmatch 'DWMWA_CLOAK' -or
+    $styleWindowRoot -notmatch 'painted_section.get\(\).is_none\(\)' -or
+    $styleWindowRoot -notmatch 'first complete settings frame must be rendered synchronously') {
+    throw 'Settings must reveal only after an opaque, fully painted initial parent/child frame.'
+}
 # Closing the discard overlay must restore the RichEdit child before the file chooser.
 if ($styleWindowRoot -notmatch '(?s)Some\(PendingDiscardAction::Json\(action\)\) => \{\s*//[^\n]*\n\s*//[^\n]*\n\s*//[^\n]*\n\s*layout_settings_children\(hwnd\);\s*redraw_settings_window\(hwnd\);\s*begin_json_action_confirmed\(hwnd, action\);' -or
     $styleWindowRoot -notmatch 'json_has_pending_changes\(s.json_dirty, s.json_import_pending_apply\)' -or

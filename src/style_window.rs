@@ -6,7 +6,7 @@ use std::{fs, path::PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_CLOAK, DWMWA_TEXT_COLOR};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -1270,7 +1270,22 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
         sync_numeric_edits();
         sync_blur_edit();
         sync_corner_edit();
+        // Display the top-level HWND while DWM still hides it. Both the
+        // full parent and its visible child tree must paint synchronously
+        // into the redirection surface before the user can see any pixels.
+        // If DWM cloaking is unsupported, the initial opaque erase below
+        // still prevents a transparent client area.
+        let first_frame_cloaked = set_settings_initial_dwm_cloak(hwnd, true);
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            HRGN::default(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+        if first_frame_cloaked {
+            let _ = set_settings_initial_dwm_cloak(hwnd, false);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
 }
@@ -1373,6 +1388,21 @@ pub fn sync(snapshot: StyleWindowSnapshot) {
     sync_corner_edit();
     mark_settings_paint_cause(SettingsPaintCause::FullSync);
     redraw_settings_window(hwnd);
+}
+
+// Hide only the very first presentation from DWM. A WS_EX_COMPOSITED
+// settings window can otherwise expose its caption before any client pixels
+// have been committed, even though all child controls were created hidden.
+fn set_settings_initial_dwm_cloak(hwnd: HWND, cloaked: bool) -> bool {
+    let value: i32 = i32::from(cloaked); // DWM expects a Win32 BOOL.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            &value as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        ).is_ok()
+    }
 }
 
 fn apply_fixed_titlebar(hwnd: HWND) {
@@ -2684,7 +2714,38 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_ERASEBKGND => LRESULT(1),
+        WM_ERASEBKGND => {
+            // On the first frame, telling Windows that the background was
+            // erased without actually drawing it can expose windows behind
+            // the settings client before the retained bitmap is ready.
+            // Once a complete frame exists, keep the usual flicker-free
+            // buffered path and do not erase on every invalidation.
+            let first_frame = SETTINGS_PAINT_BUFFER.with(|cell| {
+                cell.try_borrow().map_or(true, |cached| {
+                    cached.as_ref().is_none_or(|buffer| buffer.painted_section.get().is_none())
+                })
+            });
+            if first_frame {
+                let dark = {
+                    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.as_ref().is_none_or(|s| s.snapshot.is_dark)
+                };
+                let dc = HDC(wparam.0 as *mut _);
+                if !dc.0.is_null() {
+                    let mut client = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut client);
+                    fill(
+                        dc, client,
+                        if dark {
+                            Color::from_hex("#1F2125FF")
+                        } else {
+                            Color::from_hex("#E9EEF4FF")
+                        },
+                    );
+                }
+            }
+            LRESULT(1)
+        }
         WM_PAINT => {
             paint(hwnd);
             // JSON toolbar hover, status and custom scrollbar are painted on
@@ -4662,6 +4723,12 @@ mod ui_smoke_tests {
 
             let _ = UpdateWindow(hwnd);
             assert!(!hwnd.0.is_null(), "style settings HWND must remain valid");
+            assert_eq!(
+                SETTINGS_PAINT_BUFFER.with(|cell| cell.borrow().as_ref()
+                    .and_then(|buffer| buffer.painted_section.get())),
+                Some(Section::General),
+                "first complete settings frame must be rendered synchronously before opening returns"
+            );
 
             let json_edit = {
                 let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
