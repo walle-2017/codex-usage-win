@@ -18,6 +18,21 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# Native EDIT change handlers are separate from value synchronization.
+# In particular a focused blur edit must be redrawn without rewriting its text.
+$editorInput = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_input.rs')
+$styleWindow += [Environment]::NewLine + $editorInput
+if ($styleWindowRoot -notmatch 'mod editor_input;' -or
+    $styleWindowRoot -notmatch 'use self::editor_input::\*;' -or
+    $editorInput -notmatch 'pub\(super\) fn update_color_from_hex_edit\(' -or
+    $editorInput -notmatch 'pub\(super\) fn update_color_from_numeric_edit\(' -or
+    $editorInput -notmatch 'pub\(super\) fn update_blur_from_numeric_edit\(' -or
+    $editorInput -notmatch 'pub\(super\) fn update_corner_from_numeric_edit\(' -or
+    $editorInput -notmatch 'queue_settings_interactive_frame\(hwnd, false\)' -or
+    $editorInput -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:update_color_from_hex_edit|update_color_from_numeric_edit|update_blur_from_numeric_edit|update_corner_from_numeric_edit)\(') {
+    throw 'Native input handlers must stay in editor_input.rs without changing preview or focus behavior.'
+}
 # Desktop submenu's cached endpoint frames retain their GDI-backed blending and terminal refresh.
 $submenuComposition = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\submenu_composition.rs')
 $styleWindow += [Environment]::NewLine + $submenuComposition
@@ -196,8 +211,8 @@ if ($styleWindowRoot -notmatch 'mod edit_controls;' -or
 # Direct typing must explicitly present the Settings slider and native
 # EDIT without rewriting the in-progress text or moving its caret.
 $typedBlurHandler = [regex]::Match(
-    $styleWindowRoot,
-    '(?s)fn update_blur_from_numeric_edit\(\)\s*\{.*?\n\}'
+    $editorInput,
+    '(?s)pub\(super\) fn update_blur_from_numeric_edit\(\)\s*\{.*?\n\}'
 ).Value
 if ([string]::IsNullOrWhiteSpace($typedBlurHandler) -or
     $typedBlurHandler -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or
