@@ -18,6 +18,20 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$interactiveFrames = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\interactive_frames.rs')
+$styleWindow += [Environment]::NewLine + $interactiveFrames
+if ($styleWindowRoot -notmatch 'mod interactive_frames;' -or
+    $styleWindowRoot -notmatch 'use self::interactive_frames::\*;' -or
+    $interactiveFrames -notmatch 'pub\(super\) fn mark_settings_paint_cause\(' -or
+    $interactiveFrames -notmatch 'pub\(super\) fn settings_interactive_frame_due\(' -or
+    $interactiveFrames -notmatch 'pub\(super\) fn queue_settings_interactive_frame\(' -or
+    $interactiveFrames -notmatch 'SETTINGS_INTERACTIVE_FRAME_QUEUED' -or
+    $interactiveFrames -notmatch 'SETTINGS_LAST_INTERACTIVE_FRAME' -or
+    $interactiveFrames -notmatch 'PostMessageW\(' -or
+    $interactiveFrames -notmatch 'Duration::from_millis\(16\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:mark_settings_paint_cause|settings_interactive_frame_due|queue_settings_interactive_frame)\(') {
+    throw 'Settings interactive-frame scheduling must remain in interactive_frames.rs.'
+}
 # WinMM tick source is separated from UI-thread message dispatch.
 $submenuFrameClock = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\submenu_frame_clock.rs')
 $styleWindow += [Environment]::NewLine + $submenuFrameClock
