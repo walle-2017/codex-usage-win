@@ -18,6 +18,22 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+# WinMM tick source is separated from UI-thread message dispatch.
+$submenuFrameClock = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\submenu_frame_clock.rs')
+$styleWindow += [Environment]::NewLine + $submenuFrameClock
+if ($styleWindowRoot -notmatch 'mod submenu_frame_clock;' -or
+    $styleWindowRoot -notmatch 'use self::submenu_frame_clock::\*;' -or
+    $submenuFrameClock -notmatch 'pub\(super\) fn begin_submenu_frame_clock\(' -or
+    $submenuFrameClock -notmatch 'pub\(super\) fn end_submenu_frame_clock\(' -or
+    $submenuFrameClock -notmatch 'pub\(super\) unsafe fn drive_submenu_frame_tick\(' -or
+    $submenuFrameClock -notmatch 'timeSetEvent\(' -or
+    $submenuFrameClock -notmatch 'TIME_KILL_SYNCHRONOUS_FLAG' -or
+    $submenuFrameClock -notmatch 'PostMessageW\(' -or
+    $submenuFrameClock -notmatch 'timeKillEvent\(' -or
+    $submenuFrameClock -notmatch 'SetTimer\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe )?fn (?:begin_submenu_frame_clock|end_submenu_frame_clock|drive_submenu_frame_tick)\(') {
+    throw 'Submenu multimedia frame clock and fallback must remain in submenu_frame_clock.rs.'
+}
 $windowChrome = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\window_chrome.rs')
 $styleWindow += [Environment]::NewLine + $windowChrome
 if ($styleWindowRoot -notmatch 'mod window_chrome;' -or
