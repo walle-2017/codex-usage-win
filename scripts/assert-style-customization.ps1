@@ -18,6 +18,17 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$windowChrome = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\window_chrome.rs')
+$styleWindow += [Environment]::NewLine + $windowChrome
+if ($styleWindowRoot -notmatch 'mod window_chrome;' -or
+    $styleWindowRoot -notmatch 'use self::window_chrome::\*;' -or
+    $windowChrome -notmatch 'pub\(super\) fn set_settings_initial_dwm_cloak\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn apply_fixed_titlebar\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn settings_window_ex_style\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn settings_composition_for_section\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn sync_settings_window_composition\(') {
+    throw 'Settings window chrome must remain isolated in window_chrome.rs.'
+}
 # Wheel and slider actions retain native EDIT updates, model synchronization and frame throttling.
 $sliderInteraction = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\slider_interaction.rs')
 $styleWindow += [Environment]::NewLine + $sliderInteraction
@@ -85,7 +96,7 @@ if (-not $firstSettingsShow.Success -or
     $firstSettingsShow.Value -notmatch 'ShowWindow\(hwnd, SW_SHOWNORMAL\)' -or
     $firstSettingsShow.Value -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_ALLCHILDREN \| RDW_UPDATENOW' -or
     $firstSettingsShow.Value -notmatch 'set_settings_initial_dwm_cloak\(hwnd, false\)' -or
-    $styleWindowRoot -notmatch 'DWMWA_CLOAK' -or
+    $windowChrome -notmatch 'DWMWA_CLOAK' -or
     $styleWindowRoot -notmatch 'painted_section.get\(\).is_none\(\)' -or
     $styleWindowRoot -notmatch 'first complete settings frame must be rendered synchronously') {
     throw 'Settings must reveal only after an opaque, fully painted initial parent/child frame.'
