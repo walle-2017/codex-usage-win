@@ -88,7 +88,7 @@ pub(super) fn end_submenu_frame_clock(hwnd: HWND) {
     end_precise_animation_timer();
 }
 
-unsafe pub(super) fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
+pub(super) unsafe fn drive_submenu_frame_tick(hwnd: HWND, multimedia: bool) {
     let now = Instant::now();
     let (active, rendered) = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
