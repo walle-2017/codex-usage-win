@@ -18,6 +18,20 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$navigationState = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_state.rs')
+$styleWindow += [Environment]::NewLine + $navigationState
+if ($styleWindowRoot -notmatch 'mod navigation_state;' -or
+    $styleWindowRoot -notmatch 'use self::navigation_state::\*;' -or
+    $navigationState -notmatch 'pub\(super\) fn set_section\(' -or
+    $navigationState -notmatch 'pub\(super\) fn select_editor\(' -or
+    $navigationState -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::SwitchSection\(section\)\)' -or
+    $navigationState -notmatch 'sync_settings_window_composition\(hwnd, section\)' -or
+    $navigationState -notmatch 'layout_settings_children\(hwnd\)' -or
+    $navigationState -notmatch 'sync_numeric_edits\(' -or
+    $navigationState -notmatch 'redraw_settings_window\(hwnd\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:set_section|select_editor)\(') {
+    throw 'Settings navigation and editor selection must remain in navigation_state.rs.'
+}
 $interactiveFrames = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\interactive_frames.rs')
 $styleWindow += [Environment]::NewLine + $interactiveFrames
 if ($styleWindowRoot -notmatch 'mod interactive_frames;' -or
