@@ -60,6 +60,7 @@ mod window_chrome;
 mod submenu_frame_clock;
 mod interactive_frames;
 mod navigation_state;
+mod window_placement;
 mod edit_controls;
 mod json_geometry;
 mod color_codec;
@@ -94,6 +95,7 @@ use self::window_chrome::*;
 use self::submenu_frame_clock::*;
 use self::interactive_frames::*;
 use self::navigation_state::*;
+use self::window_placement::*;
 use self::edit_controls::*;
 use self::json_geometry::*;
 pub use self::color_codec::{decode_color_target, unpack_color};
@@ -720,44 +722,8 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
 
         set_window_caption_icons(hwnd, large_icon, small_icon);
 
-        // Keep the original ownerless CW_USEDEFAULT creation contract. Move
-        // this still-hidden window to the active widget's monitor before
-        // creating child controls, so Windows can negotiate Per-Monitor DPI.
-        if let Some(work) = widget_work_area {
-            let anchor_dpi = GetDpiForWindow(widget).max(96);
-            let scaled = |v: i32| ((v as i64 * anchor_dpi as i64 + 48) / 96) as i32;
-            let width = scaled(WINDOW_WIDTH);
-            let height = scaled(WINDOW_HEIGHT);
-            let (x, y) = settings_centered_origin(work, width, height);
-            let _ = SetWindowPos(
-                hwnd, HWND::default(), x, y, width, height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-        let dpi = GetDpiForWindow(hwnd).max(96);
+        let dpi = position_new_settings_window(hwnd, widget, widget_work_area);
         let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
-        // Final resize/center is based on the settings HWND's negotiated DPI.
-        // Both placement steps occur before the first ShowWindow; no jump.
-        let final_width = s(WINDOW_WIDTH);
-        let final_height = s(WINDOW_HEIGHT);
-        let final_origin = widget_work_area.map(|work| {
-            settings_centered_origin(work, final_width, final_height)
-        });
-        let (final_x, final_y) = final_origin.unwrap_or((0, 0));
-        let position_flags = if final_origin.is_some() {
-            SWP_NOZORDER | SWP_NOACTIVATE
-        } else {
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
-        };
-        let _ = SetWindowPos(
-            hwnd,
-            HWND::default(),
-            final_x,
-            final_y,
-            final_width,
-            final_height,
-            position_flags,
-        );
 
         let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, Some(snapshot.language)));
         let font = CreateFontW(

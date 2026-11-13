@@ -18,6 +18,19 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$windowPlacement = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\window_placement.rs')
+$styleWindow += [Environment]::NewLine + $windowPlacement
+if ($styleWindowRoot -notmatch 'mod window_placement;' -or
+    $styleWindowRoot -notmatch 'use self::window_placement::\*;' -or
+    $windowPlacement -notmatch 'pub\(super\) unsafe fn position_new_settings_window\(' -or
+    $windowPlacement -notmatch 'GetDpiForWindow\(widget\).max\(96\)' -or
+    $windowPlacement -notmatch 'GetDpiForWindow\(hwnd\).max\(96\)' -or
+    $windowPlacement -notmatch 'settings_centered_origin\(' -or
+    $windowPlacement -notmatch 'SWP_NOMOVE \| SWP_NOZORDER \| SWP_NOACTIVATE' -or
+    $styleWindowRoot -notmatch 'let dpi = position_new_settings_window\(hwnd, widget, widget_work_area\);' -or
+    $styleWindowRoot -match '(?m)^\s*let anchor_dpi = GetDpiForWindow\(widget\)') {
+    throw 'Pre-show settings window monitor placement must preserve both DPI passes.'
+}
 $navigationState = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_state.rs')
 $styleWindow += [Environment]::NewLine + $navigationState
 if ($styleWindowRoot -notmatch 'mod navigation_state;' -or
