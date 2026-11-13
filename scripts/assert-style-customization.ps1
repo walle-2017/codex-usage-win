@@ -1,18 +1,736 @@
 $ErrorActionPreference = 'Stop'
 
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
+# Desktop Default->Minimal->Default must recompute reset labels when the
+# effective popup preset changes, not only at the earlier settings-message step.
+$floatingWidgetBlock = [regex]::Match(
+    $window,
+    '(?s)fn enable_floating_widget\(reason: &str, vertical: bool\)\s*\{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($floatingWidgetBlock) -or
+    [regex]::Matches($floatingWidgetBlock, 'sync_floating_preset_and_usage\(s, preset\)').Count -ne 2 -or
+    $window -notmatch '(?s)fn sync_floating_preset_and_usage\(s: &mut AppState, preset: AppearancePreset\)\s*\{\s*if s\.effective_appearance_preset != preset\s*\{\s*s\.effective_appearance_preset = preset;\s*refresh_usage_texts\(s\);') {
+    throw 'Desktop layout changes must regenerate usage reset timestamps after the effective preset changes.'
+}
 $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $native = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\native_interop.rs')
 $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_blur.cpp')
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$styleWindowRoot = $styleWindow
+$windowPlacement = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\window_placement.rs')
+$styleWindow += [Environment]::NewLine + $windowPlacement
+if ($styleWindowRoot -notmatch 'mod window_placement;' -or
+    $styleWindowRoot -notmatch 'use self::window_placement::\*;' -or
+    $windowPlacement -notmatch 'pub\(super\) unsafe fn position_new_settings_window\(' -or
+    $windowPlacement -notmatch 'GetDpiForWindow\(widget\).max\(96\)' -or
+    $windowPlacement -notmatch 'GetDpiForWindow\(hwnd\).max\(96\)' -or
+    $windowPlacement -notmatch 'settings_centered_origin\(' -or
+    $windowPlacement -notmatch 'SWP_NOMOVE \| SWP_NOZORDER \| SWP_NOACTIVATE' -or
+    $styleWindowRoot -notmatch 'let dpi = position_new_settings_window\(hwnd, widget, widget_work_area\);' -or
+    $styleWindowRoot -match '(?m)^\s*let anchor_dpi = GetDpiForWindow\(widget\)') {
+    throw 'Pre-show settings window monitor placement must preserve both DPI passes.'
+}
+$navigationState = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_state.rs')
+$styleWindow += [Environment]::NewLine + $navigationState
+if ($styleWindowRoot -notmatch 'mod navigation_state;' -or
+    $styleWindowRoot -notmatch 'use self::navigation_state::\*;' -or
+    $navigationState -notmatch 'pub\(super\) fn set_section\(' -or
+    $navigationState -notmatch 'pub\(super\) fn select_editor\(' -or
+    $navigationState -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::SwitchSection\(section\)\)' -or
+    $navigationState -notmatch 'sync_settings_window_composition\(hwnd, section\)' -or
+    $navigationState -notmatch 'layout_settings_children\(hwnd\)' -or
+    $navigationState -notmatch 'sync_numeric_edits\(' -or
+    $navigationState -notmatch 'redraw_settings_window\(hwnd\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:set_section|select_editor)\(') {
+    throw 'Settings navigation and editor selection must remain in navigation_state.rs.'
+}
+$interactiveFrames = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\interactive_frames.rs')
+$styleWindow += [Environment]::NewLine + $interactiveFrames
+if ($styleWindowRoot -notmatch 'mod interactive_frames;' -or
+    $styleWindowRoot -notmatch 'use self::interactive_frames::\*;' -or
+    $interactiveFrames -notmatch 'pub\(super\) fn mark_settings_paint_cause\(' -or
+    $interactiveFrames -notmatch 'pub\(super\) fn settings_interactive_frame_due\(' -or
+    $interactiveFrames -notmatch 'pub\(super\) fn queue_settings_interactive_frame\(' -or
+    $interactiveFrames -notmatch 'SETTINGS_INTERACTIVE_FRAME_QUEUED' -or
+    $interactiveFrames -notmatch 'SETTINGS_LAST_INTERACTIVE_FRAME' -or
+    $interactiveFrames -notmatch 'PostMessageW\(' -or
+    $interactiveFrames -notmatch 'Duration::from_millis\(16\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:mark_settings_paint_cause|settings_interactive_frame_due|queue_settings_interactive_frame)\(') {
+    throw 'Settings interactive-frame scheduling must remain in interactive_frames.rs.'
+}
+# WinMM tick source is separated from UI-thread message dispatch.
+$submenuFrameClock = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\submenu_frame_clock.rs')
+$styleWindow += [Environment]::NewLine + $submenuFrameClock
+if ($styleWindowRoot -notmatch 'mod submenu_frame_clock;' -or
+    $styleWindowRoot -notmatch 'use self::submenu_frame_clock::\*;' -or
+    $submenuFrameClock -notmatch 'pub\(super\) fn begin_submenu_frame_clock\(' -or
+    $submenuFrameClock -notmatch 'pub\(super\) fn end_submenu_frame_clock\(' -or
+    $submenuFrameClock -notmatch 'pub\(super\) unsafe fn drive_submenu_frame_tick\(' -or
+    $submenuFrameClock -notmatch 'timeSetEvent\(' -or
+    $submenuFrameClock -notmatch 'TIME_KILL_SYNCHRONOUS_FLAG' -or
+    $submenuFrameClock -notmatch 'PostMessageW\(' -or
+    $submenuFrameClock -notmatch 'timeKillEvent\(' -or
+    $submenuFrameClock -notmatch 'SetTimer\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe )?fn (?:begin_submenu_frame_clock|end_submenu_frame_clock|drive_submenu_frame_tick)\(') {
+    throw 'Submenu multimedia frame clock and fallback must remain in submenu_frame_clock.rs.'
+}
+$windowChrome = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\window_chrome.rs')
+$styleWindow += [Environment]::NewLine + $windowChrome
+if ($styleWindowRoot -notmatch 'mod window_chrome;' -or
+    $styleWindowRoot -notmatch 'use self::window_chrome::\*;' -or
+    $windowChrome -notmatch 'pub\(super\) fn set_settings_initial_dwm_cloak\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn apply_fixed_titlebar\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn settings_window_ex_style\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn settings_composition_for_section\(' -or
+    $windowChrome -notmatch 'pub\(super\) fn sync_settings_window_composition\(') {
+    throw 'Settings window chrome must remain isolated in window_chrome.rs.'
+}
+# Wheel and slider actions retain native EDIT updates, model synchronization and frame throttling.
+$sliderInteraction = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\slider_interaction.rs')
+$styleWindow += [Environment]::NewLine + $sliderInteraction
+if ($styleWindowRoot -notmatch 'mod slider_interaction;' -or
+    $styleWindowRoot -notmatch 'use self::slider_interaction::\*;' -or
+    $sliderInteraction -notmatch 'pub\(super\) fn adjust_numeric_by_wheel\(' -or
+    $sliderInteraction -notmatch 'pub\(super\) fn adjust_slider_by_wheel\(' -or
+    $sliderInteraction -notmatch 'pub\(super\) fn update_slider\(' -or
+    $sliderInteraction -notmatch 'queue_settings_interactive_frame\(hwnd, true\)' -or
+    $sliderInteraction -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:adjust_numeric_by_wheel|adjust_slider_by_wheel|update_slider)\(') {
+    throw 'Numeric wheel and slider interactions must retain their native controls and 60 FPS frame schedule.'
+}
+# Native EDIT change handlers are separate from value synchronization.
+# In particular a focused blur edit must be redrawn without rewriting its text.
+$editorInput = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_input.rs')
+$styleWindow += [Environment]::NewLine + $editorInput
+if ($styleWindowRoot -notmatch 'mod editor_input;' -or
+    $styleWindowRoot -notmatch 'use self::editor_input::\*;' -or
+    $editorInput -notmatch 'pub\(super\) fn update_color_from_hex_edit\(' -or
+    $editorInput -notmatch 'pub\(super\) fn update_color_from_numeric_edit\(' -or
+    $editorInput -notmatch 'pub\(super\) fn update_blur_from_numeric_edit\(' -or
+    $editorInput -notmatch 'pub\(super\) fn update_corner_from_numeric_edit\(' -or
+    $editorInput -notmatch 'queue_settings_interactive_frame\(hwnd, false\)' -or
+    $editorInput -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $styleWindowRoot -match '(?m)^fn (?:update_color_from_hex_edit|update_color_from_numeric_edit|update_blur_from_numeric_edit|update_corner_from_numeric_edit)\(') {
+    throw 'Native input handlers must stay in editor_input.rs without changing preview or focus behavior.'
+}
+# Desktop submenu's cached endpoint frames retain their GDI-backed blending and terminal refresh.
+$submenuComposition = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\submenu_composition.rs')
+$styleWindow += [Environment]::NewLine + $submenuComposition
+if ($styleWindowRoot -notmatch 'mod submenu_composition;' -or
+    $styleWindowRoot -notmatch 'use self::submenu_composition::\*;' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn paint_submenu_endpoint\(' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn composite_cached_submenu_card\(' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn finish_submenu_terminal_paint\(' -or
+    $submenuComposition -notmatch 'pub\(super\) (?:unsafe )?fn can_reuse_coalesced_position_paint\(' -or
+    $submenuComposition -notmatch 'native_interop::alpha_blend_cached_card\(' -or
+    $submenuComposition -notmatch 'PostMessageW\(' -or
+    $submenuComposition -notmatch 'painted_section == Some\(section\)' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe\s+)?fn (?:paint_submenu_endpoint|composite_cached_submenu_card|finish_submenu_terminal_paint|can_reuse_coalesced_position_paint)\(') {
+    throw 'Cached submenu endpoint composition and safe retained-pixel reuse must remain in submenu_composition.rs.'
+}
+# Preset gallery caches pre-render both positions and keep deferred warmup outside live frame paints.
+$presetGalleryCache = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_cache.rs')
+$styleWindow += [Environment]::NewLine + $presetGalleryCache
+if ($styleWindowRoot -notmatch 'mod preset_gallery_cache;' -or
+    $styleWindowRoot -notmatch 'use self::preset_gallery_cache::\*;' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn preset_gallery_cache_ready\(' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn build_preset_gallery_cache\(' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn request_preset_gallery_warmup\(' -or
+    $presetGalleryCache -notmatch 'pub\(super\) (?:unsafe )?fn copy_cached_preset_gallery\(' -or
+    $presetGalleryCache -notmatch 'PostMessageW\(hwnd, WM_SETTINGS_PREWARM_GALLERY' -or
+    $presetGalleryCache -notmatch 'SettingsPaintBuffer::create\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe\s+)?fn (?:preset_gallery_cache_ready|build_preset_gallery_cache|request_preset_gallery_warmup|copy_cached_preset_gallery)\(') {
+    throw 'Deferred preset gallery warmup and cached position rendering must remain in preset_gallery_cache.rs.'
+}
+# First settings show is DWM-cloaked until a synchronous parent/child paint,
+# with an opaque erase only if no retained first frame exists yet.
+$firstSettingsShow = [regex]::Match(
+    $styleWindowRoot,
+    '(?s)let first_frame_cloaked = set_settings_initial_dwm_cloak\(hwnd, true\);.*?let _ = SetForegroundWindow\(hwnd\);'
+)
+if (-not $firstSettingsShow.Success -or
+    $firstSettingsShow.Value -notmatch 'ShowWindow\(hwnd, SW_SHOWNORMAL\)' -or
+    $firstSettingsShow.Value -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_ALLCHILDREN \| RDW_UPDATENOW' -or
+    $firstSettingsShow.Value -notmatch 'set_settings_initial_dwm_cloak\(hwnd, false\)' -or
+    $windowChrome -notmatch 'DWMWA_CLOAK' -or
+    $styleWindowRoot -notmatch 'painted_section.get\(\).is_none\(\)' -or
+    $styleWindowRoot -notmatch 'first complete settings frame must be rendered synchronously') {
+    throw 'Settings must reveal only after an opaque, fully painted initial parent/child frame.'
+}
+# Closing the discard overlay must restore the RichEdit child before the file chooser.
+if ($styleWindowRoot -notmatch '(?s)Some\(PendingDiscardAction::Json\(action\)\) => \{\s*//[^\n]*\n\s*//[^\n]*\n\s*//[^\n]*\n\s*layout_settings_children\(hwnd\);\s*redraw_settings_window\(hwnd\);\s*begin_json_action_confirmed\(hwnd, action\);' -or
+    $styleWindowRoot -notmatch 'json_has_pending_changes\(s.json_dirty, s.json_import_pending_apply\)' -or
+    $styleWindowRoot -notmatch 'json_import_pending_apply: false,') {
+    throw 'Confirmed JSON replacement must restore RichEdit and preserve imported-pending state.'
+}
+# JSON file import must not inherit an old dirty warning, and Export is disabled until applied.
+$jsonFileGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_file_io.rs')
+$jsonClickGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hit_testing.rs')
+$jsonPaintGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
+$jsonEditorGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_editor_text.rs')
+$jsonActionGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_actions.rs')
+$jsonSupportGuards = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+# Editing JSON invalidates the prior operation-success label and clickable
+# import/export path immediately, but retains errors until live validation runs.
+if ($jsonActionGuards -notmatch 'if json_success_status_is_stale_on_edit\(&s.json_status\) \{\s*s.json_status.clear\(\);\s*s.json_status_path = None;' -or
+    $jsonSupportGuards -notmatch "status.starts_with\('✓'\)" -or
+    $jsonSupportGuards -notmatch 'fn json_user_edit_clears_stale_success_statuses_but_not_errors\(') {
+    throw 'JSON user edits must clear stale Reload, Format, Import and Export success statuses immediately.'
+}
+if ($jsonClickGuards -notmatch 'json_action_enabled\(action, json_dirty, json_import_pending_apply\)' -or
+    $jsonPaintGuards -notmatch 'disabled_export = action == JsonAction::Export' -or
+    $jsonPaintGuards -notmatch '● 已导入，待应用' -or
+    $jsonFileGuards -notmatch 'write_json_editor\(&standard, status, false\)' -or
+    $jsonFileGuards -notmatch 's.json_import_pending_apply = import_pending_apply;' -or
+    $jsonFileGuards -notmatch 'json_action_enabled\(JsonAction::Export, s.json_dirty, s.json_import_pending_apply\)' -or
+    $jsonEditorGuards -notmatch 's.json_import_pending_apply = false;' -or
+    $jsonActionGuards -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Json\(action\)\)' -or
+    $jsonActionGuards -notmatch 'begin_json_action_confirmed\(hwnd, action\)' -or
+    $jsonSupportGuards -notmatch 'fn json_actions_guard_export_and_confirm_destructive_reload_or_import\(' -or
+    $styleWindowRoot -notmatch 'Some\(PendingDiscardAction::Json\(action\)\)') {
+    throw 'JSON import, unsaved confirmation, Export-disable and pending Apply regression.'
+}
+# Configuration file dialog and cancellation behavior must remain in json_file_io.rs.
+$jsonFileIo = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_file_io.rs')
+$styleWindow += [Environment]::NewLine + $jsonFileIo
+if ($styleWindowRoot -notmatch 'mod json_file_io;' -or
+    $styleWindowRoot -notmatch 'use self::json_file_io::\*;' -or
+    $jsonFileIo -notmatch 'pub\(super\) fn file_dialog\(' -or
+    $jsonFileIo -notmatch 'pub\(super\) fn import_json_file\(' -or
+    $jsonFileIo -notmatch 'pub\(super\) fn export_json_file\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:file_dialog|import_json_file|export_json_file)\(') {
+    throw 'JSON Windows file pickers and import/export must remain in json_file_io.rs.'
+}
+# JSON action state and validation logic is independently modularized.
+$jsonActions = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_actions.rs')
+$styleWindow += [Environment]::NewLine + $jsonActions
+if ($styleWindowRoot -notmatch 'mod json_actions;' -or
+    $styleWindowRoot -notmatch 'use self::json_actions::\*;' -or
+    $jsonActions -notmatch 'pub\(super\) fn begin_json_apply\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn begin_json_action\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn finish_pending_json_action\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn schedule_json_validation\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn update_json_validation_status\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn format_json_editor\(' -or
+    $jsonActions -notmatch 'pub\(super\) fn apply_json_editor\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:begin_json_apply|begin_json_action|finish_pending_json_action|schedule_json_validation|update_json_validation_status|format_json_editor|apply_json_editor)\(') {
+    throw 'JSON action orchestration, validation and apply helpers must remain in json_actions.rs.'
+}
+# Native editor value synchronization stays separate from repaint and input handlers.
+$editorSync = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_sync.rs')
+$styleWindow += "\`n" + $editorSync
+if ($styleWindowRoot -notmatch 'mod editor_sync;' -or
+    $styleWindowRoot -notmatch 'use self::editor_sync::\*;' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_numeric_edits\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_blur_edit\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_corner_edit\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_active_style_into_editable\(' -or
+    $editorSync -notmatch 'pub\(super\) fn sync_hex_edits\(' -or
+    $editorSync -notmatch 'pub\(super\) fn normalize_hex_edit\(' -or
+    $editorSync -notmatch 'set_edit_text_string\(' -or
+    $editorSync -notmatch 's.syncing_hex_edits = false;' -or
+    $styleWindowRoot -match '(?m)^fn (?:sync_numeric_edits|sync_blur_edit|sync_corner_edit|sync_active_style_into_editable|sync_hex_edits|normalize_hex_edit)\(') {
+    throw 'Native edit synchronization must preserve state locks and input-message order in editor_sync.rs.'
+}
+# Native editor layout now has its own module; retain focus-safe child operations.
+$editorLayout = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_layout.rs')
+$styleWindow += "\`n" + $editorLayout
+if ($styleWindowRoot -notmatch 'mod editor_layout;' -or
+    $styleWindowRoot -notmatch 'use self::editor_layout::\*;' -or
+    $editorLayout -notmatch 'pub\(super\) unsafe fn single_line_edit_font_height\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn editor_layout_snapshot\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn release_editor_focus_before_layout\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn layout_numeric_edits\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn hex_layout_snapshot\(' -or
+    $editorLayout -notmatch 'pub\(super\) fn layout_hex_edits\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe\s+)?fn (?:single_line_edit_font_height|editor_layout_snapshot|release_editor_focus_before_layout|layout_numeric_edits|hex_layout_snapshot|layout_hex_edits)\(') {
+    throw 'Editor child layout must remain centralized and preserve font/focus safety.'
+}
+# Region and text-measurement helpers must stay in the shared geometry modules.
+$layoutWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
+$jsonWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_geometry.rs')
+$renderWindowHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\render_primitives.rs')
+if ($layoutWindowHelpers -notmatch 'pub\(super\) fn settings_work_area_for_widget\(' -or
+    $layoutWindowHelpers -notmatch 'pub\(super\) fn position_is_only_snapshot_change\(' -or
+    $jsonWindowHelpers -notmatch 'pub\(super\) fn json_status_path_rect\(' -or
+    $renderWindowHelpers -notmatch 'pub\(super\) fn text_width_px\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:settings_work_area_for_widget|position_is_only_snapshot_change|json_status_path_rect|text_width_px)\(') {
+    throw 'Settings geometry/text helpers must be available from extracted modules.'
+}
+# Input hit testing and JSON export name defaults stay available after splitting.
+$inputHitHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')
+$hitTesting = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hit_testing.rs')
+$styleWindow += "`n" + $hitTesting
+$jsonNameHelpers = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+if ($hitTesting -notmatch 'pub\(super\) fn wheel_numeric_target_at\(' -or
+    $hitTesting -notmatch 'pub\(super\) fn hit_target_at\(' -or
+    $hitTesting -notmatch 'pub\(super\) fn slider_kind_at\(' -or
+    $styleWindowRoot -notmatch 'mod hit_testing;' -or
+    $styleWindowRoot -notmatch 'use self::hit_testing::\*;' -or
+    $styleWindowRoot -match '(?m)^fn (?:hit_target_at|slider_kind_at)\(' -or
+    $inputHitHelpers -match '(?m)^pub\(super\) fn wheel_numeric_target_at\(' -or
+    $jsonNameHelpers -notmatch 'pub\(super\) fn export_default_filename\(' -or
+    $jsonNameHelpers -notmatch 'codex-usage-win-config-' -or
+    $styleWindowRoot -match '(?m)^fn (?:wheel_numeric_target_at|export_default_filename)\(') {
+    throw 'Wheel numeric hit targets and export file names must remain unchanged after extraction.'
+}
+# Native editor messaging now lives in a dedicated module; retain all six helpers.
+$editControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\edit_controls.rs')
+$styleWindow += "`n" + $editControls
+if ($styleWindowRoot -notmatch 'mod edit_controls;' -or
+    $styleWindowRoot -notmatch 'use self::edit_controls::\*;' -or
+    $editControls -notmatch 'pub\(super\) fn set_edit_text_string\(' -or
+    $editControls -notmatch 'pub\(super\) fn set_edit_text\(' -or
+    $editControls -notmatch 'pub\(super\) fn read_edit_value\(' -or
+    $editControls -notmatch 'pub\(super\) fn read_edit_text\(' -or
+    $editControls -notmatch 'pub\(super\) unsafe fn rich_set_selection\(' -or
+    $editControls -notmatch 'pub\(super\) unsafe fn rich_set_selected_color\(' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe\s+)?fn (?:set_edit_text_string|set_edit_text|read_edit_value|read_edit_text|rich_set_selection|rich_set_selected_color)\(') {
+    throw 'Settings native edit helpers must remain centralized after modularization.'
+}
+# Direct typing must explicitly present the Settings slider and native
+# EDIT without rewriting the in-progress text or moving its caret.
+$typedBlurHandler = [regex]::Match(
+    $editorInput,
+    '(?s)pub\(super\) fn update_blur_from_numeric_edit\(\)\s*\{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($typedBlurHandler) -or
+    $typedBlurHandler -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or
+    $typedBlurHandler -notmatch 'queue_settings_interactive_frame\(hwnd, false\)' -or
+    $typedBlurHandler -match '(?m)^\s*sync_blur_edit\(' -or
+    $styleWindowRoot -notmatch 'for \(section, typed_value\) in \[\(Section::Panel, 27\), \(Section::Tooltip, 43\)\]') {
+    throw 'Typed panel/tooltip blur must present the native edit and slider without replacing focused input text.'
+}
+# A wheel step on a native EDIT must update both the model and the actual
+# child window text, even when the settings parent uses WS_EX_COMPOSITED.
+$wheelTextSync = [regex]::Match(
+    $sliderInteraction,
+    '(?s)pub\(super\) fn adjust_numeric_by_wheel\(.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($wheelTextSync) -or
+    $wheelTextSync -notmatch 'set_edit_text\(edit, next\)' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Blur => return,' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Corner => sync_corner_edit\(\)' -or
+    $wheelTextSync -notmatch 'WheelNumericTarget::Color\(_\) => sync_numeric_edits\(\)' -or
+    $wheelTextSync -notmatch 'RDW_INVALIDATE \| RDW_ERASE \| RDW_UPDATENOW' -or
+    $styleWindowRoot -notmatch 'focused native EDIT text must match the blur slider/model') {
+    throw 'Numeric wheel adjustments must synchronize and repaint the focused native edit after updating style.'
+}
+$editorGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_geometry.rs')
+# Native single-line EDIT has no vertical-text alignment API. The child
+# must be centered inside the themed input background using real font metrics.
+if ($editorGeometry -notmatch 'pub\(super\) fn centered_single_line_edit_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn centered_single_line_edit_rect\(' -or
+    $editorLayout -notmatch 'fn single_line_edit_font_height\(' -or
+    $editorLayout -notmatch 'WM_GETFONT' -or
+    $editorLayout -notmatch 'GetTextMetricsW\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*numeric_edit_rect\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*blur_edit_rect\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*corner_edit_rect\(' -or
+    $editorLayout -notmatch 'centered_single_line_edit_rect\(\s*hex_edit_rect\(' -or
+    $styleWindowRoot -notmatch 'fn single_line_edits_stay_vertically_centered_across_font_metrics_and_dpi\(') {
+    throw 'Settings single-line edit controls must center the native text window using measured font metrics across all input types.'
+}
+$styleWindow += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_preview.rs'))
+$jsonStatus = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_status.rs')
+$styleWindow += "`n" + $jsonStatus
+if ($styleWindowRoot -notmatch 'mod json_status;' -or
+    $styleWindowRoot -notmatch 'use self::json_status::\*;' -or
+    $jsonStatus -notmatch 'pub\(super\) fn set_json_status\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn set_json_status_with_path\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn open_json_status_path\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn start_json_error_shake\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn advance_json_error_shake\(' -or
+    $jsonStatus -notmatch 'pub\(super\) fn show_json_apply_validation_error\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:set_json_status|set_json_status_with_path|open_json_status_path|start_json_error_shake|advance_json_error_shake|show_json_apply_validation_error)\(') {
+    throw 'JSON status and validation feedback helpers must stay in json_status.rs.'
+}
+$jsonEditorText = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_editor_text.rs')
+$styleWindow += "`n" + $jsonEditorText
+if ($styleWindowRoot -notmatch 'mod json_editor_text;' -or
+    $styleWindowRoot -notmatch 'use self::json_editor_text::\*;' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn read_large_edit_text_raw\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn read_large_edit_text\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn syntax_highlight_json_editor\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn write_json_editor\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn refresh_json_editor_theme\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn reload_json_editor_from_snapshot\(' -or
+    $jsonEditorText -notmatch 'pub\(super\) fn locate_json_error\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:read_large_edit_text_raw|read_large_edit_text|syntax_highlight_json_editor|write_json_editor|refresh_json_editor_theme|reload_json_editor_from_snapshot|locate_json_error)\(') {
+    throw 'JSON RichEdit text, syntax and editor refresh helpers must remain in json_editor_text.rs.'
+}
+$jsonSupport = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_support.rs')
+$styleWindow += "`n" + $jsonSupport
+$colorCodec = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\color_codec.rs')
+$styleWindow += "`n" + $colorCodec
+if ($styleWindowRoot -notmatch 'mod color_codec;' -or
+    $styleWindowRoot -notmatch 'pub use self::color_codec::\{decode_color_target, unpack_color\};' -or
+    $colorCodec -notmatch 'pub fn decode_color_target\(' -or
+    $colorCodec -notmatch 'pub fn unpack_color\(' -or
+    $colorCodec -notmatch 'pub\(super\) fn encode_color_target\(' -or
+    $colorCodec -notmatch 'pub\(super\) fn pack_color\(' -or
+    $colorCodec -notmatch 'u32::from\(color.a\) << 24' -or
+    $styleWindowRoot -match '(?m)^\s*(?:pub )?fn (?:decode_color_target|unpack_color|encode_color_target|pack_color)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_color_codec_round_trips_all_targets_and_rgba_channels\(') {
+    throw 'Color target IDs and RGBA Win32 packing must remain stable and exported after modularization.'
+}
+$jsonScroll = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_scroll.rs')
+$styleWindow += "`n" + $jsonScroll
+$inputEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\input_events.rs')
+$styleWindow += "`n" + $inputEvents
+$commandEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\command_events.rs')
+$styleWindow += "`n" + $commandEvents
+$timerEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\timer_events.rs')
+$styleWindow += "`n" + $timerEvents
+$lifecycleEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\lifecycle_events.rs')
+$styleWindow += "`n" + $lifecycleEvents
+$renderPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\render_primitives.rs')
+$styleWindow += "`n" + $renderPrimitives
+# Semantic icon mapping follows the shared native icon painter.
+if ($renderPrimitives -notmatch 'pub\(super\) fn theme_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn layout_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn preset_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn json_action_icon\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:theme_icon|layout_icon|preset_icon|json_action_icon)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_icons_preserve_theme_layout_preset_and_json_mappings\(') {
+    throw 'Settings icon mappings must be centralized without changing any theme, preset or JSON button icon.'
+}
+$jsonGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_geometry.rs')
+$styleWindow += "`n" + $jsonGeometry
+$jsonPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_paint.rs')
+$styleWindow += "`n" + $jsonPaint
+# JSON child pane and its narrow scrollbar repaint must share json_paint.rs.
+# Keep the retained tiny bitmap, clipped scrollbar frame, full-page fallback
+# and the existing Windows HWND regression that exercises the buffered painter.
+if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_scrollbar_buffered\(' -or
+    $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_page_surface\(' -or
+    $jsonPaint -notmatch 'JSON_SCROLLBAR_PAINT_BUFFER.with\(' -or
+    $jsonPaint -notmatch 'SettingsPaintBuffer::create\(' -or
+    $jsonPaint -notmatch 'if scrollbar_only \{' -or
+    $jsonPaint -notmatch 'if !buffered \{' -or
+    $jsonPaint -notmatch 'SetViewportOrgEx\(buffer.dc, -track.left, -track.top' -or
+    $jsonPaint -notmatch 'paint_json_scrollbar_decoration\(' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn (?:paint_json_scrollbar_buffered|paint_json_page_surface)\(' -or
+    $styleWindowRoot -notmatch 'paint_json_page_surface\(hwnd\);' -or
+    $styleWindowRoot -notmatch 'the narrow scrollbar must support double-buffered painting') {
+    throw 'JSON child-pane rendering must keep buffered scrollbar and fallback semantics when moved to json_paint.rs.'
+}
+# Unsaved JSON overlay painting belongs with the JSON page rendering;
+# click hit-testing and the dialog action remain in the parent window.
+if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_discard_dialog\(' -or
+    $jsonPaint -notmatch 'discard_dialog_button_rect\(hwnd, true\)' -or
+    $jsonPaint -notmatch 'discard_dialog_button_rect\(hwnd, false\)' -or
+    $jsonPaint -notmatch 'HitTarget::DiscardChanges' -or
+    $jsonPaint -notmatch 'HitTarget::KeepEditing' -or
+    $jsonPaint -notmatch '未保存的更改' -or
+    $jsonPaint -notmatch '#B65F63FF' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn paint_discard_dialog\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn discard_dialog_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn discard_dialog_button_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn discard_dialog_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn discard_dialog_button_rect\(' -or
+    $styleWindowRoot -notmatch 'fn unsaved_json_confirmation_buttons_keep_distinct_hit_rects\(') {
+    throw 'Unsaved JSON confirmation must keep its original layout, copy and actions when moving painting to json_paint.rs.'
+}
+$presetGalleryPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\preset_gallery_paint.rs')
+$styleWindow += "`n" + $presetGalleryPaint
+if ($presetGalleryPaint -notmatch 'pub\(super\) fn preset_gallery_card_rect\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preview_vertical_for_snapshot\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preview_layout_flags\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preset_card_rect_for_orientation\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preset_card_rect\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) const PRESET_CARD_TOP:' -or
+    $presetGalleryPaint -notmatch 'PRESET_CARD_MINIMAL_HEIGHT: i32 = 250' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:preset_gallery_card_rect|preview_layout_flags|preset_card_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn preset_gallery_retains_vertical_and_horizontal_card_sizes\(') {
+    throw 'Preset card sizing and position must remain unchanged.'
+}
+$appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
+$styleWindow += "`n" + $appearancePaint
+$editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_paint.rs')
+$styleWindow += "`n" + $editorPaint
+if ($editorPaint -notmatch 'pub\(super\) unsafe fn paint_frosted_alpha_hint\(' -or
+    $editorPaint -notmatch 'pub\(super\) fn row_label\(' -or
+    $editorPaint -notmatch 'CreateFontW\(' -or
+    $editorPaint -notmatch 'DeleteObject\(hint_font\)' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:paint_frosted_alpha_hint|row_label)\(' -or
+    $styleWindowRoot -notmatch 'fn editor_labels_preserve_localized_frosted_and_progress_values\(') {
+    throw 'Editor label and alpha-hint rendering must retain original locale and GDI lifecycle.'
+}
+$generalPagePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\general_page_paint.rs')
+$styleWindow += "`n" + $generalPagePaint
+$navigationPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\navigation_paint.rs')
+$styleWindow += "`n" + $navigationPaint
+$layoutGeometry = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\layout_geometry.rs')
+$styleWindow += "`n" + $layoutGeometry
+if ($layoutGeometry -notmatch 'pub\(super\) fn window_dpi\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn scale\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn rect\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn point_from_lparam\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn pt_in_rect\(' -or
+    $layoutGeometry -notmatch 'GetDpiForWindow\(hwnd\).max\(96\)' -or
+    $layoutGeometry -notmatch 'as i16 as i32' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:window_dpi|scale|rect|point_from_lparam|pt_in_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_coordinate_helpers_keep_signed_points_and_half_open_hits\(') {
+    throw 'Shared DPI pixel geometry and signed pointer hit bounds must remain unchanged.'
+}
+$styleWindow += "`n" + $editorGeometry
+if ($styleWindowRoot -notmatch 'mod editor_geometry;' -or
+    $styleWindowRoot -notmatch 'use self::editor_geometry::\*;' -or
+    $editorGeometry -notmatch 'pub\(super\) fn rows\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn blur_row_index\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn blur_slider_track_rect\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn blur_edit_rect\(' -or
+    $editorGeometry -notmatch 'pub\(super\) fn numeric_edit_frame_rect\(' -or
+    $editorGeometry -notmatch 'client.bottom - scale\(hwnd, 24\)' -or
+    $editorGeometry -notmatch 'right: frame.right - scale\(hwnd, 28\)' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:rows|blur_row_index|blur_edit_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn editor_slider_hit_regions_keep_blur_rows_aligned\(') {
+    throw 'Editor row/slider/blur geometry must preserve original paint and hit targets.'
+}
+if ($styleWindowRoot -notmatch 'mod layout_geometry;' -or
+    $styleWindowRoot -notmatch 'use self::layout_geometry::\*;' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn general_segment_rect\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn section_rect\(' -or
+    $layoutGeometry -notmatch 'Section::Tooltip => \(220, 260\)' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn desktop_auto_collapse_rect\(' -or
+    $layoutGeometry -notmatch 'pub\(super\) fn appearance_button_rect\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn (?:general_segment_rect|section_rect|appearance_button_rect)\(' -or
+    $styleWindowRoot -notmatch 'fn appearance_button_hit_areas_keep_joined_edges\(') {
+    throw 'Sidebar/General/appearance paint and hit-test geometry must remain shared.'
+}
+if ($styleWindowRoot -notmatch 'mod navigation_paint;' -or
+    $styleWindowRoot -notmatch 'use self::navigation_paint::\*;' -or
+    $navigationPaint -notmatch 'pub\(super\) unsafe fn paint_navigation\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn navigation_icon\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn navigation_text_inset\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn section_label\(' -or
+    $navigationPaint -notmatch 'pub\(super\) fn appearance_page_title\(' -or
+    $navigationPaint -notmatch 'navigation_icon\(item\)' -or
+    $navigationPaint -notmatch 'section_label\(item, snapshot.language\)' -or
+    $navigationPaint -notmatch 'navigation_text_inset\(item\)' -or
+    $navigationPaint -notmatch 'Section::Tooltip' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:paint_navigation|navigation_icon|navigation_text_inset|section_label|appearance_page_title)\(' -or
+    $styleWindowRoot -notmatch 'fn settings_navigation_icons_labels_and_hit_regions_are_consistent\(') {
+    throw 'Navigation painting, icon mapping and labels must remain in navigation_paint.rs without changing sidebar hit geometry or localization.'
+}
+if ($styleWindowRoot -notmatch 'mod general_page_paint;' -or
+    $styleWindowRoot -notmatch 'use self::general_page_paint::\*;' -or
+    $generalPagePaint -notmatch 'pub\(super\) unsafe fn draw_general_segment_group\(' -or
+    $generalPagePaint -notmatch 'pub\(super\) unsafe fn draw_general_usage_checkbox\(' -or
+    $generalPagePaint -notmatch 'pub\(super\) unsafe fn paint_general_page\(' -or
+    $generalPagePaint -notmatch 'HitTarget::Refresh\(60_000\)' -or
+    $generalPagePaint -notmatch 'HitTarget::Refresh\(3_600_000\)' -or
+    $generalPagePaint -notmatch 'HitTarget::Alert\(30\)' -or
+    $generalPagePaint -notmatch 'HitTarget::UsageSession' -or
+    $generalPagePaint -notmatch 'HitTarget::UsageWeekly' -or
+    $generalPagePaint -notmatch 'HitTarget::Startup' -or
+    $generalPagePaint -notmatch 'HitTarget::LanguageOption\(index\)' -or
+    $generalPagePaint -notmatch 'draw_rounded_outline_rect\(hdc, bounds, separator, radius, 1\)' -or
+    $generalPagePaint -notmatch 'draw_switch\(' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn (?:draw_general_segment_group|draw_general_usage_checkbox|paint_general_page)\(') {
+    throw 'General-page painters must live in general_page_paint.rs with refresh, quota, usage, startup, language and border contracts intact.'
+}
+if ($styleWindowRoot -notmatch 'mod editor_paint;' -or
+    $styleWindowRoot -notmatch 'use self::editor_paint::\*;' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_hex_edit_frames\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_numeric_edit_frames\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_blur_edit_frame\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_corner_edit_frame\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn paint_editor\(' -or
+    $editorPaint -notmatch 'pub\(super\) unsafe fn draw_slider\(' -or
+    $editorPaint -notmatch 'if invalid\[index\]' -or
+    $editorPaint -notmatch 'focused == Some\(target\)' -or
+    $editorPaint -notmatch 'focused == Some\(index\)' -or
+    $editorPaint -notmatch 'draw_text\(\s*hdc,\s*"%"' -or
+    $editorPaint -notmatch 'draw_text\(\s*hdc,\s*"px"' -or
+    $editorPaint -notmatch 'Color channels' -or
+    $editorPaint -notmatch 'fill_rounded_rect\(hdc, track' -or
+    $editorPaint -notmatch 'fill_rounded_rect\(hdc, thumb, accent, radius\)' -or
+    $styleWindowRoot -match '(?m)^\s*unsafe fn (?:paint_hex_edit_frames|paint_numeric_edit_frames|paint_blur_edit_frame|paint_corner_edit_frame|paint_editor|draw_slider)\(') {
+    throw 'Color editor frames and sliders must live in editor_paint.rs with original input focus, error, suffix and slider rendering.'
+}
+if ($styleWindowRoot -notmatch 'mod appearance_paint;' -or
+    $styleWindowRoot -notmatch 'use self::appearance_paint::\*;' -or
+    $appearancePaint -notmatch 'pub\(super\) fn submenu_mix\(' -or
+    $appearancePaint -notmatch 'pub\(super\) fn submenu_content_alpha\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_submenu_well\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn draw_appearance_choice_group\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_submenu_collapse_switch\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_submenu_content\(' -or
+    $appearancePaint -notmatch 'pub\(super\) unsafe fn paint_appearance_page\(' -or
+    $appearancePaint -notmatch '0\.45 \+ 0\.55 \* submenu_content_alpha\(progress\)' -or
+    $appearancePaint -notmatch 'let saved = SaveDC\(hdc\)' -or
+    $appearancePaint -notmatch 'RestoreDC\(hdc, saved\)' -or
+    $appearancePaint -notmatch 'if submenu_only \{ return; \}' -or
+    $appearancePaint -notmatch 'paint_preset_gallery\(' -or
+    $appearancePaint -notmatch 'paint_hex_edit_frames\(' -or
+    $appearancePaint -notmatch 'paint_numeric_edit_frames\(' -or
+    $appearancePaint -notmatch 'paint_blur_edit_frame\(' -or
+    $appearancePaint -notmatch 'paint_corner_edit_frame\(' -or
+    $appearancePaint -notmatch 'draw_slider\(' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:submenu_mix|submenu_content_alpha|paint_submenu_well|draw_appearance_choice_group|paint_submenu_collapse_switch|paint_submenu_content|paint_appearance_page)\(') {
+    throw 'Appearance page and desktop submenu painters must remain in appearance_paint.rs with existing selection, animation, clip and edit frames.'
+}
+if ($styleWindowRoot -notmatch 'mod preset_gallery_paint;' -or
+    $styleWindowRoot -notmatch 'use self::preset_gallery_paint::\*;' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) fn preset_label\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) unsafe fn paint_preset_gallery\(' -or
+    $presetGalleryPaint -notmatch 'pub\(super\) unsafe fn paint_style_preview_card\(' -or
+    $presetGalleryPaint -notmatch 'if\s+!matched' -or
+    $presetGalleryPaint -notmatch 'paint_vertical_style_preview\(' -or
+    $presetGalleryPaint -notmatch 'paint_horizontal_style_preview\(' -or
+    $presetGalleryPaint -notmatch 'StyleColorTarget::ProgressConsumed' -or
+    $presetGalleryPaint -notmatch 'if selected \{ 2 \} else \{ 1 \}' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:preset_label|paint_preset_gallery|paint_style_preview_card)\(') {
+    throw 'Preset gallery labels, cards and thumbnail rendering must live in preset_gallery_paint.rs.'
+}
+if ($styleWindowRoot -notmatch 'mod json_paint;' -or
+    $styleWindowRoot -notmatch 'use self::json_paint::\*;' -or
+    $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_page\(' -or
+    $jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_scrollbar_decoration\(' -or
+    $jsonPaint -notmatch 'json_scroll_thumb_rect\(hwnd\)' -or
+    $jsonPaint -notmatch 'json_editor_background\(snapshot\.is_dark\)' -or
+    $jsonPaint -notmatch 'json_error_shake_offset\(hwnd, error_shake_step\)' -or
+    $jsonPaint -notmatch 'JsonSaveFeedback::Saving' -or
+    $jsonPaint -notmatch 'JsonSaveFeedback::Saved' -or
+    $jsonPaint -notmatch 'JsonAction::Apply' -or
+    $jsonPaint -notmatch 'paint_json_scrollbar_decoration\(hdc, hwnd, snapshot\.is_dark\)' -or
+    $styleWindowRoot -match '(?m)^unsafe fn paint_json_(?:page|scrollbar_decoration)\(') {
+    throw 'JSON page and scrollbar decoration painting must live in json_paint.rs without losing status and action rendering.'
+}
+if ($styleWindowRoot -notmatch 'mod render_primitives;' -or
+    $styleWindowRoot -notmatch 'use self::render_primitives::\*;' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_settings_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_segment_with_icon\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_segment\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) fn subtle_control_border\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn fill_rounded_rect\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_rounded_outline_rect\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_switch\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_outline_rect\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_outline_rect_width\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn fill\(' -or
+    $renderPrimitives -notmatch 'pub\(super\) unsafe fn draw_text\(' -or
+    $renderPrimitives -notmatch 'native_interop::draw_antialiased_rounded_rect\(' -or
+    $renderPrimitives -notmatch 'GetStockObject\(NULL_BRUSH\)' -or
+    $renderPrimitives -notmatch 'SelectObject\(hdc, old_brush\)' -or
+    $renderPrimitives -notmatch 'DeleteObject\(pen\)' -or
+    $renderPrimitives -notmatch 'if text\.is_empty\(\)' -or
+    $styleWindowRoot -match '(?m)^\s*(?:unsafe )?fn (?:draw_settings_icon|draw_segment_with_icon|draw_segment|subtle_control_border|fill_rounded_rect|draw_rounded_outline_rect|draw_switch|draw_outline_rect|draw_outline_rect_width|fill|draw_text)\(') {
+    throw 'Settings drawing primitives must remain in render_primitives.rs with GDI fallbacks and empty-text guard.'
+}
+if ($styleWindowRoot -notmatch 'mod lifecycle_events;' -or
+    $styleWindowRoot -notmatch 'x if is_settings_lifecycle_message\(x\)' -or
+    $lifecycleEvents -notmatch 'pub\(super\) unsafe fn handle_settings_lifecycle_message\(' -or
+    $lifecycleEvents -notmatch 'pub\(super\) fn is_settings_lifecycle_message\(' -or
+    $lifecycleEvents -notmatch 'WM_DPICHANGED\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_SIZE\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_GETMINMAXINFO\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_CLOSE\s*=>' -or
+    $lifecycleEvents -notmatch 'WM_DESTROY\s*=>' -or
+    $lifecycleEvents -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Close\)' -or
+    $lifecycleEvents -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $lifecycleEvents -notmatch 'let _ = DestroyWindow\(hwnd\)' -or
+    $lifecycleEvents -notmatch 'state.take\(\).map\(' -or
+    $lifecycleEvents -notmatch 'end_submenu_frame_clock\(hwnd\)' -or
+    $styleWindowRoot -match '(?m)^\s*WM_(?:DPICHANGED|SIZE|GETMINMAXINFO|CLOSE|DESTROY)\s*=>') {
+    throw 'Settings lifecycle and DPI/size messages must remain in lifecycle_events.rs.'
+}
+if ($styleWindowRoot -notmatch 'mod timer_events;' -or
+    $styleWindowRoot -notmatch 'x if is_settings_scheduled_message\(x\)' -or
+    $timerEvents -notmatch 'pub\(super\) unsafe fn handle_settings_scheduled_message\(' -or
+    $timerEvents -notmatch 'pub\(super\) fn is_settings_scheduled_message\(' -or
+    $timerEvents -notmatch 'WM_TIMER\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_PREWARM_GALLERY\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_PRESET_GALLERY_REFRESH\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_MULTIMEDIA_ANIMATION_TICK\s*=>' -or
+    $timerEvents -notmatch 'WM_SETTINGS_PRESENT_INTERACTIVE_FRAME\s*=>' -or
+    $timerEvents -notmatch 'json_scroll_drag_paced\(' -and $timerEvents -notmatch 'update_json_scroll_drag_paced\(' -or
+    $timerEvents -notmatch 'refresh_json_scrollbar_if_changed\(' -or
+    $timerEvents -notmatch 'update_json_validation_status\(' -or
+    $timerEvents -notmatch 'drive_submenu_frame_tick\(' -or
+    $styleWindowRoot -match '(?m)^\s*WM_TIMER\s*=>') {
+    throw 'Settings timer and scheduled refresh handlers must live in timer_events.rs.'
+}
+if ($styleWindowRoot -notmatch 'mod command_events;' -or
+    $styleWindowRoot -notmatch 'WM_COMMAND\s*=>\s*handle_settings_command\(' -or
+    $commandEvents -notmatch 'pub\(super\) unsafe fn handle_settings_command\(' -or
+    $commandEvents -notmatch 'pub\(super\) fn decode_settings_command\(' -or
+    $commandEvents -notmatch 'control_id == ID_EDIT_JSON' -or
+    $commandEvents -notmatch 'target_from_hex_control_id\(control_id\)' -or
+    $commandEvents -notmatch 'EN_CHANGE_CODE\s*=>' -or
+    $commandEvents -notmatch 'EN_SETFOCUS_CODE\s*=>' -or
+    $commandEvents -notmatch 'EN_KILLFOCUS_CODE\s*=>' -or
+    $commandEvents -notmatch 'update_color_from_numeric_edit\(' -or
+    $commandEvents -notmatch 'sync_corner_edit\(' -or
+    $commandEvents -notmatch 'update_blur_from_numeric_edit\(' -or
+    $styleWindowRoot -match '(?m)^\s*let control_id = \(wparam\.0 \& 0xFFFF\) as u16;') {
+    throw 'Edit-control WM_COMMAND handlers must remain in command_events.rs.'
+}
+if ($styleWindowRoot -notmatch 'mod input_events;' -or
+    $styleWindowRoot -notmatch 'x if is_settings_input_message\(x\)' -or
+    $inputEvents -notmatch 'pub\(super\) unsafe fn handle_settings_input_message\(' -or
+    $inputEvents -notmatch 'WM_MOUSEWHEEL\s*=>' -or
+    $inputEvents -notmatch 'WM_SETCURSOR\s*=>' -or
+    $inputEvents -notmatch 'WM_LBUTTONDOWN\s*=>' -or
+    $inputEvents -notmatch 'WM_MOUSEMOVE\s*=>' -or
+    $inputEvents -notmatch 'WM_MOUSELEAVE_MSG\s*=>' -or
+    $inputEvents -notmatch 'WM_LBUTTONUP\s*=>' -or
+    $inputEvents -notmatch 'WM_CANCELMODE\s*\|\s*WM_CAPTURECHANGED\s*=>' -or
+    $styleWindowRoot -match '(?m)^\s*WM_LBUTTONDOWN\s*=>' -or
+    $styleWindowRoot -match '(?m)^\s*WM_MOUSEMOVE\s*=>') {
+    throw 'Settings mouse/wheel/capture event handling must live in input_events.rs.'
+}
+if ($styleWindowRoot -notmatch 'mod json_scroll;' -or
+    $jsonScroll -notmatch 'pub\(super\) fn json_scroll_drag_should_apply\(' -or
+    $jsonScroll -notmatch 'pub\(super\) fn json_scroll_thumb_rect\(' -or
+    $jsonScroll -notmatch 'pub\(super\) fn json_scrollbar_wheel_target\(' -or
+    $jsonScroll -notmatch 'pub\(super\) fn reset_json_scroll_frame_clock\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn json_scroll_line_metrics\(' -or
+    $styleWindowRoot -match '(?m)^\s*fn update_json_scroll_drag\(') {
+    throw 'JSON scroll geometry, pacing and drag management must live in json_scroll.rs.'
+}
+if ($styleWindow -notmatch 'mod json_support;' -or
+    $jsonSupport -notmatch 'pub\(super\) fn jsonc_highlight_ranges\(' -or
+    $jsonSupport -notmatch 'pub\(super\) fn friendly_json_error\(' -or
+    $jsonSupport -notmatch 'pub\(super\) fn normalize_to_lf\(' -or
+    ($styleWindow -split 'mod json_support;', 2)[0] -match 'fn jsonc_highlight_ranges\(') {
+    throw 'JSONC text helpers must live in the shared JSON support module.'
+}
+$windowCommon = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window_common.rs')
+if ($styleWindow -notmatch 'pub\(super\) unsafe fn paint_horizontal_style_preview\(' -or
+    $styleWindow -notmatch 'pub\(super\) unsafe fn paint_vertical_style_preview\(' -or
+    $styleWindow -notmatch 'pub\(super\) fn preview_ring_angles\(') {
+    throw 'Preset preview painting must remain in the dedicated settings module.'
+}
 $settingsModel = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\settings_model.rs')
 $popupMenu = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\popup_menu.rs')
 $fonts = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\fonts.rs')
 $windowProduction = ($window -split '#\[cfg\(test\)\]', 2)[0]
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs'))
 $windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tooltip_measure.rs'))
+$windowProduction += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\floating_geometry.rs'))
 $styleProduction = ($style -split '#\[cfg\(test\)\]', 2)[0]
+$layeredBitmap = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\layered_bitmap.rs')
+if ($layeredBitmap -notmatch 'struct WindowDc' -or
+    $layeredBitmap -notmatch 'struct DibSurface' -or
+    $layeredBitmap -notmatch 'impl Drop for WindowDc' -or
+    $layeredBitmap -notmatch 'impl Drop for DibSurface' -or
+    $layeredBitmap -notmatch 'SelectObject\(self\.dc, self\.previous\)' -or
+    $layeredBitmap -notmatch 'DeleteObject\(self\.bitmap\)' -or
+    $layeredBitmap -notmatch 'ReleaseDC\(self\.owner, self\.dc\)' -or
+    $windowProduction -notmatch 'DibSurface::create\(screen_dc, width, height\)' -or
+    $windowProduction -notmatch 'DibSurface::create\(screen_dc, canvas_w, canvas_h\)' -or
+    ([regex]::Matches($windowProduction, 'DibSurface::create\(screen_dc, width, height\)')).Count -ne 2 -or
+    ([regex]::Matches($windowProduction, 'reset_floating_transition_state\(s\)')).Count -ne 2 -or
+    $windowProduction -notmatch 'fn reset_floating_transition_state\(') {
+    throw 'Layered widget and tooltip must use scoped GDI handles and desktop transitions must share one reset routine.'
+}
+
+
 
 foreach ($mode in @('System', 'Dark', 'Light')) {
     if ($styleProduction -notmatch ("\b" + $mode + "\b")) {
@@ -538,13 +1256,44 @@ if ($styleWindow -notmatch 'WINDOW_WIDTH:\s*i32\s*=\s*980' -or
     $styleWindow -notmatch 'WS_THICKFRAME' -or
     $styleWindow -notmatch '"常规"' -or
     $styleWindow -notmatch '"JSON 配置"' -or
-    $styleWindow -notmatch 'language_button_rect' -or
-    $styleWindow -notmatch 'rect\(hwnd,\s*760,\s*414,\s*920,\s*450\)' -or
-    $styleWindow -notmatch 'language_popup_open' -or
+    $styleWindow -notmatch 'general_language_group_rect' -or
+    $styleWindow -notmatch 'language_option_rect' -or
     $styleWindow -notmatch 'LanguageOption' -or
+    $styleWindow -notmatch 'language_label_for_index' -or
+    $styleWindow -match 'language_popup_open' -or
     $styleWindow -notmatch 'ID_EDIT_JSON') {
-    throw 'Unified settings window must provide resizable General, Appearance, JSON pages and a self-drawn language selector.'
+    throw 'Unified settings window must provide General, Appearance, JSON pages and inline two-choice language selection.'
 }
+# Title changes are synchronous Win32 messages. Explorer-hosted taskbar
+# children can re-enter the app, so language state must be unlocked first.
+$languageStateBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn apply_language_to_state\(.*?\n\}'
+).Value
+$titleRefreshBlock = [regex]::Match(
+    $windowProduction,
+    '(?s)fn refresh_window_title\(\) \{.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($languageStateBlock) -or
+    $languageStateBlock -match 'set_window_title\(' -or
+    $languageStateBlock -match 'SetWindowTextW\(' -or
+    [string]::IsNullOrWhiteSpace($titleRefreshBlock) -or
+    $titleRefreshBlock -notmatch '(?s)let title = \{.*?lock_state\(\).*?\};\s*if let Some\(\(hwnd, strings\)\) = title \{\s*set_window_title\(') {
+    throw 'Language state updates must release AppState lock before synchronous SetWindowTextW.'
+}
+foreach ($fragment in @(
+    'apply_language_to_state(s, Some(language));',
+    'apply_language_to_state(s, language_override);',
+    'apply_language_to_state(app_state, None);'
+)) {
+    if (-not $windowProduction.Contains($fragment)) {
+        throw "Missing language update path: $fragment"
+    }
+}
+if ($windowProduction -notmatch '(?s)WM_SETTINGS_LANGUAGE_CHANGE\s*=>\s*\{.*?refresh_window_title\(\);.*?style_window::sync\(') {
+    throw 'Settings language command must refresh title outside the app state lock before syncing UI.'
+}
+
 foreach ($message in @(
     'WM_SETTINGS_REFRESH_CHANGE',
     'WM_SETTINGS_USAGE_CHANGE',
@@ -577,6 +1326,11 @@ if ($styleWindow -match '"当前自定义"' -or
 # Both thumbnail orientations must use the same sample text template
 # as the production tooltip, with no time-only legacy preview strings.
 $appearanceSource = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\appearance.rs')
+if ($window -notmatch 'mod tooltip_measure;' -or
+    $window -notmatch 'tooltip_measure::\{cached_minimal_tooltip_width, TOOLTIP_TEXT_INSET\}' -or
+    $window -match 'static MINIMAL_TOOLTIP_WIDTH_CACHE:') {
+    throw 'Tooltip measurement and cache must be owned by the dedicated window module.'
+}
 if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
     $windowProduction -notmatch 'appearance::quota_reset_tooltip_text\(' -or
     $styleWindow -notmatch 'fn preview_reset_tooltip_lines\(' -or
@@ -586,6 +1340,9 @@ if ($appearanceSource -notmatch 'fn quota_reset_tooltip_text\(' -or
     $styleWindow -match 'preset, "5H", "20[0-9]{2}-[0-9]{2}-[0-9]{2}' -or
     $windowProduction -notmatch 'fn tooltip_width_with_render_slack\(' -or
     $windowProduction -notmatch 'TOOLTIP_TEXT_MEASUREMENT_SLACK' -or
+    $windowProduction -notmatch 'fn tooltip_mask_content_width\(' -or
+    $windowProduction -notmatch 'native_interop::directwrite_text_mask\(' -or
+    $windowProduction -notmatch 'const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 3;' -or
     $styleWindow -match 'draw_text\(hdc, "21:30", tip,') {
     throw 'Every preview tooltip must use the real default/minimal reset-time text template, not a time-only placeholder.'
 }
@@ -616,8 +1373,8 @@ if ($styleWindow -notmatch 'read_large_edit_text_raw' -or
 if ($styleWindow -notmatch '● 有未保存更改' -or
     $styleWindow -notmatch '● Unsaved changes' -or
     $styleWindow -notmatch 'settings != &applied_settings' -or
-    $styleWindow -notmatch 'action == JsonAction::Apply && !json_dirty' -or
-    $styleWindow -notmatch 'let apply_background = if dirty') {
+    $styleWindow -notmatch 'json_action_enabled\(action, json_dirty, json_import_pending_apply\)' -or
+    $styleWindow -notmatch 'let apply_background = if apply_enabled') {
     throw 'JSON editor must derive dirty state from parsed settings, show it on a separate line, and disable Apply while clean.'
 }
 if ($styleWindow -notmatch '✓ 已重新载入' -or
@@ -739,12 +1496,33 @@ if ($styleWindow -notmatch 'enum\s+SettingsIcon' -or
     $styleWindow -notmatch 'SettingsIcon::JsonApply' -or
     $styleWindow -notmatch 'draw_segment_with_icon\(' -or
     $styleWindow -notmatch 'crate::svg_icons::draw\(' -or
-    $styleWindow -notmatch 'theme_icon\(mode\)' -or
-    $styleWindow -notmatch 'layout_icon\(preset\)' -or
+    $styleWindow -notmatch 'theme_icon\(ThemeMode::System\)' -or
+    $styleWindow -notmatch 'layout_icon\(AppearancePreset::Default\)' -or
     $styleWindow -notmatch 'preset_icon\(preset,\s*snapshot\.is_dark\)' -or
     $styleWindow -notmatch 'json_action_icon\(action\)' -or
     $styleWindow -notmatch 'json_action_icon\(apply\)') {
     throw 'Settings icon vocabulary must use the precise anti-aliased path renderer for navigation, Theme/Layout buttons, preset cards, and Custom.'
+}
+if ($styleWindow -notmatch 'fn draw_appearance_choice_group\(' -or
+    $styleWindow -notmatch 'general_segment_rect\(bounds, index, choices\.len\(\)\)' -or
+    $styleWindow -notmatch 'fn paint_submenu_collapse_switch\(' -or
+    $styleWindow -notmatch 'fn desktop_auto_collapse_rect\(hwnd: HWND\)' -or
+    $styleWindow -notmatch 'hdc, strings\.start_with_windows,') {
+    throw 'Appearance controls must use joined icon choices, a single collapse switch and abbreviated Auto-start label.'
+}
+if ($styleWindow -notmatch 'title:\s*RECT' -or
+    $styleWindow -notmatch 'if zh \{ "桌面模式" \} else \{ "Desktop mode" \}' -or
+    $styleWindow -notmatch 'draw_antialiased_rounded_rect\(' -or
+    $styleWindow -notmatch '0\.45 \+ 0\.55 \* submenu_content_alpha' -or
+    $styleWindow -match 'foot:\s*RECT' -or
+    $styleWindow -match 'draw_antialiased_desktop_inset_well\(') {
+    throw 'Desktop controls must use a permanently visible, titled, independent right-side inset without the old L-shaped connection.'
+}
+$localeZh = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\simplified_chinese.rs')
+$localeEn = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\localization\english.rs')
+if ($localeZh -notmatch 'start_with_windows:\s*"自启"' -or
+    $localeEn -notmatch 'start_with_windows:\s*"Auto-start"') {
+    throw 'Localized startup labels must be shortened without bypassing the Strings resource.'
 }
 if ($styleWindow -match 'snapshot\.language\.strings\(\)\.settings' -or
     $styleWindow -notmatch 'navigation_text_inset' -or
@@ -785,12 +1563,15 @@ if ($styleWindow -match 'Manage refresh, display, alerts, and application behavi
     $styleWindow -notmatch 'settings_page_title_rect' -or
     $styleWindow -notmatch 'settings_card_rect' -or
     $styleWindow -notmatch 'settings_card_label_rect' -or
-    $styleWindow -notmatch 'settings_choice_rect' -or
+    $styleWindow -notmatch 'general_segment_rect' -or
+    $styleWindow -notmatch 'draw_general_segment_group' -or
+    $styleWindow -notmatch 'draw_general_usage_checkbox' -or
     $styleWindow -notmatch 'if zh \{ "常规" \} else \{ "General" \}' -or
-    $styleWindow -notmatch 'settings_choice_rect\(hwnd, 68, 102, index\)' -or
-    $styleWindow -notmatch 'settings_choice_rect\(hwnd, 268, 302, index\)' -or
-    $styleWindow -notmatch 'settings_card_rect\(hwnd, 328, 464\)') {
-    throw 'Settings pages must keep the shared right-pane layout baseline, restored General title, and matched refresh/alert padding.'
+    $styleWindow -notmatch 'general_refresh_group_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_alert_group_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_usage_card_rect\(hwnd\)' -or
+    $styleWindow -notmatch 'general_application_card_rect\(hwnd\)') {
+    throw 'Settings pages must keep the shared right pane and connected General choice groups plus half-width cards.'
 }
 if ($styleWindow -notmatch 'SETTINGS_EDITOR_HEIGHT: i32 = 164' -or
     $styleWindow -notmatch 'SETTINGS_EDITOR_CHANNEL_GAP: i32 = 30' -or
@@ -803,6 +1584,23 @@ if ($styleWindow -notmatch 'WS_CAPTION\s*\|\s*WS_SYSMENU' -or
     $styleWindow -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
     $styleWindow -notmatch 'DestroyWindow\(hwnd\)') {
     throw 'Settings must use the native titlebar close button and save before closing.'
+}
+# The JSON editor, save overlay and toolbar hit zones now share one
+# geometry module rather than relying on definitions in the parent file.
+if ($styleWindowRoot -notmatch 'mod json_geometry;' -or
+    $styleWindowRoot -notmatch 'use self::json_geometry::\*;' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_edit_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_edit_text_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_save_mask_rect\(' -or
+    $jsonGeometry -notmatch 'pub\(super\) fn json_action_rect\(' -or
+    $styleWindowRoot -match '(?m)^fn (?:json_edit_rect|json_edit_text_rect|json_save_mask_rect|json_action_rect)\(') {
+    throw 'JSON editor geometry must stay shared after moving to json_geometry.rs.'
+}
+# Canceling the Windows Import/Export file picker must clear the temporary
+# progress message without changing JSON contents or save/dirty state.
+if ($jsonFileIo -notmatch '(?s)fn import_json_file\(hwnd: HWND\).*?let Some\(path\) = file_dialog\(hwnd, false, None\) else \{\s*//[^\n]*\n\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};' -or
+    $jsonFileIo -notmatch '(?s)fn export_json_file\(hwnd: HWND\).*?let Some\(mut path\) = file_dialog\(hwnd, true, Some\(&default_name\)\) else \{\s*//[^\n]*\n\s*set_json_status\(String::new\(\)\);\s*return;\s*\};') {
+    throw 'Cancelled JSON Import/Export must clear its in-progress status.'
 }
 if ($styleWindow -notmatch 'let edit = json_edit_rect\(hwnd\)' -or
     $styleWindow -notmatch 'let button_width = scale\(hwnd, 108\)' -or
@@ -826,10 +1624,22 @@ if ($styleWindow -match 'draw_outline_rect\(hdc, language_button') {
 if ($styleWindow -notmatch 'load_embedded_app_icons\(' -or
     $styleWindow -notmatch 'hIcon:\s*large_icon' -or
     $styleWindow -notmatch 'hIconSm:\s*small_icon' -or
-    $styleWindow -notmatch 'WM_SETICON' -or
-    $styleWindow -notmatch 'ICON_BIG' -or
-    $styleWindow -notmatch 'ICON_SMALL') {
-    throw 'Settings window must bind the embedded executable icon to its standard caption.'
+    $styleWindow -notmatch 'set_window_caption_icons\(' -or
+    $windowProduction -notmatch 'set_window_caption_icons\(' -or
+    $windowCommon -notmatch 'fn load_embedded_app_icons\(' -or
+    $windowCommon -notmatch 'fn set_window_caption_icons\(' -or
+    $windowCommon -notmatch 'WM_SETICON' -or
+    $windowCommon -notmatch 'ICON_BIG' -or
+    $windowCommon -notmatch 'ICON_SMALL' -or
+    $windowCommon -notmatch 'unsafe impl Send for SendHwnd' -or
+    $window -match 'struct SendHwnd\(' -or
+    $styleWindow -match 'struct SendHwnd\(') {
+    throw 'Both windows must reuse the shared Win32 handle and embedded executable caption icon helpers.'
+}
+if ($controlPrimitives -match 'codex_draw_desktop_inset_well' -or
+    $controlPrimitives -match 'DesktopInsetCache' -or
+    $controlPrimitives -match 'g_desktop_inset_cache') {
+    throw 'The removed L-shaped desktop inset must not remain in native C++.'
 }
 if ($styleWindow -match 'WS_VSCROLL' -or
     $styleWindow -match 'ShowScrollBar' -or
@@ -866,10 +1676,10 @@ if ($styleWindow -notmatch 'redraw_settings_window\(' -or
     $styleWindow -notmatch 'RDW_INVALIDATE\s*\|\s*RDW_ERASE\s*\|\s*RDW_ALLCHILDREN\s*\|\s*RDW_UPDATENOW' -or
     $styleWindow -notmatch 'fill_rounded_rect\(hdc, r, section_bg' -or
     $styleWindow -notmatch 'fill_rounded_rect\([\s\S]{0,260}r\.right - scale\(hwnd, 202\)' -or
-    $styleWindow -notmatch 'fn language_popup_rect\(' -or
-    $styleWindow -notmatch 'fill_rounded_rect\(hdc, popup_rect, card' -or
-    $styleWindow -notmatch 'draw_rounded_outline_rect\([\s\S]{0,100}popup_rect') {
-    throw 'Settings page switching must fully redraw and settings UI blocks must use rounded navigation, swatches, and an opaque rounded language popup.'
+    $styleWindow -notmatch 'fn general_language_group_rect\(' -or
+    $styleWindow -notmatch 'draw_general_segment_group\(' -or
+    $styleWindow -notmatch 'draw_rounded_outline_rect\(hdc, bounds, separator, radius, 1\)') {
+    throw 'Settings page switching must fully redraw, preserve rounded navigation and swatches, and keep an inline language group with a shared border.'
 }
 if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
     $styleWindow -notmatch 'i32::from\(style\.tooltip_corner_radius\)' -or
@@ -883,12 +1693,13 @@ if ($styleWindow -notmatch 'i32::from\(style\.panel_corner_radius\)' -or
 }
 # The card outline is required, but the preview-positioning rectangle must
 # never draw an additional frame around the grip, panel and tooltip.
-$previewCardStart = $styleWindow.IndexOf('unsafe fn paint_style_preview_card(')
-$previewCardEnd = $styleWindow.IndexOf('unsafe fn paint_hex_edit_frames(', $previewCardStart)
-if ($previewCardStart -lt 0 -or $previewCardEnd -le $previewCardStart) {
+$previewCardPainter = [regex]::Match(
+    $presetGalleryPaint,
+    '(?s)pub\(super\) unsafe fn paint_style_preview_card\(.*?\n\}'
+).Value
+if ([string]::IsNullOrWhiteSpace($previewCardPainter)) {
     throw 'Unable to isolate preset preview card painting for border regression verification.'
 }
-$previewCardPainter = $styleWindow.Substring($previewCardStart, $previewCardEnd - $previewCardStart)
 if ($previewCardPainter -notmatch 'draw_rounded_outline_rect\(\s*hdc,\s*r,' -or
     $previewCardPainter -match '(?:draw_rounded_outline_rect|draw_outline_rect|fill_rounded_rect|fill)\(\s*hdc,\s*preview\s*,') {
     throw 'Preset cards must keep their outer selection border but never paint a secondary enclosing preview frame.'
@@ -958,10 +1769,10 @@ if ($windowProduction -match 'let\s+grip\s*=\s*RECT\s*\{\s*left:\s*sc\(3\),\s*to
     $windowProduction -notmatch 'let\s+\(dot, gap_x, gap_y, dots\)\s*=\s*drag_handle_dot_style' -or
     $windowProduction -notmatch 'fn\s+drag_hover_outline_color\(' -or
     $windowProduction -notmatch 'StyleColorTarget::ProgressHigh' -or
-    $windowProduction -notmatch 'fn\s+draw_drag_hover_outline\(' -or
+    $windowProduction -notmatch 'fn\s+draw_drag_hover_outer_glow\(' -or
     $windowProduction -notmatch 'fn\s+drag_hover_glow_coverage\(' -or
-    $windowProduction -notmatch 'fn\s+drag_hover_signed_edge_distance\(' -or
-    $windowProduction -notmatch 'drag_hover_glow_coverage\(distance\)' -or
+    $window -notmatch 'fn\s+drag_hover_signed_edge_distance\(' -or
+    $window -notmatch 'drag_hover_glow_coverage\(distance\)' -or
     $windowProduction -notmatch 'if !floating && drag_hovered' -or
     $windowProduction -notmatch 'if hovered && !hidden' -or
     $windowProduction -notmatch 'floating_grip_rect\(' -or

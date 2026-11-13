@@ -17,6 +17,7 @@ mod theme;
 mod tray_icon;
 mod updater;
 mod window;
+mod window_common;
 
 fn main() {
     let diagnose_enabled = std::env::args().skip(1).any(|arg| arg == "--diagnose");
