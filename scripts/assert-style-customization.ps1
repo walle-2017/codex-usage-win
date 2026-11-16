@@ -18,6 +18,18 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$hexControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hex_controls.rs')
+$styleWindow += [Environment]::NewLine + $hexControls
+if ($styleWindowRoot -notmatch 'mod hex_controls;' -or
+    $styleWindowRoot -notmatch 'use self::hex_controls::\*;' -or
+    $hexControls -notmatch 'pub\(super\) unsafe fn create_hex_edits\(' -or
+    $hexControls -notmatch 'ID_EDIT_HEX_BASE \+ index as u16' -or
+    $hexControls -notmatch 'EM_SETLIMITTEXT_MSG, WPARAM\(9\)' -or
+    $hexControls -notmatch 'Some\(hex_edits_raw.map\(SendHwnd::from_hwnd\)\)' -or
+    $styleWindowRoot -notmatch 'match create_hex_edits\(hwnd, font, dpi\)' -or
+    $styleWindowRoot -match '(?m)^\s*let mut hex_edits_raw =') {
+    throw 'Hex edits must be initialized in hex_controls.rs and retain caller cleanup.'
+}
 $windowPlacement = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\window_placement.rs')
 $styleWindow += [Environment]::NewLine + $windowPlacement
 if ($styleWindowRoot -notmatch 'mod window_placement;' -or

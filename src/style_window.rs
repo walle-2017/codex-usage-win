@@ -61,6 +61,7 @@ mod submenu_frame_clock;
 mod interactive_frames;
 mod navigation_state;
 mod window_placement;
+mod hex_controls;
 mod edit_controls;
 mod json_geometry;
 mod color_codec;
@@ -96,6 +97,7 @@ use self::submenu_frame_clock::*;
 use self::interactive_frames::*;
 use self::navigation_state::*;
 use self::window_placement::*;
+use self::hex_controls::*;
 use self::edit_controls::*;
 use self::json_geometry::*;
 pub use self::color_codec::{decode_color_target, unpack_color};
@@ -906,34 +908,14 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             hwnd.0 as usize,
         );
 
-        let mut hex_edits_raw = [HWND::default(); HEX_EDIT_COUNT];
-        for (index, slot) in hex_edits_raw.iter_mut().enumerate() {
-            let edit = match CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                PCWSTR::from_raw(edit_class.as_ptr()),
-                PCWSTR::from_raw(empty.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | ES_CENTER as u32 | ES_AUTOHSCROLL as u32),
-                0,
-                0,
-                s(112),
-                s(22),
-                hwnd,
-                HMENU((ID_EDIT_HEX_BASE + index as u16) as usize as *mut _),
-                GetModuleHandleW(PCWSTR::null()).unwrap(),
-                None,
-            ) {
-                Ok(edit) => edit,
-                Err(_) => {
-                    let _ = DestroyWindow(hwnd);
-                    let _ = DeleteObject(font);
-                    return;
-                }
-            };
-            let _ = SendMessageW(edit, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
-            let _ = SendMessageW(edit, EM_SETLIMITTEXT_MSG, WPARAM(9), LPARAM(0));
-            *slot = edit;
-        }
-        let hex_edits = hex_edits_raw.map(SendHwnd::from_hwnd);
+        let hex_edits = match create_hex_edits(hwnd, font, dpi) {
+            Some(edits) => edits,
+            None => {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(font);
+                return;
+            }
+        };
 
         // Create the opaque JSON content pane before RichEdit. As a sibling
         // child, it stays BELOW RichEdit in Z order but ABOVE all stale parent
