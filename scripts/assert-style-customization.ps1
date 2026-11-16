@@ -18,6 +18,20 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$numericControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\numeric_controls.rs')
+$styleWindow += [Environment]::NewLine + $numericControls
+if ($styleWindowRoot -notmatch 'mod numeric_controls;' -or
+    $styleWindowRoot -notmatch 'use self::numeric_controls::\*;' -or
+    $numericControls -notmatch 'pub\(super\) unsafe fn create_rgba_numeric_edits\(' -or
+    $numericControls -notmatch 'ID_EDIT_R, ID_EDIT_G, ID_EDIT_B, ID_EDIT_A' -or
+    $numericControls -notmatch 'Some\(settings_edit_subclass_proc\)' -or
+    $numericControls -notmatch 'EM_SETLIMITTEXT_MSG' -or
+    $numericControls -notmatch 'WPARAM\(3\)' -or
+    $numericControls -notmatch 'Some\(numeric_edits_raw.map\(SendHwnd::from_hwnd\)\)' -or
+    $styleWindowRoot -notmatch 'match create_rgba_numeric_edits\(hwnd, font, dpi\)' -or
+    $styleWindowRoot -match '(?m)^\s*let mut numeric_edits_raw =') {
+    throw 'RGBA numeric child EDITs must remain isolated with matching subclass, limits and cleanup.'
+}
 $hexControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\hex_controls.rs')
 $styleWindow += [Environment]::NewLine + $hexControls
 if ($styleWindowRoot -notmatch 'mod hex_controls;' -or
