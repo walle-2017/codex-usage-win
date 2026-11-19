@@ -18,6 +18,19 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$auxiliaryNumericControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\auxiliary_numeric_controls.rs')
+$styleWindow += [Environment]::NewLine + $auxiliaryNumericControls
+if ($styleWindowRoot -notmatch 'mod auxiliary_numeric_controls;' -or
+    $styleWindowRoot -notmatch 'use self::auxiliary_numeric_controls::\*;' -or
+    $auxiliaryNumericControls -notmatch 'pub\(super\) unsafe fn create_auxiliary_numeric_edit\(' -or
+    $auxiliaryNumericControls -notmatch 'EM_SETLIMITTEXT_MSG, WPARAM\(max_digits\)' -or
+    $auxiliaryNumericControls -notmatch 'Some\(settings_edit_subclass_proc\)' -or
+    $styleWindowRoot -notmatch 'create_auxiliary_numeric_edit\(hwnd, font, dpi, ID_EDIT_BLUR, 3\)' -or
+    $styleWindowRoot -notmatch 'create_auxiliary_numeric_edit\(hwnd, font, dpi, ID_EDIT_CORNER, 2\)' -or
+    $styleWindowRoot -match '(?m)^\s*let blur_edit = match CreateWindowExW\(' -or
+    $styleWindowRoot -match '(?m)^\s*let corner_edit = match CreateWindowExW\(') {
+    throw 'Blur and corner control initialization must preserve numeric styles, limits and cleanup.'
+}
 $numericControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\numeric_controls.rs')
 $styleWindow += [Environment]::NewLine + $numericControls
 if ($styleWindowRoot -notmatch 'mod numeric_controls;' -or

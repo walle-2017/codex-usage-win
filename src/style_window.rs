@@ -63,6 +63,7 @@ mod navigation_state;
 mod window_placement;
 mod hex_controls;
 mod numeric_controls;
+mod auxiliary_numeric_controls;
 mod edit_controls;
 mod json_geometry;
 mod color_codec;
@@ -100,6 +101,7 @@ use self::navigation_state::*;
 use self::window_placement::*;
 use self::hex_controls::*;
 use self::numeric_controls::*;
+use self::auxiliary_numeric_controls::*;
 use self::edit_controls::*;
 use self::json_geometry::*;
 pub use self::color_codec::{decode_color_target, unpack_color};
@@ -775,95 +777,22 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             }
         };
 
-        let blur_edit = match CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR::from_raw(edit_class.as_ptr()),
-            PCWSTR::from_raw(empty.as_ptr()),
-            WINDOW_STYLE(
-                WS_CHILD.0
-                    | ES_NUMBER as u32
-                    | ES_CENTER as u32
-                    | ES_AUTOHSCROLL as u32,
-            ),
-            0,
-            0,
-            s(54),
-            s(22),
-            hwnd,
-            HMENU(ID_EDIT_BLUR as usize as *mut _),
-            GetModuleHandleW(PCWSTR::null()).unwrap(),
-            None,
-        ) {
-            Ok(edit) => edit,
-            Err(_) => {
+        let blur_edit = match create_auxiliary_numeric_edit(hwnd, font, dpi, ID_EDIT_BLUR, 3) {
+            Some(edit) => edit,
+            None => {
                 let _ = DestroyWindow(hwnd);
                 let _ = DeleteObject(font);
                 return;
             }
         };
-        let _ = SendMessageW(
-            blur_edit,
-            WM_SETFONT,
-            WPARAM(font.0 as usize),
-            LPARAM(1),
-        );
-        let _ = SendMessageW(
-            blur_edit,
-            EM_SETLIMITTEXT_MSG,
-            WPARAM(3),
-            LPARAM(0),
-        );
-        let _ = SetWindowSubclass(
-            blur_edit,
-            Some(settings_edit_subclass_proc),
-            SETTINGS_EDIT_SUBCLASS_ID,
-            hwnd.0 as usize,
-        );
-
-        let corner_edit = match CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR::from_raw(edit_class.as_ptr()),
-            PCWSTR::from_raw(empty.as_ptr()),
-            WINDOW_STYLE(
-                WS_CHILD.0
-                    | ES_NUMBER as u32
-                    | ES_CENTER as u32
-                    | ES_AUTOHSCROLL as u32,
-            ),
-            0,
-            0,
-            s(54),
-            s(22),
-            hwnd,
-            HMENU(ID_EDIT_CORNER as usize as *mut _),
-            GetModuleHandleW(PCWSTR::null()).unwrap(),
-            None,
-        ) {
-            Ok(edit) => edit,
-            Err(_) => {
+        let corner_edit = match create_auxiliary_numeric_edit(hwnd, font, dpi, ID_EDIT_CORNER, 2) {
+            Some(edit) => edit,
+            None => {
                 let _ = DestroyWindow(hwnd);
                 let _ = DeleteObject(font);
                 return;
             }
         };
-        let _ = SendMessageW(
-            corner_edit,
-            WM_SETFONT,
-            WPARAM(font.0 as usize),
-            LPARAM(1),
-        );
-        let _ = SendMessageW(
-            corner_edit,
-            EM_SETLIMITTEXT_MSG,
-            WPARAM(2),
-            LPARAM(0),
-        );
-        let _ = SetWindowSubclass(
-            corner_edit,
-            Some(settings_edit_subclass_proc),
-            SETTINGS_EDIT_SUBCLASS_ID,
-            hwnd.0 as usize,
-        );
 
         let hex_edits = match create_hex_edits(hwnd, font, dpi) {
             Some(edits) => edits,
