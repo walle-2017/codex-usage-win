@@ -766,7 +766,6 @@ pub fn open_or_focus_on_widget(parent: HWND, widget: HWND, snapshot: StyleWindow
             PCWSTR::from_raw(mono_name.as_ptr()),
         );
 
-        let edit_class = native_interop::wide_str("EDIT");
         let empty = native_interop::wide_str("");
         let numeric_edits = match create_rgba_numeric_edits(hwnd, font, dpi) {
             Some(edits) => edits,
