@@ -18,6 +18,38 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$jsonControlInit = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_control_init.rs')
+$jsonChildrenLayout = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_children_layout.rs')
+$targetActions = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\target_actions.rs')
+$paintPipeline = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\paint_pipeline.rs')
+$styleWindow += [Environment]::NewLine + $jsonControlInit + [Environment]::NewLine + $jsonChildrenLayout + [Environment]::NewLine + $targetActions + [Environment]::NewLine + $paintPipeline
+if ($styleWindowRoot -notmatch 'mod json_control_init;' -or
+    $styleWindowRoot -notmatch 'use self::json_control_init::\*;' -or
+    $jsonControlInit -notmatch 'pub\(super\) unsafe fn create_json_editor_children\(' -or
+    $jsonControlInit -notmatch 'json_page_surface_wnd_proc' -or
+    $jsonControlInit -notmatch 'Msftedit.dll' -or
+    $jsonControlInit -notmatch 'Some\(json_edit_subclass_proc\)' -or
+    $jsonControlInit -notmatch 'EM_SETEVENTMASK_MSG' -or
+    $jsonControlInit -notmatch 'Some\(\(json_page_surface, json_edit\)\)' -or
+    $styleWindowRoot -notmatch 'create_json_editor_children\(hwnd, json_font, dpi, snapshot.is_dark\)' -or
+    $styleWindowRoot -notmatch 'let _ = DeleteObject\(json_font\);' -or
+    $styleWindowRoot -notmatch 'mod json_children_layout;' -or
+    $styleWindowRoot -notmatch 'use self::json_children_layout::\*;' -or
+    $jsonChildrenLayout -notmatch 'pub\(super\) fn layout_settings_children\(' -or
+    $jsonChildrenLayout -notmatch 'HWND_TOP,' -or
+    $jsonChildrenLayout -notmatch 'invalidate_json_scroll_layout_cache\(' -or
+    $styleWindowRoot -notmatch 'mod target_actions;' -or
+    $styleWindowRoot -notmatch 'use self::target_actions::\*;' -or
+    $targetActions -notmatch 'pub\(super\) fn activate_target\(' -or
+    $targetActions -notmatch 'Some\(PendingDiscardAction::Json\(action\)\)' -or
+    $styleWindowRoot -notmatch 'mod paint_pipeline;' -or
+    $styleWindowRoot -notmatch 'use self::paint_pipeline::\*;' -or
+    $paintPipeline -notmatch 'pub\(super\) unsafe fn paint\(' -or
+    $paintPipeline -notmatch 'SETTINGS_PAINT_BUFFER.with\(' -or
+    $paintPipeline -notmatch 'EndPaint\(hwnd, &ps\)' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe )?fn (?:layout_settings_children|activate_target|paint)\(') {
+    throw 'JSON control creation, layout, hit-target handling and painting must remain modular and retain their ordering.'
+}
 $auxiliaryNumericControls = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\auxiliary_numeric_controls.rs')
 $styleWindow += [Environment]::NewLine + $auxiliaryNumericControls
 if ($styleWindowRoot -notmatch 'mod auxiliary_numeric_controls;' -or
@@ -198,7 +230,7 @@ if (-not $firstSettingsShow.Success -or
     throw 'Settings must reveal only after an opaque, fully painted initial parent/child frame.'
 }
 # Closing the discard overlay must restore the RichEdit child before the file chooser.
-if ($styleWindowRoot -notmatch '(?s)Some\(PendingDiscardAction::Json\(action\)\) => \{\s*//[^\n]*\n\s*//[^\n]*\n\s*//[^\n]*\n\s*layout_settings_children\(hwnd\);\s*redraw_settings_window\(hwnd\);\s*begin_json_action_confirmed\(hwnd, action\);' -or
+if ($targetActions -notmatch '(?s)Some\(PendingDiscardAction::Json\(action\)\) => \{\s*//[^\n]*\n\s*//[^\n]*\n\s*//[^\n]*\n\s*layout_settings_children\(hwnd\);\s*redraw_settings_window\(hwnd\);\s*begin_json_action_confirmed\(hwnd, action\);' -or
     $styleWindowRoot -notmatch 'json_has_pending_changes\(s.json_dirty, s.json_import_pending_apply\)' -or
     $styleWindowRoot -notmatch 'json_import_pending_apply: false,') {
     throw 'Confirmed JSON replacement must restore RichEdit and preserve imported-pending state.'
