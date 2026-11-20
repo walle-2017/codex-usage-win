@@ -18,6 +18,21 @@ $composition = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\composition_
 $controlPrimitives = Get-Content -Raw (Join-Path $PSScriptRoot '..\native\control_primitives.cpp')
 $styleWindow = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $styleWindowRoot = $styleWindow
+$jsonWindowEvents = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_window_events.rs')
+$styleWindow += [Environment]::NewLine + $jsonWindowEvents
+if ($styleWindowRoot -notmatch 'mod json_window_events;' -or
+    $styleWindowRoot -notmatch 'use self::json_window_events::\*;' -or
+    $jsonWindowEvents -notmatch 'pub\(super\) unsafe extern "system" fn json_edit_subclass_proc\(' -or
+    $jsonWindowEvents -notmatch 'pub\(super\) unsafe extern "system" fn json_page_surface_wnd_proc\(' -or
+    $jsonWindowEvents -notmatch 'pub\(super\) unsafe extern "system" fn json_save_mask_wnd_proc\(' -or
+    $jsonWindowEvents -notmatch 'pub\(super\) fn ensure_json_save_mask\(' -or
+    $jsonWindowEvents -notmatch 'json_save_feedback == Some\(JsonSaveFeedback::Saving\)' -or
+    $jsonWindowEvents -notmatch 'WM_NCHITTEST => LRESULT\(HTCLIENT as isize\)' -or
+    $jsonWindowEvents -notmatch 'WS_EX_LAYERED \| WS_EX_TOOLWINDOW \| WS_EX_NOACTIVATE' -or
+    $jsonWindowEvents -notmatch 'SetLayeredWindowAttributes\(' -or
+    $styleWindowRoot -match '(?m)^(?:unsafe extern "system" fn (?:json_edit_subclass_proc|json_page_surface_wnd_proc|json_save_mask_wnd_proc)|fn ensure_json_save_mask)\(') {
+    throw 'JSON child events and save-mask barrier must remain isolated without changing scroll or paint behavior.'
+}
 $jsonControlInit = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_control_init.rs')
 $jsonChildrenLayout = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\json_children_layout.rs')
 $targetActions = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\target_actions.rs')
@@ -259,7 +274,7 @@ if ($jsonClickGuards -notmatch 'json_action_enabled\(action, json_dirty, json_im
     $jsonActionGuards -notmatch 'request_discard_confirmation\(hwnd, PendingDiscardAction::Json\(action\)\)' -or
     $jsonActionGuards -notmatch 'begin_json_action_confirmed\(hwnd, action\)' -or
     $jsonSupportGuards -notmatch 'fn json_actions_guard_export_and_confirm_destructive_reload_or_import\(' -or
-    $styleWindowRoot -notmatch 'Some\(PendingDiscardAction::Json\(action\)\)') {
+    $targetActions -notmatch 'Some\(PendingDiscardAction::Json\(action\)\)') {
     throw 'JSON import, unsaved confirmation, Export-disable and pending Apply regression.'
 }
 # Configuration file dialog and cancellation behavior must remain in json_file_io.rs.
@@ -483,7 +498,7 @@ if ($jsonPaint -notmatch 'pub\(super\) unsafe fn paint_json_scrollbar_buffered\(
     $jsonPaint -notmatch 'SetViewportOrgEx\(buffer.dc, -track.left, -track.top' -or
     $jsonPaint -notmatch 'paint_json_scrollbar_decoration\(' -or
     $styleWindowRoot -match '(?m)^\s*unsafe fn (?:paint_json_scrollbar_buffered|paint_json_page_surface)\(' -or
-    $styleWindowRoot -notmatch 'paint_json_page_surface\(hwnd\);' -or
+    $jsonWindowEvents -notmatch 'paint_json_page_surface\(hwnd\);' -or
     $styleWindowRoot -notmatch 'the narrow scrollbar must support double-buffered painting') {
     throw 'JSON child-pane rendering must keep buffered scrollbar and fallback semantics when moved to json_paint.rs.'
 }
