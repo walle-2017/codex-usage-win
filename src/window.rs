@@ -222,19 +222,6 @@ const IDM_THEME_DARK: u16 = 94;
 const IDM_THEME_LIGHT: u16 = 95;
 const IDM_STYLE_SETTINGS: u16 = 96;
 
-const IDM_STYLE_PANEL_BACKGROUND: u16 = 100;
-const IDM_STYLE_PANEL_BORDER: u16 = 101;
-const IDM_STYLE_PANEL_BLUR: u16 = 102;
-const IDM_STYLE_QUOTA_TYPE: u16 = 103;
-const IDM_STYLE_REMAINING: u16 = 104;
-const IDM_STYLE_RESET_TIME: u16 = 105;
-const IDM_STYLE_ERROR: u16 = 106;
-const IDM_STYLE_PROGRESS_HIGH: u16 = 107;
-const IDM_STYLE_PROGRESS_MEDIUM: u16 = 108;
-const IDM_STYLE_PROGRESS_LOW: u16 = 109;
-const IDM_STYLE_PROGRESS_CONSUMED: u16 = 110;
-const IDM_STYLE_DRAG_HANDLE: u16 = 111;
-const IDM_STYLE_RESET_CURRENT: u16 = 112;
 const IDM_QUICK_POSITION_TASKBAR: u16 = 113;
 const IDM_QUICK_POSITION_DESKTOP: u16 = 114;
 const IDM_QUICK_DIRECTION_HORIZONTAL: u16 = 115;
@@ -242,18 +229,12 @@ const IDM_QUICK_DIRECTION_VERTICAL: u16 = 116;
 const IDM_QUICK_COLLAPSE_ON: u16 = 117;
 const IDM_QUICK_COLLAPSE_OFF: u16 = 118;
 
-const TBM_GETPOS_MSG: u32 = WM_USER;
-const TBM_SETPOS_MSG: u32 = WM_USER + 5;
-const TBM_SETRANGE_MSG: u32 = WM_USER + 6;
-const TB_ENDTRACK_CODE: u16 = 8;
-/// Keep the visible panel border at one physical pixel even at high DPI.
 const PANEL_BORDER_WIDTH_PX: i32 = 1;
 /// Layered windows treat fully transparent pixels as mouse-pass-through.
 /// Keep an imperceptible alpha on visually transparent panel pixels so the
 /// component remains draggable/right-clickable even when its background is 0 alpha.
 const MIN_INTERACTIVE_ALPHA: u8 = 1;
 const FROSTED_MAX_BLUR_PX: f32 = 20.0;
-const STYLE_PREVIEW_FRAME_MS: u64 = 16;
 const DRAG_FRAME_MS: u64 = 8;
 const TASKBAR_LAYOUT_POLL_MS: u32 = 1_000;
 const TASKBAR_CONTROL_MARGIN_LOGICAL: i32 = 4;
@@ -292,7 +273,6 @@ struct ParkedBlurBackdrop {
     params: Option<BlurBackdropParams>,
 }
 static PARKED_BLUR_BACKDROPS: Mutex<Vec<ParkedBlurBackdrop>> = Mutex::new(Vec::new());
-static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
@@ -310,27 +290,6 @@ static TASKBAR_LAYOUT_CACHE: Mutex<Vec<TaskbarLayoutSnapshot>> = Mutex::new(Vec:
 // Collected by the existing background taskbar worker. Geometry-only reads on
 // the UI thread never synchronously enter Explorer or enumerate every window.
 static TASKBAR_EDGE_RECTS: Mutex<Vec<RECT>> = Mutex::new(Vec::new());
-
-#[derive(Clone, Copy)]
-struct ColorEditorState {
-    hwnd: SendHwnd,
-    theme_is_dark: bool,
-    target: StyleColorTarget,
-    sliders: [SendHwnd; 4],
-    value_labels: [SendHwnd; 4],
-    hex_label: SendHwnd,
-}
-
-#[derive(Clone, Copy)]
-struct BlurEditorState {
-    hwnd: SendHwnd,
-    theme_is_dark: bool,
-    slider: SendHwnd,
-    value_label: SendHwnd,
-}
-
-static COLOR_EDITOR_STATE: Mutex<Option<ColorEditorState>> = Mutex::new(None);
-static BLUR_EDITOR_STATE: Mutex<Option<BlurEditorState>> = Mutex::new(None);
 
 /// Current system DPI (96 = 100% scaling, 144 = 150%, 192 = 200%, etc.)
 static CURRENT_DPI: AtomicU32 = AtomicU32::new(96);
@@ -2624,12 +2583,6 @@ fn preview_frame_due(last: &Mutex<Option<Instant>>, interval_ms: u64, force: boo
     }
 }
 
-fn render_style_preview(force: bool) {
-    if preview_frame_due(&LAST_STYLE_PREVIEW_RENDER, STYLE_PREVIEW_FRAME_MS, force) {
-        render_layered();
-    }
-}
-
 fn drag_frame_due(force: bool) -> bool {
     preview_frame_due(&LAST_DRAG_FRAME, DRAG_FRAME_MS, force)
 }
@@ -4562,7 +4515,6 @@ fn check_theme_change() {
         }
     };
     if changed {
-        close_style_editors();
         render_layered();
         style_window::sync(style_settings_snapshot());
     }
@@ -8904,46 +8856,6 @@ unsafe extern "system" fn wnd_proc(
                         LPARAM(0),
                     );
                 }
-                IDM_STYLE_PANEL_BACKGROUND
-                | IDM_STYLE_PANEL_BORDER
-                | IDM_STYLE_QUOTA_TYPE
-                | IDM_STYLE_REMAINING
-                | IDM_STYLE_RESET_TIME
-                | IDM_STYLE_ERROR
-                | IDM_STYLE_PROGRESS_HIGH
-                | IDM_STYLE_PROGRESS_MEDIUM
-                | IDM_STYLE_PROGRESS_LOW
-                | IDM_STYLE_PROGRESS_CONSUMED
-                | IDM_STYLE_DRAG_HANDLE => {
-                    let target = match id {
-                        IDM_STYLE_PANEL_BACKGROUND => StyleColorTarget::PanelBackground,
-                        IDM_STYLE_PANEL_BORDER => StyleColorTarget::PanelBorder,
-                        IDM_STYLE_QUOTA_TYPE => StyleColorTarget::QuotaType,
-                        IDM_STYLE_REMAINING => StyleColorTarget::Remaining,
-                        IDM_STYLE_RESET_TIME => StyleColorTarget::ResetTime,
-                        IDM_STYLE_ERROR => StyleColorTarget::Error,
-                        IDM_STYLE_PROGRESS_HIGH => StyleColorTarget::ProgressHigh,
-                        IDM_STYLE_PROGRESS_MEDIUM => StyleColorTarget::ProgressMedium,
-                        IDM_STYLE_PROGRESS_LOW => StyleColorTarget::ProgressLow,
-                        IDM_STYLE_PROGRESS_CONSUMED => StyleColorTarget::ProgressConsumed,
-                        _ => StyleColorTarget::DragHandle,
-                    };
-                    open_color_editor(hwnd, target);
-                }
-                IDM_STYLE_PANEL_BLUR => {
-                    open_blur_editor(hwnd);
-                }
-                IDM_STYLE_RESET_CURRENT => {
-                    close_style_editors();
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.styles.reset_active(s.is_dark);
-                        }
-                    }
-                    save_state_settings();
-                    render_layered();
-                }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
                 | IDM_LANG_SIMPLIFIED_CHINESE => {
@@ -8972,8 +8884,7 @@ unsafe extern "system" fn wnd_proc(
             if let Some(s) = lock_state().as_mut() {
                 s.minimal_hover_target = None;
             }
-            close_style_editors();
-            style_window::open_or_focus(
+                style_window::open_or_focus(
                 taskbar_replica_service_hwnd(hwnd),
                 style_settings_snapshot(),
             );
@@ -9048,8 +8959,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == style_window::WM_STYLE_THEME_CHANGE => {
-            close_style_editors();
-            {
+                {
                 let mut state = lock_state();
                 if let Some(s) = state.as_mut() {
                     s.theme_mode = match wparam.0 {
@@ -9300,499 +9210,6 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-
-fn style_color_target_label(target: StyleColorTarget, language: LanguageId) -> &'static str {
-    let zh = language == LanguageId::SimplifiedChinese;
-    match target {
-        StyleColorTarget::PanelBackground => if zh { "背景颜色" } else { "Background color" },
-        StyleColorTarget::PanelBorder => if zh { "边框颜色" } else { "Border color" },
-        StyleColorTarget::TooltipBackground => if zh { "浮框背景颜色" } else { "Tooltip background" },
-        StyleColorTarget::TooltipBorder => if zh { "浮框边框颜色" } else { "Tooltip border" },
-        StyleColorTarget::QuotaType => if zh { "额度类型" } else { "Quota type" },
-        StyleColorTarget::Remaining => if zh { "剩余额度" } else { "Remaining quota" },
-        StyleColorTarget::ResetTime => if zh { "重置时间" } else { "Reset time" },
-        StyleColorTarget::Error => if zh { "异常状态" } else { "Error state" },
-        StyleColorTarget::ProgressHigh => if zh { "充足额度颜色" } else { "High quota color" },
-        StyleColorTarget::ProgressMedium => if zh { "中等额度颜色" } else { "Medium quota color" },
-        StyleColorTarget::ProgressLow => if zh { "低额度颜色" } else { "Low quota color" },
-        StyleColorTarget::ProgressConsumed => if zh { "已消耗部分颜色" } else { "Consumed color" },
-        StyleColorTarget::DragHandle => if zh { "拖拽点颜色" } else { "Drag handle color" },
-    }
-}
-
-fn close_style_editors() {
-    let color_hwnd = {
-        let state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.hwnd.to_hwnd())
-    };
-    let blur_hwnd = {
-        let state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().map(|s| s.hwnd.to_hwnd())
-    };
-    if color_hwnd.is_some() || blur_hwnd.is_some() {
-        save_state_settings();
-    }
-    unsafe {
-        if let Some(hwnd) = color_hwnd {
-            let _ = DestroyWindow(hwnd);
-        }
-        if let Some(hwnd) = blur_hwnd {
-            let _ = DestroyWindow(hwnd);
-        }
-    }
-}
-
-fn refresh_widget_after_style_editor_close() {
-    let hwnd = {
-        let state = lock_state();
-        state.as_ref().map(|s| s.hwnd.to_hwnd())
-    };
-    render_layered();
-    if widget_hidden_for_taskbar_space() {
-        return;
-    }
-    if let Some(hwnd) = hwnd {
-        let (embedded, frosted_active) = {
-            let state = lock_state();
-            state
-                .as_ref()
-                .map(|s| (s.embedded, s.composition_blur_active))
-                .unwrap_or((true, false))
-        };
-        if frosted_active {
-            sync_blur_backdrop_zorder(hwnd);
-        } else if !embedded {
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
-            }
-        }
-    }
-}
-
-fn apply_style_color(theme_is_dark: bool, target: StyleColorTarget, color: Color) {
-    let mut state = lock_state();
-    if let Some(s) = state.as_mut() {
-        s.styles.active_mut(theme_is_dark).set_color(target, color);
-    }
-}
-
-fn apply_frosted_strength(theme_is_dark: bool, strength: u8) {
-    let mut state = lock_state();
-    if let Some(s) = state.as_mut() {
-        s.styles.active_mut(theme_is_dark).panel_frosted_strength =
-            strength.min(FROSTED_STRENGTH_MAX);
-    }
-}
-
-unsafe fn create_editor_static(
-    parent: HWND,
-    text: &str,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-) -> Option<HWND> {
-    let class = native_interop::wide_str("STATIC");
-    let text = native_interop::wide_str(text);
-    CreateWindowExW(
-        WINDOW_EX_STYLE(0),
-        PCWSTR::from_raw(class.as_ptr()),
-        PCWSTR::from_raw(text.as_ptr()),
-        WS_CHILD | WS_VISIBLE,
-        x,
-        y,
-        width,
-        height,
-        parent,
-        HMENU::default(),
-        GetModuleHandleW(PCWSTR::null()).ok()?,
-        None,
-    )
-    .ok()
-}
-
-unsafe fn create_editor_trackbar(
-    parent: HWND,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    max_value: i32,
-    value: i32,
-) -> Option<HWND> {
-    let class = native_interop::wide_str("msctls_trackbar32");
-    let title = native_interop::wide_str("");
-    let hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE(0),
-        PCWSTR::from_raw(class.as_ptr()),
-        PCWSTR::from_raw(title.as_ptr()),
-        WS_CHILD | WS_VISIBLE,
-        x,
-        y,
-        width,
-        height,
-        parent,
-        HMENU::default(),
-        GetModuleHandleW(PCWSTR::null()).ok()?,
-        None,
-    )
-    .ok()?;
-    let range = ((max_value as u32) << 16) as isize;
-    let _ = SendMessageW(hwnd, TBM_SETRANGE_MSG, WPARAM(1), LPARAM(range));
-    let _ = SendMessageW(
-        hwnd,
-        TBM_SETPOS_MSG,
-        WPARAM(1),
-        LPARAM(value.clamp(0, max_value) as isize),
-    );
-    Some(hwnd)
-}
-
-fn update_color_editor_labels(editor: ColorEditorState, color: Color) {
-    let values = [color.r, color.g, color.b, color.a];
-    unsafe {
-        for (label, value) in editor.value_labels.iter().zip(values) {
-            let text = native_interop::wide_str(&value.to_string());
-            let _ = SetWindowTextW(label.to_hwnd(), PCWSTR::from_raw(text.as_ptr()));
-        }
-        let hex = native_interop::wide_str(&color.to_hex_rgba());
-        let _ = SetWindowTextW(editor.hex_label.to_hwnd(), PCWSTR::from_raw(hex.as_ptr()));
-    }
-}
-
-unsafe fn color_editor_value(editor: &ColorEditorState) -> Color {
-    let values = editor.sliders.map(|slider| {
-        SendMessageW(slider.to_hwnd(), TBM_GETPOS_MSG, WPARAM(0), LPARAM(0)).0 as u8
-    });
-    Color::rgba(values[0], values[1], values[2], values[3])
-}
-
-unsafe extern "system" fn color_editor_wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_HSCROLL => {
-            let editor = {
-                let state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.as_ref().copied().filter(|s| s.hwnd.to_hwnd() == hwnd)
-            };
-            if let Some(editor) = editor {
-                let color = color_editor_value(&editor);
-                update_color_editor_labels(editor, color);
-                apply_style_color(editor.theme_is_dark, editor.target, color);
-                let code = (wparam.0 & 0xFFFF) as u16;
-                let final_frame = code == TB_ENDTRACK_CODE;
-                render_style_preview(final_frame);
-                if final_frame {
-                    save_state_settings();
-                }
-            }
-            LRESULT(0)
-        }
-        WM_CLOSE => {
-            save_state_settings();
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            {
-                let mut state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
-                    *state = None;
-                }
-            }
-            refresh_widget_after_style_editor_close();
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-fn register_color_editor_class() {
-    unsafe {
-        let class_name = native_interop::wide_str("CodexUsageColorEditor");
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(color_editor_wnd_proc),
-            hInstance: HINSTANCE(hinstance.0),
-            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
-            hbrBackground: CreateSolidBrush(COLORREF(native_interop::colorref(240, 240, 240))),
-            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
-            ..Default::default()
-        };
-        let _ = RegisterClassExW(&wc);
-    }
-}
-
-fn open_color_editor(owner: HWND, target: StyleColorTarget) {
-    close_style_editors();
-    register_color_editor_class();
-    let (theme_is_dark, language, color) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        (s.is_dark, s.language, s.styles.active(s.is_dark).color(target))
-    };
-
-    unsafe {
-        let class_name = native_interop::wide_str("CodexUsageColorEditor");
-        let title = format!(
-            "{} - {}",
-            if language == LanguageId::SimplifiedChinese { "样式" } else { "Style" },
-            style_color_target_label(target, language)
-        );
-        let title = native_interop::wide_str(&title);
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        let Ok(hwnd) = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            PCWSTR::from_raw(class_name.as_ptr()),
-            PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-            pt.x + 12,
-            pt.y + 12,
-            350,
-            245,
-            owner,
-            HMENU::default(),
-            GetModuleHandleW(PCWSTR::null()).unwrap(),
-            None,
-        ) else {
-            return;
-        };
-
-        let channel_names = ["R", "G", "B", "A"];
-        let channel_values = [color.r, color.g, color.b, color.a];
-        let mut sliders = [SendHwnd::from_hwnd(HWND::default()); 4];
-        let mut labels = [SendHwnd::from_hwnd(HWND::default()); 4];
-        for index in 0..4 {
-            let y = 18 + index as i32 * 38;
-            let Some(_) = create_editor_static(hwnd, channel_names[index], 12, y + 5, 20, 22)
-            else {
-                let _ = DestroyWindow(hwnd);
-                return;
-            };
-            let Some(slider) = create_editor_trackbar(hwnd, 34, y, 230, 30, 255, channel_values[index] as i32)
-            else {
-                let _ = DestroyWindow(hwnd);
-                return;
-            };
-            let Some(value_label) =
-                create_editor_static(hwnd, &channel_values[index].to_string(), 274, y + 5, 50, 22)
-            else {
-                let _ = DestroyWindow(hwnd);
-                return;
-            };
-            sliders[index] = SendHwnd::from_hwnd(slider);
-            labels[index] = SendHwnd::from_hwnd(value_label);
-        }
-
-        let Some(hex_label) =
-            create_editor_static(hwnd, &color.to_hex_rgba(), 34, 172, 150, 24)
-        else {
-            let _ = DestroyWindow(hwnd);
-            return;
-        };
-        let hint = if language == LanguageId::SimplifiedChinese {
-            "拖动时实时预览，操作结束自动保存"
-        } else {
-            "Live preview while dragging; changes save automatically"
-        };
-        let _ = create_editor_static(hwnd, hint, 34, 196, 290, 22);
-
-        let editor = ColorEditorState {
-            hwnd: SendHwnd::from_hwnd(hwnd),
-            theme_is_dark,
-            target,
-            sliders,
-            value_labels: labels,
-            hex_label: SendHwnd::from_hwnd(hex_label),
-        };
-        {
-            let mut state = COLOR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            *state = Some(editor);
-        }
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        let _ = SetForegroundWindow(hwnd);
-    }
-}
-
-fn update_blur_editor_label(editor: BlurEditorState, strength: u8, language: LanguageId) {
-    let text = if strength == 0 {
-        if language == LanguageId::SimplifiedChinese {
-            "0%（关闭）".to_string()
-        } else {
-            "0% (Off)".to_string()
-        }
-    } else {
-        format!("{}%", strength.min(FROSTED_STRENGTH_MAX))
-    };
-    unsafe {
-        let text = native_interop::wide_str(&text);
-        let _ = SetWindowTextW(editor.value_label.to_hwnd(), PCWSTR::from_raw(text.as_ptr()));
-    }
-}
-
-unsafe extern "system" fn blur_editor_wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_HSCROLL => {
-            let editor = {
-                let state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.as_ref().copied().filter(|s| s.hwnd.to_hwnd() == hwnd)
-            };
-            if let Some(editor) = editor {
-                let strength =
-                    SendMessageW(editor.slider.to_hwnd(), TBM_GETPOS_MSG, WPARAM(0), LPARAM(0)).0
-                        as u8;
-                let language = {
-                    let state = lock_state();
-                    state.as_ref().map(|s| s.language).unwrap_or(LanguageId::English)
-                };
-                update_blur_editor_label(editor, strength, language);
-                apply_frosted_strength(editor.theme_is_dark, strength);
-                let code = (wparam.0 & 0xFFFF) as u16;
-                let final_frame = code == TB_ENDTRACK_CODE;
-                render_style_preview(final_frame);
-                if final_frame {
-                    save_state_settings();
-                }
-            }
-            LRESULT(0)
-        }
-        WM_CLOSE => {
-            save_state_settings();
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            {
-                let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                if state.as_ref().map(|s| s.hwnd.to_hwnd()) == Some(hwnd) {
-                    *state = None;
-                }
-            }
-            refresh_widget_after_style_editor_close();
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-fn register_blur_editor_class() {
-    unsafe {
-        let class_name = native_interop::wide_str("CodexUsageBlurEditor");
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(blur_editor_wnd_proc),
-            hInstance: HINSTANCE(hinstance.0),
-            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
-            hbrBackground: CreateSolidBrush(COLORREF(native_interop::colorref(240, 240, 240))),
-            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
-            ..Default::default()
-        };
-        let _ = RegisterClassExW(&wc);
-    }
-}
-
-fn open_blur_editor(owner: HWND) {
-    close_style_editors();
-    register_blur_editor_class();
-    let (theme_is_dark, language, strength) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        (
-            s.is_dark,
-            s.language,
-            s.styles.active(s.is_dark).panel_frosted_strength,
-        )
-    };
-
-    unsafe {
-        let class_name = native_interop::wide_str("CodexUsageBlurEditor");
-        let title = native_interop::wide_str(if language == LanguageId::SimplifiedChinese {
-            "样式 - 磨砂强度"
-        } else {
-            "Style - Frosted intensity"
-        });
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        let Ok(hwnd) = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            PCWSTR::from_raw(class_name.as_ptr()),
-            PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-            pt.x + 12,
-            pt.y + 12,
-            360,
-            160,
-            owner,
-            HMENU::default(),
-            GetModuleHandleW(PCWSTR::null()).unwrap(),
-            None,
-        ) else {
-            return;
-        };
-
-        let Some(slider) = create_editor_trackbar(
-            hwnd,
-            18,
-            20,
-            260,
-            32,
-            i32::from(FROSTED_STRENGTH_MAX),
-            i32::from(strength.min(FROSTED_STRENGTH_MAX)),
-        )
-        else {
-            let _ = DestroyWindow(hwnd);
-            return;
-        };
-        let Some(value_label) = create_editor_static(hwnd, "", 286, 25, 64, 22) else {
-            let _ = DestroyWindow(hwnd);
-            return;
-        };
-        let hint = if language == LanguageId::SimplifiedChinese {
-            "0%=关闭；1–100%=磨砂强度；拖动实时预览并自动保存"
-        } else {
-            "0%=Off; 1–100%=frosted intensity; live preview and auto-save"
-        };
-        let _ = create_editor_static(hwnd, hint, 18, 65, 330, 22);
-
-        let editor = BlurEditorState {
-            hwnd: SendHwnd::from_hwnd(hwnd),
-            theme_is_dark,
-            slider: SendHwnd::from_hwnd(slider),
-            value_label: SendHwnd::from_hwnd(value_label),
-        };
-        {
-            let mut state = BLUR_EDITOR_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            *state = Some(editor);
-        }
-        update_blur_editor_label(editor, strength, language);
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        let _ = SetForegroundWindow(hwnd);
-    }
-}
 
 fn editable_settings_from_state(state: &AppState, startup_enabled: bool) -> EditableSettings {
     EditableSettings {

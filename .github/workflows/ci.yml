@@ -56,6 +56,9 @@ jobs:
       - name: Verify theme and style customization
         shell: pwsh
         run: ./scripts/assert-style-customization.ps1
+      - name: Verify retired native style dialogs stay removed
+        shell: pwsh
+        run: ./scripts/assert-legacy-style-ui-retired.ps1
       - name: Verify settings focus and alpha-gated frosted rendering
         shell: pwsh
         run: ./scripts/assert-settings-and-frosted-alpha.ps1
