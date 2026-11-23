@@ -18,7 +18,7 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
-use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::appearance::{self, AppearancePreset, DesktopDirection, DisplayPosition};
@@ -43,11 +43,18 @@ use crate::style_window;
 use crate::theme;
 use crate::tray_icon;
 use crate::updater;
+use crate::window_common::{load_embedded_app_icons, set_window_caption_icons, SendHwnd};
 
 mod taskbar_replica;
 mod blur_backdrop;
+mod layered_bitmap;
+mod tooltip_measure;
+mod floating_geometry;
+use self::floating_geometry::*;
+use self::tooltip_measure::{cached_minimal_tooltip_width, TOOLTIP_TEXT_INSET};
 use self::taskbar_replica::*;
 use self::blur_backdrop::*;
+use self::layered_bitmap::{DibSurface, WindowDc};
 
 // Set only while restoring the desktop popup to a different monitor.
 // SetWindowPos may synchronously emit WM_DPICHANGED, which must not re-enter
@@ -66,21 +73,6 @@ impl FloatingInitialPlacementGuard {
 impl Drop for FloatingInitialPlacementGuard {
     fn drop(&mut self) {
         FLOATING_INITIAL_PLACEMENT.with(|flag| flag.set(false));
-    }
-}
-
-/// Wrapper to make HWND sendable across threads (safe for PostMessage usage)
-#[derive(Clone, Copy)]
-struct SendHwnd(isize);
-
-unsafe impl Send for SendHwnd {}
-
-impl SendHwnd {
-    fn from_hwnd(hwnd: HWND) -> Self {
-        Self(hwnd.0 as isize)
-    }
-    fn to_hwnd(self) -> HWND {
-        HWND(self.0 as *mut _)
     }
 }
 
@@ -304,9 +296,6 @@ static LAST_STYLE_PREVIEW_RENDER: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_DRAG_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static MINIMAL_TOOLTIP_TEXT: Mutex<String> = Mutex::new(String::new());
-// Mousemove repaints the tooltip often; do not re-rasterize the same text
-// solely to measure its width on every cursor event.
-static MINIMAL_TOOLTIP_WIDTH_CACHE: Mutex<Option<(String, u32, i32)>> = Mutex::new(None);
 static TOOLTIP_BLUR_HWND: Mutex<Option<SendHwnd>> = Mutex::new(None);
 static TOOLTIP_BLUR_CONTEXT: Mutex<Option<usize>> = Mutex::new(None);
 static TOOLTIP_BLUR_PARAMS: Mutex<Option<BlurBackdropParams>> = Mutex::new(None);
@@ -510,32 +499,6 @@ fn spawn_taskbar_watchdog() {
             relaunch_self();
         }
     });
-}
-
-fn load_embedded_app_icons() -> (HICON, HICON) {
-    unsafe {
-        let mut exe_buf = [0u16; 260];
-        let len = GetModuleFileNameW(None, &mut exe_buf) as usize;
-        if len == 0 {
-            return (HICON::default(), HICON::default());
-        }
-
-        let mut large_icon = HICON::default();
-        let mut small_icon = HICON::default();
-        let extracted = ExtractIconExW(
-            PCWSTR::from_raw(exe_buf.as_ptr()),
-            0,
-            Some(&mut large_icon),
-            Some(&mut small_icon),
-            1,
-        );
-
-        if extracted == 0 {
-            (HICON::default(), HICON::default())
-        } else {
-            (large_icon, small_icon)
-        }
-    }
 }
 
 unsafe impl Send for AppState {}
@@ -1794,6 +1757,17 @@ fn refresh_usage_texts(state: &mut AppState) {
     );
 }
 
+// The desktop popup does not use the taskbar's adaptive space fallback.
+// Rebuild the formatted usage strings *after* changing the effective preset:
+// Minimal omits the reset suffix, so a stale Minimal string cannot recover
+// its date/time merely by repainting a Default-width widget.
+fn sync_floating_preset_and_usage(s: &mut AppState, preset: AppearancePreset) {
+    if s.effective_appearance_preset != preset {
+        s.effective_appearance_preset = preset;
+        refresh_usage_texts(s);
+    }
+}
+
 fn manual_update_required_message(language: LanguageId, version: &str) -> String {
     match language {
         LanguageId::English => format!("Version v{version} is available, but the release asset is missing. Open GitHub Releases and update manually."),
@@ -2407,22 +2381,7 @@ pub fn run() {
         )
         .unwrap();
 
-        if !large_icon.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(ICON_BIG as usize),
-                LPARAM(large_icon.0 as isize),
-            );
-        }
-        if !small_icon.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(ICON_SMALL as usize),
-                LPARAM(small_icon.0 as isize),
-            );
-        }
+        set_window_caption_icons(hwnd, large_icon, small_icon);
 
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
         TASKBAR_PRIMARY_WINDOW.with(|cell| cell.set(hwnd.0 as isize));
@@ -2825,32 +2784,11 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
     }
 
     unsafe {
-        let screen_dc = GetDC(hwnd);
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        let dib =
-            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
-        if dib.is_invalid() || bits.is_null() {
-            let _ = DeleteDC(mem_dc);
-            ReleaseDC(hwnd, screen_dc);
-            return;
-        }
-
-        let old_bmp = SelectObject(mem_dc, dib);
-        let pixel_count = (width * height) as usize;
-        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
+        let Some(window_dc) = WindowDc::acquire(hwnd) else { return };
+        let screen_dc = window_dc.handle();
+        let Some(mut panel_surface) = DibSurface::create(screen_dc, width, height) else { return };
+        let mem_dc = panel_surface.handle();
+        let pixel_data = panel_surface.pixels();
         fill_bitmap(pixel_data, bg_color);
 
         blend_panel_bitmap(pixel_data, width, height, &surface_style);
@@ -2948,28 +2886,9 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
             let grip = floating_layout_grip_rect(
                 canvas_w, canvas_h, edge, free_below,
             );
-            let canvas_info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: canvas_w,
-                    biHeight: -canvas_h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: 0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let canvas_dc = CreateCompatibleDC(screen_dc);
-            let mut canvas_bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let canvas_dib = CreateDIBSection(
-                canvas_dc, &canvas_info, DIB_RGB_COLORS, &mut canvas_bits, None, 0,
-            ).unwrap_or_default();
-            if !canvas_dib.is_invalid() && !canvas_bits.is_null() {
-                let old_canvas_bmp = SelectObject(canvas_dc, canvas_dib);
-                let canvas = std::slice::from_raw_parts_mut(
-                    canvas_bits as *mut u32, (canvas_w * canvas_h) as usize,
-                );
+            if let Some(mut canvas_surface) = DibSurface::create(screen_dc, canvas_w, canvas_h) {
+                let canvas_dc = canvas_surface.handle();
+                let canvas = canvas_surface.pixels();
                 let accent = drag_hover_outline_color(&style);
                 canvas.fill(0);
                 if hovered && !hidden {
@@ -3022,10 +2941,7 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                     canvas_dc, Some(&pt_src),
                     COLORREF(0), Some(&blend), ULW_ALPHA,
                 );
-                SelectObject(canvas_dc, old_canvas_bmp);
             }
-            if !canvas_dib.is_invalid() { let _ = DeleteObject(canvas_dib); }
-            let _ = DeleteDC(canvas_dc);
         } else {
             let sz = SIZE { cx: width, cy: height };
             let _ = UpdateLayeredWindow(
@@ -3033,10 +2949,8 @@ fn render_layered_at(desktop_origin: Option<POINT>) {
                 COLORREF(0), Some(&blend), ULW_ALPHA,
             );
         }
-        SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(dib);
-        let _ = DeleteDC(mem_dc);
-        ReleaseDC(hwnd, screen_dc);
+        // Both DIB surfaces are deselected/deleted before the window DC is
+        // returned, including failure and early-exit paths.
     }
 
     if composition_blur_active {
@@ -3097,19 +3011,6 @@ fn drag_hover_glow_coverage(distance_from_edge: f32) -> u8 {
     // Retain the antialiased hairline while making the outer halo dominant.
     let hairline = 65.0 * (1.0 - distance / 0.7).max(0.0);
     (diffuse + hairline).round().clamp(0.0, 200.0) as u8
-}
-
-/// Rounded-rectangle signed distance. Negative is inside the actual panel,
-/// positive is outside; returns zero at its edge.
-#[allow(dead_code)]
-fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
-    let inset = sc(1).max(1) as f32;
-    let half_w = (width as f32 / 2.0 - inset).max(0.5);
-    let half_h = (height as f32 / 2.0 - inset).max(0.5);
-    let radius = (radius as f32).min(half_w.min(half_h)).max(0.0);
-    let dx = (x as f32 + 0.5 - width as f32 / 2.0).abs() - (half_w - radius);
-    let dy = (y as f32 + 0.5 - height as f32 / 2.0).abs() - (half_h - radius);
-    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
 }
 
 /// Feather hover feedback around the actual body or detached grip perimeter.
@@ -3283,48 +3184,6 @@ fn draw_taskbar_hover_inner_glow_gdi(
             }
         }
     }
-}
-
-#[allow(dead_code)]
-fn draw_drag_hover_outline(
-    pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
-    bounds: RECT, corner_radius: u8, color: Color,
-) {
-    if canvas_w <= 0 || canvas_h <= 0 || bounds.right <= bounds.left
-        || bounds.bottom <= bounds.top { return; }
-    let w = bounds.right - bounds.left;
-    let h = bounds.bottom - bounds.top;
-    let radius = sc(i32::from(corner_radius))
-        .min((w.min(h) / 2).max(0));
-    let extent = sc(12).max(2);
-    // Restrict work to the edge envelope, avoiding per-pixel work over the
-    // center of larger horizontal panels.
-    for y in bounds.top.saturating_sub(extent).max(0)
-        ..bounds.bottom.saturating_add(extent).min(canvas_h) {
-        for x in bounds.left.saturating_sub(extent).max(0)
-            ..bounds.right.saturating_add(extent).min(canvas_w) {
-            let local_x = x - bounds.left;
-            let local_y = y - bounds.top;
-            let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
-            if distance.abs() > extent as f32 { continue; }
-            let coverage = drag_hover_glow_coverage(distance);
-            if coverage == 0 { continue; }
-            let index = (y * canvas_w + x) as usize;
-            pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
-        }
-    }
-}
-
-/// Draw the dedicated desktop drag tab into the premultiplied layered surface.
-/// When collapsed, every pixel outside the tab is fully transparent and cannot
-/// obstruct other desktop windows or leave a visible panel edge.
-#[allow(dead_code)]
-fn render_floating_handle_bitmap(
-    pixels: &mut [u32], width: i32, height: i32,
-    edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
-) {
-    let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
-    render_floating_handle_bitmap_at(pixels, width, height, grip, hovered, style, opacity);
 }
 
 fn render_floating_handle_bitmap_at(
@@ -4860,27 +4719,6 @@ fn floating_drag_tab_hit_code(body: RECT, grip: RECT, x: i32, y: i32) -> i32 {
     else { -1 } // HTCLIENT or HTTRANSPARENT
 }
 
-#[allow(dead_code)]
-fn floating_drag_handle_hit(
-    x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
-) -> bool {
-    point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
-}
-
-// The desktop tab lives OUTSIDE the panel body. Hover must be checked against
-// its final screen-space rectangle, especially after the canvas origin changes
-// on drop from a docked edge to the free-floating top tab.
-#[allow(dead_code)]
-fn floating_drag_grip_contains_screen_point(
-    origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
-    edge: Option<FloatingEdge>, pointer: POINT,
-) -> bool {
-    floating_drag_handle_hit(
-        pointer.x - origin_x, pointer.y - origin_y,
-        canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
-    )
-}
-
 // A stale WM_MOUSELEAVE can be queued when mouse capture ends or a layered
 // popup is repositioned. Recheck where the pointer actually is, rather than
 // clearing an otherwise valid hover until another WM_MOUSEMOVE arrives.
@@ -4898,172 +4736,6 @@ fn floating_pointer_still_over_free_grip(hwnd: HWND) -> bool {
     let mut pointer = POINT::default();
     if unsafe { GetCursorPos(&mut pointer) }.is_err() { return false; }
     point_in_rect(grip, pointer.x - rect.left, pointer.y - rect.top)
-}
-
-/// Desktop tabs occupy an independent, transparent gutter. The panel dimensions
-/// remain identical to the taskbar renderer, including progress and ring layout.
-fn floating_canvas_geometry(
-    body_width: i32, body_height: i32, edge: Option<FloatingEdge>,
-) -> (i32, i32, RECT) {
-    let tab = sc(FLOAT_EDGE_PEEK);
-    match edge {
-        Some(FloatingEdge::Left) => {
-            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
-            (body_width + tab + glow, body_height + 2 * glow,
-                RECT { left: 0, top: glow, right: body_width, bottom: glow + body_height })
-        },
-        Some(FloatingEdge::Right) => {
-            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
-            (body_width + tab + glow, body_height + 2 * glow,
-                RECT { left: tab + glow, top: glow,
-                    right: body_width + tab + glow, bottom: glow + body_height })
-        },
-        Some(FloatingEdge::Top) => {
-            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
-            (body_width + 2 * glow, body_height + tab + glow,
-                RECT { left: glow, top: 0, right: glow + body_width, bottom: body_height })
-        },
-        Some(FloatingEdge::Bottom) => {
-            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
-            (body_width + 2 * glow, body_height + tab + glow,
-                RECT { left: glow, top: tab + glow,
-                    right: glow + body_width, bottom: tab + glow + body_height })
-        },
-        None => {
-            let glow = sc(FLOAT_FREE_GLOW_MARGIN);
-            (
-                body_width + glow * 2,
-                body_height + tab + glow * 2,
-                RECT {
-                    left: glow, top: tab + glow,
-                    right: body_width + glow, bottom: body_height + tab + glow,
-                },
-            )
-        },
-    }
-}
-
-// Switching the free tab to below keeps the canvas size unchanged and
-// shifts only the panel pixels, never the visible panel's screen position.
-fn floating_free_canvas_geometry(
-    body_width: i32, body_height: i32, below: bool,
-) -> (i32, i32, RECT) {
-    let (width, height, mut body) =
-        floating_canvas_geometry(body_width, body_height, None);
-    if below {
-        let shift = sc(FLOAT_EDGE_PEEK);
-        body.top -= shift;
-        body.bottom -= shift;
-    }
-    (width, height, body)
-}
-
-fn floating_layout_grip_rect(
-    width: i32, height: i32, edge: Option<FloatingEdge>, free_below: bool,
-) -> RECT {
-    floating_grip_rect(width, height,
-        if edge.is_none() && free_below { Some(FloatingEdge::Top) } else { edge },
-        sc(FLOAT_EDGE_PEEK))
-}
-
-// This is a layout choice, NOT docking. Prefer the top tab when it fits;
-// otherwise use the empty space below. Preserve the body and tab on-screen.
-fn floating_choose_free_grip_below(bounds: RECT, body_top: i32, body_height: i32) -> bool {
-    let above = body_top.saturating_sub(bounds.top);
-    let below = bounds.bottom.saturating_sub(body_top.saturating_add(body_height));
-    above < sc(FLOAT_EDGE_PEEK) && below >= sc(FLOAT_EDGE_PEEK)
-}
-
-/// During dragging, the existing edge orientation is preserved for a stable
-/// grip. Once the panel has cleared the monitor edge, add transparent pixels
-/// only on the formerly screen-clipped side. The unchanged body dimensions
-/// and original tab orientation then gain an external halo on all sides.
-fn floating_drag_canvas_geometry(
-    body_width: i32, body_height: i32, edge: Option<FloatingEdge>,
-    drag_glow_detached: bool,
-) -> (i32, i32, RECT) {
-    let (width, height, mut body) =
-        floating_canvas_geometry(body_width, body_height, edge);
-    if !drag_glow_detached { return (width, height, body); }
-    let glow = sc(FLOAT_FREE_GLOW_MARGIN);
-    match edge {
-        Some(FloatingEdge::Left) => {
-            body.left += glow;
-            body.right += glow;
-            (width + glow, height, body)
-        }
-        Some(FloatingEdge::Right) => (width + glow, height, body),
-        Some(FloatingEdge::Top) => {
-            body.top += glow;
-            body.bottom += glow;
-            (width, height + glow, body)
-        }
-        Some(FloatingEdge::Bottom) => (width, height + glow, body),
-        None => (width, height, body),
-    }
-}
-
-/// Shared slide distance for physical screen edges and Explorer taskbar edges.
-/// At reveal=0 the grip is flush with the boundary; at reveal=100 the
-/// original content and tab occupy their fully expanded coordinates.
-fn floating_slide_offset(
-    width: i32, height: i32, edge: FloatingEdge, reveal: u8,
-) -> (i32, i32) {
-    let grip = floating_grip_rect(width, height, Some(edge), sc(FLOAT_EDGE_PEEK));
-    let (dx, dy) = match edge {
-        FloatingEdge::Left => (-grip.left, 0),
-        FloatingEdge::Right => (width - grip.right, 0),
-        FloatingEdge::Top => (0, -grip.top),
-        FloatingEdge::Bottom => (0, height - grip.bottom),
-    };
-    // Use the physical-edge interpolation's original integer rounding
-    // (including halfway frames). This avoids one-pixel differences between
-    // the taskbar slide and the ordinary popup slide.
-    let progress = f64::from(reveal.min(100)) / 100.0;
-    (
-        dx + (f64::from(-dx) * progress).round() as i32,
-        dy + (f64::from(-dy) * progress).round() as i32,
-    )
-}
-
-/// Clip moving desktop pixels to the taskbar-free canvas. The panel and grip
-/// use the exact same offset as physical-edge docking, not a second
-/// shortening/stretching animation invented for reserved work-area edges.
-fn floating_slid_canvas_rect(
-    rect: RECT, width: i32, height: i32, edge: FloatingEdge, reveal: u8,
-) -> RECT {
-    let (dx, dy) = floating_slide_offset(width, height, edge, reveal);
-    RECT {
-        left: (rect.left + dx).clamp(0, width),
-        right: (rect.right + dx).clamp(0, width),
-        top: (rect.top + dy).clamp(0, height),
-        bottom: (rect.bottom + dy).clamp(0, height),
-    }
-}
-
-/// Shift the *completed* premultiplied foreground bitmap as one unit. It
-/// preserves text, rounded corners, double-sided halo, and the six-dot tab,
-/// while the taskbar-facing pixels outside the desktop canvas stay alpha=0.
-fn floating_slide_layered_bitmap(
-    canvas: &mut [u32], width: i32, height: i32,
-    edge: FloatingEdge, reveal: u8,
-) {
-    let (dx, dy) = floating_slide_offset(width, height, edge, reveal);
-    if dx == 0 && dy == 0 { return; }
-    let src = canvas.to_vec();
-    canvas.fill(0);
-    let copy_width = width - dx.abs();
-    if copy_width <= 0 { return; }
-    let dst_left = dx.max(0);
-    let src_left = (-dx).max(0);
-    for dst_y in dy.max(0)..(height + dy).min(height) {
-        let src_y = dst_y - dy;
-        let dst_index = (dst_y * width + dst_left) as usize;
-        let src_index = (src_y * width + src_left) as usize;
-        let count = copy_width as usize;
-        canvas[dst_index..dst_index + count]
-            .copy_from_slice(&src[src_index..src_index + count]);
-    }
 }
 
 fn floating_free_grip_below_for_state(s: &AppState) -> bool {
@@ -5373,13 +5045,6 @@ fn floating_clamp_drag_visible_position(
     let min_y = bounds.top.saturating_sub(visible.top);
     let max_y = bounds.bottom.saturating_sub(visible.bottom).max(min_y);
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
-}
-
-#[allow(dead_code)]
-fn floating_clamp_free_visible_position(
-    bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
-) -> (i32, i32) {
-    floating_clamp_drag_visible_position(bounds, width, height, body, None, false, x, y)
 }
 
 // Explicit Desktop docking requires contact between the body/drag tab that
@@ -6523,6 +6188,26 @@ fn floating_content_size_for_state(s: &AppState, vertical: bool) -> (i32, i32) {
     (width, height)
 }
 
+/// Reset animation endpoints when entering or reconfiguring a desktop popup.
+/// Keep this state-only: never call synchronous Win32 APIs under the state lock.
+fn reset_floating_transition_state(s: &mut AppState) {
+    let (collapsed, reveal) = initial_floating_visibility(
+        s.floating_edge, s.display_position, s.desktop_auto_collapse,
+    );
+    s.floating_collapsed = collapsed;
+    s.floating_reveal = reveal;
+    s.floating_slide_from = reveal;
+    s.floating_slide_target = reveal;
+    s.floating_slide_started = Instant::now();
+    s.floating_reserved_drag_reveal = reveal;
+    s.floating_grip_hover = false;
+    s.floating_first_collapse_guard = false;
+    s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
+    s.floating_fade_from = s.floating_grip_alpha;
+    s.floating_fade_target = s.floating_grip_alpha;
+    s.floating_fade_started = Instant::now();
+}
+
 fn enable_floating_widget(reason: &str, vertical: bool) {
     let vertical = {
         let state = lock_state();
@@ -6539,22 +6224,10 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
             let Some(s) = state.as_mut() else { return };
             s.vertical_taskbar_mode = vertical;
             s.small_taskbar_mode = false;
-            s.effective_appearance_preset = vertical_effective_preset(s.appearance_preset);
+            let preset = vertical_effective_preset(s.appearance_preset);
+            sync_floating_preset_and_usage(s, preset);
             s.vertical_widget_width = sc(VERTICAL_WIDGET_MIN_WIDTH).max(sc(48));
-            let (collapsed, reveal) = initial_floating_visibility(
-                s.floating_edge, s.display_position, s.desktop_auto_collapse,
-            );
-            s.floating_collapsed = collapsed;
-            s.floating_reveal = reveal;
-            s.floating_slide_from = reveal;
-            s.floating_slide_target = reveal;
-            s.floating_slide_started = Instant::now();
-            s.floating_reserved_drag_reveal = reveal;
-            s.floating_grip_hover = false;
-            s.floating_first_collapse_guard = false;
-            s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
-            s.floating_fade_from = s.floating_grip_alpha;
-            s.floating_fade_target = s.floating_grip_alpha;
+            reset_floating_transition_state(s);
             s.floating_fade_started = Instant::now();
             s.hwnd.to_hwnd()
         };
@@ -6685,30 +6358,18 @@ fn enable_floating_widget(reason: &str, vertical: bool) {
         s.floating_mode = true;
         s.embedded = false;
         s.hidden_for_taskbar_space = false;
-        let (collapsed, reveal) = initial_floating_visibility(
-            s.floating_edge, s.display_position, s.desktop_auto_collapse,
-        );
-        s.floating_collapsed = collapsed;
-        s.floating_reveal = reveal;
-        s.floating_slide_from = reveal;
-        s.floating_slide_target = reveal;
-        s.floating_slide_started = Instant::now();
-        s.floating_reserved_drag_reveal = reveal;
-        s.floating_grip_hover = false;
-        s.floating_first_collapse_guard = false;
-        s.floating_grip_alpha = if !floating_grip_uses_hover_fade(s) { 100 } else { 0 };
-        s.floating_fade_from = s.floating_grip_alpha;
-        s.floating_fade_target = s.floating_grip_alpha;
+        reset_floating_transition_state(s);
         s.floating_fade_started = Instant::now();
         s.floating_x = x;
         s.floating_y = y;
         s.vertical_taskbar_mode = vertical;
         s.small_taskbar_mode = false;
-        s.effective_appearance_preset = if vertical {
+        let preset = if vertical {
             vertical_effective_preset(s.appearance_preset)
         } else {
             effective_appearance_preset(s)
         };
+        sync_floating_preset_and_usage(s, preset);
         s.vertical_widget_width = width;
     }
     unsafe { let _ = ShowWindow(old, SW_HIDE); }
@@ -7189,32 +6850,6 @@ fn ensure_tooltip_blur_backdrop(blur_amount: f32, tint: Color, width: i32, heigh
     }
 }
 
-// Keep the reset-time tooltip content-sized. Its measured glyph bounds must
-// come from the same DirectWrite mask used for the actual layered rendering,
-// not the slightly different GDI font metrics. The final width needs only
-// normal padding and a small rasterization safety allowance.
-const TOOLTIP_TEXT_INSET: i32 = 12;
-const TOOLTIP_TEXT_MEASUREMENT_SLACK: i32 = 3;
-
-fn tooltip_width_with_render_slack(measured_text_px: i32, logical: impl Fn(i32) -> i32) -> i32 {
-    (measured_text_px.max(0)
-        + logical(2 * TOOLTIP_TEXT_INSET + TOOLTIP_TEXT_MEASUREMENT_SLACK))
-        .max(logical(48))
-}
-
-// Extract the last painted column, including antialiased edge pixels. Using
-// the rightmost pixel rather than the total nonzero pixel count also keeps
-// space between digits and glyph overhangs from being cropped.
-fn tooltip_mask_content_width(mask: &[u8], row_width: usize) -> Option<i32> {
-    if row_width == 0 || !mask.len().is_multiple_of(row_width) {
-        return None;
-    }
-    mask.chunks_exact(row_width)
-        .filter_map(|row| row.iter().rposition(|&coverage| coverage != 0))
-        .max()
-        .and_then(|x| i32::try_from(x + 1).ok())
-}
-
 unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, frosted_active: bool) {
     let (mut background_color, border_color, text_color, tooltip_corner_radius) = {
         let state = lock_state();
@@ -7244,32 +6879,11 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    let screen_dc = GetDC(hwnd);
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mem_dc = CreateCompatibleDC(screen_dc);
-    let dib =
-        CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
-    if dib.is_invalid() || bits.is_null() {
-        let _ = DeleteDC(mem_dc);
-        ReleaseDC(hwnd, screen_dc);
-        return;
-    }
-
-    let old_bmp = SelectObject(mem_dc, dib);
-    let pixel_data =
-        std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
+    let Some(window_dc) = WindowDc::acquire(hwnd) else { return };
+    let screen_dc = window_dc.handle();
+    let Some(mut tooltip_surface) = DibSurface::create(screen_dc, width, height) else { return };
+    let mem_dc = tooltip_surface.handle();
+    let pixel_data = tooltip_surface.pixels();
     let outer_radius = sc(i32::from(tooltip_corner_radius))
         .min((width.min(height) / 2).max(0));
     let inner_radius = (outer_radius - 1).max(1);
@@ -7347,10 +6961,7 @@ unsafe fn render_minimal_tooltip_layered(hwnd: HWND, width: i32, height: i32, fr
         ULW_ALPHA,
     );
 
-    let _ = SelectObject(mem_dc, old_bmp);
-    let _ = DeleteObject(dib);
-    let _ = DeleteDC(mem_dc);
-    ReleaseDC(hwnd, screen_dc);
+    // Guarded surfaces restore GDI selection and release the HWND DC.
 }
 
 unsafe extern "system" fn minimal_tooltip_wnd_proc(
@@ -7464,76 +7075,6 @@ fn hide_minimal_usage_tooltip() {
         }
     }
     hide_tooltip_blur_backdrop();
-}
-
-unsafe fn measure_minimal_tooltip_width(text: &str) -> i32 {
-    let hdc = GetDC(HWND::default());
-    if hdc.0.is_null() {
-        // Failed measurement must not fall back to a tiny fixed-width box.
-        return tooltip_width_with_render_slack(
-            sc((text.chars().count().min(64) as i32) * 12),
-            sc,
-        );
-    }
-    let font_name = native_interop::wide_str(fonts::face(fonts::FontRole::Ui, None));
-    let font = CreateFontW(
-        -sc(12),
-        0,
-        0,
-        0,
-        FW_NORMAL.0 as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET.0 as u32,
-        OUT_TT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32,
-        ANTIALIASED_QUALITY.0 as u32,
-        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-        PCWSTR::from_raw(font_name.as_ptr()),
-    );
-    let old_font = SelectObject(hdc, font);
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    let mut size = SIZE::default();
-    let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
-    SelectObject(hdc, old_font);
-    let _ = DeleteObject(font);
-    let _ = ReleaseDC(HWND::default(), hdc);
-
-    // Probe the real DirectWrite glyph mask with generous temporary room,
-    // but do not carry that probe width into the final popup size. GDI only
-    // provides a fallback and an approximate probe bound.
-    let probe_width = size.cx.max(0)
-        .saturating_add(sc(64))
-        .max(sc((text.chars().count().min(1024) as i32) * 20))
-        .clamp(sc(64), sc(4096));
-    let content_width = native_interop::directwrite_text_mask(
-        text,
-        fonts::face(fonts::FontRole::Ui, None),
-        12.0 * CURRENT_DPI.load(Ordering::Relaxed) as f32 / 96.0,
-        FW_NORMAL.0 as i32,
-        probe_width,
-        sc(28),
-    ).and_then(|mask| {
-        tooltip_mask_content_width(&mask, probe_width as usize)
-    });
-    tooltip_width_with_render_slack(content_width.unwrap_or(size.cx), sc)
-}
-
-fn cached_minimal_tooltip_width(text: &str) -> i32 {
-    let dpi = CURRENT_DPI.load(Ordering::Relaxed);
-    {
-        let cache = MINIMAL_TOOLTIP_WIDTH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((last_text, last_dpi, width)) = cache.as_ref() {
-            if last_text == text && *last_dpi == dpi {
-                return *width;
-            }
-        }
-    }
-    let width = unsafe { measure_minimal_tooltip_width(text) };
-    *MINIMAL_TOOLTIP_WIDTH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((text.to_owned(), dpi, width));
-    width
 }
 
 fn show_minimal_usage_tooltip(target: MinimalHoverTarget) {
@@ -10035,8 +9576,8 @@ fn open_color_editor(owner: HWND, target: StyleColorTarget) {
 
         let channel_names = ["R", "G", "B", "A"];
         let channel_values = [color.r, color.g, color.b, color.a];
-        let mut sliders = [SendHwnd(0); 4];
-        let mut labels = [SendHwnd(0); 4];
+        let mut sliders = [SendHwnd::from_hwnd(HWND::default()); 4];
+        let mut labels = [SendHwnd::from_hwnd(HWND::default()); 4];
         for index in 0..4 {
             let y = 18 + index as i32 * 38;
             let Some(_) = create_editor_static(hwnd, channel_names[index], 12, y + 5, 20, 22)
@@ -11040,6 +10581,7 @@ fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
 
 #[cfg(test)]
 mod tests {
+    use super::tooltip_measure::{tooltip_mask_content_width, tooltip_width_with_render_slack};
     use crate::popup_menu::PopupAction;
     #[test]
     fn quick_appearance_menu_tracks_explicit_user_choices() {
@@ -11072,6 +10614,86 @@ mod tests {
     }
 
     use super::*;
+
+    // Geometry adapters retained solely for regression tests of historical
+    // edge cases; production uses the unified hover and handle render paths.
+    /// Rounded-rectangle signed distance. Negative is inside the actual panel,
+    /// positive is outside; returns zero at its edge.
+    fn drag_hover_signed_edge_distance(width: i32, height: i32, x: i32, y: i32, radius: i32) -> f32 {
+        let inset = sc(1).max(1) as f32;
+        let half_w = (width as f32 / 2.0 - inset).max(0.5);
+        let half_h = (height as f32 / 2.0 - inset).max(0.5);
+        let radius = (radius as f32).min(half_w.min(half_h)).max(0.0);
+        let dx = (x as f32 + 0.5 - width as f32 / 2.0).abs() - (half_w - radius);
+        let dy = (y as f32 + 0.5 - height as f32 / 2.0).abs() - (half_h - radius);
+        dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+    }
+
+    fn draw_drag_hover_outline(
+        pixels: &mut [u32], canvas_w: i32, canvas_h: i32,
+        bounds: RECT, corner_radius: u8, color: Color,
+    ) {
+        if canvas_w <= 0 || canvas_h <= 0 || bounds.right <= bounds.left
+            || bounds.bottom <= bounds.top { return; }
+        let w = bounds.right - bounds.left;
+        let h = bounds.bottom - bounds.top;
+        let radius = sc(i32::from(corner_radius))
+            .min((w.min(h) / 2).max(0));
+        let extent = sc(12).max(2);
+        // Restrict work to the edge envelope, avoiding per-pixel work over the
+        // center of larger horizontal panels.
+        for y in bounds.top.saturating_sub(extent).max(0)
+            ..bounds.bottom.saturating_add(extent).min(canvas_h) {
+            for x in bounds.left.saturating_sub(extent).max(0)
+                ..bounds.right.saturating_add(extent).min(canvas_w) {
+                let local_x = x - bounds.left;
+                let local_y = y - bounds.top;
+                let distance = drag_hover_signed_edge_distance(w, h, local_x, local_y, radius);
+                if distance.abs() > extent as f32 { continue; }
+                let coverage = drag_hover_glow_coverage(distance);
+                if coverage == 0 { continue; }
+                let index = (y * canvas_w + x) as usize;
+                pixels[index] = composite_premultiplied_text(pixels[index], color, coverage);
+            }
+        }
+    }
+
+    /// Draw the dedicated desktop drag tab into the premultiplied layered surface.
+    /// When collapsed, every pixel outside the tab is fully transparent and cannot
+    /// obstruct other desktop windows or leave a visible panel edge.
+    fn render_floating_handle_bitmap(
+        pixels: &mut [u32], width: i32, height: i32,
+        edge: Option<FloatingEdge>, hovered: bool, style: &ThemeStyle, opacity: u8,
+    ) {
+        let grip = floating_grip_rect(width, height, edge, sc(FLOAT_EDGE_PEEK));
+        render_floating_handle_bitmap_at(pixels, width, height, grip, hovered, style, opacity);
+    }
+
+    fn floating_drag_handle_hit(
+        x: i32, y: i32, width: i32, height: i32, edge: Option<FloatingEdge>, peek: i32,
+    ) -> bool {
+        point_in_rect(floating_grip_rect(width, height, edge, peek), x, y)
+    }
+
+    // The desktop tab lives OUTSIDE the panel body. Hover must be checked against
+    // its final screen-space rectangle, especially after the canvas origin changes
+    // on drop from a docked edge to the free-floating top tab.
+    fn floating_drag_grip_contains_screen_point(
+        origin_x: i32, origin_y: i32, canvas_w: i32, canvas_h: i32,
+        edge: Option<FloatingEdge>, pointer: POINT,
+    ) -> bool {
+        floating_drag_handle_hit(
+            pointer.x - origin_x, pointer.y - origin_y,
+            canvas_w, canvas_h, edge, sc(FLOAT_EDGE_PEEK),
+        )
+    }
+
+    fn floating_clamp_free_visible_position(
+        bounds: RECT, width: i32, height: i32, body: RECT, x: i32, y: i32,
+    ) -> (i32, i32) {
+        floating_clamp_drag_visible_position(bounds, width, height, body, None, false, x, y)
+    }
+
 
     #[test]
     fn v24_22_taskbar_inner_glow_never_touches_border_or_outside() {

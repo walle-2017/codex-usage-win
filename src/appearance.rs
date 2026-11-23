@@ -288,6 +288,31 @@ mod tests {
     }
 
     #[test]
+    fn default_minimal_default_restores_both_reset_hints_without_polling() {
+        let session = section_with_local_reset(12.0, 1_789_000_000);
+        let weekly = section_with_local_reset(58.0, 1_789_000_000);
+        for (preset, should_show_reset) in [
+            (AppearancePreset::Default, true),
+            (AppearancePreset::Minimal, false),
+            (AppearancePreset::Default, true),
+        ] {
+            for (section, window) in [
+                (&session, UsageWindowKind::Session),
+                (&weekly, UsageWindowKind::Weekly),
+            ] {
+                let text = taskbar_line(
+                    preset, LanguageId::SimplifiedChinese, section, window,
+                );
+                assert_eq!(
+                    text.split_once("  ").is_some(),
+                    should_show_reset,
+                    "layout {preset:?} must regenerate the reset suffix",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn taskbar_line_never_uses_reset_icon() {
         let section = section_with_local_reset(81.0, 1_789_000_000);
         let default_layout = taskbar_line(

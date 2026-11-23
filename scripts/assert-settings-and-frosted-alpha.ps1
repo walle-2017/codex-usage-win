@@ -6,6 +6,8 @@ $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
 $replica = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs')
 $settings = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
+$appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
+$editorPaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\editor_paint.rs')
 
 foreach ($token in @(
     'pub fn panel_frosted_active(&self) -> bool',
@@ -29,6 +31,12 @@ foreach ($token in @(
         throw "Panel/tooltip or deferred settings path missing: $token"
     }
 }
+# The localized hint moved from style_window.rs into the editor renderer.
+# Keep its wording check scoped to that module; reactivation checks still
+# inspect the settings window's own message handling.
+if (-not $editorPaint.Contains('Alpha < 255')) {
+    throw 'Editor frosted hint must keep the Alpha < 255 explanation.'
+}
 # At alpha=255 the Composition backdrop remains allocated but the layered
 # foreground stays opaque. Crossing to 254 reuses the prepared background.
 # Do not regress to first creating the asynchronous blur visual at that edge.
@@ -42,9 +50,11 @@ if ($replica -notmatch 's\.styles\.active\(s\.is_dark\)\.panel_frosted_active\(\
     throw 'Replica handoff must use the same Alpha-gated frosted predicate.'
 }
 
+if (-not $appearancePaint.Contains('paint_frosted_alpha_hint(hdc, hwnd, snapshot.language, secondary)')) {
+    throw 'Appearance page must keep the frosted alpha hint even after its painter is extracted.'
+}
+
 foreach ($token in @(
-    'paint_frosted_alpha_hint(hdc, hwnd, snapshot.language, secondary)',
-    'Alpha < 255',
     'SW_RESTORE',
     'HWND_TOP,',
     'SetForegroundWindow(hwnd)'
@@ -54,10 +64,11 @@ foreach ($token in @(
     }
 }
 
-$open = [regex]::Match($settings, '(?s)pub fn open_or_focus\(.*?\n\}\s*\n\s*pub fn sync\(')
+$open = [regex]::Match($settings, '(?s)pub fn open_or_focus_on_widget\(.*?\n\}')
 if (-not $open.Success -or $open.Value -match 'HWND_TOPMOST' -or
     $open.Value -notmatch 'IsWindow\(hwnd\)' -or
-    $open.Value -notmatch 'IsIconic\(hwnd\)') {
+    $open.Value -notmatch 'IsIconic\(hwnd\)' -or
+    $settings -notmatch 'open_or_focus_on_widget\(parent, widget, snapshot\)') {
     throw 'Existing settings HWND must be restored and raised normally, never permanently topmost.'
 }
 if ($window -notmatch '(?s)IDM_STYLE_SETTINGS\s*=>.*?PostMessageW\(.*?WM_APP_FOCUS_EXISTING_SETTINGS') {
