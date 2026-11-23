@@ -12,7 +12,13 @@ $legacy = @(
     'IDM_STYLE_PANEL_BLUR',
     'IDM_STYLE_RESET_CURRENT',
     'TBM_GETPOS_MSG',
-    'STYLE_PREVIEW_FRAME_MS'
+    'STYLE_PREVIEW_FRAME_MS',
+    'IDM_START_WITH_WINDOWS',
+    'IDM_SHOW_SESSION_WINDOW',
+    'IDM_SHOW_WEEKLY_WINDOW',
+    'IDM_FREQ_1MIN',
+    'IDM_ALERT_OFF',
+    'IDM_LANG_SYSTEM'
 )
 foreach ($symbol in $legacy) {
     if ($window.Contains($symbol)) { throw "Unreachable legacy native style editor returned: $symbol" }

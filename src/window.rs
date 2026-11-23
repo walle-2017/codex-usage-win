@@ -197,24 +197,9 @@ const POLL_15_MIN: u32 = 900_000;
 const POLL_1_HOUR: u32 = 3_600_000;
 
 // Menu item IDs for update frequency
-const IDM_FREQ_1MIN: u16 = 10;
-const IDM_FREQ_5MIN: u16 = 11;
-const IDM_FREQ_15MIN: u16 = 12;
-const IDM_FREQ_1HOUR: u16 = 13;
-const IDM_START_WITH_WINDOWS: u16 = 20;
 const IDM_RESET_POSITION: u16 = 30;
-const IDM_LANG_SYSTEM: u16 = 40;
-const IDM_LANG_ENGLISH: u16 = 41;
-const IDM_LANG_SIMPLIFIED_CHINESE: u16 = 51;
 const IDM_CHECK_UPDATE: u16 = 60;
 const IDM_OPEN_RELEASES: u16 = 61;
-const IDM_SHOW_SESSION_WINDOW: u16 = 71;
-const IDM_SHOW_WEEKLY_WINDOW: u16 = 72;
-const IDM_ALERT_OFF: u16 = 80;
-const IDM_ALERT_10: u16 = 81;
-const IDM_ALERT_20: u16 = 82;
-const IDM_ALERT_30: u16 = 83;
-
 const IDM_LAYOUT_DEFAULT: u16 = 91;
 const IDM_LAYOUT_MINIMAL: u16 = 92;
 const IDM_THEME_SYSTEM: u16 = 93;
@@ -8752,76 +8737,6 @@ unsafe extern "system" fn wnd_proc(
                     position_at_taskbar();
                     render_layered();
                 }
-                IDM_START_WITH_WINDOWS => {
-                    set_startup_enabled(!is_startup_enabled());
-                }
-                IDM_FREQ_1MIN | IDM_FREQ_5MIN | IDM_FREQ_15MIN | IDM_FREQ_1HOUR => {
-                    let new_interval = match id {
-                        IDM_FREQ_1MIN => POLL_1_MIN,
-                        IDM_FREQ_5MIN => POLL_5_MIN,
-                        IDM_FREQ_15MIN => POLL_15_MIN,
-                        IDM_FREQ_1HOUR => POLL_1_HOUR,
-                        _ => POLL_15_MIN,
-                    };
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.poll_interval_ms = new_interval;
-                        }
-                    }
-                    save_state_settings();
-                    // Reset the poll timer with the new interval
-                    SetTimer(taskbar_replica_service_hwnd(hwnd), TIMER_POLL, new_interval, None);
-                }
-                IDM_SHOW_SESSION_WINDOW | IDM_SHOW_WEEKLY_WINDOW => {
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            match id {
-                                IDM_SHOW_SESSION_WINDOW
-                                    if s.show_weekly_window || !s.show_session_window =>
-                                {
-                                    s.show_session_window = !s.show_session_window;
-                                }
-                                IDM_SHOW_WEEKLY_WINDOW
-                                    if s.show_session_window || !s.show_weekly_window =>
-                                {
-                                    s.show_weekly_window = !s.show_weekly_window;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    save_state_settings();
-                    render_layered();
-                    sync_tray_icons(hwnd);
-                }
-                IDM_ALERT_OFF | IDM_ALERT_10 | IDM_ALERT_20 | IDM_ALERT_30 => {
-                    let threshold = match id {
-                        IDM_ALERT_10 => 10,
-                        IDM_ALERT_20 => 20,
-                        IDM_ALERT_30 => 30,
-                        _ => 0,
-                    };
-                    let alerts = {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.alert_threshold_percent = threshold;
-                            if threshold == 0 {
-                                s.notified_quota_windows.clear();
-                                Vec::new()
-                            } else if let Some(data) = s.data.clone() {
-                                collect_low_quota_alerts(s, &data)
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        }
-                    };
-                    notify_quota_alerts(hwnd, &alerts);
-                    save_state_settings();
-                }
                 IDM_THEME_SYSTEM | IDM_THEME_DARK | IDM_THEME_LIGHT
                 | IDM_LAYOUT_DEFAULT | IDM_LAYOUT_MINIMAL
                 | IDM_QUICK_POSITION_TASKBAR | IDM_QUICK_POSITION_DESKTOP
@@ -8855,25 +8770,6 @@ unsafe extern "system" fn wnd_proc(
                         WPARAM(0),
                         LPARAM(0),
                     );
-                }
-                IDM_LANG_SYSTEM
-                | IDM_LANG_ENGLISH
-                | IDM_LANG_SIMPLIFIED_CHINESE => {
-                    let language_override = match id {
-                        IDM_LANG_SYSTEM => None,
-                        IDM_LANG_ENGLISH => Some(LanguageId::English),
-                        IDM_LANG_SIMPLIFIED_CHINESE => Some(LanguageId::SimplifiedChinese),
-                        _ => None,
-                    };
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            apply_language_to_state(s, language_override);
-                        }
-                    }
-                    refresh_window_title();
-                    save_state_settings();
-                    render_layered();
                 }
                 _ => {}
             }
