@@ -2,6 +2,10 @@
 //! Caller owns window and font cleanup on failure.
 use super::*;
 
+// Keep the RichEdit module loaded for the process lifetime. Window instances may
+// be closed/recreated repeatedly; unloading it while RichEdit HWNDs exist is unsafe.
+static RICH_EDIT_DLL: Mutex<Option<usize>> = Mutex::new(None);
+
 pub(super) unsafe fn create_json_editor_children(hwnd: HWND, json_font: HFONT, dpi: u32, is_dark: bool) -> Option<(HWND, HWND)> {
     let s = |v: i32| ((v as i64 * dpi as i64 + 48) / 96) as i32;
     let empty = native_interop::wide_str("");
@@ -37,8 +41,12 @@ pub(super) unsafe fn create_json_editor_children(hwnd: HWND, json_font: HFONT, d
     };
 
     let msftedit = native_interop::wide_str("Msftedit.dll");
-    if LoadLibraryW(PCWSTR::from_raw(msftedit.as_ptr())).is_err() {
-            return None;
+    {
+        let mut dll = RICH_EDIT_DLL.lock().unwrap_or_else(|e| e.into_inner());
+        if dll.is_none() {
+            let module = LoadLibraryW(PCWSTR::from_raw(msftedit.as_ptr())).ok()?;
+            *dll = Some(module.0 as usize);
+        }
     }
     let rich_edit_class = native_interop::wide_str(RICH_EDIT_CLASS);
     let json_edit = match CreateWindowExW(
