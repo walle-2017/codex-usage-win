@@ -55,5 +55,26 @@ if (-not $Joined.Contains('--diagnose') -or -not $Troubleshooting.Contains('code
     throw 'User-facing docs must document opt-in diagnostics and rotation.'
 }
 
+# Documentation reset: retain an empty changelog file but do not expose obsolete notes.
+if (-not (Test-Path -LiteralPath 'CHANGELOG.md' -PathType Leaf) -or
+    (Get-Item -LiteralPath 'CHANGELOG.md').Length -ne 0) {
+    throw 'CHANGELOG.md must exist and remain empty after the audit reset.'
+}
+if (Test-Path -LiteralPath 'CONTRIBUTING.md' -PathType Leaf) {
+    throw 'The retired CONTRIBUTING.md document must not be present.'
+}
+if ($Readme.Contains('(CHANGELOG.md)') -or $ReadmeZh.Contains('(CHANGELOG.md)')) {
+    throw 'README links must not direct users to the empty changelog.'
+}
+if ($Readme -notmatch 'resvg' -or $ReadmeZh -notmatch 'resvg' -or
+    $Readme -match 'Direct2D anti-aliased vector icons' -or
+    $ReadmeZh -match 'Direct2D 抗锯齿矢量图标') {
+    throw 'READMEs must accurately document resvg-based embedded SVG rasterization.'
+}
+$Security = Get-Content -Raw -LiteralPath 'SECURITY.md'
+if ($Security.Contains('preserved in '+[char]96+'CHANGELOG.md')) {
+    throw 'Security policy must not refer to notes in the cleared changelog.'
+}
+
 Write-Output 'PASS: documentation matches the cleaned Codex Usage Win repository and Store/GitHub channels.'
 exit 0

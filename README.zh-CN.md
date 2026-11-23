@@ -9,7 +9,7 @@
 
 # Codex Usage Win
 
-一款轻量级 Windows 原生 **Codex 用量监控工具**。当前正式版本：**v1.0.0**。
+一款轻量级 Windows 原生 **Codex 用量监控工具**。最新正式版本见 [GitHub Releases](https://github.com/walle-2017/codex-usage-win/releases/latest)。
 
 ## 功能
 
@@ -23,7 +23,7 @@
 - Hex 与 RGBA 双向联动，支持实时预览、鼠标滚轮调节和自动保存
 - 深色预设提供石墨、深海、松影；浅色预设提供云瓷、晴湾、麦光
 - 原生 JSON 配置编辑器支持校验、格式化、导入/导出、本地化错误提示、未保存更改保护和应用反馈
-- 设置导航、主题/排版、预设卡片及 JSON 操作统一使用 Direct2D 抗锯齿矢量图标
+- 设置导航、主题/排版、预设卡片及 JSON 操作统一使用内嵌 SVG 图标，经 resvg 按目标 DPI 栅格化、缓存并着色后显示
 - 可配置低额度提醒和刷新间隔
 - 设置界面提供中文与 English，并保留旧语言配置的迁移兼容
 - 支持多显示器任务栏放置：自动避开已占用的任务栏控件；没有足够宽的安全空白区时临时隐藏，并在空间恢复后自动显示
@@ -95,7 +95,6 @@ Store MSIX 打包说明见 [packaging/README.md](packaging/README.md)。
 - [维护基线](docs/MAINTENANCE.md)
 - [隐私策略](PRIVACY.md)
 - [安全策略](SECURITY.md)
-- [变更记录](CHANGELOG.md)
 
 ## 许可证
 

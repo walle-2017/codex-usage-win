@@ -9,7 +9,7 @@
 
 # Codex Usage Win
 
-A lightweight native Windows taskbar monitor for **Codex usage**. Current release: **v1.0.0**.
+A lightweight native Windows taskbar monitor for **Codex usage**. Latest stable release: [GitHub Releases](https://github.com/walle-2017/codex-usage-win/releases/latest).
 
 ## Features
 
@@ -23,7 +23,7 @@ A lightweight native Windows taskbar monitor for **Codex usage**. Current releas
 - Bidirectionally linked Hex/RGBA color controls, live preview, mouse-wheel adjustment, and automatic persistence
 - Coordinated presets: Graphite, Deep Sea, and Pine Shade for dark mode; Cloud Porcelain, Clear Bay, and Wheat Glow for light mode
 - Native JSON configuration editor with validation, formatting, import/export, localized errors, unsaved-change protection, and apply feedback
-- Consistent Direct2D anti-aliased vector icons throughout Settings and JSON actions
+- Consistent embedded SVG icons across Settings and JSON actions, rasterized at the target DPI using resvg, cached and tinted for display
 - Optional low-quota alerts and configurable refresh interval
 - Chinese and English settings UI, with legacy-language migration compatibility
 - Multi-monitor taskbar placement that avoids occupied taskbar controls, temporarily hides when no safe gap is wide enough, and restores automatically when space returns
@@ -95,7 +95,6 @@ Store MSIX packaging is documented in [packaging/README.md](packaging/README.md)
 - [Maintenance baseline](docs/MAINTENANCE.md)
 - [Privacy Policy](PRIVACY.md)
 - [Security Policy](SECURITY.md)
-- [Changelog](CHANGELOG.md)
 
 ## License
 
