@@ -12,8 +12,8 @@ index order matches `SettingsIcon` in `src/style_window.rs`, bound through
   that disappear at the 18 px / 100% DPI setting.
 - Physical-pixel rasterization uses `resvg` + premultiplied BGRA and
   native `AlphaBlend`. The cache is bounded to 192 variants.
-- Cache key includes index, physical size and complete RGBA foreground.
-  Hover, selection, theme and submenu animation get correct per-frame colors.
+- Cache key includes icon index and physical width/height only. The cache stores an untinted coverage mask, and complete RGBA foreground color is applied after lookup.
+  Hover, selection, theme and submenu animation get correct per-frame colors without re-parsing the SVG.
 - Run `cargo test`, `cargo clippy -- -D warnings`, and
   `cargo build --release` on Windows for every change.
 

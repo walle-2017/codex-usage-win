@@ -65,7 +65,7 @@ If a proxy is used, it must be trusted because the Codex usage request carries a
 
 ## Reset local position without deleting settings
 
-Right-click the taskbar component or tray icon and choose **Settings > Reset Position**. Settings are stored at:
+Right-click the taskbar component or tray icon and choose **Reset Position** from the context menu. Settings are stored at:
 
 ```text
 %APPDATA%\CodexUsage\settings.json

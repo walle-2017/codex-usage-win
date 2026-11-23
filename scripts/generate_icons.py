@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 ICON_DIR = ROOT / "src" / "icons"
-GITHUB_DIR = ROOT / ".github"
+DOC_ICON_DIR = ROOT / "docs" / "assets"
 VERIFY_PATH = ROOT / "target" / "codex-usage-icon-verification.png"
 
 NAVY_TOP = (20, 38, 64, 255)
@@ -52,19 +52,18 @@ def render_icon(size: int) -> Image.Image:
 
 def main() -> None:
     ICON_DIR.mkdir(parents=True, exist_ok=True)
-    GITHUB_DIR.mkdir(parents=True, exist_ok=True)
+    DOC_ICON_DIR.mkdir(parents=True, exist_ok=True)
     VERIFY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     rendered = {size: render_icon(size) for size in (16, 32, 48, 256)}
-    for size, image in rendered.items():
-        image.save(ICON_DIR / f"{size}x{size}.png", optimize=True)
+    rendered[256].save(ICON_DIR / "256x256.png", optimize=True)
 
     rendered[256].save(
         ICON_DIR / "icon.ico",
         format="ICO",
         sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    rendered[256].save(GITHUB_DIR / "codex-usage-icon.png", optimize=True)
+    rendered[256].save(DOC_ICON_DIR / "icon.png", optimize=True)
 
     sheet = Image.new("RGB", (760, 360), "#CBD5E1")
     draw = ImageDraw.Draw(sheet)
