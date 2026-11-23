@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased (after v1.0.0)
+
+- Added native quick-setting submenus for theme, taskbar layout, desktop position, direction and auto-collapse (PR #28).
+- Removed obsolete UI drawing paths, consolidated Win32/GDI resource ownership, and modularized the unified Settings window without intended user-visible behavior changes (PR #29).
+- Completed Windows CI, Store/MSIX build verification and Windows manual regression testing before merging PR #29 into `main`.
+
+
 ## v1.0.0 (2026-10-29) — release baseline reset
 
 - Published the finalized main branch as the new v1.0.0 baseline.
