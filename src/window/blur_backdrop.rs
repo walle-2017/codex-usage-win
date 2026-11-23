@@ -55,11 +55,14 @@ fn blur_bounds_snapshot() -> Option<BlurBoundsSnapshot> {
         inset,
         radius,
         grip_radius: (grip_radius - PANEL_BORDER_WIDTH_PX).max(0) as f32,
-        grip_alpha: if s.floating_edge.is_some() || s.dragging {
-            100
-        } else {
-            s.floating_grip_alpha
-        },
+        // Composition is a separate HWND/visual tree from the layered
+        // foreground. Its grip must follow the same fade opacity; merely
+        // being edge-docked must not force the glass backing to stay opaque.
+        grip_alpha: floating_grip_visual_alpha(
+            floating_grip_uses_hover_fade(s),
+            s.dragging,
+            s.floating_grip_alpha,
+        ),
         panel_visible: !(s.floating_collapsed && s.floating_reveal == 0),
     })
 }
