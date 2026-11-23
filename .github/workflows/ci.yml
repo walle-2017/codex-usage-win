@@ -35,6 +35,9 @@ jobs:
       - name: Verify package version consistency
         shell: pwsh
         run: ./scripts/assert-version-consistency.ps1
+      - name: Verify audited docs, Store packaging and icon asset contracts
+        shell: pwsh
+        run: ./scripts/assert-audit-contracts.ps1
       - name: Verify documentation
         shell: pwsh
         run: ./scripts/assert-final-docs.ps1
