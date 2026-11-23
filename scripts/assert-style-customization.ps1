@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
+$window += [Environment]::NewLine + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tests.rs'))
 # Desktop Default->Minimal->Default must recompute reset labels when the
 # effective popup preset changes, not only at the earlier settings-message step.
 $floatingWidgetBlock = [regex]::Match(
