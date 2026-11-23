@@ -10,7 +10,7 @@ This directory contains the Microsoft Store packaging configuration for **Codex 
 - Store ID: `9NGSJ2MXF6GS`
 - Architecture: `x64`
 
-The package version is derived from `Cargo.toml` and converted from `x.y.z` to `x.y.z.0` for Microsoft Store submission.
+The package version is derived from `Cargo.toml` and converted from `x.y.z` to `x.y.z.0` for Microsoft Store submission. The GitHub Actions validation and artifact name follow the derived version. Store submissions must use a higher package version than any package version already published.
 
 ## Build
 

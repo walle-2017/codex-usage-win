@@ -32,9 +32,9 @@ jobs:
       - name: Verify release asset fallback
         shell: pwsh
         run: ./scripts/assert-release-assets.ps1
-      - name: Verify version contract
+      - name: Verify package version consistency
         shell: pwsh
-        run: ./scripts/assert-v1-version.ps1
+        run: ./scripts/assert-version-consistency.ps1
       - name: Verify documentation
         shell: pwsh
         run: ./scripts/assert-final-docs.ps1
@@ -53,7 +53,7 @@ jobs:
       - name: Verify default taskbar UI contract
         shell: pwsh
         run: ./scripts/assert-default-ui.ps1
-      - name: Verify v1.0.5 theme and style customization
+      - name: Verify theme and style customization
         shell: pwsh
         run: ./scripts/assert-style-customization.ps1
       - name: Verify settings focus and alpha-gated frosted rendering

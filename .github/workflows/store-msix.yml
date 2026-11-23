@@ -10,6 +10,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'src/**'
+      - 'assets/**'
       - 'native/**'
       - 'build.rs'
   pull_request:
@@ -21,6 +22,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'src/**'
+      - 'assets/**'
       - 'native/**'
       - 'build.rs'
   workflow_dispatch:
@@ -35,6 +37,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@1.97.0
+
+      - name: Resolve MSIX version from Cargo
+        id: package_version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -Raw Cargo.toml
+          $match = [regex]::Match($manifest, '(?ms)^\[package\]\s*.*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"')
+          if (-not $match.Success) { throw 'Cargo package version missing or malformed.' }
+          "msix_version=$($match.Groups['version'].Value).0" >> $env:GITHUB_OUTPUT
 
       - name: Test
         shell: pwsh
@@ -125,7 +136,7 @@ jobs:
           $required = @(
               'Name="WalleStudio.CodexUsageWin"',
               'Publisher="CN=2AE5CECF-93C9-4AF7-82E0-23BE2024603E"',
-              'Version="1.0.0.0"',
+              ('Version="{0}"' -f '${{ steps.package_version.outputs.msix_version }}'),
               'ProcessorArchitecture="x64"',
               'Executable="codex-usage-win.exe"',
               'EntryPoint="windows.fullTrustApplication"',
@@ -174,7 +185,7 @@ jobs:
       - name: Upload MSIX test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: codex-usage-win-msix-1.0.0.0
+          name: codex-usage-win-msix-${{ steps.package_version.outputs.msix_version }}
           path: |
             dist/*
           if-no-files-found: error
