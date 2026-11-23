@@ -1,7 +1,5 @@
 $ErrorActionPreference = 'Stop'
 
-$ExpectedVersion = '1.0.0'
-
 $CargoToml = Get-Content -Raw -LiteralPath 'Cargo.toml'
 $PackageMatch = [regex]::Match(
     $CargoToml,
@@ -10,8 +8,9 @@ $PackageMatch = [regex]::Match(
 if (-not $PackageMatch.Success) {
     throw 'Unable to locate the package version in Cargo.toml.'
 }
-if ($PackageMatch.Groups[1].Value -ne $ExpectedVersion) {
-    throw "Cargo.toml package version must be $ExpectedVersion, found $($PackageMatch.Groups[1].Value)."
+$ExpectedVersion = $PackageMatch.Groups[1].Value
+if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Cargo package version must be semantic x.y.z; found $ExpectedVersion."
 }
 
 $CargoLock = Get-Content -Raw -LiteralPath 'Cargo.lock'
@@ -40,13 +39,13 @@ if ($BuildSource -notmatch 'env!\("CARGO_PKG_VERSION"\)') {
 }
 
 $OldProductVersion = '1.9' + '.1'
-$OldProductVersionHits = git grep -n -F $OldProductVersion -- . ':(exclude)Cargo.lock' ':(exclude)scripts/assert-v1-version.ps1' 2>$null
+$OldProductVersionHits = git grep -n -F $OldProductVersion -- . ':(exclude)Cargo.lock' ':(exclude)scripts/assert-version-consistency.ps1' 2>$null
 if ($LASTEXITCODE -eq 0 -and $OldProductVersionHits) {
-    throw "Old product version $OldProductVersion remains in tracked files:`n$($OldProductVersionHits -join "`n")"
+    throw "Old product version $OldProductVersion remains in tracked files:"
 }
 if ($LASTEXITCODE -notin @(0, 1)) {
     throw 'git grep failed while checking for stale product version strings.'
 }
 
-Write-Output "Version contract verified: v$ExpectedVersion"
+Write-Output "Version consistency contract verified: v$ExpectedVersion"
 exit 0

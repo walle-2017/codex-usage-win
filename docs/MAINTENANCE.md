@@ -81,9 +81,8 @@ Panel and tooltip Composition blur are independently active only when the config
 - `src/window/taskbar_replica.rs` owns bounded taskbar-specific child window replicas, parent validation, the single service HWND and resource guards.
 - `src/window/blur_backdrop.rs` owns DirectComposition Gaussian blur lifecycle, target validation and taskbar-specific parked-context reuse.
 - These are Rust child modules, not runtime feature switches. A split must not change HWND parents, mouse capture or rendering order.
-- Verified application baseline (2026-10-16): `9c00439` (`fix/settings-focus-frosted-alpha`), including module extraction, tooltip foreground ownership, outside-taskbar drag and settings/frosted-alpha fixes. Keep it as the rollback point during final cleanup.
-- The historical pre-extraction cleanup baseline is `0c65724`; module-extraction and subsequent fixes have now passed Windows CI and manual regression.
-- Continue desktop and vertical-taskbar refinements on `feature/vertical-taskbar-support`; do not change or merge into `main` without final review.
+- The maintained source of truth is `main`. PR #28 (native quick settings) and PR #29 (Win32/GDI lifetime and Settings modularization) were merged on 2026-11-23 after Windows CI/MSIX and manual regression testing. Do not use previously deleted development branches as a maintenance baseline.
+- Future changes should start from a fresh branch off `main`, with Windows CI/MSIX and targeted manual review before merge. Keep the current taskbar replica and native Settings behavior unchanged unless a feature explicitly requires it.
 
 ## Verification
 

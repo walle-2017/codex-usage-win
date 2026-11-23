@@ -4,12 +4,12 @@ Codex Usage Win is a single native Windows executable. Installation places the e
 
 ## Direct installation
 
-- Install directory: `%LOCALAPPDATA%\Programs\CodexUsage`
-- Executable: `%LOCALAPPDATA%\Programs\CodexUsage\codex-usage-win.exe`
-- Uninstall helper: `%LOCALAPPDATA%\Programs\CodexUsage\uninstall.ps1`
+- Install directory: `%LOCALAPPDATA%\Programs\CodexUsageWin`
+- Executable: `%LOCALAPPDATA%\Programs\CodexUsageWin\codex-usage-win.exe`
+- Uninstall helper: `%LOCALAPPDATA%\Programs\CodexUsageWin\uninstall.ps1`
 - Start menu shortcut: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Codex Usage Win.lnk`
 - Desktop shortcut: `Codex Usage Win.lnk`
-- Add/Remove Programs key: `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsage`
+- Add/Remove Programs key: `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageWin`
 
 The installer is per-user and does not request elevation. It verifies the release SHA256 before replacing an existing executable. Replacement uses a staged `.new` file and preserves the previous executable as `.old` until the new installation has completed successfully.
 

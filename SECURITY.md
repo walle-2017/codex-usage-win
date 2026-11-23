@@ -2,7 +2,7 @@
 
 ## Supported version
 
-The latest stable release is supported. Older releases are retained for migration and historical reproducibility.
+The latest published stable release is supported. Earlier pre-v1.0.0 development tags and GitHub Release assets were retired during the v1.0.0 baseline reset.
 
 ## Reporting a vulnerability
 

@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $style = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style.rs')
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
+$windowTests = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tests.rs')
 $replica = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\taskbar_replica.rs')
 $settings = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window.rs')
 $appearancePaint = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\style_window\appearance_paint.rs')
@@ -43,7 +44,7 @@ if (-not $editorPaint.Contains('Alpha < 255')) {
 if ($window -notmatch '(?s)fn panel_blur_backdrop_needed\(style: &ThemeStyle\) -> bool\s*\{\s*style\.panel_frosted_strength > 0\s*\}') {
     throw 'Frosted Composition visual must be prepared whenever strength > 0.'
 }
-if ($window -notmatch 'fn frosted_backdrop_is_prepared_before_panel_alpha_becomes_translucent\(') {
+if ($windowTests -notmatch 'fn frosted_backdrop_is_prepared_before_panel_alpha_becomes_translucent\(') {
     throw 'Alpha 255 to 254 transition must retain its regression test.'
 }
 if ($replica -notmatch 's\.styles\.active\(s\.is_dark\)\.panel_frosted_active\(\)') {

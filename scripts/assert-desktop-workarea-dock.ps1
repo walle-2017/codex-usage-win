@@ -1,6 +1,7 @@
 # Explicit Desktop uses exact visible-edge contact; fallback retains Explorer docking.
 $ErrorActionPreference = 'Stop'
 $window = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window.rs')
+$window += [Environment]::NewLine + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\tests.rs'))
 $window += "`n" + (Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\floating_geometry.rs'))
 $blur = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\window\blur_backdrop.rs')
 

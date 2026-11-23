@@ -421,13 +421,6 @@ impl StyleSettings {
         }
     }
 
-    pub fn reset_active(&mut self, is_dark: bool) {
-        if is_dark {
-            self.dark = ThemeStyle::dark_default();
-        } else {
-            self.light = ThemeStyle::light_default();
-        }
-    }
 }
 
 fn normalize_color(value: &str, fallback: &str) -> String {
