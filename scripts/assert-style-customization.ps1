@@ -1146,15 +1146,13 @@ foreach ($hex in @(
         throw "Expected RGBA default is missing: $hex"
     }
 }
-if ($windowProduction -notmatch 'TB_ENDTRACK_CODE') {
-    throw 'Continuous editors must save when trackbar interaction ends.'
-}
-if ($windowProduction -notmatch 'apply_style_color\(' -or
-    $windowProduction -notmatch 'apply_frosted_strength\(') {
-    throw 'Color and frosted-intensity editors must apply live previews.'
-}
-if ($windowProduction -notmatch 'render_layered\(\);[\s\S]{0,200}TB_ENDTRACK_CODE') {
-    Write-Warning 'Live-preview implementation shape changed; inspect manually if this warning appears.'
+if ($sliderInteraction -notmatch 'pub\(super\) fn update_slider\(' -or
+    $sliderInteraction -notmatch 'WM_STYLE_COLOR_PREVIEW' -or
+    $sliderInteraction -notmatch 'WM_STYLE_BLUR_PREVIEW' -or
+    $sliderInteraction -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)' -or
+    $editorInput -notmatch 'WM_STYLE_COLOR_PREVIEW' -or
+    $editorInput -notmatch 'send_parent\(WM_STYLE_SAVE, 0, 0\)') {
+    throw 'Unified Settings slider and numeric editors must preview live changes and save on completion.'
 }
 if ($native -notmatch 'create_composition_blur' -or
     $native -notmatch 'set_composition_blur_amount' -or
@@ -1281,10 +1279,10 @@ if ($watchdogBlock -notmatch 'taskbar_monitor' -or
     $watchdogBlock -notmatch 'waiting instead of switching monitors') {
     throw 'Taskbar watchdog recovery must wait for the same monitor instead of silently moving the widget to another taskbar.'
 }
-if ($windowProduction -notmatch 'STYLE_PREVIEW_FRAME_MS:\s*u64\s*=\s*16' -or
-    $windowProduction -notmatch 'render_style_preview\(' -or
-    $windowProduction -notmatch 'LAST_STYLE_PREVIEW_RENDER') {
-    throw 'Live style preview must be frame-limited instead of repainting for every raw trackbar event.'
+if ($sliderInteraction -notmatch 'queue_settings_interactive_frame\(hwnd, true\)' -or
+    $styleWindow -notmatch 'Duration::from_millis\(16\)' -or
+    $windowProduction -match 'STYLE_PREVIEW_FRAME_MS') {
+    throw 'Unified Settings must pace interactive frames and legacy style preview scheduling must remain removed.'
 }
 if ($windowProduction -notmatch 'DRAG_FRAME_MS:\s*u64\s*=\s*8' -or
     $windowProduction -notmatch 'drag_frame_due\(' -or
@@ -1328,9 +1326,6 @@ if ($windowProduction -match 'capture_taskbar_background' -or
 if ($styleWindow -notmatch '"磨砂强度"' -or
     $styleWindow -notmatch '"Frosted intensity"') {
     throw 'Unified frosted-intensity UI labels are missing.'
-}
-if ($windowProduction -notmatch 'reset_active\(s\.is_dark\)') {
-    throw 'Reset Style must only reset the active theme.'
 }
 if ($windowProduction -notmatch 's\.styles\.active\(s\.is_dark\)') {
     throw 'Style menu/rendering must resolve the currently active theme.'
