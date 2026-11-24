@@ -38,7 +38,7 @@ Store packages are built with:
 
 Store builds must not initiate GitHub executable self-updates. Package updates are managed by Microsoft Store.
 
-**Version reset note:** v1.0.0 is the GitHub release baseline. A Microsoft Store package version must increase above any version already submitted to Store; the v1.0.0.0 MSIX output must not be submitted as a downgrade over v1.0.6.0.
+Microsoft Store package versions must always increase above previously submitted package versions, independently of the GitHub Release version.
 
 ## Settings schema
 
@@ -81,7 +81,7 @@ Panel and tooltip Composition blur are independently active only when the config
 - `src/window/taskbar_replica.rs` owns bounded taskbar-specific child window replicas, parent validation, the single service HWND and resource guards.
 - `src/window/blur_backdrop.rs` owns DirectComposition Gaussian blur lifecycle, target validation and taskbar-specific parked-context reuse.
 - These are Rust child modules, not runtime feature switches. A split must not change HWND parents, mouse capture or rendering order.
-- The maintained source of truth is `main`. PR #28 (native quick settings) and PR #29 (Win32/GDI lifetime and Settings modularization) were merged on 2026-11-23 after Windows CI/MSIX and manual regression testing. Do not use previously deleted development branches as a maintenance baseline.
+- The maintained source of truth is `main`. Development and maintenance branches must be created from its current head and validated before merge.
 - Future changes should start from a fresh branch off `main`, with Windows CI/MSIX and targeted manual review before merge. Keep the current taskbar replica and native Settings behavior unchanged unless a feature explicitly requires it.
 
 ## Verification
