@@ -1,5 +1,6 @@
 """Generate and verify all application icons from the canonical documentation PNG."""
 import argparse
+import math
 from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 
@@ -59,8 +60,10 @@ def verify_image(actual, expected, label, tolerance=3):
 
 
 def asset_sizes():
-    result = {"Square44x44Logo.png": 44, "StoreLogo.png": 50,
-              "Square150x150Logo.png": 150}
+    result = {}
+    for scale in (100, 125, 150, 200, 250, 300, 400):
+        for logo, base in (("Square44x44Logo", 44), ("Square150x150Logo", 150), ("StoreLogo", 50)):
+            result[f"{logo}.scale-{scale}.png"] = math.ceil(base * scale / 100)
     for size in TARGET_SIZES:
         for suffix in ("", "_altform-unplated", "_altform-lightunplated"):
             result[f"Square44x44Logo.targetsize-{size}{suffix}.png"] = size
@@ -82,7 +85,7 @@ def verify(source, msix_assets):
         # against the same artwork with a modest tolerance for small icons.
         for name, size in asset_sizes().items():
             with Image.open(msix_assets / name) as image:
-                if name == "StoreLogo.png":
+                if name.startswith("StoreLogo."):
                     verify_store_icon(image, source, size, name, tolerance=12)
                 else:
                     verify_image(image, scaled(source, size), name, tolerance=12)

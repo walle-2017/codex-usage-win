@@ -120,9 +120,16 @@ function Write-ScaledPng {
 }
 
 $assets = Join-Path $stage "Assets"
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square44x44Logo.png") -Width 44 -Height 44
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "StoreLogo.png") -Width 50 -Height 50 -OpaqueBlackBackground
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square150x150Logo.png") -Width 150 -Height 150
+
+# Scale-qualified assets serve high-DPI Shell surfaces, including Search.
+# Always resize directly from the canonical source, not the 44px fallback.
+foreach ($scale in @(100, 125, 150, 200, 250, 300, 400)) {
+    foreach ($logo in @(@{Name="Square44x44Logo"; Base=44}, @{Name="Square150x150Logo"; Base=150}, @{Name="StoreLogo"; Base=50})) {
+        $size = [int][Math]::Ceiling($logo.Base * $scale / 100.0)
+        $name = "$($logo.Name).scale-${scale}.png"
+        Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets $name) -Width $size -Height $size -OpaqueBlackBackground:($logo.Name -eq "StoreLogo")
+    }
+}
 
 # Target-size variants are selected by the Windows Shell for taskbar and Start.
 # Unplated variants preserve the application's own rounded transparent artwork.
