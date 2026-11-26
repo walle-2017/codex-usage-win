@@ -127,6 +127,20 @@ foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
     }
 }
 
+# Qualified visual assets require a Package Resource Index for Shell lookup.
+$makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
+if (-not (Test-Path -LiteralPath $makePri -PathType Leaf)) {
+    throw "makepri.exe was not found alongside MakeAppx."
+}
+$priConfig = Join-Path $workRoot "priconfig.xml"
+$priPath = Join-Path $stage "resources.pri"
+& $makePri createconfig /cf $priConfig /dq en-US /o
+if ($LASTEXITCODE -ne 0) { throw "MakePri createconfig failed." }
+& $makePri new /pr $stage /cf $priConfig /of $priPath /o
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $priPath -PathType Leaf)) {
+    throw "MakePri failed to generate resources.pri."
+}
+
 $packageName = "codex-usage-win_{0}_x64.msix" -f $PackageVersion
 $packagePath = Join-Path $outputRoot $packageName
 Remove-Item -Force $packagePath -ErrorAction SilentlyContinue

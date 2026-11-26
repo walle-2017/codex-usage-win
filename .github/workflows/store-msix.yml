@@ -187,6 +187,24 @@ jobs:
           python scripts/generate_icons.py --check --msix-assets (Join-Path $verifyDir "Assets")
           if ($LASTEXITCODE -ne 0) { throw "MSIX artwork validation failed." }
 
+          $pri = Join-Path $verifyDir "resources.pri"
+          if (-not (Test-Path -LiteralPath $pri -PathType Leaf)) {
+              throw "Missing package resource index."
+          }
+          $makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
+          $priDump = Join-Path $env:RUNNER_TEMP "msix-pri.xml"
+          & $makePri dump /if $pri /of $priDump /dt detailed /o
+          if ($LASTEXITCODE -ne 0) { throw "MakePri dump failed." }
+          $index = Get-Content -Raw -LiteralPath $priDump
+          foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)) {
+              foreach ($suffix in @("unplated", "lightunplated")) {
+                  $name = "Square44x44Logo.targetsize-${size}_altform-${suffix}.png"
+                  if ($index -notmatch [regex]::Escape($name)) {
+                      throw "Unindexed taskbar icon: $name"
+                  }
+              }
+          }
+
       - name: Generate checksums
         shell: pwsh
         run: |
