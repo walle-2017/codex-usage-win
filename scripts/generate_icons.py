@@ -23,6 +23,27 @@ def scaled(source, size):
     return source.resize((size, size), Image.Resampling.LANCZOS)
 
 
+def store_listing_icon(source, size=300):
+    # Store adds its own rounded frame; avoid a second transparent margin.
+    background = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    background.alpha_composite(scaled(source, size))
+    return background.convert("RGB")
+
+
+def verify_store_icon(actual, source, size=300, label="Store listing PNG", tolerance=3):
+    if actual.size != (size, size):
+        raise ValueError(f"{label}: incorrect dimensions")
+    rgba = actual.convert("RGBA")
+    if rgba.getchannel("A").getextrema() != (255, 255):
+        raise ValueError(f"{label}: background must be fully opaque")
+    corners = [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)]
+    if any(rgba.getpixel(point) != (0, 0, 0, 255) for point in corners):
+        raise ValueError(f"{label}: background must extend to all corners")
+    means = ImageStat.Stat(ImageChops.difference(actual.convert("RGB"), store_listing_icon(source, size))).mean
+    if max(means) > tolerance:
+        raise ValueError(f"{label}: artwork differs from canonical icon: {means}")
+
+
 def verify_image(actual, expected, label, tolerance=3):
     actual = actual.convert("RGBA")
     if actual.size != expected.size:
@@ -50,7 +71,7 @@ def verify(source, msix_assets):
     with Image.open(ICON_DIR / "256x256.png") as image:
         verify_image(image, source, "runtime PNG")
     with Image.open(DOC_ICON_DIR / "store-icon.png") as image:
-        verify_image(image, scaled(source, 300), "Store listing PNG")
+        verify_store_icon(image, source)
     with Image.open(ICON_DIR / "icon.ico") as image:
         if image.ico.sizes() != {(n, n) for n in ICO_SIZES}:
             raise ValueError("ICO frame sizes do not match")
@@ -61,7 +82,10 @@ def verify(source, msix_assets):
         # against the same artwork with a modest tolerance for small icons.
         for name, size in asset_sizes().items():
             with Image.open(msix_assets / name) as image:
-                verify_image(image, scaled(source, size), name, tolerance=12)
+                if name == "StoreLogo.png":
+                    verify_store_icon(image, source, size, name, tolerance=12)
+                else:
+                    verify_image(image, scaled(source, size), name, tolerance=12)
 
 
 def main():
@@ -75,7 +99,7 @@ def main():
         source.save(ICON_DIR / "256x256.png", optimize=True)
         source.save(ICON_DIR / "icon.ico", format="ICO",
                     sizes=[(n, n) for n in ICO_SIZES])
-        scaled(source, 300).save(DOC_ICON_DIR / "store-icon.png", optimize=True)
+        store_listing_icon(source).save(DOC_ICON_DIR / "store-icon.png", optimize=True)
     verify(source, args.msix_assets)
     print("PASS: application icons match canonical artwork and preserve transparency")
 

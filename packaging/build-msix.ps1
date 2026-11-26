@@ -77,7 +77,8 @@ function Write-ScaledPng {
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][int]$Width,
-        [Parameter(Mandatory = $true)][int]$Height
+        [Parameter(Mandatory = $true)][int]$Height,
+        [switch]$OpaqueBlackBackground
     )
 
     $sourceImage = [System.Drawing.Image]::FromFile($Source)
@@ -87,8 +88,13 @@ function Write-ScaledPng {
             $bitmap.SetResolution(96, 96)
             $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
             try {
-                $graphics.Clear([System.Drawing.Color]::Transparent)
-                $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+                if ($OpaqueBlackBackground) {
+                    $graphics.Clear([System.Drawing.Color]::Black)
+                    $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+                } else {
+                    $graphics.Clear([System.Drawing.Color]::Transparent)
+                    $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+                }
                 $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
                 $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
                 $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
@@ -115,7 +121,7 @@ function Write-ScaledPng {
 
 $assets = Join-Path $stage "Assets"
 Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square44x44Logo.png") -Width 44 -Height 44
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "StoreLogo.png") -Width 50 -Height 50
+Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "StoreLogo.png") -Width 50 -Height 50 -OpaqueBlackBackground
 Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square150x150Logo.png") -Width 150 -Height 150
 
 # Target-size variants are selected by the Windows Shell for taskbar and Start.
