@@ -33,7 +33,7 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Release executable not found: $exePath. Run 'cargo build --release' first."
 }
 
-$sourceIcon = Join-Path $repoRoot "src\icons\256x256.png"
+$sourceIcon = Join-Path $repoRoot "docs\assets\icon.png"
 if (-not (Test-Path -LiteralPath $sourceIcon -PathType Leaf)) {
     throw "Source icon not found: $sourceIcon"
 }
@@ -117,6 +117,15 @@ $assets = Join-Path $stage "Assets"
 Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square44x44Logo.png") -Width 44 -Height 44
 Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "StoreLogo.png") -Width 50 -Height 50
 Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square150x150Logo.png") -Width 150 -Height 150
+
+# Target-size variants are selected by the Windows Shell for taskbar and Start.
+# Unplated variants preserve the application's own rounded transparent artwork.
+foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)) {
+    foreach ($suffix in @("", "_altform-unplated", "_altform-lightunplated")) {
+        $name = "Square44x44Logo.targetsize-${size}${suffix}.png"
+        Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets $name) -Width $size -Height $size
+    }
+}
 
 $packageName = "codex-usage-win_{0}_x64.msix" -f $PackageVersion
 $packagePath = Join-Path $outputRoot $packageName

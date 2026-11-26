@@ -1,81 +1,83 @@
-"""Generate deterministic PNG and ICO assets from the Codex Usage icon geometry."""
-
+"""Generate and verify all application icons from the canonical documentation PNG."""
+import argparse
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageStat
 
 ROOT = Path(__file__).resolve().parents[1]
-ICON_DIR = ROOT / "src" / "icons"
 DOC_ICON_DIR = ROOT / "docs" / "assets"
-VERIFY_PATH = ROOT / "target" / "codex-usage-icon-verification.png"
-
-NAVY_TOP = (20, 38, 64, 255)
-NAVY_BOTTOM = (7, 15, 28, 255)
-CYAN = "#36C5F0"
-WHITE = "#F8FAFC"
-LIME = "#A3E635"
+ICON_DIR = ROOT / "src" / "icons"
+SOURCE = DOC_ICON_DIR / "icon.png"
+ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+TARGET_SIZES = (16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
 
 
-def render_icon(size: int) -> Image.Image:
-    scale = max(4, 1024 // size)
-    canvas = size * scale
-    image = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-
-    def px(value: float) -> int:
-        return round(value * canvas / 256)
-
-    # A restrained vertical gradient keeps the large icon dimensional while
-    # preserving a solid silhouette when Windows scales it down to 16 px.
-    gradient = Image.new("RGBA", (canvas, canvas))
-    pixels = gradient.load()
-    for y in range(canvas):
-        t = y / max(1, canvas - 1)
-        color = tuple(round(a + (b - a) * t) for a, b in zip(NAVY_TOP, NAVY_BOTTOM))
-        for x in range(canvas):
-            pixels[x, y] = color
-    mask = Image.new("L", (canvas, canvas), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        (0, 0, canvas - 1, canvas - 1), radius=px(58), fill=255
-    )
-    image.alpha_composite(Image.composite(gradient, Image.new("RGBA", gradient.size), mask))
-    draw = ImageDraw.Draw(image)
-
-    # The open C-shaped ring is readable at every ICO size and represents a
-    # quota window without looking like a calculator or a battery widget.
-    arc_box = (px(45), px(45), px(211), px(211))
-    draw.arc(arc_box, 42, 318, fill=WHITE, width=px(28))
-    draw.arc(arc_box, 42, 128, fill=CYAN, width=px(28))
-    draw.ellipse((px(190), px(112), px(220), px(142)), fill=LIME)
-
-    return image.resize((size, size), Image.Resampling.LANCZOS)
+def source_image():
+    with Image.open(SOURCE) as image:
+        result = image.convert("RGBA")
+    if result.size != (256, 256) or result.getchannel("A").getextrema()[0] != 0:
+        raise ValueError("Canonical icon must be 256x256 with transparency")
+    return result
 
 
-def main() -> None:
-    ICON_DIR.mkdir(parents=True, exist_ok=True)
-    DOC_ICON_DIR.mkdir(parents=True, exist_ok=True)
-    VERIFY_PATH.parent.mkdir(parents=True, exist_ok=True)
+def scaled(source, size):
+    return source.resize((size, size), Image.Resampling.LANCZOS)
 
-    rendered = {size: render_icon(size) for size in (16, 32, 48, 256)}
-    rendered[256].save(ICON_DIR / "256x256.png", optimize=True)
 
-    rendered[256].save(
-        ICON_DIR / "icon.ico",
-        format="ICO",
-        sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)],
-    )
-    rendered[256].save(DOC_ICON_DIR / "icon.png", optimize=True)
+def verify_image(actual, expected, label, tolerance=3):
+    actual = actual.convert("RGBA")
+    if actual.size != expected.size:
+        raise ValueError(f"{label}: unexpected size {actual.size}")
+    if actual.getchannel("A").getextrema()[0] != 0:
+        raise ValueError(f"{label}: missing transparent pixels")
+    # Compare visible pixels and alpha, ignoring RGB hidden by transparency.
+    # Allow small resampling/rounding differences across encoders.
+    difference = ImageChops.difference(actual.convert("RGBa"), expected.convert("RGBa"))
+    means = ImageStat.Stat(difference).mean
+    if max(means) > tolerance:
+        raise ValueError(f"{label}: artwork differs from canonical icon: {means}")
 
-    sheet = Image.new("RGB", (760, 360), "#CBD5E1")
-    draw = ImageDraw.Draw(sheet)
-    for row, background in enumerate(("#F8FAFC", "#111827")):
-        top = 20 + row * 170
-        draw.rounded_rectangle((20, top, 740, top + 150), radius=18, fill=background)
-        x = 55
-        for size in (16, 32, 48, 128):
-            icon = render_icon(size)
-            sheet.paste(icon, (x, top + (150 - size) // 2), icon)
-            x += size + 70
-    sheet.save(VERIFY_PATH, optimize=True)
+
+def asset_sizes():
+    result = {"Square44x44Logo.png": 44, "StoreLogo.png": 50,
+              "Square150x150Logo.png": 150}
+    for size in TARGET_SIZES:
+        for suffix in ("", "_altform-unplated", "_altform-lightunplated"):
+            result[f"Square44x44Logo.targetsize-{size}{suffix}.png"] = size
+    return result
+
+
+def verify(source, msix_assets):
+    with Image.open(ICON_DIR / "256x256.png") as image:
+        verify_image(image, source, "runtime PNG")
+    with Image.open(DOC_ICON_DIR / "store-icon.png") as image:
+        verify_image(image, scaled(source, 300), "Store listing PNG")
+    with Image.open(ICON_DIR / "icon.ico") as image:
+        if image.ico.sizes() != {(n, n) for n in ICO_SIZES}:
+            raise ValueError("ICO frame sizes do not match")
+        for size in ICO_SIZES:
+            verify_image(image.ico.getimage((size, size)), scaled(source, size), f"ICO {size}")
+    if msix_assets:
+        # GDI+ uses bicubic rather than Lanczos; use an independent comparison
+        # against the same artwork with a modest tolerance for small icons.
+        for name, size in asset_sizes().items():
+            with Image.open(msix_assets / name) as image:
+                verify_image(image, scaled(source, size), name, tolerance=12)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="Verify without modifying files")
+    parser.add_argument("--msix-assets", type=Path, help="Also verify extracted MSIX Assets directory")
+    args = parser.parse_args()
+    source = source_image()
+    if not args.check:
+        ICON_DIR.mkdir(parents=True, exist_ok=True)
+        source.save(ICON_DIR / "256x256.png", optimize=True)
+        source.save(ICON_DIR / "icon.ico", format="ICO",
+                    sizes=[(n, n) for n in ICO_SIZES])
+        scaled(source, 300).save(DOC_ICON_DIR / "store-icon.png", optimize=True)
+    verify(source, args.msix_assets)
+    print("PASS: application icons match canonical artwork and preserve transparency")
 
 
 if __name__ == "__main__":
