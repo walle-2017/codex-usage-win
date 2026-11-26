@@ -192,18 +192,15 @@ jobs:
               throw "Missing package resource index."
           }
           $makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
-          # MakePri may split scale-qualified resources into separate PRI files.
-          # Validate the union of actual indexes extracted from the package.
+          # The standalone package must index every candidate in one PRI.
           $priFiles = @(Get-ChildItem -LiteralPath $verifyDir -Filter 'resources*.pri' -File)
-          $index = ($priFiles | ForEach-Object {
-              $priDump = Join-Path $env:RUNNER_TEMP ("msix-" + $_.BaseName + ".xml")
-              & $makePri dump /if $_.FullName /of $priDump /dt detailed /o | Out-Host
-              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $priDump -PathType Leaf)) {
-                  throw "MakePri dump failed: $($_.Name)"
-              }
-              Write-Host "Validated resource index: $($_.Name)"
-              Get-Content -Raw -LiteralPath $priDump
-          }) -join "`n"
+          if ($priFiles.Count -ne 1 -or $priFiles[0].Name -ne "resources.pri") {
+              throw "Expected one unified package resource index."
+          }
+          $priDump = Join-Path $env:RUNNER_TEMP "msix-pri.xml"
+          & $makePri dump /if $pri /of $priDump /dt detailed /o
+          if ($LASTEXITCODE -ne 0) { throw "MakePri dump failed." }
+          $index = Get-Content -Raw -LiteralPath $priDump
           foreach ($scale in @(100, 125, 150, 200, 250, 300, 400)) {
               foreach ($logo in @("Square44x44Logo", "Square150x150Logo", "StoreLogo")) {
                   $name = "$logo.scale-${scale}.png"

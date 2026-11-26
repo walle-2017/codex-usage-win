@@ -149,9 +149,23 @@ $priConfig = Join-Path $workRoot "priconfig.xml"
 $priPath = Join-Path $stage "resources.pri"
 & $makePri createconfig /cf $priConfig /dq en-US /o
 if ($LASTEXITCODE -ne 0) { throw "MakePri createconfig failed." }
+
+# Keep all qualifiers in the main PRI for a standalone MSIX, rather than
+# generating separate resource-package indexes that Shell may not load.
+[xml]$config = Get-Content -Raw -LiteralPath $priConfig
+$packagingNodes = @($config.SelectNodes("//*[local-name()='packaging']"))
+foreach ($node in $packagingNodes) {
+    [void]$node.ParentNode.RemoveChild($node)
+}
+$config.Save($priConfig)
+
 & $makePri new /pr $stage /cf $priConfig /of $priPath /o
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $priPath -PathType Leaf)) {
     throw "MakePri failed to generate resources.pri."
+}
+$splitIndexes = @(Get-ChildItem -LiteralPath $stage -Filter 'resources.*.pri' -File)
+if ($splitIndexes.Count -ne 0) {
+    throw "Standalone MSIX must contain a single resources.pri."
 }
 
 $packageName = "codex-usage-win_{0}_x64.msix" -f $PackageVersion
