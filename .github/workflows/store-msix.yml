@@ -1,4 +1,4 @@
-name: Search Geometry MSIX
+name: Search Small Resource MSIX
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [Mark80, MarkOthers, Fit80]
+        variant: [Mark40, Mark32, MarkBoth, MarkRest]
     steps:
       - uses: actions/checkout@v4
 
@@ -126,7 +126,7 @@ jobs:
 
           $manifestText = Get-Content -Raw (Join-Path $verifyDir "AppxManifest.xml")
           $required = @(
-              'Name="WalleStudio.CodexUsageWin.GeometryProbe.${{ matrix.variant }}"',
+              'Name="WalleStudio.CodexUsageWin.SmallProbe.${{ matrix.variant }}"',
               'Publisher="CN=2AE5CECF-93C9-4AF7-82E0-23BE2024603E"',
               ('Version="{0}"' -f '${{ steps.package_version.outputs.msix_version }}'),
               'ProcessorArchitecture="x64"',
@@ -163,7 +163,7 @@ jobs:
               }
           }
 
-          python scripts/search_geometry_probe.py (Join-Path $verifyDir "Assets") "${{ matrix.variant }}" dist/search-geometry-probe.json --verify
+          python scripts/search_small_probe.py (Join-Path $verifyDir "Assets") "${{ matrix.variant }}" dist/search-small-probe.json --verify
           if ($LASTEXITCODE -ne 0) { throw "Diagnostic artwork validation failed." }
 
           $pri = Join-Path $verifyDir "resources.pri"
@@ -211,12 +211,12 @@ jobs:
       - name: Upload MSIX test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: search-geometry-${{ matrix.variant }}-msix-${{ steps.package_version.outputs.msix_version }}
+          name: search-small-${{ matrix.variant }}-msix-${{ steps.package_version.outputs.msix_version }}
           path: |
             dist/*-test-signed.msix
             dist/*.cer
             dist/install-test.ps1
-            dist/search-geometry-probe.json
+            dist/search-small-probe.json
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
