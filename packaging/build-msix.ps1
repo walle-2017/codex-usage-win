@@ -33,7 +33,7 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Release executable not found: $exePath. Run 'cargo build --release' first."
 }
 
-$sourceIcon = Join-Path $repoRoot "src\icons\256x256.png"
+$sourceIcon = Join-Path $repoRoot "docs\assets\icon.png"
 if (-not (Test-Path -LiteralPath $sourceIcon -PathType Leaf)) {
     throw "Source icon not found: $sourceIcon"
 }
@@ -77,7 +77,8 @@ function Write-ScaledPng {
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][int]$Width,
-        [Parameter(Mandatory = $true)][int]$Height
+        [Parameter(Mandatory = $true)][int]$Height,
+        [switch]$OpaqueBlackBackground
     )
 
     $sourceImage = [System.Drawing.Image]::FromFile($Source)
@@ -87,8 +88,13 @@ function Write-ScaledPng {
             $bitmap.SetResolution(96, 96)
             $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
             try {
-                $graphics.Clear([System.Drawing.Color]::Transparent)
-                $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+                if ($OpaqueBlackBackground) {
+                    $graphics.Clear([System.Drawing.Color]::Black)
+                    $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+                } else {
+                    $graphics.Clear([System.Drawing.Color]::Transparent)
+                    $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+                }
                 $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
                 $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
                 $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
@@ -114,9 +120,58 @@ function Write-ScaledPng {
 }
 
 $assets = Join-Path $stage "Assets"
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square44x44Logo.png") -Width 44 -Height 44
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "StoreLogo.png") -Width 50 -Height 50
-Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets "Square150x150Logo.png") -Width 150 -Height 150
+
+# Scale-qualified assets serve high-DPI Shell surfaces, including Search.
+# Always resize directly from the canonical source, not the 44px fallback.
+foreach ($scale in @(100, 125, 150, 200, 250, 300, 400)) {
+    foreach ($logo in @(@{Name="Square44x44Logo"; Base=44}, @{Name="Square150x150Logo"; Base=150}, @{Name="StoreLogo"; Base=50})) {
+        $size = [int][Math]::Ceiling($logo.Base * $scale / 100.0)
+        $name = "$($logo.Name).scale-${scale}.png"
+        Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets $name) -Width $size -Height $size -OpaqueBlackBackground:($logo.Name -eq "StoreLogo")
+    }
+}
+
+# Target-size variants are selected by the Windows Shell for taskbar and Start.
+# Unplated variants preserve rounded transparent artwork except the verified
+# Search-specific compatibility treatment applied below.
+foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)) {
+    foreach ($suffix in @("", "_altform-unplated", "_altform-lightunplated")) {
+        $name = "Square44x44Logo.targetsize-${size}${suffix}.png"
+        Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets $name) -Width $size -Height $size
+    }
+}
+
+# Reproduce the verified Bold40 diagnostic pipeline before indexing assets.
+python (Join-Path $repoRoot "scripts\generate_icons.py") --prepare-msix-assets $assets --msix-report (Join-Path $outputRoot "msix-icon-report.json")
+if ($LASTEXITCODE -ne 0) { throw "MSIX icon compatibility preparation failed." }
+
+# Qualified visual assets require a Package Resource Index for Shell lookup.
+$makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
+if (-not (Test-Path -LiteralPath $makePri -PathType Leaf)) {
+    throw "makepri.exe was not found alongside MakeAppx."
+}
+$priConfig = Join-Path $workRoot "priconfig.xml"
+$priPath = Join-Path $stage "resources.pri"
+& $makePri createconfig /cf $priConfig /dq en-US /o
+if ($LASTEXITCODE -ne 0) { throw "MakePri createconfig failed." }
+
+# Keep all qualifiers in the main PRI for a standalone MSIX, rather than
+# generating separate resource-package indexes that Shell may not load.
+[xml]$config = Get-Content -Raw -LiteralPath $priConfig
+$packagingNodes = @($config.SelectNodes("//*[local-name()='packaging']"))
+foreach ($node in $packagingNodes) {
+    [void]$node.ParentNode.RemoveChild($node)
+}
+$config.Save($priConfig)
+
+& $makePri new /pr $stage /cf $priConfig /of $priPath /o
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $priPath -PathType Leaf)) {
+    throw "MakePri failed to generate resources.pri."
+}
+$splitIndexes = @(Get-ChildItem -LiteralPath $stage -Filter 'resources.*.pri' -File)
+if ($splitIndexes.Count -ne 0) {
+    throw "Standalone MSIX must contain a single resources.pri."
+}
 
 $packageName = "codex-usage-win_{0}_x64.msix" -f $PackageVersion
 $packagePath = Join-Path $outputRoot $packageName

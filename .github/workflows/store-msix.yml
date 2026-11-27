@@ -11,6 +11,8 @@ on:
       - 'Cargo.lock'
       - 'src/**'
       - 'assets/**'
+      - 'docs/assets/**'
+      - 'scripts/generate_icons.py'
       - 'native/**'
       - 'build.rs'
   pull_request:
@@ -23,6 +25,8 @@ on:
       - 'Cargo.lock'
       - 'src/**'
       - 'assets/**'
+      - 'docs/assets/**'
+      - 'scripts/generate_icons.py'
       - 'native/**'
       - 'build.rs'
   workflow_dispatch:
@@ -35,6 +39,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify canonical application icons
+        run: |
+          python -m pip install Pillow==11.3.0
+          python scripts/generate_icons.py --check
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
@@ -154,9 +167,9 @@ jobs:
 
           Add-Type -AssemblyName System.Drawing
           $expectedAssets = @{
-              "Square44x44Logo.png" = @(44, 44)
-              "StoreLogo.png" = @(50, 50)
-              "Square150x150Logo.png" = @(150, 150)
+              "Square44x44Logo.scale-100.png" = @(44, 44)
+              "StoreLogo.scale-100.png" = @(50, 50)
+              "Square150x150Logo.scale-100.png" = @(150, 150)
           }
           foreach ($name in $expectedAssets.Keys) {
               $path = Join-Path $verifyDir ("Assets\" + $name)
@@ -168,6 +181,40 @@ jobs:
                   }
               } finally {
                   $image.Dispose()
+              }
+          }
+
+          python scripts/generate_icons.py --check --msix-assets (Join-Path $verifyDir "Assets") --msix-report dist/msix-icon-report.json
+          if ($LASTEXITCODE -ne 0) { throw "MSIX artwork validation failed." }
+
+          $pri = Join-Path $verifyDir "resources.pri"
+          if (-not (Test-Path -LiteralPath $pri -PathType Leaf)) {
+              throw "Missing package resource index."
+          }
+          $makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
+          # The standalone package must index every candidate in one PRI.
+          $priFiles = @(Get-ChildItem -LiteralPath $verifyDir -Filter 'resources*.pri' -File)
+          if ($priFiles.Count -ne 1 -or $priFiles[0].Name -ne "resources.pri") {
+              throw "Expected one unified package resource index."
+          }
+          $priDump = Join-Path $env:RUNNER_TEMP "msix-pri.xml"
+          & $makePri dump /if $pri /of $priDump /dt detailed /o
+          if ($LASTEXITCODE -ne 0) { throw "MakePri dump failed." }
+          $index = Get-Content -Raw -LiteralPath $priDump
+          foreach ($scale in @(100, 125, 150, 200, 250, 300, 400)) {
+              foreach ($logo in @("Square44x44Logo", "Square150x150Logo", "StoreLogo")) {
+                  $name = "$logo.scale-${scale}.png"
+                  if ($index -notmatch [regex]::Escape($name)) {
+                      throw "Unindexed scale-qualified icon: $name"
+                  }
+              }
+          }
+          foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)) {
+              foreach ($suffix in @("", "_altform-unplated", "_altform-lightunplated")) {
+                  $name = "Square44x44Logo.targetsize-${size}${suffix}.png"
+                  if ($index -notmatch [regex]::Escape($name)) {
+                      throw "Unindexed taskbar icon: $name"
+                  }
               }
           }
 
