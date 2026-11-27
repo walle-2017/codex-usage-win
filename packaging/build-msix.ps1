@@ -140,6 +140,10 @@ foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
     }
 }
 
+# DIAGNOSTIC ONLY: tag each image before indexing.
+python (Join-Path $repoRoot "scripts\mark_search_probe.py") $assets (Join-Path $outputRoot "icon-probe-map.csv")
+if ($LASTEXITCODE -ne 0) { throw "Diagnostic icon tagging failed." }
+
 # Qualified visual assets require a Package Resource Index for Shell lookup.
 $makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
 if (-not (Test-Path -LiteralPath $makePri -PathType Leaf)) {

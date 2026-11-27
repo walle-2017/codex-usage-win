@@ -1,34 +1,9 @@
-name: Store MSIX Build
+name: Search Icon Probe MSIX
 
 on:
   push:
     branches:
-      - main
-    paths:
-      - 'packaging/**'
-      - '.github/workflows/store-msix.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'src/**'
-      - 'assets/**'
-      - 'docs/assets/**'
-      - 'scripts/generate_icons.py'
-      - 'native/**'
-      - 'build.rs'
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'packaging/**'
-      - '.github/workflows/store-msix.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'src/**'
-      - 'assets/**'
-      - 'docs/assets/**'
-      - 'scripts/generate_icons.py'
-      - 'native/**'
-      - 'build.rs'
+      - diagnostic/search-icon-probe
   workflow_dispatch:
 
 permissions:
@@ -147,7 +122,7 @@ jobs:
 
           $manifestText = Get-Content -Raw (Join-Path $verifyDir "AppxManifest.xml")
           $required = @(
-              'Name="WalleStudio.CodexUsageWin"',
+              'Name="WalleStudio.CodexUsageWin.IconProbe"',
               'Publisher="CN=2AE5CECF-93C9-4AF7-82E0-23BE2024603E"',
               ('Version="{0}"' -f '${{ steps.package_version.outputs.msix_version }}'),
               'ProcessorArchitecture="x64"',
@@ -184,8 +159,8 @@ jobs:
               }
           }
 
-          python scripts/generate_icons.py --check --msix-assets (Join-Path $verifyDir "Assets")
-          if ($LASTEXITCODE -ne 0) { throw "MSIX artwork validation failed." }
+          python scripts/mark_search_probe.py (Join-Path $verifyDir "Assets") dist/icon-probe-map.csv --verify
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostic artwork validation failed." }
 
           $pri = Join-Path $verifyDir "resources.pri"
           if (-not (Test-Path -LiteralPath $pri -PathType Leaf)) {
@@ -232,8 +207,12 @@ jobs:
       - name: Upload MSIX test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: codex-usage-win-msix-${{ steps.package_version.outputs.msix_version }}
+          name: search-icon-probe-msix-${{ steps.package_version.outputs.msix_version }}
           path: |
-            dist/*
+            dist/*-test-signed.msix
+            dist/*.cer
+            dist/install-test.ps1
+            dist/icon-probe-map.csv
+            dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
