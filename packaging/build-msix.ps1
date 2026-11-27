@@ -142,7 +142,7 @@ foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
 }
 
 # DIAGNOSTIC ONLY: A/B comparison using real artwork, not colored markers.
-python (Join-Path $repoRoot "scripts\search_alpha_probe.py") $assets $ProbeVariant (Join-Path $outputRoot "search-alpha-probe.json")
+python (Join-Path $repoRoot "scripts\search_hybrid_probe.py") $assets $ProbeVariant (Join-Path $outputRoot "search-hybrid-probe.json")
 if ($LASTEXITCODE -ne 0) { throw "Diagnostic icon preparation failed." }
 
 # Qualified visual assets require a Package Resource Index for Shell lookup.
