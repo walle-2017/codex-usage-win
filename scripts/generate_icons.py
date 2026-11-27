@@ -2,14 +2,15 @@
 import argparse
 import math
 from pathlib import Path
-from PIL import Image, ImageChops, ImageFilter, ImageStat
+from PIL import Image, ImageChops, ImageStat
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC_ICON_DIR = ROOT / "docs" / "assets"
 ICON_DIR = ROOT / "src" / "icons"
 SOURCE = DOC_ICON_DIR / "icon.png"
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
-TARGET_SIZES = (16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
+# Search fallback experiment: intentionally omit 80px candidates.
+TARGET_SIZES = (16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 96, 256)
 
 
 def source_image():
@@ -22,44 +23,6 @@ def source_image():
 
 def scaled(source, size):
     return source.resize((size, size), Image.Resampling.LANCZOS)
-
-
-SEARCH_ICON_SIZE = 80
-
-
-def search_icon(source):
-    # Search chooses the 80px unplated candidate on the observed test system.
-    # Sharpen the visible artwork at its final pixel size, not the alpha mask.
-    base = scaled(source, SEARCH_ICON_SIZE)
-    sharpened = base.convert("RGB").filter(
-        ImageFilter.UnsharpMask(radius=0.75, percent=125, threshold=2)
-    )
-    # Restrict RGB sharpening to the interior to avoid a silhouette halo.
-    alpha = base.getchannel("A")
-    interior = alpha.point(lambda value: 255 if value >= 240 else 0)
-    rgb = Image.composite(sharpened, base.convert("RGB"), interior)
-    rgb.putalpha(alpha)
-    return rgb
-
-
-def search_asset_names():
-    return [
-        f"Square44x44Logo.targetsize-{SEARCH_ICON_SIZE}{suffix}.png"
-        for suffix in ("", "_altform-unplated", "_altform-lightunplated")
-    ]
-
-
-def write_search_assets(source, directory):
-    image = search_icon(source)
-    for name in search_asset_names():
-        image.save(directory / name, optimize=True)
-
-
-def verify_search_asset(actual, source, label):
-    expected = search_icon(source)
-    actual = actual.convert("RGBA")
-    if actual.size != expected.size or actual.tobytes() != expected.tobytes():
-        raise ValueError(f"{label}: optimized search icon does not match expected pixels")
 
 
 def store_listing_icon(source, size=300):
@@ -119,13 +82,13 @@ def verify(source, msix_assets):
         for size in ICO_SIZES:
             verify_image(image.ico.getimage((size, size)), scaled(source, size), f"ICO {size}")
     if msix_assets:
+        if list(msix_assets.glob('Square44x44Logo.targetsize-80*.png')):
+            raise ValueError('Unexpected 80px candidate in Search fallback package')
         # GDI+ uses bicubic rather than Lanczos; use an independent comparison
         # against the same artwork with a modest tolerance for small icons.
         for name, size in asset_sizes().items():
             with Image.open(msix_assets / name) as image:
-                if name in search_asset_names():
-                    verify_search_asset(image, source, name)
-                elif name.startswith("StoreLogo."):
+                if name.startswith("StoreLogo."):
                     verify_store_icon(image, source, size, name, tolerance=12)
                 else:
                     verify_image(image, scaled(source, size), name, tolerance=12)
@@ -135,12 +98,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Verify without modifying files")
     parser.add_argument("--msix-assets", type=Path, help="Also verify extracted MSIX Assets directory")
-    parser.add_argument("--write-search-assets", type=Path, help="Generate only the optimized 80px package variants")
     args = parser.parse_args()
     source = source_image()
-    if args.write_search_assets is not None:
-        write_search_assets(source, args.write_search_assets)
-        return
     if not args.check:
         ICON_DIR.mkdir(parents=True, exist_ok=True)
         source.save(ICON_DIR / "256x256.png", optimize=True)

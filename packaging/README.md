@@ -14,15 +14,14 @@ The package version is derived from `Cargo.toml` and converted from `x.y.z` to `
 
 ## Build
 
-On a Windows machine with the Windows 10/11 SDK and Python 3 installed:
+On a Windows machine with the Windows 10/11 SDK installed:
 
 ```powershell
-python -m pip install Pillow==11.3.0
 cargo build --release --no-default-features --features store
 .\packaging\build-msix.ps1 -OutputDir dist
 ```
 
-The build script creates the required Store assets from `docs/assets/icon.png`, uses Pillow for the three optimized 80px Search icon variants, indexes all qualified assets in a single `resources.pri`, and packages the release executable with `MakeAppx.exe`.
+The build script creates Store assets from `docs/assets/icon.png`, indexes qualified assets in a single `resources.pri`, and packages the release executable with `MakeAppx.exe`. The current Search fallback experiment omits the three 80px target-size variants while retaining 72px and 96px candidates. Actual fallback selection and visual quality require Windows testing.
 
 Do not use a default-feature `cargo build --release` executable for Store packaging: it includes the GitHub standalone updater. The MSIX script packages the existing executable without changing Cargo features.
 

@@ -201,6 +201,9 @@ jobs:
           & $makePri dump /if $pri /of $priDump /dt detailed /o
           if ($LASTEXITCODE -ne 0) { throw "MakePri dump failed." }
           $index = Get-Content -Raw -LiteralPath $priDump
+          if ($index -match 'Square44x44Logo\.targetsize-80(?:_|\.)') {
+              throw "Unexpected indexed 80px icon in Search fallback package."
+          }
           foreach ($scale in @(100, 125, 150, 200, 250, 300, 400)) {
               foreach ($logo in @("Square44x44Logo", "Square150x150Logo", "StoreLogo")) {
                   $name = "$logo.scale-${scale}.png"
@@ -209,7 +212,7 @@ jobs:
                   }
               }
           }
-          foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)) {
+          foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 96, 256)) {
               foreach ($suffix in @("unplated", "lightunplated")) {
                   $name = "Square44x44Logo.targetsize-${size}_altform-${suffix}.png"
                   if ($index -notmatch [regex]::Escape($name)) {
