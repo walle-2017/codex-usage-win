@@ -6,13 +6,13 @@
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="WalleStudio.CodexUsageWin.SmallProbe.__PROBE_VARIANT__"
+    Name="WalleStudio.CodexUsageWin.U40Probe.__PROBE_VARIANT__"
     Publisher="CN=2AE5CECF-93C9-4AF7-82E0-23BE2024603E"
     Version="__PACKAGE_VERSION__"
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>UsageTray Small __PROBE_VARIANT__</DisplayName>
+    <DisplayName>UsageTray U40 __PROBE_VARIANT__</DisplayName>
     <PublisherDisplayName>Walle Studio</PublisherDisplayName>
     <Description>Native Windows taskbar monitor for Codex usage.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
@@ -36,7 +36,7 @@
       Executable="codex-usage-win.exe"
       EntryPoint="windows.fullTrustApplication">
       <uap:VisualElements
-        DisplayName="UsageTray Small __PROBE_VARIANT__"
+        DisplayName="UsageTray U40 __PROBE_VARIANT__"
         Description="Native Windows taskbar monitor for Codex usage."
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"
