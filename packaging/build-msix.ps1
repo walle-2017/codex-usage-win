@@ -132,14 +132,18 @@ foreach ($scale in @(100, 125, 150, 200, 250, 300, 400)) {
 }
 
 # Target-size variants are selected by the Windows Shell for taskbar and Start.
-# Unplated variants preserve the application's own rounded transparent artwork.
-# Search fallback experiment: omit all 80px variants; keep 72px and 96px unchanged.
-foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 96, 256)) {
+# Unplated variants preserve rounded transparent artwork except the verified
+# Search-specific compatibility treatment applied below.
+foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)) {
     foreach ($suffix in @("", "_altform-unplated", "_altform-lightunplated")) {
         $name = "Square44x44Logo.targetsize-${size}${suffix}.png"
         Write-ScaledPng -Source $sourceIcon -Destination (Join-Path $assets $name) -Width $size -Height $size
     }
 }
+
+# Reproduce the verified Bold40 diagnostic pipeline before indexing assets.
+python (Join-Path $repoRoot "scripts\generate_icons.py") --prepare-msix-assets $assets --msix-report (Join-Path $outputRoot "msix-icon-report.json")
+if ($LASTEXITCODE -ne 0) { throw "MSIX icon compatibility preparation failed." }
 
 # Qualified visual assets require a Package Resource Index for Shell lookup.
 $makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"
