@@ -1,7 +1,7 @@
 param(
     [string]$OutputDir = "dist",
     [string]$PackageVersion = "",
-    [Parameter(Mandatory = $true)][ValidateSet("Inset40", "Bold40", "Round80")][string]$ProbeVariant
+    [Parameter(Mandatory = $true)][ValidateSet("BoldRound")][string]$ProbeVariant
 )
 
 $ErrorActionPreference = "Stop"
@@ -142,7 +142,7 @@ foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
 }
 
 # DIAGNOSTIC ONLY: isolate encoding, marker geometry, and chroma.
-python (Join-Path $repoRoot "scripts\search_u40_probe.py") $assets $ProbeVariant (Join-Path $outputRoot "search-u40-probe.json")
+python (Join-Path $repoRoot "scripts\search_bold_round_probe.py") $assets $ProbeVariant (Join-Path $outputRoot "search-bold-round-probe.json")
 if ($LASTEXITCODE -ne 0) { throw "Diagnostic icon preparation failed." }
 
 # Qualified visual assets require a Package Resource Index for Shell lookup.
