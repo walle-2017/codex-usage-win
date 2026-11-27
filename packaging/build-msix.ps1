@@ -1,6 +1,7 @@
 param(
     [string]$OutputDir = "dist",
-    [string]$PackageVersion = ""
+    [string]$PackageVersion = "",
+    [Parameter(Mandatory = $true)][ValidateSet("Transparent", "Opaque")][string]$ProbeVariant
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,7 +64,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stage "Assets") | Out-Null
 Copy-Item -LiteralPath $exePath -Destination (Join-Path $stage "codex-usage-win.exe")
 
 $manifestTemplate = Get-Content -Raw (Join-Path $PSScriptRoot "AppxManifest.xml")
-$manifest = $manifestTemplate.Replace("__PACKAGE_VERSION__", $PackageVersion)
+$manifest = $manifestTemplate.Replace("__PACKAGE_VERSION__", $PackageVersion).Replace("__PROBE_VARIANT__", $ProbeVariant)
 [System.IO.File]::WriteAllText(
     (Join-Path $stage "AppxManifest.xml"),
     $manifest,
@@ -140,9 +141,9 @@ foreach ($size in @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
     }
 }
 
-# DIAGNOSTIC ONLY: tag each image before indexing.
-python (Join-Path $repoRoot "scripts\mark_search_probe.py") $assets (Join-Path $outputRoot "icon-probe-map.csv")
-if ($LASTEXITCODE -ne 0) { throw "Diagnostic icon tagging failed." }
+# DIAGNOSTIC ONLY: A/B comparison using real artwork, not colored markers.
+python (Join-Path $repoRoot "scripts\search_alpha_probe.py") $assets $ProbeVariant (Join-Path $outputRoot "search-alpha-probe.json")
+if ($LASTEXITCODE -ne 0) { throw "Diagnostic icon preparation failed." }
 
 # Qualified visual assets require a Package Resource Index for Shell lookup.
 $makePri = Join-Path $makeAppx.DirectoryName "makepri.exe"

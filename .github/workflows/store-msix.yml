@@ -1,4 +1,4 @@
-name: Search Icon Probe MSIX
+name: Search Alpha AB MSIX
 
 on:
   push:
@@ -12,6 +12,10 @@ permissions:
 jobs:
   build-msix:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [Transparent, Opaque]
     steps:
       - uses: actions/checkout@v4
 
@@ -57,7 +61,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          .\packaging\build-msix.ps1 -OutputDir dist
+          .\packaging\build-msix.ps1 -OutputDir dist -ProbeVariant "${{ matrix.variant }}"
 
       - name: Create locally installable test package
         shell: pwsh
@@ -122,7 +126,7 @@ jobs:
 
           $manifestText = Get-Content -Raw (Join-Path $verifyDir "AppxManifest.xml")
           $required = @(
-              'Name="WalleStudio.CodexUsageWin.IconProbe"',
+              'Name="WalleStudio.CodexUsageWin.SearchProbe.${{ matrix.variant }}"',
               'Publisher="CN=2AE5CECF-93C9-4AF7-82E0-23BE2024603E"',
               ('Version="{0}"' -f '${{ steps.package_version.outputs.msix_version }}'),
               'ProcessorArchitecture="x64"',
@@ -159,7 +163,7 @@ jobs:
               }
           }
 
-          python scripts/mark_search_probe.py (Join-Path $verifyDir "Assets") dist/icon-probe-map.csv --verify
+          python scripts/search_alpha_probe.py (Join-Path $verifyDir "Assets") "${{ matrix.variant }}" dist/search-alpha-probe.json --verify
           if ($LASTEXITCODE -ne 0) { throw "Diagnostic artwork validation failed." }
 
           $pri = Join-Path $verifyDir "resources.pri"
@@ -207,12 +211,12 @@ jobs:
       - name: Upload MSIX test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: search-icon-probe-msix-${{ steps.package_version.outputs.msix_version }}
+          name: search-alpha-${{ matrix.variant }}-msix-${{ steps.package_version.outputs.msix_version }}
           path: |
             dist/*-test-signed.msix
             dist/*.cer
             dist/install-test.ps1
-            dist/icon-probe-map.csv
+            dist/search-alpha-probe.json
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
